@@ -147,9 +147,13 @@ pub fn fit_beer_lambert(
         ));
     }
     let fit = fit_polynomial(concentrations, absorbances, 1)?;
+    if fit.coefficients.len() < 2 {
+        return Err(KimiyaError::ComputationError(
+            "linear fit did not produce slope coefficient".into(),
+        ));
+    }
     // A = intercept + slope·c, slope = ε·l, so ε = slope/l
-    let slope = fit.coefficients.get(1).copied().unwrap_or(0.0);
-    Ok(slope / path_length)
+    Ok(fit.coefficients[1] / path_length)
 }
 
 #[cfg(test)]

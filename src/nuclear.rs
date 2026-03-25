@@ -5,14 +5,14 @@ use serde::Serialize;
 
 // ── Constants ────────────────────────────────────────────────────────
 
-/// Atomic mass unit in MeV/c².
-pub const AMU_MEV: f64 = 931.494;
+/// Atomic mass unit in MeV/c² (CODATA 2018).
+pub const AMU_MEV: f64 = 931.494_102_22;
 
-/// Proton mass (u).
-pub const PROTON_MASS_U: f64 = 1.007276;
+/// Proton mass in atomic mass units (CODATA 2018).
+pub const PROTON_MASS_U: f64 = 1.007_276_466_88;
 
-/// Neutron mass (u).
-pub const NEUTRON_MASS_U: f64 = 1.008665;
+/// Neutron mass in atomic mass units (CODATA 2018).
+pub const NEUTRON_MASS_U: f64 = 1.008_664_915_95;
 
 // ── Radioactive decay ────────────────────────────────────────────────
 
@@ -105,6 +105,11 @@ pub fn binding_energy_per_nucleon(z: u32, n: u32, atomic_mass_u: f64) -> Result<
             "mass number must be positive".into(),
         ));
     }
+    if atomic_mass_u <= 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "atomic mass must be positive".into(),
+        ));
+    }
     let md = mass_defect(z, n, atomic_mass_u);
     Ok(binding_energy_mev(md) / a as f64)
 }
@@ -114,6 +119,7 @@ pub fn binding_energy_per_nucleon(z: u32, n: u32, atomic_mass_u: f64) -> Result<
 ///
 /// Returns binding energy in MeV.
 #[must_use]
+#[inline]
 pub fn semi_empirical_binding_energy(z: u32, a: u32) -> f64 {
     let af = a as f64;
     let zf = z as f64;

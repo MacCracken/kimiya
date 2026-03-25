@@ -31,6 +31,9 @@ pub fn simulate_first_order(
             "end time must be positive".into(),
         ));
     }
+    if steps == 0 {
+        return Err(KimiyaError::InvalidInput("steps must be at least 1".into()));
+    }
     let k = rate_constant;
     let f = move |_t: f64, y: &[f64], dy: &mut [f64]| {
         dy[0] = -k * y[0];
@@ -61,6 +64,9 @@ pub fn simulate_second_order(
         return Err(KimiyaError::InvalidInput(
             "end time must be positive".into(),
         ));
+    }
+    if steps == 0 {
+        return Err(KimiyaError::InvalidInput("steps must be at least 1".into()));
     }
     let k = rate_constant;
     let f = move |_t: f64, y: &[f64], dy: &mut [f64]| {
@@ -96,6 +102,9 @@ pub fn simulate_consecutive(
             "end time must be positive".into(),
         ));
     }
+    if steps == 0 {
+        return Err(KimiyaError::InvalidInput("steps must be at least 1".into()));
+    }
     let f = move |_t: f64, y: &[f64], dy: &mut [f64]| {
         dy[0] = -k1 * y[0]; // d[A]/dt = -k1[A]
         dy[1] = k1 * y[0] - k2 * y[1]; // d[B]/dt = k1[A] - k2[B]
@@ -129,6 +138,9 @@ pub fn simulate_reversible(
         return Err(KimiyaError::InvalidInput(
             "end time must be positive".into(),
         ));
+    }
+    if steps == 0 {
+        return Err(KimiyaError::InvalidInput("steps must be at least 1".into()));
     }
     let f = move |_t: f64, y: &[f64], dy: &mut [f64]| {
         dy[0] = -k_forward * y[0] + k_reverse * y[1]; // d[A]/dt
@@ -171,6 +183,9 @@ pub fn simulate_michaelis_menten(
         return Err(KimiyaError::InvalidInput(
             "end time must be positive".into(),
         ));
+    }
+    if steps == 0 {
+        return Err(KimiyaError::InvalidInput("steps must be at least 1".into()));
     }
     let f = move |_t: f64, y: &[f64], dy: &mut [f64]| {
         let rate = v_max * y[0] / (km + y[0]);

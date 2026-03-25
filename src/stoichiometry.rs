@@ -30,6 +30,11 @@ pub fn limiting_reagent(moles_available: &[f64], stoich_coefficients: &[f64]) ->
         .zip(stoich_coefficients.iter())
         .enumerate()
     {
+        if moles < 0.0 {
+            return Err(KimiyaError::InvalidInput(
+                "moles available must be non-negative".into(),
+            ));
+        }
         if coeff <= 0.0 {
             return Err(KimiyaError::InvalidInput(
                 "stoichiometric coefficients must be positive".into(),
