@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.24.3] - 2026-03-25
+## [1.0.0] - 2026-03-25
+
+Stable release. API frozen. 21 modules, 118 elements, 444 tests.
 
 ### Added
 
@@ -56,5 +58,4 @@ Initial scaffold with real chemistry implementations.
 - **thermo** — heat transfer (q = mcΔT), Hess's law, formation enthalpy, specific heat from calorimetry
 - **error** — `KimiyaError` with `#[non_exhaustive]` and `thiserror` integration
 
-[0.24.3]: https://github.com/MacCracken/kimiya/compare/v0.1.0...v0.24.3
-[0.1.0]: https://github.com/MacCracken/kimiya/releases/tag/v0.1.0
+[1.0.0]: https://github.com/MacCracken/kimiya/releases/tag/v1.0.0

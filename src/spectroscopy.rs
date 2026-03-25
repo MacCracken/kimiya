@@ -390,6 +390,152 @@ pub fn diatomic_moment_of_inertia(reduced_mass_kg: f64, bond_length_m: f64) -> f
     reduced_mass_kg * bond_length_m * bond_length_m
 }
 
+// ── Mass spectrometry isotope patterns ───────────────────────────────
+
+/// Natural abundance data for common isotopes.
+///
+/// Returns (mass, abundance) pairs for a given element.
+/// Only elements with significant isotope patterns are included.
+#[must_use]
+pub fn isotope_abundances(atomic_number: u8) -> &'static [(f64, f64)] {
+    match atomic_number {
+        1 => &[(1.00783, 0.99985), (2.01410, 0.00015)], // H, D
+        6 => &[(12.0, 0.9893), (13.00335, 0.0107)],     // 12C, 13C
+        7 => &[(14.00307, 0.99636), (15.00011, 0.00364)], // 14N, 15N
+        8 => &[
+            (15.99491, 0.99757),
+            (16.99913, 0.00038),
+            (17.99916, 0.00205),
+        ], // 16O, 17O, 18O
+        16 => &[(31.97207, 0.9499), (32.97146, 0.0075), (33.96787, 0.0425)], // 32S, 33S, 34S
+        17 => &[(34.96885, 0.7576), (36.96590, 0.2424)], // 35Cl, 37Cl
+        35 => &[(78.91834, 0.5069), (80.91629, 0.4931)], // 79Br, 81Br
+        _ => &[],
+    }
+}
+
+/// Compute isotope pattern for a molecule.
+///
+/// Takes a list of (atomic_number, count) pairs and returns
+/// (relative_mass, relative_intensity) peaks.
+///
+/// Uses the polynomial expansion method for small molecules.
+/// Intensities are normalized to the base peak (most abundant = 1.0).
+///
+/// # Errors
+///
+/// Returns error if the molecule is empty.
+pub fn isotope_pattern(atoms: &[(u8, u32)]) -> Result<Vec<(f64, f64)>> {
+    if atoms.is_empty() {
+        return Err(KimiyaError::InvalidInput("need at least one atom".into()));
+    }
+
+    // Start with a single peak at mass=0, intensity=1
+    let mut pattern: Vec<(f64, f64)> = vec![(0.0, 1.0)];
+
+    for &(z, count) in atoms {
+        let abundances = isotope_abundances(z);
+        if abundances.is_empty() {
+            // No isotope data — use monoisotopic mass from element table
+            if let Some(elem) = crate::element::lookup_by_number(z) {
+                let mono_mass = elem.atomic_mass;
+                for _ in 0..count {
+                    pattern = pattern.iter().map(|&(m, i)| (m + mono_mass, i)).collect();
+                }
+            }
+            continue;
+        }
+
+        // Convolve pattern with this element's isotope distribution, `count` times
+        for _ in 0..count {
+            let mut new_pattern: Vec<(f64, f64)> = Vec::new();
+            for &(m1, i1) in &pattern {
+                for &(m2, i2) in abundances {
+                    new_pattern.push((m1 + m2, i1 * i2));
+                }
+            }
+            // Bin peaks within 0.5 Da
+            new_pattern.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            let mut binned: Vec<(f64, f64)> = Vec::new();
+            for (m, i) in new_pattern {
+                if let Some(last) = binned.last_mut()
+                    && (m - last.0).abs() < 0.5
+                {
+                    let total = last.1 + i;
+                    last.0 = (last.0 * last.1 + m * i) / total;
+                    last.1 = total;
+                    continue;
+                }
+                binned.push((m, i));
+            }
+            pattern = binned;
+        }
+    }
+
+    // Normalize to base peak
+    let max_intensity = pattern.iter().map(|(_, i)| *i).fold(0.0_f64, f64::max);
+    if max_intensity > 0.0 {
+        for peak in &mut pattern {
+            peak.1 /= max_intensity;
+        }
+    }
+
+    // Filter out very small peaks
+    pattern.retain(|(_, i)| *i > 0.001);
+
+    Ok(pattern)
+}
+
+// ── Fourier transform spectroscopy ───────────────────────────────────
+
+/// Apply FFT to a real-valued spectrum (e.g., interferogram → spectrum).
+///
+/// Input: real-valued signal of length N (must be power of 2).
+/// Returns: magnitude spectrum (N/2 + 1 points).
+///
+/// # Errors
+///
+/// Returns error if input length is not a power of 2.
+pub fn fft_spectrum(signal: &[f64]) -> Result<Vec<f64>> {
+    let n = signal.len();
+    if n == 0 || (n & (n - 1)) != 0 {
+        return Err(KimiyaError::InvalidInput(
+            "signal length must be a non-zero power of 2".into(),
+        ));
+    }
+    let mut data: Vec<hisab::Complex> = signal
+        .iter()
+        .map(|&x| hisab::Complex::from_real(x))
+        .collect();
+    hisab::num::fft(&mut data)
+        .map_err(|e| KimiyaError::ComputationError(format!("FFT failed: {e}")))?;
+
+    // Return magnitude spectrum (first half + DC)
+    Ok(data.iter().take(n / 2 + 1).map(|c| c.abs()).collect())
+}
+
+/// Simple peak detection: find local maxima above a threshold.
+///
+/// - `data`: spectrum values
+/// - `threshold`: minimum intensity for a peak (fraction of max, 0–1)
+///
+/// Returns indices of detected peaks.
+#[must_use]
+pub fn find_peaks(data: &[f64], threshold: f64) -> Vec<usize> {
+    if data.len() < 3 {
+        return Vec::new();
+    }
+    let max_val = data.iter().cloned().fold(0.0_f64, f64::max);
+    let abs_threshold = threshold * max_val;
+    let mut peaks = Vec::new();
+    for i in 1..data.len() - 1 {
+        if data[i] > data[i - 1] && data[i] > data[i + 1] && data[i] > abs_threshold {
+            peaks.push(i);
+        }
+    }
+    peaks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,9 +832,83 @@ mod tests {
 
     #[test]
     fn diatomic_moment_of_inertia_basic() {
-        let mu = 1e-26; // ~10 u
-        let r = 1e-10; // 1 Å
+        let mu = 1e-26;
+        let r = 1e-10;
         let i = diatomic_moment_of_inertia(mu, r);
         assert!((i - 1e-46).abs() < 1e-48);
+    }
+
+    // ── Isotope patterns ─────────────────────────────────────────────
+
+    #[test]
+    fn isotope_pattern_ch4() {
+        // CH₄: M=16, M+1 peak from 13C
+        let pattern = isotope_pattern(&[(6, 1), (1, 4)]).unwrap();
+        assert!(!pattern.is_empty());
+        // Base peak should be near 16
+        assert!((pattern[0].0 - 16.0).abs() < 0.1);
+        assert!((pattern[0].1 - 1.0).abs() < f64::EPSILON); // normalized to 1
+        // M+1 peak should exist (from 13C)
+        assert!(pattern.len() >= 2);
+    }
+
+    #[test]
+    fn isotope_pattern_chlorine_doublet() {
+        // Cl₂: characteristic 3:1 pattern from 35Cl/37Cl
+        let pattern = isotope_pattern(&[(17, 2)]).unwrap();
+        // Should have M, M+2, M+4 peaks
+        assert!(pattern.len() >= 2);
+    }
+
+    #[test]
+    fn isotope_pattern_empty_is_error() {
+        assert!(isotope_pattern(&[]).is_err());
+    }
+
+    // ── FFT spectroscopy ─────────────────────────────────────────────
+
+    #[test]
+    fn fft_spectrum_sine_wave() {
+        // Pure sine wave → single peak in FFT
+        let n = 64;
+        let freq = 4.0; // 4 cycles in N samples
+        let signal: Vec<f64> = (0..n)
+            .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / n as f64).sin())
+            .collect();
+        let spectrum = fft_spectrum(&signal).unwrap();
+        // Peak should be at index 4 (frequency bin 4)
+        let peak_idx = spectrum
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(peak_idx, 4, "peak should be at frequency bin 4");
+    }
+
+    #[test]
+    fn fft_spectrum_non_power_of_2_is_error() {
+        assert!(fft_spectrum(&[1.0; 10]).is_err());
+    }
+
+    #[test]
+    fn find_peaks_basic() {
+        let data = [0.0, 1.0, 3.0, 1.0, 0.5, 2.0, 0.5, 0.0];
+        let peaks = find_peaks(&data, 0.1);
+        assert!(peaks.contains(&2)); // peak at index 2 (value 3.0)
+        assert!(peaks.contains(&5)); // peak at index 5 (value 2.0)
+    }
+
+    #[test]
+    fn find_peaks_threshold_filters() {
+        let data = [0.0, 1.0, 3.0, 1.0, 0.5, 0.6, 0.5, 0.0];
+        let peaks = find_peaks(&data, 0.5); // threshold = 50% of max (3.0) = 1.5
+        assert!(peaks.contains(&2)); // 3.0 > 1.5
+        assert!(!peaks.contains(&5)); // 0.6 < 1.5
+    }
+
+    #[test]
+    fn find_peaks_empty() {
+        assert!(find_peaks(&[1.0, 2.0], 0.1).is_empty());
     }
 }

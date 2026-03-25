@@ -17,6 +17,7 @@ pub mod gas;
 pub mod inorganic;
 pub mod kinetics;
 pub mod molecule;
+pub mod network;
 pub mod nuclear;
 pub mod organic;
 pub mod phase;
