@@ -148,6 +148,19 @@ pub fn semi_empirical_binding_energy(z: u32, a: u32) -> f64 {
     volume + surface + coulomb + asymmetry + delta
 }
 
+/// Q-value of a nuclear reaction: Q = (Σ m_reactants - Σ m_products) × c²
+///
+/// - `reactant_masses_u`: atomic masses of reactants (u)
+/// - `product_masses_u`: atomic masses of products (u)
+///
+/// Returns Q in MeV. Positive Q = exothermic (energy released).
+#[must_use]
+pub fn q_value(reactant_masses_u: &[f64], product_masses_u: &[f64]) -> f64 {
+    let sum_r: f64 = reactant_masses_u.iter().sum();
+    let sum_p: f64 = product_masses_u.iter().sum();
+    (sum_r - sum_p) * AMU_MEV
+}
+
 // ── Isotope data ─────────────────────────────────────────────────────
 
 /// A radioactive isotope with its half-life.
@@ -424,5 +437,26 @@ mod tests {
     #[test]
     fn isotope_count() {
         assert!(ISOTOPES.len() >= 18);
+    }
+
+    // ── Q-value ──────────────────────────────────────────────────────
+
+    #[test]
+    fn q_value_deuterium_tritium_fusion() {
+        // D + T → He-4 + n
+        // m_D=2.01410, m_T=3.01605, m_He4=4.00260, m_n=1.00866
+        let q = q_value(&[2.01410, 3.01605], &[4.00260, 1.00866]);
+        // Q ≈ 17.6 MeV
+        assert!(
+            (q - 17.6).abs() < 0.5,
+            "D-T fusion Q should be ~17.6 MeV, got {q}"
+        );
+    }
+
+    #[test]
+    fn q_value_endothermic_is_negative() {
+        // Reverse reaction has negative Q
+        let q = q_value(&[4.00260, 1.00866], &[2.01410, 3.01605]);
+        assert!(q < 0.0, "reverse fusion should be endothermic");
     }
 }

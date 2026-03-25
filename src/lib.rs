@@ -19,6 +19,7 @@ pub mod molecule;
 pub mod nuclear;
 pub mod organic;
 pub mod phase;
+pub mod potential;
 pub mod reaction;
 pub mod reaction_dynamics;
 pub mod solution;

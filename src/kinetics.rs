@@ -59,6 +59,59 @@ pub fn second_order_concentration(initial: f64, rate_constant: f64, time: f64) -
     Ok(1.0 / (1.0 / initial + rate_constant * time))
 }
 
+/// Zero-order concentration: \[A\] = \[A\]₀ - k × t
+///
+/// Returns zero if the result would be negative (reaction complete).
+#[must_use]
+#[inline]
+pub fn zero_order_concentration(initial: f64, rate_constant: f64, time: f64) -> f64 {
+    (initial - rate_constant * time).max(0.0)
+}
+
+/// Zero-order half-life: t½ = \[A\]₀ / (2k)
+///
+/// # Errors
+///
+/// Returns error if rate constant is not positive.
+#[inline]
+pub fn zero_order_half_life(initial: f64, rate_constant: f64) -> Result<f64> {
+    if rate_constant <= 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "rate constant must be positive".into(),
+        ));
+    }
+    Ok(initial / (2.0 * rate_constant))
+}
+
+/// General nth-order half-life: t½ = (2^(n-1) - 1) / ((n-1) × k × \[A\]₀^(n-1))
+///
+/// Valid for n > 1 (integer or fractional). For n=1, use [`half_life_first_order`].
+/// For n=0, use [`zero_order_half_life`].
+///
+/// # Errors
+///
+/// Returns error if order ≤ 1 or parameters are invalid.
+#[inline]
+pub fn nth_order_half_life(initial: f64, rate_constant: f64, order: f64) -> Result<f64> {
+    if order <= 1.0 {
+        return Err(KimiyaError::InvalidInput(
+            "order must be > 1 (use half_life_first_order for n=1)".into(),
+        ));
+    }
+    if rate_constant <= 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "rate constant must be positive".into(),
+        ));
+    }
+    if initial <= 0.0 {
+        return Err(KimiyaError::InvalidConcentration(
+            "initial concentration must be positive".into(),
+        ));
+    }
+    let n_minus_1 = order - 1.0;
+    Ok((2.0_f64.powf(n_minus_1) - 1.0) / (n_minus_1 * rate_constant * initial.powf(n_minus_1)))
+}
+
 // ── Michaelis-Menten enzyme kinetics ─────────────────────────────────
 
 /// Michaelis-Menten rate: v = Vmax × \[S\] / (Km + \[S\])
@@ -380,17 +433,62 @@ mod tests {
 
     #[test]
     fn eyring_decomposed_matches_combined() {
-        // ΔG‡ = ΔH‡ - TΔS‡
         let dh = 80_000.0;
         let ds = -50.0;
         let t = 298.0;
         let dg = dh - t * ds;
-
         let k_combined = eyring_rate(dg, t).unwrap();
         let k_decomposed = eyring_rate_from_activation(dh, ds, t).unwrap();
         assert!(
             (k_combined - k_decomposed).abs() / k_combined < 1e-6,
             "combined ({k_combined}) should match decomposed ({k_decomposed})"
         );
+    }
+
+    // ── Zero-order + nth-order ───────────────────────────────────────
+
+    #[test]
+    fn zero_order_linear_decrease() {
+        let c = zero_order_concentration(1.0, 0.1, 5.0);
+        assert!((c - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn zero_order_floors_at_zero() {
+        let c = zero_order_concentration(1.0, 0.1, 20.0);
+        assert!((c).abs() < f64::EPSILON, "should floor at 0, got {c}");
+    }
+
+    #[test]
+    fn zero_order_half_life_basic() {
+        let t = zero_order_half_life(1.0, 0.1).unwrap();
+        assert!((t - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn nth_order_second_order_matches() {
+        // For n=2: t½ = 1/(k·[A]₀)
+        let t_nth = nth_order_half_life(1.0, 0.1, 2.0).unwrap();
+        let t_direct = 1.0 / (0.1 * 1.0);
+        assert!(
+            (t_nth - t_direct).abs() < 0.001,
+            "n=2 half-life should be {t_direct}, got {t_nth}"
+        );
+    }
+
+    #[test]
+    fn nth_order_increases_with_order() {
+        let t2 = nth_order_half_life(1.0, 0.1, 2.0).unwrap();
+        let t3 = nth_order_half_life(1.0, 0.1, 3.0).unwrap();
+        assert!(
+            t3 > t2,
+            "higher order should have longer half-life at same [A]₀"
+        );
+    }
+
+    #[test]
+    fn nth_order_below_1_is_error() {
+        assert!(nth_order_half_life(1.0, 0.1, 1.0).is_err());
+        assert!(nth_order_half_life(1.0, 0.1, 0.5).is_err());
     }
 }

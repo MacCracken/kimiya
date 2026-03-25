@@ -219,6 +219,55 @@ pub const PR_METHANE: PengRobinsonParams = PengRobinsonParams {
     omega: 0.0115,
 };
 
+/// Fugacity coefficient from Peng-Robinson compressibility factor:
+/// ln(φ) = (Z-1) - ln(Z-B) - A/(2√2·B) × ln((Z + (1+√2)B) / (Z + (1-√2)B))
+///
+/// # Errors
+///
+/// Returns error if Z-factor calculation fails.
+pub fn fugacity_coefficient_pr(
+    params: &PengRobinsonParams,
+    temperature_k: f64,
+    pressure_pa: f64,
+) -> Result<f64> {
+    let z = peng_robinson_z(params, temperature_k, pressure_pa)?;
+    let (a_alpha, b) = pr_coefficients(params, temperature_k);
+    let rt = GAS_CONSTANT * temperature_k;
+    let cap_a = a_alpha * pressure_pa / (rt * rt);
+    let cap_b = b * pressure_pa / rt;
+
+    let sqrt2 = std::f64::consts::SQRT_2;
+    let ln_phi = (z - 1.0)
+        - (z - cap_b).ln()
+        - cap_a / (2.0 * sqrt2 * cap_b)
+            * ((z + (1.0 + sqrt2) * cap_b) / (z + (1.0 - sqrt2) * cap_b)).ln();
+    Ok(ln_phi.exp())
+}
+
+/// Fugacity: f = φ × P
+///
+/// # Errors
+///
+/// Returns error if fugacity coefficient calculation fails.
+#[inline]
+pub fn fugacity_pr(
+    params: &PengRobinsonParams,
+    temperature_k: f64,
+    pressure_pa: f64,
+) -> Result<f64> {
+    let phi = fugacity_coefficient_pr(params, temperature_k, pressure_pa)?;
+    Ok(phi * pressure_pa)
+}
+
+/// Joule-Thomson coefficient for an ideal gas (always zero).
+///
+/// Real gas JT requires EOS derivatives — use with Peng-Robinson for real gases.
+#[must_use]
+#[inline]
+pub fn joule_thomson_ideal() -> f64 {
+    0.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +395,31 @@ mod tests {
     fn pr_zero_temp_is_error() {
         assert!(peng_robinson_z(&PR_NITROGEN, 0.0, 101325.0).is_err());
         assert!(peng_robinson_pressure(&PR_NITROGEN, 0.0, 0.025).is_err());
+    }
+
+    // ── Fugacity ─────────────────────────────────────────────────────
+
+    #[test]
+    fn fugacity_coefficient_ideal_at_low_p() {
+        // At low pressure, φ → 1
+        let phi = fugacity_coefficient_pr(&PR_NITROGEN, 300.0, 1000.0).unwrap();
+        assert!(
+            (phi - 1.0).abs() < 0.01,
+            "φ at low P should be ~1.0, got {phi}"
+        );
+    }
+
+    #[test]
+    fn fugacity_equals_pressure_at_low_p() {
+        let f = fugacity_pr(&PR_NITROGEN, 300.0, 1000.0).unwrap();
+        assert!(
+            (f - 1000.0).abs() < 20.0,
+            "fugacity should ≈ P at low P, got {f}"
+        );
+    }
+
+    #[test]
+    fn joule_thomson_ideal_is_zero() {
+        assert!((joule_thomson_ideal()).abs() < f64::EPSILON);
     }
 }

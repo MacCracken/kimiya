@@ -255,6 +255,72 @@ pub const DH_A_WATER_25C: f64 = 0.509;
 /// Debye-Huckel B parameter for water at 25°C (in Å⁻¹·M⁻¹/²).
 pub const DH_B_WATER_25C: f64 = 0.328;
 
+// ── Conductivity ─────────────────────────────────────────────────────
+
+/// Kohlrausch's law: Λ_m = Λ°_m - K√c
+///
+/// Molar conductivity at concentration c from limiting molar conductivity.
+///
+/// - `lambda_zero`: Λ°_m (S·cm²/mol) — limiting molar conductivity at infinite dilution
+/// - `k_kohlrausch`: K — Kohlrausch constant (S·cm²·L^½ / mol^(3/2))
+/// - `concentration`: c (mol/L)
+///
+/// # Errors
+///
+/// Returns error if concentration is negative.
+#[inline]
+pub fn kohlrausch_molar_conductivity(
+    lambda_zero: f64,
+    k_kohlrausch: f64,
+    concentration: f64,
+) -> Result<f64> {
+    if concentration < 0.0 {
+        return Err(KimiyaError::InvalidConcentration(
+            "concentration must be non-negative".into(),
+        ));
+    }
+    Ok(lambda_zero - k_kohlrausch * concentration.sqrt())
+}
+
+/// Kohlrausch's law of independent ion migration:
+/// Λ°_m = ν₊·λ°₊ + ν₋·λ°₋
+///
+/// - `cation_conductivity`: λ°₊ (S·cm²/mol)
+/// - `cation_stoich`: ν₊
+/// - `anion_conductivity`: λ°₋ (S·cm²/mol)
+/// - `anion_stoich`: ν₋
+#[must_use]
+#[inline]
+pub fn limiting_molar_conductivity(
+    cation_conductivity: f64,
+    cation_stoich: f64,
+    anion_conductivity: f64,
+    anion_stoich: f64,
+) -> f64 {
+    cation_stoich * cation_conductivity + anion_stoich * anion_conductivity
+}
+
+/// Solution conductivity: κ = Λ_m × c / 1000
+///
+/// - `molar_conductivity`: Λ_m (S·cm²/mol)
+/// - `concentration`: c (mol/L)
+///
+/// Returns conductivity κ in S/cm.
+#[must_use]
+#[inline]
+pub fn solution_conductivity(molar_conductivity: f64, concentration: f64) -> f64 {
+    molar_conductivity * concentration / 1000.0
+}
+
+/// Common limiting ionic conductivities λ° at 25°C (S·cm²/mol).
+pub const LAMBDA_H_PLUS: f64 = 349.8;
+pub const LAMBDA_OH_MINUS: f64 = 198.0;
+pub const LAMBDA_NA_PLUS: f64 = 50.1;
+pub const LAMBDA_K_PLUS: f64 = 73.5;
+pub const LAMBDA_CL_MINUS: f64 = 76.3;
+pub const LAMBDA_NO3_MINUS: f64 = 71.4;
+pub const LAMBDA_SO4_2MINUS: f64 = 160.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,5 +574,38 @@ mod tests {
         assert!(debye_huckel_limiting(1, -0.1, 0.509).is_err());
         assert!(debye_huckel_extended(1, -0.1, 0.509, 0.328, 3.0).is_err());
         assert!(davies_activity(1, -0.1, 0.509).is_err());
+    }
+
+    // ── Conductivity ─────────────────────────────────────────────────
+
+    #[test]
+    fn limiting_molar_conductivity_nacl() {
+        // NaCl: Λ° = λ°(Na⁺) + λ°(Cl⁻) = 50.1 + 76.3 = 126.4
+        let lambda = limiting_molar_conductivity(LAMBDA_NA_PLUS, 1.0, LAMBDA_CL_MINUS, 1.0);
+        assert!((lambda - 126.4).abs() < 0.1);
+    }
+
+    #[test]
+    fn limiting_molar_conductivity_hcl() {
+        // HCl: H⁺ has very high mobility
+        let lambda = limiting_molar_conductivity(LAMBDA_H_PLUS, 1.0, LAMBDA_CL_MINUS, 1.0);
+        assert!(
+            lambda > 400.0,
+            "HCl should have high conductivity, got {lambda}"
+        );
+    }
+
+    #[test]
+    fn kohlrausch_decreases_with_concentration() {
+        let lm1 = kohlrausch_molar_conductivity(126.4, 10.0, 0.01).unwrap();
+        let lm2 = kohlrausch_molar_conductivity(126.4, 10.0, 0.1).unwrap();
+        assert!(lm2 < lm1, "higher c should give lower Λ_m");
+    }
+
+    #[test]
+    fn solution_conductivity_basic() {
+        // κ = Λ_m × c / 1000
+        let kappa = solution_conductivity(126.4, 0.1);
+        assert!((kappa - 0.01264).abs() < 0.001);
     }
 }
