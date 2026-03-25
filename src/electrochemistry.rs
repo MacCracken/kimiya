@@ -152,6 +152,7 @@ pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
 
 /// Look up a half-reaction by its couple string (e.g., "Cu2+/Cu").
 #[must_use]
+#[inline]
 pub fn lookup_half_reaction(couple: &str) -> Option<&'static HalfReaction> {
     STANDARD_POTENTIALS.iter().find(|hr| hr.couple == couple)
 }
@@ -336,6 +337,11 @@ pub fn faraday_mass_ratio(
     if molar_mass_a <= 0.0 {
         return Err(KimiyaError::InvalidInput(
             "molar mass A must be positive".into(),
+        ));
+    }
+    if molar_mass_b <= 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "molar mass B must be positive".into(),
         ));
     }
     let equiv_a = molar_mass_a / n_electrons_a as f64;
@@ -558,5 +564,55 @@ mod tests {
     fn one_faraday_is_one_mole() {
         let moles = charge_to_moles_electrons(FARADAY);
         assert!((moles - 1.0).abs() < 1e-10);
+    }
+
+    // ── Audit-driven tests ───────────────────────────────────────────
+
+    #[test]
+    fn nernst_25c_quantitative() {
+        // E = E° − (RT/(nF)) ln(Q)
+        // At 25°C: RT/F = 0.025693 V, so (RT/(nF)) ln(Q) = (0.025693/n) × ln(Q)
+        // For Cu²⁺/Cu, n=2, Q=0.01:
+        // E = 0.342 − (0.025693/2) × ln(0.01) = 0.342 − 0.012847 × (-4.6052) = 0.342 + 0.05916 ≈ 0.4012
+        let e = nernst_potential_25c(0.342, 2, 0.01).unwrap();
+        assert!(
+            (e - 0.40116).abs() < 0.001,
+            "Cu²⁺/Cu at Q=0.01 should be ~0.401V, got {e}"
+        );
+    }
+
+    #[test]
+    fn nernst_negative_q_is_error() {
+        assert!(nernst_potential(0.342, 2, 298.15, -1.0).is_err());
+    }
+
+    #[test]
+    fn faraday_negative_charge_gives_negative_mass() {
+        // Negative charge = reverse electrolysis (dissolution). Result is negative.
+        let mass = faraday_mass_deposited(-FARADAY, 63.546, 2).unwrap();
+        assert!(mass < 0.0);
+    }
+
+    #[test]
+    fn faraday_mass_ratio_zero_molar_mass_b_is_error() {
+        assert!(faraday_mass_ratio(10.0, 63.546, 2, 0.0, 1).is_err());
+    }
+
+    #[test]
+    fn all_half_reactions_have_nonzero_electrons() {
+        for hr in STANDARD_POTENTIALS.iter() {
+            assert!(hr.electrons > 0, "{} has zero electrons", hr.couple);
+        }
+    }
+
+    #[test]
+    fn cell_gibbs_sign_matches_spontaneity() {
+        // Spontaneous cell (E > 0) → ΔG < 0
+        let dg_pos = cell_gibbs_energy(2, 1.1).unwrap();
+        assert!(dg_pos < 0.0);
+
+        // Non-spontaneous cell (E < 0) → ΔG > 0
+        let dg_neg = cell_gibbs_energy(2, -0.5).unwrap();
+        assert!(dg_neg > 0.0);
     }
 }

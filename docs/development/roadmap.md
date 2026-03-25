@@ -2,19 +2,29 @@
 
 ## Status
 
-**v0.1.0** — Initial scaffold with real chemistry implementations.
+**v0.1.0** — Initial scaffold with real chemistry implementations, electrochemistry, and thermochemical data.
 
 ## Engineering Backlog
 
 No open items.
 
-## Future Features (demand-gated)
+## Completed
 
-### Electrochemistry
-- Nernst equation (cell potential under non-standard conditions)
-- Faraday's laws of electrolysis
-- Standard electrode potentials table
-- Galvanic cell voltage calculator
+### Electrochemistry (v0.1.0)
+- [x] Nernst equation (cell potential under non-standard conditions)
+- [x] Faraday's laws of electrolysis (1st and 2nd)
+- [x] Standard electrode potentials table (19 half-reactions)
+- [x] Galvanic cell voltage calculator
+- [x] Cell Gibbs energy
+
+### Thermodynamics Integration (v0.1.0)
+- [x] Standard formation enthalpies table (31 substances)
+- [x] Standard Gibbs energy of formation table
+- [x] Entropy values table
+- [x] Van't Hoff equation (K vs temperature)
+- [x] Reaction enthalpy/Gibbs/entropy from stoichiometry
+
+## Future Features (demand-gated)
 
 ### Organic Chemistry
 - Functional group recognition
@@ -32,10 +42,10 @@ No open items.
 - Collision theory rate estimation
 - Transition state theory
 
-### Thermodynamics Integration
-- Standard formation enthalpies table (common compounds)
-- Entropy values table
+### Thermodynamics Integration (continued)
 - ushma coupling for heat flow in reactions
+- Heat capacity as f(T) — Shomate polynomials
+- Adiabatic flame temperature
 
 ## v1.0.0 Criteria
 

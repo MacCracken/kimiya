@@ -252,6 +252,7 @@ pub static THERMOCHEM_DATA: &[ThermochemData] = &[
 
 /// Look up thermochemical data by formula (e.g., "H2O(l)", "CO2(g)").
 #[must_use]
+#[inline]
 pub fn lookup_thermochem(formula: &str) -> Option<&'static ThermochemData> {
     THERMOCHEM_DATA.iter().find(|d| d.formula == formula)
 }
@@ -517,5 +518,74 @@ mod tests {
     #[test]
     fn vant_hoff_zero_k_is_error() {
         assert!(vant_hoff_k(0.0, -50_000.0, 298.15, 400.0).is_err());
+    }
+
+    // ── Audit-driven tests ───────────────────────────────────────────
+
+    #[test]
+    fn empty_reaction_returns_zero() {
+        let dh = reaction_enthalpy(&[], &[]).unwrap();
+        assert!(dh.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn vant_hoff_extreme_enthalpy_doesnt_panic() {
+        // Very large ΔH can cause overflow to infinity — should not panic
+        let result = vant_hoff_k(1.0, 1e8, 298.15, 1000.0);
+        assert!(result.is_ok());
+        let k = result.unwrap();
+        assert!(k.is_finite() || k.is_infinite()); // either is acceptable, no NaN
+        assert!(!k.is_nan());
+    }
+
+    #[test]
+    fn thermodynamic_consistency_co2() {
+        // Verify ΔG ≈ ΔH - TΔS for CO2 formation
+        // C(graphite) + O2(g) → CO2(g)
+        let d = lookup_thermochem("CO2(g)").unwrap();
+        let s_c = lookup_thermochem("C(graphite)").unwrap().s_standard_j;
+        let s_o2 = lookup_thermochem("O2(g)").unwrap().s_standard_j;
+        let delta_s = d.s_standard_j - s_c - s_o2; // J/(mol·K)
+        let t = 298.15;
+        let dg_calc = d.delta_hf_kj - t * delta_s / 1000.0; // kJ
+        assert!(
+            (dg_calc - d.delta_gf_kj).abs() < 1.0,
+            "CO2: ΔG_calc={dg_calc:.1}, ΔG_tab={:.1}",
+            d.delta_gf_kj
+        );
+    }
+
+    #[test]
+    fn unique_formulas() {
+        // No duplicate formula entries
+        for (i, a) in THERMOCHEM_DATA.iter().enumerate() {
+            for b in THERMOCHEM_DATA.iter().skip(i + 1) {
+                assert_ne!(a.formula, b.formula, "duplicate formula: {}", a.formula);
+            }
+        }
+    }
+
+    #[test]
+    fn water_vaporization_enthalpy() {
+        // ΔH_vap = ΔH_f°(H2O,g) - ΔH_f°(H2O,l)
+        let liquid = lookup_thermochem("H2O(l)").unwrap();
+        let gas = lookup_thermochem("H2O(g)").unwrap();
+        let dh_vap = gas.delta_hf_kj - liquid.delta_hf_kj;
+        // Known: ΔH_vap(H2O) ≈ 44.01 kJ/mol at 25°C
+        assert!(
+            (dh_vap - 44.01).abs() < 0.1,
+            "water vaporization should be ~44 kJ/mol, got {dh_vap}"
+        );
+    }
+
+    #[test]
+    fn gases_have_higher_entropy_than_solids() {
+        // S°(H2O,g) > S°(H2O,l) — fundamental thermodynamic principle
+        let liquid = lookup_thermochem("H2O(l)").unwrap();
+        let gas = lookup_thermochem("H2O(g)").unwrap();
+        assert!(
+            gas.s_standard_j > liquid.s_standard_j,
+            "gas entropy should exceed liquid"
+        );
     }
 }

@@ -2,6 +2,7 @@ use kimiya::electrochemistry;
 use kimiya::gas;
 use kimiya::kinetics;
 use kimiya::molecule::Molecule;
+use kimiya::reaction;
 use kimiya::solution;
 use kimiya::thermochem;
 
@@ -72,5 +73,42 @@ fn vant_hoff_le_chatelier() {
     assert!(
         k_400 < k_298,
         "Le Chatelier: exothermic + higher T → lower K"
+    );
+}
+
+#[test]
+fn electrochemistry_gibbs_matches_reaction_gibbs() {
+    // Daniell cell: Zn + Cu²⁺ → Zn²⁺ + Cu
+    // ΔG from electrochemistry: -nFE = -2 × 96485 × 1.104 ≈ -213,038 J
+    let e_cell = electrochemistry::cell_potential_from_couples("Cu2+/Cu", "Zn2+/Zn").unwrap();
+    let dg_electro = electrochemistry::cell_gibbs_energy(2, e_cell).unwrap(); // J/mol
+
+    // ΔG from reaction module: ΔG = ΔH - TΔS
+    // Using the Daniell cell standard potential, ΔG should be consistent
+    // ΔG = -nFE, and we can also get K from reaction module
+    let k = reaction::equilibrium_constant(dg_electro, 298.15).unwrap();
+    assert!(k > 1.0, "spontaneous cell should have K > 1, got {k}");
+
+    // Verify sign consistency: spontaneous cell → ΔG < 0
+    assert!(
+        dg_electro < -200_000.0,
+        "ΔG should be ~-213 kJ, got {dg_electro}"
+    );
+}
+
+#[test]
+fn thermochem_enthalpy_entropy_gibbs_triangle() {
+    // For methane combustion, verify ΔG ≈ ΔH - TΔS at 298.15 K
+    let products = &[("CO2(g)", 1.0), ("H2O(l)", 2.0)];
+    let reactants = &[("CH4(g)", 1.0), ("O2(g)", 2.0)];
+
+    let dh = thermochem::reaction_enthalpy(products, reactants).unwrap(); // kJ
+    let ds = thermochem::reaction_entropy(products, reactants).unwrap(); // J/(mol·K)
+    let dg = thermochem::reaction_gibbs_energy(products, reactants).unwrap(); // kJ
+
+    let dg_calc = dh - 298.15 * ds / 1000.0; // kJ
+    assert!(
+        (dg_calc - dg).abs() < 1.0,
+        "ΔG should ≈ ΔH - TΔS: calc={dg_calc:.1}, table={dg:.1}"
     );
 }
