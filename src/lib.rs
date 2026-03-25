@@ -23,6 +23,7 @@ pub mod phase;
 pub mod potential;
 pub mod reaction;
 pub mod reaction_dynamics;
+pub mod sensitivity;
 pub mod solution;
 pub mod spectroscopy;
 pub mod stoichiometry;

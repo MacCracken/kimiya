@@ -224,6 +224,76 @@ pub fn simulate_adaptive(
         .map_err(|e| KimiyaError::ComputationError(format!("adaptive ODE solver failed: {e}")))
 }
 
+/// Simulate a stiff reaction system using backward Euler (implicit).
+///
+/// Requires both the ODE function and its Jacobian. Suitable for systems
+/// with widely separated timescales (e.g., fast equilibrium + slow reaction).
+///
+/// - `f`: ODE function f(t, y, dy)
+/// - `jac`: Jacobian function jac(t, y, &mut J) filling the n×n matrix
+/// - `y0`: initial state vector
+/// - `t_end`: end time
+/// - `steps`: number of time steps
+///
+/// # Errors
+///
+/// Returns error if solver fails.
+pub fn simulate_stiff(
+    f: impl Fn(f64, &[f64], &mut [f64]),
+    jac: impl Fn(f64, &[f64], &mut Vec<Vec<f64>>),
+    y0: &[f64],
+    t_end: f64,
+    steps: usize,
+) -> Result<Vec<TrajectoryPoint>> {
+    if t_end <= 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "end time must be positive".into(),
+        ));
+    }
+    if steps == 0 {
+        return Err(KimiyaError::InvalidInput("steps must be at least 1".into()));
+    }
+    let final_state = hisab::num::backward_euler(f, jac, 0.0, y0, t_end, steps, 1e-10, 20)
+        .map_err(|e| KimiyaError::ComputationError(format!("stiff ODE solver failed: {e}")))?;
+    // backward_euler returns only the final state — wrap as trajectory
+    Ok(vec![(0.0, y0.to_vec()), (t_end, final_state)])
+}
+
+/// Simulate stochastic chemical kinetics using Euler-Maruyama SDE solver.
+///
+/// Models concentration fluctuations from molecular noise.
+///
+/// - `drift`: deterministic part f(t, y, dy) (same as ODE)
+/// - `diffusion`: stochastic part g(t, y, dy) (noise amplitude)
+/// - `y0`: initial state
+/// - `t_end`: end time
+/// - `steps`: number of time steps
+/// - `seed`: random seed for reproducibility
+///
+/// # Errors
+///
+/// Returns error if solver fails.
+pub fn simulate_stochastic(
+    drift: impl Fn(f64, &[f64], &mut [f64]),
+    diffusion: impl Fn(f64, &[f64], &mut [f64]),
+    y0: &[f64],
+    t_end: f64,
+    steps: usize,
+    seed: u64,
+) -> Result<Vec<TrajectoryPoint>> {
+    if t_end <= 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "end time must be positive".into(),
+        ));
+    }
+    if steps == 0 {
+        return Err(KimiyaError::InvalidInput("steps must be at least 1".into()));
+    }
+    let mut rng = hisab::num::Pcg32::new(seed, 1);
+    hisab::num::euler_maruyama(drift, diffusion, 0.0, y0, t_end, steps, &mut rng)
+        .map_err(|e| KimiyaError::ComputationError(format!("SDE solver failed: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
