@@ -591,9 +591,10 @@ pub fn enthalpy_change_cp(formula: &str, t1_k: f64, t2_k: f64) -> Result<f64> {
 
 /// Adiabatic flame temperature estimate.
 ///
-/// Finds T where: ΔH_rxn + Σ nᵢ·∫[T₀→T] Cpᵢ(T) dT = 0
+/// Finds T where: ΔH_rxn + Σ nᵢ·∫\[T₀→T\] Cpᵢ(T) dT = 0
 ///
-/// Uses [`hisab::num::bisection`] to solve for T.
+/// Uses [`hisab::num::newton_raphson`] with derivative f'(T) = -Σ nᵢ·Cpᵢ(T).
+/// Falls back to [`hisab::num::bisection`] if Newton-Raphson fails.
 ///
 /// - `reaction_enthalpy_j`: ΔH_rxn in J/mol (exothermic = negative)
 /// - `products`: list of (formula, moles) for product gases
@@ -622,16 +623,13 @@ pub fn adiabatic_flame_temperature(
     }
 
     // f(T) = -ΔH_rxn - Σ nᵢ × ∫[T₀→T] Cpᵢ dT
-    // We want f(T) = 0, i.e., the heat released equals the heat absorbed by products
-    // At T = T₀, f > 0 (no heat absorbed yet, but reaction released energy).
-    // At T = T_flame, f = 0 (all released energy absorbed).
-    // At T >> T_flame, f < 0 (products would need more energy than available).
+    // f'(T) = -Σ nᵢ × Cpᵢ(T)
     let f = |t: f64| -> f64 {
         let mut heat_absorbed = 0.0;
         for &(formula, moles) in products {
             if let Some(shomate) = lookup_shomate(formula) {
                 let cp_fn = |temp: f64| shomate.cp(temp);
-                if let Ok(dh) = hisab::calc::integral_simpson(cp_fn, t_initial_k, t, 100) {
+                if let Ok(dh) = hisab::calc::integral_simpson(cp_fn, t_initial_k, t, 50) {
                     heat_absorbed += moles * dh;
                 }
             }
@@ -639,7 +637,31 @@ pub fn adiabatic_flame_temperature(
         -reaction_enthalpy_j - heat_absorbed
     };
 
-    // Verify bracket has opposite signs before calling bisection
+    let df = |t: f64| -> f64 {
+        let mut total_cp = 0.0;
+        for &(formula, moles) in products {
+            if let Some(shomate) = lookup_shomate(formula) {
+                total_cp += moles * shomate.cp(t);
+            }
+        }
+        -total_cp
+    };
+
+    // Initial guess: assume average Cp ~ 40 J/(mol·K) per mol of product
+    let total_moles: f64 = products.iter().map(|(_, n)| n).sum();
+    let avg_cp = total_moles * 40.0;
+    let t_guess = t_initial_k + (-reaction_enthalpy_j) / avg_cp;
+
+    // Try Newton-Raphson first (fast convergence)
+    #[allow(clippy::needless_borrows_for_generic_args)]
+    if let Ok(t) = hisab::num::newton_raphson(&f, &df, t_guess, 1.0, 100)
+        && t > t_initial_k
+        && t < 6000.0
+    {
+        return Ok(t);
+    }
+
+    // Fallback to bisection for robustness
     let t_lo = t_initial_k + 1.0;
     let t_hi = 6000.0;
     let f_lo = f(t_lo);

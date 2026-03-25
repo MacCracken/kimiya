@@ -1,10 +1,12 @@
 use kimiya::electrochemistry;
 use kimiya::element;
+use kimiya::fitting;
 use kimiya::gas;
 use kimiya::kinetics;
 use kimiya::molecule::Molecule;
 use kimiya::organic;
 use kimiya::reaction;
+use kimiya::reaction_dynamics;
 use kimiya::solution;
 use kimiya::spectroscopy;
 use kimiya::thermochem;
@@ -198,5 +200,53 @@ fn vsepr_predicts_water_bent() {
     assert_eq!(
         organic::predict_geometry(2, 2),
         Some(organic::Geometry::BentTwoLonePairs)
+    );
+}
+
+#[test]
+fn reaction_dynamics_first_order_matches_analytical() {
+    // Simulate first-order decay and compare with analytical solution
+    let traj = reaction_dynamics::simulate_first_order(1.0, 0.1, 10.0, 1000).unwrap();
+    let final_a = traj.last().unwrap().1[0];
+    let analytical = (-1.0_f64).exp(); // exp(-0.1*10)
+    assert!(
+        (final_a - analytical).abs() < 0.001,
+        "ODE should match analytical: {final_a} vs {analytical}"
+    );
+}
+
+#[test]
+fn reaction_dynamics_reversible_equilibrium() {
+    // A ⇌ B, kf=2.0, kr=1.0 → K=2 → [B]/[A]=2
+    let traj = reaction_dynamics::simulate_reversible(1.0, 0.0, 2.0, 1.0, 10.0, 1000).unwrap();
+    let final_state = &traj.last().unwrap().1;
+    let k_eq = final_state[1] / final_state[0];
+    assert!((k_eq - 2.0).abs() < 0.05, "should reach K_eq=2, got {k_eq}");
+}
+
+#[test]
+fn fitting_arrhenius_roundtrip() {
+    // Generate Arrhenius data, fit it, verify recovery
+    let a = 1e10;
+    let ea = 50_000.0;
+    let r = kimiya::element::GAS_CONSTANT;
+    let temps = [280.0, 300.0, 320.0, 340.0, 360.0, 380.0, 400.0];
+    let rates: Vec<f64> = temps.iter().map(|&t| a * (-ea / (r * t)).exp()).collect();
+    let fit = fitting::fit_arrhenius(&temps, &rates).unwrap();
+    assert!(
+        (fit.activation_energy_j - ea).abs() / ea < 0.01,
+        "Ea recovery should be < 1%"
+    );
+}
+
+#[test]
+fn fitting_calibration_curve() {
+    // Fit a calibration curve for a spectrophotometer
+    let conc = [0.0, 0.01, 0.02, 0.03, 0.04, 0.05];
+    let abs: Vec<f64> = conc.iter().map(|&c| 150.0 * c + 0.005).collect();
+    let epsilon = fitting::fit_beer_lambert(&conc, &abs, 1.0).unwrap();
+    assert!(
+        (epsilon - 150.0).abs() < 1.0,
+        "ε should be ~150, got {epsilon}"
     );
 }

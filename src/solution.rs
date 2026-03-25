@@ -105,8 +105,8 @@ pub fn h_concentration_from_ph(ph: f64) -> f64 {
 
 /// pH of a weak acid solution.
 ///
-/// Solves the equilibrium equation: Ka = x² / (C - x) where x = [H⁺].
-/// Uses [`hisab::num::bisection`] for robust root finding.
+/// Solves the equilibrium equation: Ka = x² / (C - x) where x = \[H⁺\].
+/// Uses [`hisab::num::newton_raphson`] with the analytical derivative f'(x) = 2x + Ka.
 ///
 /// - `ka`: acid dissociation constant
 /// - `concentration`: initial acid concentration (M)
@@ -123,17 +123,20 @@ pub fn weak_acid_ph(ka: f64, concentration: f64) -> Result<f64> {
             "concentration must be positive".into(),
         ));
     }
-    // Solve: Ka = x² / (C - x)  →  x² + Ka·x - Ka·C = 0
-    // f(x) = x² + Ka·x - Ka·C, root in (0, C)
+    // Solve: x² + Ka·x - Ka·C = 0, f'(x) = 2x + Ka
     let f = |x: f64| x * x + ka * x - ka * concentration;
-    let root = hisab::num::bisection(f, EPSILON_F64, concentration, EPSILON_F64, 200)
-        .map_err(|e| KimiyaError::ComputationError(format!("bisection failed: {e}")))?;
-    ph_from_h_concentration(root)
+    let df = |x: f64| 2.0 * x + ka;
+    // Initial guess: x₀ = √(Ka·C) (weak acid approximation)
+    let x0 = (ka * concentration).sqrt();
+    let root = hisab::num::newton_raphson(f, df, x0, EPSILON_F64, 50)
+        .map_err(|e| KimiyaError::ComputationError(format!("newton_raphson failed: {e}")))?;
+    ph_from_h_concentration(root.abs())
 }
 
 /// pH of a weak base solution.
 ///
-/// Solves the equilibrium equation: Kb = x² / (C - x) where x = [OH⁻].
+/// Solves the equilibrium equation: Kb = x² / (C - x) where x = \[OH⁻\].
+/// Uses [`hisab::num::newton_raphson`] with analytical derivative.
 /// Returns pH = 14 - pOH.
 ///
 /// - `kb`: base dissociation constant
@@ -152,9 +155,11 @@ pub fn weak_base_ph(kb: f64, concentration: f64) -> Result<f64> {
         ));
     }
     let f = |x: f64| x * x + kb * x - kb * concentration;
-    let root = hisab::num::bisection(f, EPSILON_F64, concentration, EPSILON_F64, 200)
-        .map_err(|e| KimiyaError::ComputationError(format!("bisection failed: {e}")))?;
-    let poh = poh_from_oh_concentration(root)?;
+    let df = |x: f64| 2.0 * x + kb;
+    let x0 = (kb * concentration).sqrt();
+    let root = hisab::num::newton_raphson(f, df, x0, EPSILON_F64, 50)
+        .map_err(|e| KimiyaError::ComputationError(format!("newton_raphson failed: {e}")))?;
+    let poh = poh_from_oh_concentration(root.abs())?;
     Ok(ph_from_poh(poh))
 }
 

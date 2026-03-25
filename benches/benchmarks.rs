@@ -165,6 +165,57 @@ fn bench_eyring(c: &mut Criterion) {
     });
 }
 
+fn bench_simulate_first_order(c: &mut Criterion) {
+    c.bench_function("dynamics/first_order_100steps", |b| {
+        b.iter(|| {
+            kimiya::reaction_dynamics::simulate_first_order(
+                black_box(1.0),
+                black_box(0.1),
+                black_box(10.0),
+                black_box(100),
+            )
+            .unwrap()
+        });
+    });
+}
+
+fn bench_simulate_consecutive(c: &mut Criterion) {
+    c.bench_function("dynamics/consecutive_100steps", |b| {
+        b.iter(|| {
+            kimiya::reaction_dynamics::simulate_consecutive(
+                black_box(1.0),
+                black_box(0.5),
+                black_box(0.1),
+                black_box(20.0),
+                black_box(100),
+            )
+            .unwrap()
+        });
+    });
+}
+
+fn bench_fit_arrhenius(c: &mut Criterion) {
+    let temps: [f64; 6] = [300.0, 320.0, 340.0, 360.0, 380.0, 400.0];
+    let r: f64 = 8.314462618;
+    let rates: Vec<f64> = temps
+        .iter()
+        .map(|&t| 1e10_f64 * (-50_000.0 / (r * t)).exp())
+        .collect();
+    c.bench_function("fitting/arrhenius_6pts", |b| {
+        b.iter(|| kimiya::fitting::fit_arrhenius(black_box(&temps), black_box(&rates)).unwrap());
+    });
+}
+
+fn bench_fit_polynomial(c: &mut Criterion) {
+    let x: Vec<f64> = (0..20).map(|i| i as f64 * 0.1).collect();
+    let y: Vec<f64> = x.iter().map(|&xi| 1.0 + 2.0 * xi + 0.5 * xi * xi).collect();
+    c.bench_function("fitting/polynomial_deg2_20pts", |b| {
+        b.iter(|| {
+            kimiya::fitting::fit_polynomial(black_box(&x), black_box(&y), black_box(2)).unwrap()
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_molecular_weight,
@@ -185,6 +236,10 @@ criterion_group!(
     bench_bohr_energy,
     bench_beer_lambert,
     bench_michaelis_menten,
-    bench_eyring
+    bench_eyring,
+    bench_simulate_first_order,
+    bench_simulate_consecutive,
+    bench_fit_arrhenius,
+    bench_fit_polynomial
 );
 criterion_main!(benches);
