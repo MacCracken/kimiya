@@ -120,6 +120,79 @@ pub fn coulomb_force(q1: f64, q2: f64, r: f64) -> Result<f64> {
     Ok(COULOMB_CONSTANT * q1 * q2 / (r * r))
 }
 
+// ── Molecular geometry from 3D coordinates ───────────────────────────
+
+/// Distance between two 3D points: d = √((x₂-x₁)² + (y₂-y₁)² + (z₂-z₁)²)
+#[must_use]
+#[inline]
+pub fn distance_3d(p1: [f64; 3], p2: [f64; 3]) -> f64 {
+    let dx = p2[0] - p1[0];
+    let dy = p2[1] - p1[1];
+    let dz = p2[2] - p1[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// Bond angle between three atoms (A-B-C) in radians.
+///
+/// B is the central atom.
+///
+/// # Errors
+///
+/// Returns error if any two atoms coincide.
+pub fn bond_angle(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Result<f64> {
+    let ba = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let bc = [c[0] - b[0], c[1] - b[1], c[2] - b[2]];
+    let dot = ba[0] * bc[0] + ba[1] * bc[1] + ba[2] * bc[2];
+    let mag_ba = (ba[0] * ba[0] + ba[1] * ba[1] + ba[2] * ba[2]).sqrt();
+    let mag_bc = (bc[0] * bc[0] + bc[1] * bc[1] + bc[2] * bc[2]).sqrt();
+    if mag_ba < 1e-15 || mag_bc < 1e-15 {
+        return Err(KimiyaError::InvalidInput("atoms must not coincide".into()));
+    }
+    let cos_theta = (dot / (mag_ba * mag_bc)).clamp(-1.0, 1.0);
+    Ok(cos_theta.acos())
+}
+
+/// Dihedral angle between four atoms (A-B-C-D) in radians.
+///
+/// The dihedral is the angle between the ABC and BCD planes.
+///
+/// # Errors
+///
+/// Returns error if any three consecutive atoms are collinear.
+pub fn dihedral_angle(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> Result<f64> {
+    let b1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let b2 = [c[0] - b[0], c[1] - b[1], c[2] - b[2]];
+    let b3 = [d[0] - c[0], d[1] - c[1], d[2] - c[2]];
+
+    // n1 = b1 × b2, n2 = b2 × b3
+    let n1 = cross(b1, b2);
+    let n2 = cross(b2, b3);
+    let mag_n1 = (n1[0] * n1[0] + n1[1] * n1[1] + n1[2] * n1[2]).sqrt();
+    let mag_n2 = (n2[0] * n2[0] + n2[1] * n2[1] + n2[2] * n2[2]).sqrt();
+    if mag_n1 < 1e-15 || mag_n2 < 1e-15 {
+        return Err(KimiyaError::InvalidInput(
+            "collinear atoms — dihedral undefined".into(),
+        ));
+    }
+    let cos_phi = (dot3(n1, n2) / (mag_n1 * mag_n2)).clamp(-1.0, 1.0);
+    // Sign from (n1 × n2) · b2
+    let sign = dot3(cross(n1, n2), b2);
+    let angle = cos_phi.acos();
+    if sign < 0.0 { Ok(-angle) } else { Ok(angle) }
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,10 +286,83 @@ mod tests {
     fn coulomb_force_basic() {
         let e = 1.602176634e-19;
         let f = coulomb_force(e, e, 1e-10).unwrap();
-        // F ≈ 8.99e9 × (1.6e-19)² / (1e-10)² ≈ 2.3e-8 N
         assert!(
             f > 2e-8 && f < 3e-8,
             "proton-proton force should be ~2.3e-8 N, got {f}"
+        );
+    }
+
+    // ── 3D geometry ──────────────────────────────────────────────────
+
+    #[test]
+    fn distance_3d_basic() {
+        let d = distance_3d([0.0, 0.0, 0.0], [3.0, 4.0, 0.0]);
+        assert!((d - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn distance_3d_same_point() {
+        let d = distance_3d([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]);
+        assert!(d.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn bond_angle_right_angle() {
+        // 90° angle
+        let angle = bond_angle([1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]).unwrap();
+        assert!(
+            (angle - std::f64::consts::FRAC_PI_2).abs() < 1e-10,
+            "should be 90°, got {:.1}°",
+            angle.to_degrees()
+        );
+    }
+
+    #[test]
+    fn bond_angle_linear() {
+        let angle = bond_angle([1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [-1.0, 0.0, 0.0]).unwrap();
+        assert!(
+            (angle - std::f64::consts::PI).abs() < 1e-10,
+            "should be 180°, got {:.1}°",
+            angle.to_degrees()
+        );
+    }
+
+    #[test]
+    fn bond_angle_coincident_is_error() {
+        assert!(bond_angle([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]).is_err());
+    }
+
+    #[test]
+    fn dihedral_angle_planar() {
+        // All in xy-plane → dihedral ≈ 0 or π
+        let angle = dihedral_angle(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [3.0, 1.0, 0.0],
+        )
+        .unwrap();
+        assert!(
+            angle.abs() < 0.1 || (angle.abs() - std::f64::consts::PI).abs() < 0.1,
+            "planar dihedral should be ~0 or ~180°, got {:.1}°",
+            angle.to_degrees()
+        );
+    }
+
+    #[test]
+    fn dihedral_angle_perpendicular() {
+        // 90° dihedral
+        let angle = dihedral_angle(
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+        )
+        .unwrap();
+        assert!(
+            (angle.abs() - std::f64::consts::FRAC_PI_2).abs() < 0.1,
+            "should be ~90°, got {:.1}°",
+            angle.to_degrees()
         );
     }
 }

@@ -9,23 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **electrochemistry** module — Nernst equation, Faraday's laws (1st/2nd), 19 standard electrode potentials (Li–F₂), galvanic cell EMF, cell Gibbs energy, charge/mole conversions
-- **thermochem** module — 31 substances with ΔH_f°, ΔG_f°, S° (NIST/CRC); reaction enthalpy/Gibbs/entropy from stoichiometry; Van't Hoff equation; 15 Shomate Cp(T) datasets; Cp(T) numerical integration; adiabatic flame temperature
-- **spectroscopy** module — Beer-Lambert law, photon energy/wavelength/frequency conversions, Bohr model energy levels and transitions, Rydberg formula, hydrogen spectral series (Lyman through Pfund)
-- **organic** module — bond energy table (32 types), reaction enthalpy from bond energies, VSEPR geometry prediction (13 geometries), functional groups (16) with polarity and hydrogen bonding classification
-- **kinetics** — Michaelis-Menten enzyme kinetics, Lineweaver-Burk linearization, collision theory rate, Eyring equation (transition state theory)
-- **element** — expanded to full periodic table: 118 elements (H–Og) with Lanthanide and Actinide categories
-- **solution** — weak acid and weak base pH solvers using hisab bisection root finding
-- **hisab 1.0 integration** — bisection root finding, Simpson numerical integration, EPSILON_F64 precision constant
+- **stoichiometry** module — chemical equation balancing (via hisab gaussian_elimination), oxidation state assignment, limiting reagent, theoretical yield, percent yield, percent composition, empirical formula
+- **phase** module — Raoult's law, Henry's law, colligative properties (bp elevation, fp depression, osmotic pressure), Clausius-Clapeyron, Antoine equation with 8 solvents, Gibbs phase rule
+- **nuclear** module — radioactive decay law, activity, mass defect, binding energy per nucleon, semi-empirical mass formula (Weizsacker), Q-value, 18 isotopes (H-3 through Np-237)
+- **inorganic** module — crystal field theory (CFSE oct/tet), spectrochemical series (11 ligands), spin-only magnetic moment, Born-Landé lattice energy, 5 Madelung constants, 30 Shannon ionic radii
+- **potential** module — Lennard-Jones 6-12 potential, Morse potential, Coulomb potential and force
+- **reaction_dynamics** module — ODE-powered kinetics simulation (1st/2nd order, consecutive A→B→C, reversible A⇌B, Michaelis-Menten substrate depletion, adaptive DOPRI45) via hisab rk4_trajectory
+- **fitting** module — Arrhenius parameter fitting, polynomial calibration curves, Beer-Lambert extinction coefficient fitting via hisab least_squares_poly
+- **electrochemistry** — expanded to 49 half-reactions (added MnO₄⁻, Cr₂O₇²⁻, O₂/H₂O, Fe³⁺/Fe²⁺, Ce⁴⁺, H₂O₂, PbO₂, and 23 more)
+- **thermochem** — expanded to 71 substances (added 10 elements, 23 inorganic compounds, 7 organic compounds); Shomate Cp(T) expanded to 24 datasets
+- **spectroscopy** — wavenumber conversions, reduced mass, quantum harmonic oscillator energy, vibrational frequency from force constant
+- **organic** — bond energies expanded to 48 types (added P-H/O/Cl, Si-H/O/C/Cl, B-H/O/N/F, S-S, S=O)
+- **kinetics** — zero-order concentration and half-life, nth-order half-life, Michaelis-Menten, Lineweaver-Burk, collision theory, Eyring equation
+- **gas** — Peng-Robinson equation of state (pressure, Z-factor), fugacity coefficient, fugacity, 5 substance parameter sets
+- **solution** — weak acid/base pH (Newton-Raphson), ionic strength, Debye-Hückel (limiting, extended), Davies equation, Kohlrausch molar conductivity, 7 limiting ionic conductivities
+- **element** — full periodic table: 118 elements (H–Og) with Lanthanide and Actinide categories
+- **hisab integration** — newton_raphson (8.3x speedup for pH), rk4_trajectory, dopri45, gaussian_elimination, least_squares_poly, integral_simpson, EPSILON_F64
 
 ### Changed
 
-- All public functions that can fail now return `Result<T, KimiyaError>` instead of silent sentinel values (0.0, f64::INFINITY)
-- `KimiyaError` now derives `Clone`, `PartialEq`, `Eq`
-- `KimiyaError` gained `InvalidInput` variant for general domain violations
-- `Element` no longer derives `Deserialize` — `&'static str` fields cannot be deserialized from external data
+- All public functions that can fail now return `Result<T, KimiyaError>` instead of silent sentinel values
+- `KimiyaError` now derives `Clone`, `PartialEq`, `Eq`; added `InvalidInput` variant
+- `Element` no longer derives `Deserialize` — `&'static str` fields cannot be deserialized
 - `lookup_by_number` is O(1) via direct array indexing (was O(n) linear scan)
 - Temperature validation added to `ideal_gas_pressure`, `ideal_gas_volume`, `gibbs_free_energy`
+- Nuclear constants upgraded to CODATA 2018 full precision
 - `hisab` dependency updated from 0.24 to 1.0
 
 ### Removed

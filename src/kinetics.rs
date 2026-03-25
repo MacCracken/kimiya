@@ -112,6 +112,66 @@ pub fn nth_order_half_life(initial: f64, rate_constant: f64, order: f64) -> Resu
     Ok((2.0_f64.powf(n_minus_1) - 1.0) / (n_minus_1 * rate_constant * initial.powf(n_minus_1)))
 }
 
+// ── Steady-state approximation ────────────────────────────────────────
+
+/// Steady-state concentration of an intermediate in A →(k₁) B →(k₂) C.
+///
+/// At steady state: d\[B\]/dt = 0 → k₁\[A\] = k₂\[B\] → \[B\]_ss = k₁\[A\]/k₂
+///
+/// # Errors
+///
+/// Returns error if k₂ is not positive.
+#[inline]
+pub fn steady_state_intermediate(
+    k1: f64,
+    concentration_a: f64,
+    k2: f64,
+) -> Result<f64> {
+    if k2 <= 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "k2 must be positive".into(),
+        ));
+    }
+    Ok(k1 * concentration_a / k2)
+}
+
+/// Rate of product formation under steady-state approximation.
+///
+/// For A →(k₁) B →(k₂) C: rate = k₂\[B\]_ss = k₁\[A\]
+///
+/// The rate-determining step determines the overall rate.
+/// If k₁ << k₂, rate ≈ k₁\[A\] (first step is rate-determining).
+/// If k₂ << k₁, rate ≈ k₂\[B\] (second step is rate-determining).
+#[must_use]
+#[inline]
+pub fn steady_state_rate(k_slow: f64, concentration: f64) -> f64 {
+    k_slow * concentration
+}
+
+/// Pre-equilibrium approximation: fast equilibrium followed by slow step.
+///
+/// A ⇌(K_eq) B →(k₂) C where K_eq = k₁/k₋₁
+///
+/// Rate = k₂ × K_eq × \[A\] = k₂ × (k₁/k₋₁) × \[A\]
+///
+/// # Errors
+///
+/// Returns error if k_reverse is not positive.
+#[inline]
+pub fn pre_equilibrium_rate(
+    k_forward: f64,
+    k_reverse: f64,
+    k_slow: f64,
+    concentration_a: f64,
+) -> Result<f64> {
+    if k_reverse <= 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "reverse rate constant must be positive".into(),
+        ));
+    }
+    Ok(k_slow * (k_forward / k_reverse) * concentration_a)
+}
+
 // ── Michaelis-Menten enzyme kinetics ─────────────────────────────────
 
 /// Michaelis-Menten rate: v = Vmax × \[S\] / (Km + \[S\])

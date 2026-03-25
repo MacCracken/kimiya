@@ -259,6 +259,41 @@ pub fn fugacity_pr(
     Ok(phi * pressure_pa)
 }
 
+// ── Redlich-Kwong equation of state ──────────────────────────────────
+
+/// Redlich-Kwong pressure: P = RT/(V-b) - a / (T^½ × V(V+b))
+///
+/// - `tc`: critical temperature (K)
+/// - `pc`: critical pressure (Pa)
+/// - `temperature_k`: T (K)
+/// - `molar_volume`: V (m³/mol)
+///
+/// # Errors
+///
+/// Returns error if temperature or molar volume is invalid.
+pub fn redlich_kwong_pressure(
+    tc: f64,
+    pc: f64,
+    temperature_k: f64,
+    molar_volume: f64,
+) -> Result<f64> {
+    if temperature_k <= 0.0 {
+        return Err(KimiyaError::InvalidTemperature(
+            "temperature must be positive".into(),
+        ));
+    }
+    let a = 0.42748 * GAS_CONSTANT * GAS_CONSTANT * tc.powf(2.5) / pc;
+    let b = 0.08664 * GAS_CONSTANT * tc / pc;
+    if molar_volume <= b {
+        return Err(KimiyaError::InvalidInput(
+            "molar volume must be greater than b".into(),
+        ));
+    }
+    let term1 = GAS_CONSTANT * temperature_k / (molar_volume - b);
+    let term2 = a / (temperature_k.sqrt() * molar_volume * (molar_volume + b));
+    Ok(term1 - term2)
+}
+
 /// Joule-Thomson coefficient for an ideal gas (always zero).
 ///
 /// Real gas JT requires EOS derivatives — use with Peng-Robinson for real gases.
@@ -421,5 +456,23 @@ mod tests {
     #[test]
     fn joule_thomson_ideal_is_zero() {
         assert!((joule_thomson_ideal()).abs() < f64::EPSILON);
+    }
+
+    // ── Redlich-Kwong ────────────────────────────────────────────────
+
+    #[test]
+    fn rk_approaches_ideal_at_high_v() {
+        // N₂: Tc=126.2, Pc=3394000
+        let p_ideal = ideal_gas_pressure(1.0, 300.0, 1.0).unwrap();
+        let p_rk = redlich_kwong_pressure(126.2, 3_394_000.0, 300.0, 1.0).unwrap();
+        assert!(
+            (p_rk - p_ideal).abs() / p_ideal < 0.01,
+            "RK should approach ideal at large V"
+        );
+    }
+
+    #[test]
+    fn rk_zero_temp_is_error() {
+        assert!(redlich_kwong_pressure(126.2, 3_394_000.0, 0.0, 0.025).is_err());
     }
 }

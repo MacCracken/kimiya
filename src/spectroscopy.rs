@@ -342,6 +342,54 @@ pub fn vibrational_frequency(force_constant: f64, reduced_mass_kg: f64) -> Resul
     Ok((force_constant / reduced_mass_kg).sqrt())
 }
 
+// ── Rotational spectroscopy ──────────────────────────────────────────
+
+/// Rigid rotor rotational energy: E_J = B × J(J+1) × h
+///
+/// where B = h / (8π²I) is the rotational constant in Hz.
+///
+/// - `j`: rotational quantum number
+/// - `rotational_constant_hz`: B in Hz
+///
+/// Returns energy in Joules.
+#[must_use]
+#[inline]
+pub fn rigid_rotor_energy(j: u32, rotational_constant_hz: f64) -> f64 {
+    PLANCK * rotational_constant_hz * j as f64 * (j as f64 + 1.0)
+}
+
+/// Rotational constant B from moment of inertia:
+/// B = h / (8π²I)
+///
+/// - `moment_of_inertia`: I in kg·m²
+///
+/// Returns B in Hz.
+///
+/// # Errors
+///
+/// Returns error if moment of inertia is not positive.
+#[inline]
+pub fn rotational_constant(moment_of_inertia: f64) -> Result<f64> {
+    if moment_of_inertia <= 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "moment of inertia must be positive".into(),
+        ));
+    }
+    Ok(PLANCK / (8.0 * std::f64::consts::PI * std::f64::consts::PI * moment_of_inertia))
+}
+
+/// Moment of inertia for a diatomic: I = μ × r²
+///
+/// - `reduced_mass_kg`: μ in kg
+/// - `bond_length_m`: r in meters
+///
+/// Returns I in kg·m².
+#[must_use]
+#[inline]
+pub fn diatomic_moment_of_inertia(reduced_mass_kg: f64, bond_length_m: f64) -> f64 {
+    reduced_mass_kg * bond_length_m * bond_length_m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,8 +654,41 @@ mod tests {
 
     #[test]
     fn vibrational_frequency_basic() {
-        // k = 500 N/m, μ = 1.66e-27 kg (≈ 1 u) → ω ≈ 5.5e14 rad/s
         let omega = vibrational_frequency(500.0, 1.66e-27).unwrap();
         assert!(omega > 5e14 && omega < 6e14);
+    }
+
+    // ── Rotational spectroscopy ──────────────────────────────────────
+
+    #[test]
+    fn rigid_rotor_j0_is_zero() {
+        let e = rigid_rotor_energy(0, 1e10);
+        assert!(e.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rigid_rotor_increases_with_j() {
+        let e1 = rigid_rotor_energy(1, 1e10);
+        let e2 = rigid_rotor_energy(2, 1e10);
+        assert!(e2 > e1);
+    }
+
+    #[test]
+    fn rotational_constant_positive() {
+        let b = rotational_constant(1e-46).unwrap();
+        assert!(b > 0.0);
+    }
+
+    #[test]
+    fn rotational_constant_zero_inertia_is_error() {
+        assert!(rotational_constant(0.0).is_err());
+    }
+
+    #[test]
+    fn diatomic_moment_of_inertia_basic() {
+        let mu = 1e-26; // ~10 u
+        let r = 1e-10; // 1 Å
+        let i = diatomic_moment_of_inertia(mu, r);
+        assert!((i - 1e-46).abs() < 1e-48);
     }
 }

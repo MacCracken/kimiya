@@ -1004,6 +1004,259 @@ pub fn lookup_by_symbol(symbol: &str) -> Option<&'static Element> {
     ELEMENTS.iter().find(|e| e.symbol == symbol)
 }
 
+// ── Extended element properties ──────────────────────────────────────
+
+/// Extended properties for an element (ionization energy, electron affinity, radii, oxidation states).
+#[derive(Debug, Clone, Serialize)]
+pub struct ElementProperties {
+    pub atomic_number: u8,
+    /// First ionization energy (kJ/mol).
+    pub ionization_energy_1: f64,
+    /// Electron affinity (kJ/mol). Negative = energy released.
+    pub electron_affinity: f64,
+    /// Covalent radius (pm).
+    pub covalent_radius_pm: f64,
+    /// Common oxidation states (most common first).
+    pub oxidation_states: &'static [i8],
+}
+
+/// Extended properties for common elements (first 36 + selected heavier elements).
+pub static ELEMENT_PROPERTIES: &[ElementProperties] = &[
+    ElementProperties {
+        atomic_number: 1,
+        ionization_energy_1: 1312.0,
+        electron_affinity: -72.8,
+        covalent_radius_pm: 31.0,
+        oxidation_states: &[1, -1],
+    },
+    ElementProperties {
+        atomic_number: 2,
+        ionization_energy_1: 2372.3,
+        electron_affinity: 0.0,
+        covalent_radius_pm: 28.0,
+        oxidation_states: &[0],
+    },
+    ElementProperties {
+        atomic_number: 3,
+        ionization_energy_1: 520.2,
+        electron_affinity: -59.6,
+        covalent_radius_pm: 128.0,
+        oxidation_states: &[1],
+    },
+    ElementProperties {
+        atomic_number: 4,
+        ionization_energy_1: 899.5,
+        electron_affinity: 0.0,
+        covalent_radius_pm: 96.0,
+        oxidation_states: &[2],
+    },
+    ElementProperties {
+        atomic_number: 5,
+        ionization_energy_1: 800.6,
+        electron_affinity: -26.7,
+        covalent_radius_pm: 84.0,
+        oxidation_states: &[3],
+    },
+    ElementProperties {
+        atomic_number: 6,
+        ionization_energy_1: 1086.5,
+        electron_affinity: -121.8,
+        covalent_radius_pm: 76.0,
+        oxidation_states: &[4, -4, 2],
+    },
+    ElementProperties {
+        atomic_number: 7,
+        ionization_energy_1: 1402.3,
+        electron_affinity: 0.0,
+        covalent_radius_pm: 71.0,
+        oxidation_states: &[3, -3, 5, 4, 2],
+    },
+    ElementProperties {
+        atomic_number: 8,
+        ionization_energy_1: 1313.9,
+        electron_affinity: -141.0,
+        covalent_radius_pm: 66.0,
+        oxidation_states: &[-2, -1],
+    },
+    ElementProperties {
+        atomic_number: 9,
+        ionization_energy_1: 1681.0,
+        electron_affinity: -328.0,
+        covalent_radius_pm: 57.0,
+        oxidation_states: &[-1],
+    },
+    ElementProperties {
+        atomic_number: 10,
+        ionization_energy_1: 2080.7,
+        electron_affinity: 0.0,
+        covalent_radius_pm: 58.0,
+        oxidation_states: &[0],
+    },
+    ElementProperties {
+        atomic_number: 11,
+        ionization_energy_1: 495.8,
+        electron_affinity: -52.8,
+        covalent_radius_pm: 166.0,
+        oxidation_states: &[1],
+    },
+    ElementProperties {
+        atomic_number: 12,
+        ionization_energy_1: 737.7,
+        electron_affinity: 0.0,
+        covalent_radius_pm: 141.0,
+        oxidation_states: &[2],
+    },
+    ElementProperties {
+        atomic_number: 13,
+        ionization_energy_1: 577.5,
+        electron_affinity: -42.5,
+        covalent_radius_pm: 121.0,
+        oxidation_states: &[3],
+    },
+    ElementProperties {
+        atomic_number: 14,
+        ionization_energy_1: 786.5,
+        electron_affinity: -134.1,
+        covalent_radius_pm: 111.0,
+        oxidation_states: &[4, -4, 2],
+    },
+    ElementProperties {
+        atomic_number: 15,
+        ionization_energy_1: 1011.8,
+        electron_affinity: -72.0,
+        covalent_radius_pm: 107.0,
+        oxidation_states: &[5, 3, -3],
+    },
+    ElementProperties {
+        atomic_number: 16,
+        ionization_energy_1: 999.6,
+        electron_affinity: -200.4,
+        covalent_radius_pm: 105.0,
+        oxidation_states: &[-2, 4, 6, 2],
+    },
+    ElementProperties {
+        atomic_number: 17,
+        ionization_energy_1: 1251.2,
+        electron_affinity: -349.0,
+        covalent_radius_pm: 102.0,
+        oxidation_states: &[-1, 1, 3, 5, 7],
+    },
+    ElementProperties {
+        atomic_number: 18,
+        ionization_energy_1: 1520.6,
+        electron_affinity: 0.0,
+        covalent_radius_pm: 106.0,
+        oxidation_states: &[0],
+    },
+    ElementProperties {
+        atomic_number: 19,
+        ionization_energy_1: 418.8,
+        electron_affinity: -48.4,
+        covalent_radius_pm: 203.0,
+        oxidation_states: &[1],
+    },
+    ElementProperties {
+        atomic_number: 20,
+        ionization_energy_1: 589.8,
+        electron_affinity: -2.4,
+        covalent_radius_pm: 176.0,
+        oxidation_states: &[2],
+    },
+    ElementProperties {
+        atomic_number: 24,
+        ionization_energy_1: 652.9,
+        electron_affinity: -64.3,
+        covalent_radius_pm: 139.0,
+        oxidation_states: &[3, 6, 2],
+    },
+    ElementProperties {
+        atomic_number: 25,
+        ionization_energy_1: 717.3,
+        electron_affinity: 0.0,
+        covalent_radius_pm: 139.0,
+        oxidation_states: &[2, 4, 7, 3, 6],
+    },
+    ElementProperties {
+        atomic_number: 26,
+        ionization_energy_1: 762.5,
+        electron_affinity: -15.7,
+        covalent_radius_pm: 132.0,
+        oxidation_states: &[2, 3],
+    },
+    ElementProperties {
+        atomic_number: 27,
+        ionization_energy_1: 760.4,
+        electron_affinity: -63.7,
+        covalent_radius_pm: 126.0,
+        oxidation_states: &[2, 3],
+    },
+    ElementProperties {
+        atomic_number: 28,
+        ionization_energy_1: 737.1,
+        electron_affinity: -112.0,
+        covalent_radius_pm: 124.0,
+        oxidation_states: &[2],
+    },
+    ElementProperties {
+        atomic_number: 29,
+        ionization_energy_1: 745.5,
+        electron_affinity: -118.4,
+        covalent_radius_pm: 132.0,
+        oxidation_states: &[2, 1],
+    },
+    ElementProperties {
+        atomic_number: 30,
+        ionization_energy_1: 906.4,
+        electron_affinity: 0.0,
+        covalent_radius_pm: 122.0,
+        oxidation_states: &[2],
+    },
+    ElementProperties {
+        atomic_number: 35,
+        ionization_energy_1: 1139.9,
+        electron_affinity: -324.6,
+        covalent_radius_pm: 120.0,
+        oxidation_states: &[-1, 1, 3, 5],
+    },
+    ElementProperties {
+        atomic_number: 47,
+        ionization_energy_1: 731.0,
+        electron_affinity: -125.6,
+        covalent_radius_pm: 145.0,
+        oxidation_states: &[1],
+    },
+    ElementProperties {
+        atomic_number: 53,
+        ionization_energy_1: 1008.4,
+        electron_affinity: -295.2,
+        covalent_radius_pm: 139.0,
+        oxidation_states: &[-1, 1, 3, 5, 7],
+    },
+    ElementProperties {
+        atomic_number: 79,
+        ionization_energy_1: 890.1,
+        electron_affinity: -222.8,
+        covalent_radius_pm: 136.0,
+        oxidation_states: &[3, 1],
+    },
+    ElementProperties {
+        atomic_number: 82,
+        ionization_energy_1: 715.6,
+        electron_affinity: -35.1,
+        covalent_radius_pm: 146.0,
+        oxidation_states: &[2, 4],
+    },
+];
+
+/// Look up extended element properties by atomic number.
+#[must_use]
+#[inline]
+pub fn lookup_properties(atomic_number: u8) -> Option<&'static ElementProperties> {
+    ELEMENT_PROPERTIES
+        .iter()
+        .find(|p| p.atomic_number == atomic_number)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1106,5 +1359,66 @@ mod tests {
                 element.symbol
             );
         }
+    }
+
+    // ── Extended properties ──────────────────────────────────────────
+
+    #[test]
+    fn properties_hydrogen() {
+        let p = lookup_properties(1).unwrap();
+        assert!((p.ionization_energy_1 - 1312.0).abs() < 1.0);
+        assert!(p.oxidation_states.contains(&1));
+        assert!(p.oxidation_states.contains(&-1));
+    }
+
+    #[test]
+    fn properties_fluorine_highest_ea() {
+        // Chlorine actually has higher EA than fluorine
+        let f = lookup_properties(9).unwrap();
+        let cl = lookup_properties(17).unwrap();
+        assert!(
+            cl.electron_affinity < f.electron_affinity,
+            "Cl should have more negative EA"
+        );
+    }
+
+    #[test]
+    fn properties_noble_gas_zero_ea() {
+        let he = lookup_properties(2).unwrap();
+        assert!((he.electron_affinity).abs() < f64::EPSILON);
+        assert_eq!(he.oxidation_states, &[0]);
+    }
+
+    #[test]
+    fn properties_iron_oxidation_states() {
+        let fe = lookup_properties(26).unwrap();
+        assert!(fe.oxidation_states.contains(&2));
+        assert!(fe.oxidation_states.contains(&3));
+    }
+
+    #[test]
+    fn properties_ie_trend_period2() {
+        // IE generally increases across a period: Li < Be < B < ... < Ne
+        let li = lookup_properties(3).unwrap();
+        let ne = lookup_properties(10).unwrap();
+        assert!(ne.ionization_energy_1 > li.ionization_energy_1);
+    }
+
+    #[test]
+    fn properties_covalent_radius_trend() {
+        // Covalent radius decreases across period: Na > Cl
+        let na = lookup_properties(11).unwrap();
+        let cl = lookup_properties(17).unwrap();
+        assert!(na.covalent_radius_pm > cl.covalent_radius_pm);
+    }
+
+    #[test]
+    fn properties_count() {
+        assert!(ELEMENT_PROPERTIES.len() >= 32);
+    }
+
+    #[test]
+    fn properties_nonexistent() {
+        assert!(lookup_properties(200).is_none());
     }
 }

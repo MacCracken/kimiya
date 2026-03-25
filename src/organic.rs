@@ -39,6 +39,24 @@ pub enum BondType {
     NN,
     NNDouble,
     NNTriple,
+    // ── Phosphorus bonds ─────────────────────────────────
+    PH,
+    PO,
+    PODouble,
+    PCl,
+    // ── Silicon bonds ──────────────────────────────────────
+    SiH,
+    SiO,
+    SiC,
+    SiCl,
+    // ── Boron bonds ────────────────────────────────────────
+    BH,
+    BO,
+    BN,
+    BF,
+    // ── Sulfur bonds ───────────────────────────────────────
+    SS,
+    SODouble,
     // ── Halogen bonds ────────────────────────────────────
     FF,
     ClCl,
@@ -82,6 +100,24 @@ impl BondType {
             Self::NN => 160.0,
             Self::NNDouble => 418.0,
             Self::NNTriple => 945.0,
+            // Phosphorus bonds
+            Self::PH => 322.0,
+            Self::PO => 335.0,
+            Self::PODouble => 544.0,
+            Self::PCl => 326.0,
+            // Silicon bonds
+            Self::SiH => 318.0,
+            Self::SiO => 452.0,
+            Self::SiC => 301.0,
+            Self::SiCl => 381.0,
+            // Boron bonds
+            Self::BH => 389.0,
+            Self::BO => 536.0,
+            Self::BN => 389.0,
+            Self::BF => 613.0,
+            // Sulfur bonds
+            Self::SS => 266.0,
+            Self::SODouble => 522.0,
             // Halogen bonds
             Self::FF => 155.0,
             Self::ClCl => 242.0,

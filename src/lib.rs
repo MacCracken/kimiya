@@ -14,6 +14,7 @@ pub mod element;
 pub mod error;
 pub mod fitting;
 pub mod gas;
+pub mod inorganic;
 pub mod kinetics;
 pub mod molecule;
 pub mod nuclear;
