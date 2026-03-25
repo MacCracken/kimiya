@@ -1,18 +1,23 @@
 # Changelog
 
-## [0.24.3] - 2026-03-24
+## [0.24.3] - 2026-03-25
 
 ### Added
 - **electrochemistry** — Nernst equation, Faraday's laws (1st/2nd), 19 standard electrode potentials (Li–F₂), galvanic cell EMF, cell Gibbs energy, charge/mole conversions
-- **thermochem** — 31 substances with ΔH_f°, ΔG_f°, S° (NIST/CRC), reaction enthalpy/Gibbs/entropy from stoichiometry, Van't Hoff equation
+- **thermochem** — 31 substances with ΔH_f°, ΔG_f°, S° (NIST/CRC), reaction enthalpy/Gibbs/entropy from stoichiometry, Van't Hoff equation, 15 Shomate Cp(T) datasets, Cp(T) integration, adiabatic flame temperature
+- **spectroscopy** — Beer-Lambert law, photon energy/wavelength/frequency conversions, Bohr model, Rydberg formula, hydrogen spectral series (Lyman through Pfund)
+- **organic** — Bond energy table (32 types), reaction enthalpy from bonds, VSEPR geometry prediction (13 geometries), functional groups (16) with polarity/H-bonding
+- **kinetics (advanced)** — Michaelis-Menten enzyme kinetics, Lineweaver-Burk, collision theory, Eyring equation (transition state theory)
+- **element** — Full periodic table: 118 elements (H–Og) with Lanthanide/Actinide categories
+- **hisab integration** — bisection for weak acid/base pH and flame temperature, Simpson integration for Cp(T), EPSILON_F64 precision
 
 ### Changed
 - All public functions that can fail now return `Result<T, KimiyaError>` instead of silent sentinel values
-- `KimiyaError` now derives `Clone`, `PartialEq`, `Eq`
-- Added `InvalidInput` variant to `KimiyaError`
+- `KimiyaError` now derives `Clone`, `PartialEq`, `Eq`; added `InvalidInput` variant
 - `Element` no longer derives `Deserialize` (`&'static str` fields cannot be deserialized)
 - `lookup_by_number` is now O(1) via direct indexing (was O(n) linear scan)
 - Temperature validation added to `ideal_gas_pressure`, `ideal_gas_volume`, `gibbs_free_energy`
+- hisab dependency updated to 1.0
 
 ### Removed
 - Unused `Bond` enum from molecule module

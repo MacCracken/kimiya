@@ -59,6 +59,143 @@ pub fn second_order_concentration(initial: f64, rate_constant: f64, time: f64) -
     Ok(1.0 / (1.0 / initial + rate_constant * time))
 }
 
+// ── Michaelis-Menten enzyme kinetics ─────────────────────────────────
+
+/// Michaelis-Menten rate: v = Vmax × \[S\] / (Km + \[S\])
+///
+/// - `v_max`: maximum reaction rate
+/// - `km`: Michaelis constant (substrate concentration at half Vmax)
+/// - `substrate`: substrate concentration \[S\]
+///
+/// # Errors
+///
+/// Returns error if Vmax, Km, or substrate is not positive.
+#[inline]
+pub fn michaelis_menten(v_max: f64, km: f64, substrate: f64) -> Result<f64> {
+    if v_max <= 0.0 {
+        return Err(KimiyaError::InvalidInput("Vmax must be positive".into()));
+    }
+    if km <= 0.0 {
+        return Err(KimiyaError::InvalidInput("Km must be positive".into()));
+    }
+    if substrate < 0.0 {
+        return Err(KimiyaError::InvalidConcentration(
+            "substrate concentration must be non-negative".into(),
+        ));
+    }
+    Ok(v_max * substrate / (km + substrate))
+}
+
+/// Lineweaver-Burk linearization: 1/v = (Km/Vmax)(1/\[S\]) + 1/Vmax
+///
+/// Returns (slope, intercept) for a Lineweaver-Burk plot.
+///
+/// - slope = Km / Vmax
+/// - intercept = 1 / Vmax
+///
+/// # Errors
+///
+/// Returns error if Vmax or Km is not positive.
+#[inline]
+pub fn lineweaver_burk(v_max: f64, km: f64) -> Result<(f64, f64)> {
+    if v_max <= 0.0 {
+        return Err(KimiyaError::InvalidInput("Vmax must be positive".into()));
+    }
+    if km <= 0.0 {
+        return Err(KimiyaError::InvalidInput("Km must be positive".into()));
+    }
+    Ok((km / v_max, 1.0 / v_max))
+}
+
+// ── Collision theory ─────────────────────────────────────────────────
+
+/// Collision theory rate constant:
+/// k = Z × p × exp(-Ea / (RT))
+///
+/// - `collision_frequency`: Z (collisions per second per unit concentration²)
+/// - `steric_factor`: p (probability of correct orientation, 0 < p ≤ 1)
+/// - `activation_energy_j`: Ea in J/mol
+/// - `temperature_k`: T in Kelvin
+///
+/// # Errors
+///
+/// Returns error if temperature or steric factor is invalid.
+#[inline]
+pub fn collision_theory_rate(
+    collision_frequency: f64,
+    steric_factor: f64,
+    activation_energy_j: f64,
+    temperature_k: f64,
+) -> Result<f64> {
+    if temperature_k <= 0.0 {
+        return Err(KimiyaError::InvalidTemperature(
+            "temperature must be positive".into(),
+        ));
+    }
+    if steric_factor <= 0.0 || steric_factor > 1.0 {
+        return Err(KimiyaError::InvalidInput(
+            "steric factor must be in (0, 1]".into(),
+        ));
+    }
+    Ok(collision_frequency
+        * steric_factor
+        * (-activation_energy_j / (GAS_CONSTANT * temperature_k)).exp())
+}
+
+// ── Transition state theory (Eyring equation) ────────────────────────
+
+/// Boltzmann constant (J/K).
+pub const BOLTZMANN: f64 = 1.380649e-23;
+
+/// Eyring equation (transition state theory):
+/// k = (kB × T / h) × exp(-ΔG‡ / (RT))
+///
+/// - `delta_g_activation_j`: ΔG‡ (Gibbs energy of activation) in J/mol
+/// - `temperature_k`: T in Kelvin
+///
+/// Returns rate constant in s⁻¹.
+///
+/// # Errors
+///
+/// Returns error if temperature is not positive.
+#[inline]
+pub fn eyring_rate(delta_g_activation_j: f64, temperature_k: f64) -> Result<f64> {
+    if temperature_k <= 0.0 {
+        return Err(KimiyaError::InvalidTemperature(
+            "temperature must be positive".into(),
+        ));
+    }
+    let prefactor = BOLTZMANN * temperature_k / crate::spectroscopy::PLANCK;
+    Ok(prefactor * (-delta_g_activation_j / (GAS_CONSTANT * temperature_k)).exp())
+}
+
+/// Eyring equation decomposed into enthalpy and entropy of activation:
+/// k = (kB × T / h) × exp(ΔS‡/R) × exp(-ΔH‡/(RT))
+///
+/// - `delta_h_activation_j`: ΔH‡ in J/mol
+/// - `delta_s_activation_j_per_k`: ΔS‡ in J/(mol·K)
+/// - `temperature_k`: T in Kelvin
+///
+/// # Errors
+///
+/// Returns error if temperature is not positive.
+#[inline]
+pub fn eyring_rate_from_activation(
+    delta_h_activation_j: f64,
+    delta_s_activation_j_per_k: f64,
+    temperature_k: f64,
+) -> Result<f64> {
+    if temperature_k <= 0.0 {
+        return Err(KimiyaError::InvalidTemperature(
+            "temperature must be positive".into(),
+        ));
+    }
+    let prefactor = BOLTZMANN * temperature_k / crate::spectroscopy::PLANCK;
+    Ok(prefactor
+        * (delta_s_activation_j_per_k / GAS_CONSTANT).exp()
+        * (-delta_h_activation_j / (GAS_CONSTANT * temperature_k)).exp())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +290,107 @@ mod tests {
         // With Ea=0, k = A * exp(0) = A
         let k = arrhenius_rate(1e13, 0.0, 300.0).unwrap();
         assert!((k - 1e13).abs() < 1.0, "zero Ea should give k=A, got {k}");
+    }
+
+    // ── Michaelis-Menten ─────────────────────────────────────────────
+
+    #[test]
+    fn michaelis_menten_at_km() {
+        // When [S] = Km, v = Vmax/2
+        let v = michaelis_menten(100.0, 5.0, 5.0).unwrap();
+        assert!((v - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn michaelis_menten_saturation() {
+        // At very high [S], v → Vmax
+        let v = michaelis_menten(100.0, 5.0, 1e6).unwrap();
+        assert!((v - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn michaelis_menten_zero_substrate() {
+        let v = michaelis_menten(100.0, 5.0, 0.0).unwrap();
+        assert!(v.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn michaelis_menten_zero_vmax_is_error() {
+        assert!(michaelis_menten(0.0, 5.0, 1.0).is_err());
+    }
+
+    #[test]
+    fn michaelis_menten_zero_km_is_error() {
+        assert!(michaelis_menten(100.0, 0.0, 1.0).is_err());
+    }
+
+    #[test]
+    fn lineweaver_burk_basic() {
+        let (slope, intercept) = lineweaver_burk(100.0, 5.0).unwrap();
+        assert!((slope - 0.05).abs() < 1e-10); // Km/Vmax = 5/100
+        assert!((intercept - 0.01).abs() < 1e-10); // 1/Vmax = 1/100
+    }
+
+    // ── Collision theory ─────────────────────────────────────────────
+
+    #[test]
+    fn collision_theory_basic() {
+        let k = collision_theory_rate(1e10, 0.1, 50_000.0, 300.0).unwrap();
+        assert!(k > 0.0);
+        assert!(k < 1e10, "rate should be less than Z×p");
+    }
+
+    #[test]
+    fn collision_theory_steric_reduces_rate() {
+        let k_full = collision_theory_rate(1e10, 1.0, 50_000.0, 300.0).unwrap();
+        let k_steric = collision_theory_rate(1e10, 0.01, 50_000.0, 300.0).unwrap();
+        assert!(k_steric < k_full);
+    }
+
+    #[test]
+    fn collision_theory_zero_steric_is_error() {
+        assert!(collision_theory_rate(1e10, 0.0, 50_000.0, 300.0).is_err());
+    }
+
+    #[test]
+    fn collision_theory_steric_over_one_is_error() {
+        assert!(collision_theory_rate(1e10, 1.5, 50_000.0, 300.0).is_err());
+    }
+
+    // ── Eyring equation ──────────────────────────────────────────────
+
+    #[test]
+    fn eyring_basic() {
+        // ΔG‡ = 80 kJ/mol at 298K should give a reasonable rate
+        let k = eyring_rate(80_000.0, 298.0).unwrap();
+        assert!(k > 0.0 && k < 1e15);
+    }
+
+    #[test]
+    fn eyring_higher_temp_faster() {
+        let k_low = eyring_rate(80_000.0, 298.0).unwrap();
+        let k_high = eyring_rate(80_000.0, 400.0).unwrap();
+        assert!(k_high > k_low);
+    }
+
+    #[test]
+    fn eyring_zero_temp_is_error() {
+        assert!(eyring_rate(80_000.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn eyring_decomposed_matches_combined() {
+        // ΔG‡ = ΔH‡ - TΔS‡
+        let dh = 80_000.0;
+        let ds = -50.0;
+        let t = 298.0;
+        let dg = dh - t * ds;
+
+        let k_combined = eyring_rate(dg, t).unwrap();
+        let k_decomposed = eyring_rate_from_activation(dh, ds, t).unwrap();
+        assert!(
+            (k_combined - k_decomposed).abs() / k_combined < 1e-6,
+            "combined ({k_combined}) should match decomposed ({k_decomposed})"
+        );
     }
 }

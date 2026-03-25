@@ -3,9 +3,9 @@
 //! **Kimiya** (كيمياء — Arabic for "alchemy", the root of "chemistry") — chemistry
 //! engine for the AGNOS ecosystem.
 //!
-//! Provides elements, molecules, reactions, kinetics, gas laws, solutions,
-//! thermochemistry, electrochemistry, and thermochemical data tables.
-//! Built on [`hisab`] for math.
+//! Full periodic table (118 elements), molecules, reactions, kinetics, gas laws,
+//! solutions, thermochemistry, electrochemistry, spectroscopy, organic chemistry,
+//! and thermochemical data tables. Built on [`hisab`] for numerical methods.
 
 pub mod electrochemistry;
 pub mod element;
@@ -13,8 +13,10 @@ pub mod error;
 pub mod gas;
 pub mod kinetics;
 pub mod molecule;
+pub mod organic;
 pub mod reaction;
 pub mod solution;
+pub mod spectroscopy;
 pub mod thermo;
 pub mod thermochem;
 

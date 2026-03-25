@@ -444,6 +444,114 @@ pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
             t_max: 1300.0,
         },
     ),
+    (
+        "H2(g)",
+        Shomate {
+            a: 33.066178,
+            b: -11.363417,
+            c: 11.432816,
+            d: -2.772874,
+            e: -0.158558,
+            t_min: 298.0,
+            t_max: 1000.0,
+        },
+    ),
+    (
+        "NH3(g)",
+        Shomate {
+            a: 19.99563,
+            b: 49.77119,
+            c: -15.37599,
+            d: 1.921168,
+            e: 0.189174,
+            t_min: 298.0,
+            t_max: 1400.0,
+        },
+    ),
+    (
+        "SO2(g)",
+        Shomate {
+            a: 21.43049,
+            b: 74.35094,
+            c: -57.75217,
+            d: 16.35534,
+            e: 0.086731,
+            t_min: 298.0,
+            t_max: 1200.0,
+        },
+    ),
+    (
+        "HCl(g)",
+        Shomate {
+            a: 32.12392,
+            b: -13.45805,
+            c: 19.86852,
+            d: -6.853936,
+            e: -0.049672,
+            t_min: 298.0,
+            t_max: 1200.0,
+        },
+    ),
+    (
+        "NO(g)",
+        Shomate {
+            a: 23.83491,
+            b: 12.58878,
+            c: -1.139011,
+            d: -1.497459,
+            e: 0.214194,
+            t_min: 298.0,
+            t_max: 1200.0,
+        },
+    ),
+    (
+        "NO2(g)",
+        Shomate {
+            a: 16.10857,
+            b: 75.89525,
+            c: -54.38740,
+            d: 14.30777,
+            e: 0.239423,
+            t_min: 298.0,
+            t_max: 1200.0,
+        },
+    ),
+    (
+        "C2H6(g)",
+        Shomate {
+            a: 6.16331,
+            b: 173.5507,
+            c: -64.14486,
+            d: 7.523975,
+            e: 0.168137,
+            t_min: 298.0,
+            t_max: 1200.0,
+        },
+    ),
+    (
+        "C2H4(g)",
+        Shomate {
+            a: 3.806800,
+            b: 156.5700,
+            c: -84.76060,
+            d: 17.54950,
+            e: 0.135519,
+            t_min: 298.0,
+            t_max: 1200.0,
+        },
+    ),
+    (
+        "C2H2(g)",
+        Shomate {
+            a: 40.68697,
+            b: 40.73279,
+            c: -16.17840,
+            d: 3.669741,
+            e: -0.658411,
+            t_min: 298.0,
+            t_max: 1100.0,
+        },
+    ),
 ];
 
 /// Look up Shomate coefficients by formula.
@@ -479,6 +587,72 @@ pub fn enthalpy_change_cp(formula: &str, t1_k: f64, t2_k: f64) -> Result<f64> {
     let result = hisab::calc::integral_simpson(cp_fn, t1_k, t2_k, 100)
         .map_err(|e| KimiyaError::ComputationError(format!("integration failed: {e}")))?;
     Ok(result)
+}
+
+/// Adiabatic flame temperature estimate.
+///
+/// Finds T where: ΔH_rxn + Σ nᵢ·∫[T₀→T] Cpᵢ(T) dT = 0
+///
+/// Uses [`hisab::num::bisection`] to solve for T.
+///
+/// - `reaction_enthalpy_j`: ΔH_rxn in J/mol (exothermic = negative)
+/// - `products`: list of (formula, moles) for product gases
+/// - `t_initial_k`: initial temperature (K)
+///
+/// Returns adiabatic flame temperature in Kelvin.
+///
+/// # Errors
+///
+/// Returns error if any product formula has no Shomate data, or if root finding fails.
+pub fn adiabatic_flame_temperature(
+    reaction_enthalpy_j: f64,
+    products: &[(&str, f64)],
+    t_initial_k: f64,
+) -> Result<f64> {
+    if t_initial_k <= 0.0 {
+        return Err(KimiyaError::InvalidTemperature(
+            "initial temperature must be positive".into(),
+        ));
+    }
+    // Verify all products have Shomate data
+    for &(formula, _) in products {
+        lookup_shomate(formula).ok_or_else(|| {
+            KimiyaError::InvalidReaction(format!("no Shomate data for '{formula}'"))
+        })?;
+    }
+
+    // f(T) = -ΔH_rxn - Σ nᵢ × ∫[T₀→T] Cpᵢ dT
+    // We want f(T) = 0, i.e., the heat released equals the heat absorbed by products
+    // At T = T₀, f > 0 (no heat absorbed yet, but reaction released energy).
+    // At T = T_flame, f = 0 (all released energy absorbed).
+    // At T >> T_flame, f < 0 (products would need more energy than available).
+    let f = |t: f64| -> f64 {
+        let mut heat_absorbed = 0.0;
+        for &(formula, moles) in products {
+            if let Some(shomate) = lookup_shomate(formula) {
+                let cp_fn = |temp: f64| shomate.cp(temp);
+                if let Ok(dh) = hisab::calc::integral_simpson(cp_fn, t_initial_k, t, 100) {
+                    heat_absorbed += moles * dh;
+                }
+            }
+        }
+        -reaction_enthalpy_j - heat_absorbed
+    };
+
+    // Verify bracket has opposite signs before calling bisection
+    let t_lo = t_initial_k + 1.0;
+    let t_hi = 6000.0;
+    let f_lo = f(t_lo);
+    let f_hi = f(t_hi);
+
+    if f_lo.signum() == f_hi.signum() {
+        return Err(KimiyaError::ComputationError(
+            "cannot bracket flame temperature — check reaction enthalpy and products".into(),
+        ));
+    }
+
+    hisab::num::bisection(f, t_lo, t_hi, 1.0, 200)
+        .map_err(|e| KimiyaError::ComputationError(format!("flame temperature solver failed: {e}")))
 }
 
 #[cfg(test)]
@@ -839,5 +1013,64 @@ mod tests {
             );
             assert!(s.t_min > 0.0, "{formula}: t_min must be positive");
         }
+    }
+
+    #[test]
+    fn expanded_shomate_h2_cp_at_298() {
+        let s = lookup_shomate("H2(g)").unwrap();
+        let cp = s.cp(298.0);
+        // H2 Cp at 298K ≈ 28.8 J/(mol·K)
+        assert!(
+            (cp - 28.8).abs() < 1.0,
+            "H2 Cp at 298K should be ~28.8, got {cp}"
+        );
+    }
+
+    #[test]
+    fn shomate_data_count() {
+        assert_eq!(SHOMATE_DATA.len(), 15, "should have 15 Shomate entries");
+    }
+
+    // ── Adiabatic flame temperature ──────────────────────────────────
+
+    #[test]
+    fn adiabatic_flame_h2_air() {
+        // H₂ + ½O₂ + 1.88 N₂ → H₂O(g) + 1.88 N₂ (stoichiometric in air)
+        // ΔH = -241.82 kJ/mol = -241820 J/mol
+        // N₂ diluent absorbs heat, bringing flame temp to a solvable range
+        let t =
+            adiabatic_flame_temperature(-241_820.0, &[("H2O(g)", 1.0), ("N2(g)", 1.88)], 298.15)
+                .unwrap();
+        assert!(
+            t > 1800.0 && t < 3000.0,
+            "H₂/air flame should be ~2300K, got {t}"
+        );
+    }
+
+    #[test]
+    fn adiabatic_flame_ch4_air() {
+        // CH₄ + 2O₂ → CO₂ + 2H₂O(g), ΔH = -802.3 kJ/mol = -802300 J/mol
+        // In air with excess N₂ (~7.52 mol N₂ per mol CH₄)
+        // Starting from 298K. Shomate accuracy varies — accept wider range.
+        let t = adiabatic_flame_temperature(
+            -802_300.0,
+            &[("CO2(g)", 1.0), ("H2O(g)", 2.0), ("N2(g)", 7.52)],
+            298.15,
+        )
+        .unwrap();
+        assert!(
+            t > 1700.0 && t < 2500.0,
+            "CH₄/air flame should be ~1800-2300K, got {t}"
+        );
+    }
+
+    #[test]
+    fn adiabatic_flame_unknown_product_is_error() {
+        assert!(adiabatic_flame_temperature(-100_000.0, &[("XeF6(g)", 1.0)], 298.15).is_err());
+    }
+
+    #[test]
+    fn adiabatic_flame_zero_temp_is_error() {
+        assert!(adiabatic_flame_temperature(-100_000.0, &[("CO2(g)", 1.0)], 0.0).is_err());
     }
 }

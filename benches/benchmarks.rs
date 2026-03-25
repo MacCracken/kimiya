@@ -136,6 +136,35 @@ fn bench_shomate_cp(c: &mut Criterion) {
     });
 }
 
+fn bench_bohr_energy(c: &mut Criterion) {
+    c.bench_function("spectroscopy/bohr_energy_level", |b| {
+        b.iter(|| kimiya::spectroscopy::bohr_energy_level(black_box(1), black_box(3)).unwrap());
+    });
+}
+
+fn bench_beer_lambert(c: &mut Criterion) {
+    c.bench_function("spectroscopy/absorbance", |b| {
+        b.iter(|| {
+            kimiya::spectroscopy::absorbance(black_box(100.0), black_box(1.0), black_box(0.01))
+        });
+    });
+}
+
+fn bench_michaelis_menten(c: &mut Criterion) {
+    c.bench_function("kinetics/michaelis_menten", |b| {
+        b.iter(|| {
+            kimiya::kinetics::michaelis_menten(black_box(100.0), black_box(5.0), black_box(10.0))
+                .unwrap()
+        });
+    });
+}
+
+fn bench_eyring(c: &mut Criterion) {
+    c.bench_function("kinetics/eyring_rate", |b| {
+        b.iter(|| kimiya::kinetics::eyring_rate(black_box(80_000.0), black_box(298.0)).unwrap());
+    });
+}
+
 criterion_group!(
     benches,
     bench_molecular_weight,
@@ -152,6 +181,10 @@ criterion_group!(
     bench_vant_hoff,
     bench_weak_acid_ph,
     bench_enthalpy_change_cp,
-    bench_shomate_cp
+    bench_shomate_cp,
+    bench_bohr_energy,
+    bench_beer_lambert,
+    bench_michaelis_menten,
+    bench_eyring
 );
 criterion_main!(benches);
