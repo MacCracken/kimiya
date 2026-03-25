@@ -1,6 +1,6 @@
 [package]
 name = "kimiya"
-version = "0.1.0"
+version = "0.24.3"
 edition = "2024"
 rust-version = "1.89"
 license = "GPL-3.0"
@@ -18,7 +18,7 @@ default = []
 logging = ["dep:tracing-subscriber"]
 
 [dependencies]
-hisab = "0.24"
+hisab = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"

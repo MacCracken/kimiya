@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.24.3] - 2026-03-24
 
 ### Added
 - **electrochemistry** — Nernst equation, Faraday's laws (1st/2nd), 19 standard electrode potentials (Li–F₂), galvanic cell EMF, cell Gibbs energy, charge/mole conversions
