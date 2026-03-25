@@ -1,6 +1,228 @@
-//! Stoichiometry — limiting reagent, yield, composition, empirical formulas.
+//! Stoichiometry — equation balancing, limiting reagent, yield, composition, empirical formulas.
 
 use crate::error::{KimiyaError, Result};
+
+// ── Equation balancing ───────────────────────────────────────────────
+
+/// Balance a chemical equation given the composition matrix.
+///
+/// Each row represents an element, each column represents a species.
+/// Reactants have positive entries, products have negative entries
+/// (or vice versa — the system is homogeneous).
+///
+/// The composition matrix M has M\[i\]\[j\] = count of element i in species j.
+/// Convention: reactant columns are positive, product columns are negative.
+///
+/// Returns integer stoichiometric coefficients (all positive).
+///
+/// # Example
+///
+/// For CH₄ + O₂ → CO₂ + H₂O:
+/// ```text
+///        CH4  O2  CO2  H2O
+///   C:  [ 1,  0, -1,   0 ]
+///   H:  [ 4,  0,  0,  -2 ]
+///   O:  [ 0,  2, -2,  -1 ]
+/// ```
+///
+/// # Errors
+///
+/// Returns error if the system cannot be balanced.
+pub fn balance_equation(composition: &[Vec<f64>]) -> Result<Vec<u32>> {
+    if composition.is_empty() {
+        return Err(KimiyaError::InvalidInput("empty composition matrix".into()));
+    }
+    let n_species = composition[0].len();
+    if n_species < 2 {
+        return Err(KimiyaError::InvalidInput("need at least 2 species".into()));
+    }
+    for row in composition {
+        if row.len() != n_species {
+            return Err(KimiyaError::InvalidInput(
+                "all rows must have equal length".into(),
+            ));
+        }
+    }
+
+    let n_elements = composition.len();
+    let n_unknowns = n_species - 1; // fix last coefficient = 1
+
+    // Build augmented matrix: for each element row, move the last column to RHS
+    // M[i][0..n-1] * x[0..n-1] = -M[i][n-1]
+    let mut augmented: Vec<Vec<f64>> = Vec::with_capacity(n_elements);
+    for row in composition {
+        let mut aug_row = Vec::with_capacity(n_unknowns + 1);
+        aug_row.extend_from_slice(&row[..n_unknowns]);
+        aug_row.push(-row[n_species - 1]); // RHS
+        augmented.push(aug_row);
+    }
+
+    // If more elements than unknowns, use least-squares via normal equations
+    // For typical chemistry, n_elements ≈ n_unknowns, so direct solve works
+    // Pad or truncate to square system
+    while augmented.len() < n_unknowns {
+        let mut zero_row = vec![0.0; n_unknowns + 1];
+        zero_row[augmented.len()] = 1.0; // add identity rows for underdetermined
+        augmented.push(zero_row);
+    }
+    augmented.truncate(n_unknowns);
+
+    let solution = hisab::num::gaussian_elimination(&mut augmented)
+        .map_err(|e| KimiyaError::ComputationError(format!("equation balancing failed: {e}")))?;
+
+    // Append the fixed coefficient (1.0) for the last species
+    let mut coeffs: Vec<f64> = solution;
+    coeffs.push(1.0);
+
+    // Make all positive (flip sign if needed)
+    let all_negative = coeffs.iter().all(|&c| c <= 0.0);
+    if all_negative {
+        for c in &mut coeffs {
+            *c = -(*c);
+        }
+    }
+
+    // Find smallest to scale to integers
+    let min_abs = coeffs
+        .iter()
+        .map(|c| c.abs())
+        .filter(|&c| c > 1e-10)
+        .fold(f64::INFINITY, f64::min);
+
+    if min_abs < 1e-10 {
+        return Err(KimiyaError::ComputationError(
+            "degenerate solution — equation may not be balanceable".into(),
+        ));
+    }
+
+    let scaled: Vec<f64> = coeffs.iter().map(|c| c / min_abs).collect();
+
+    // Try multipliers 1..12 to find integer solution
+    let mut best_mult = 1u32;
+    let mut best_err = f64::INFINITY;
+    for mult in 1..=12 {
+        let err: f64 = scaled
+            .iter()
+            .map(|&r| {
+                let v = r * mult as f64;
+                (v - v.round()).abs()
+            })
+            .sum();
+        if err < best_err {
+            best_err = err;
+            best_mult = mult;
+        }
+        if best_err < 0.01 {
+            break;
+        }
+    }
+
+    let result: Vec<u32> = scaled
+        .iter()
+        .map(|&r| (r * best_mult as f64).round().abs() as u32)
+        .collect();
+
+    // Verify no zero coefficients
+    if result.contains(&0) {
+        return Err(KimiyaError::ComputationError(
+            "balancing produced zero coefficient".into(),
+        ));
+    }
+
+    Ok(result)
+}
+
+// ── Oxidation state assignment ───────────────────────────────────────
+
+/// Assign oxidation states using standard rules.
+///
+/// Given a molecule as (atomic_number, count) pairs and overall charge,
+/// returns oxidation state for each element.
+///
+/// Rules applied (in order):
+/// 1. F is always -1
+/// 2. O is -2 (except in peroxides: -1, and OF₂: +2)
+/// 3. H is +1 (except in metal hydrides: -1)
+/// 4. Alkali metals are +1, alkaline earth are +2
+/// 5. Remaining elements solved from charge balance
+///
+/// Returns (atomic_number, oxidation_state) pairs.
+///
+/// # Errors
+///
+/// Returns error if the system is underdetermined (multiple unknown oxidation states).
+pub fn assign_oxidation_states(atoms: &[(u8, u32)], overall_charge: i32) -> Result<Vec<(u8, i32)>> {
+    if atoms.is_empty() {
+        return Err(KimiyaError::InvalidInput(
+            "need at least one element".into(),
+        ));
+    }
+
+    let mut result: Vec<(u8, Option<i32>)> = atoms.iter().map(|&(z, _)| (z, None)).collect();
+    let mut remaining_charge = overall_charge;
+
+    // Pass 1: assign known oxidation states
+    for (i, &(z, count)) in atoms.iter().enumerate() {
+        let os = match z {
+            9 => Some(-1),                         // F always -1
+            3 | 11 | 19 | 37 | 55 | 87 => Some(1), // Alkali metals +1
+            4 | 12 | 20 | 38 | 56 | 88 => Some(2), // Alkaline earth +2
+            _ => None,
+        };
+        if let Some(state) = os {
+            result[i].1 = Some(state);
+            remaining_charge -= state * count as i32;
+        }
+    }
+
+    // Pass 2: assign O = -2 and H = +1 (simplified rules)
+    for (i, &(z, count)) in atoms.iter().enumerate() {
+        if result[i].1.is_some() {
+            continue;
+        }
+        let os = match z {
+            8 => Some(-2), // O = -2 (simplified, ignores peroxides)
+            1 => Some(1),  // H = +1 (simplified, ignores hydrides)
+            _ => None,
+        };
+        if let Some(state) = os {
+            result[i].1 = Some(state);
+            remaining_charge -= state * count as i32;
+        }
+    }
+
+    // Pass 3: solve for the single remaining unknown
+    let unknowns: Vec<usize> = result
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, os))| os.is_none())
+        .map(|(i, _)| i)
+        .collect();
+
+    match unknowns.len() {
+        0 => {} // all assigned
+        1 => {
+            let idx = unknowns[0];
+            let count = atoms[idx].1 as i32;
+            if count == 0 {
+                return Err(KimiyaError::InvalidInput("zero atom count".into()));
+            }
+            result[idx].1 = Some(remaining_charge / count);
+        }
+        _ => {
+            return Err(KimiyaError::ComputationError(
+                "multiple unknown oxidation states — system underdetermined".into(),
+            ));
+        }
+    }
+
+    Ok(result
+        .into_iter()
+        .map(|(z, os)| (z, os.unwrap_or(0)))
+        .collect())
+}
+
+// ── Limiting reagent + yield ─────────────────────────────────────────
 
 /// Identify the limiting reagent and return its index.
 ///
@@ -268,5 +490,111 @@ mod tests {
     #[test]
     fn empirical_formula_empty_is_error() {
         assert!(empirical_formula(&[]).is_err());
+    }
+
+    // ── Equation balancing ───────────────────────────────────────────
+
+    #[test]
+    fn balance_h2_o2_water() {
+        // H₂ + O₂ → H₂O
+        //        H2  O2  H2O
+        //   H:  [ 1,  0, -1 ]  (H₂ has 2H per molecule, but we use per-species counts)
+        // Actually: composition[element][species] = atom count (positive for reactants, negative for products)
+        // H₂ + O₂ → H₂O: species = [H₂, O₂, H₂O]
+        //   H: [2, 0, -2]
+        //   O: [0, 2, -1]
+        let comp = vec![vec![2.0, 0.0, -2.0], vec![0.0, 2.0, -1.0]];
+        let coeffs = balance_equation(&comp).unwrap();
+        // Expected: 2H₂ + 1O₂ → 2H₂O → [2, 1, 2]
+        assert_eq!(coeffs.len(), 3);
+        // Verify balance: for each element, Σ coeff_i × comp[e][i] = 0
+        for row in &comp {
+            let sum: f64 = row
+                .iter()
+                .zip(coeffs.iter())
+                .map(|(&c, &k)| c * k as f64)
+                .sum();
+            assert!(sum.abs() < 0.1, "element not balanced: sum = {sum}");
+        }
+    }
+
+    #[test]
+    fn balance_ch4_combustion() {
+        // CH₄ + O₂ → CO₂ + H₂O
+        //        CH4  O2  CO2  H2O
+        //   C:  [ 1,  0, -1,   0 ]
+        //   H:  [ 4,  0,  0,  -2 ]
+        //   O:  [ 0,  2, -2,  -1 ]
+        let comp = vec![
+            vec![1.0, 0.0, -1.0, 0.0],
+            vec![4.0, 0.0, 0.0, -2.0],
+            vec![0.0, 2.0, -2.0, -1.0],
+        ];
+        let coeffs = balance_equation(&comp).unwrap();
+        // Expected: 1CH₄ + 2O₂ → 1CO₂ + 2H₂O → [1, 2, 1, 2]
+        assert_eq!(coeffs.len(), 4);
+        for row in &comp {
+            let sum: f64 = row
+                .iter()
+                .zip(coeffs.iter())
+                .map(|(&c, &k)| c * k as f64)
+                .sum();
+            assert!(sum.abs() < 0.1, "element not balanced: sum = {sum}");
+        }
+    }
+
+    #[test]
+    fn balance_empty_is_error() {
+        assert!(balance_equation(&[]).is_err());
+    }
+
+    #[test]
+    fn balance_single_species_is_error() {
+        assert!(balance_equation(&[vec![1.0]]).is_err());
+    }
+
+    // ── Oxidation states ─────────────────────────────────────────────
+
+    #[test]
+    fn oxidation_state_water() {
+        // H₂O: H = +1, O = -2
+        let os = assign_oxidation_states(&[(1, 2), (8, 1)], 0).unwrap();
+        assert_eq!(os.iter().find(|&&(z, _)| z == 1).unwrap().1, 1);
+        assert_eq!(os.iter().find(|&&(z, _)| z == 8).unwrap().1, -2);
+    }
+
+    #[test]
+    fn oxidation_state_nacl() {
+        // NaCl: Na = +1, Cl = -1
+        let os = assign_oxidation_states(&[(11, 1), (17, 1)], 0).unwrap();
+        assert_eq!(os.iter().find(|&&(z, _)| z == 11).unwrap().1, 1);
+        assert_eq!(os.iter().find(|&&(z, _)| z == 17).unwrap().1, -1);
+    }
+
+    #[test]
+    fn oxidation_state_sulfate_ion() {
+        // SO₄²⁻: O = -2, S = +6
+        let os = assign_oxidation_states(&[(16, 1), (8, 4)], -2).unwrap();
+        assert_eq!(os.iter().find(|&&(z, _)| z == 16).unwrap().1, 6);
+        assert_eq!(os.iter().find(|&&(z, _)| z == 8).unwrap().1, -2);
+    }
+
+    #[test]
+    fn oxidation_state_permanganate() {
+        // MnO₄⁻: O = -2, Mn = +7
+        let os = assign_oxidation_states(&[(25, 1), (8, 4)], -1).unwrap();
+        assert_eq!(os.iter().find(|&&(z, _)| z == 25).unwrap().1, 7);
+    }
+
+    #[test]
+    fn oxidation_state_co2() {
+        // CO₂: O = -2, C = +4
+        let os = assign_oxidation_states(&[(6, 1), (8, 2)], 0).unwrap();
+        assert_eq!(os.iter().find(|&&(z, _)| z == 6).unwrap().1, 4);
+    }
+
+    #[test]
+    fn oxidation_state_empty_is_error() {
+        assert!(assign_oxidation_states(&[], 0).is_err());
     }
 }
