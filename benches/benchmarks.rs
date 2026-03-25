@@ -64,6 +64,52 @@ fn bench_heat_transfer(c: &mut Criterion) {
     });
 }
 
+fn bench_nernst(c: &mut Criterion) {
+    c.bench_function("electrochemistry/nernst_potential", |b| {
+        b.iter(|| {
+            kimiya::electrochemistry::nernst_potential(
+                black_box(0.342),
+                black_box(2),
+                black_box(298.15),
+                black_box(0.1),
+            )
+            .unwrap()
+        });
+    });
+}
+
+fn bench_half_reaction_lookup(c: &mut Criterion) {
+    c.bench_function("electrochemistry/lookup_half_reaction", |b| {
+        b.iter(|| kimiya::electrochemistry::lookup_half_reaction(black_box("Cu2+/Cu")));
+    });
+}
+
+fn bench_reaction_enthalpy(c: &mut Criterion) {
+    c.bench_function("thermochem/reaction_enthalpy_ch4", |b| {
+        b.iter(|| {
+            kimiya::thermochem::reaction_enthalpy(
+                black_box(&[("CO2(g)", 1.0), ("H2O(l)", 2.0)]),
+                black_box(&[("CH4(g)", 1.0), ("O2(g)", 2.0)]),
+            )
+            .unwrap()
+        });
+    });
+}
+
+fn bench_vant_hoff(c: &mut Criterion) {
+    c.bench_function("thermochem/vant_hoff_k", |b| {
+        b.iter(|| {
+            kimiya::thermochem::vant_hoff_k(
+                black_box(100.0),
+                black_box(-50_000.0),
+                black_box(298.15),
+                black_box(400.0),
+            )
+            .unwrap()
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_molecular_weight,
@@ -73,6 +119,10 @@ criterion_group!(
     bench_element_lookup,
     bench_element_lookup_by_number,
     bench_gibbs,
-    bench_heat_transfer
+    bench_heat_transfer,
+    bench_nernst,
+    bench_half_reaction_lookup,
+    bench_reaction_enthalpy,
+    bench_vant_hoff
 );
 criterion_main!(benches);
