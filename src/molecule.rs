@@ -79,7 +79,7 @@ impl Molecule {
     ///
     /// Returns [`KimiyaError::InvalidElement`] if any atom references an unknown element.
     pub fn formula(&self) -> Result<String> {
-        let mut s = String::new();
+        let mut s = String::with_capacity(self.atoms.len() * 4);
         for atom in &self.atoms {
             let element = lookup_by_number(atom.element_number).ok_or_else(|| {
                 KimiyaError::InvalidElement(format!(

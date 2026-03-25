@@ -999,6 +999,7 @@ pub fn lookup_by_number(atomic_number: u8) -> Option<&'static Element> {
 
 /// Look up an element by symbol (case-sensitive).
 #[must_use]
+#[inline]
 pub fn lookup_by_symbol(symbol: &str) -> Option<&'static Element> {
     ELEMENTS.iter().find(|e| e.symbol == symbol)
 }

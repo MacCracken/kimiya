@@ -137,7 +137,7 @@ impl Geometry {
     pub const fn ideal_bond_angle(self) -> f64 {
         match self {
             Self::Linear => 180.0,
-            Self::BentOneLonePair => 120.0,
+            Self::BentOneLonePair => 117.0, // ~117° due to lone pair compression
             Self::BentTwoLonePairs => 104.5,
             Self::TrigonalPlanar => 120.0,
             Self::TrigonalPyramidal => 107.0,
