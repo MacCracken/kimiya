@@ -163,6 +163,98 @@ pub fn weak_base_ph(kb: f64, concentration: f64) -> Result<f64> {
     Ok(ph_from_poh(poh))
 }
 
+// ── Ionic strength & activity coefficients ───────────────────────────
+
+/// Ionic strength: I = ½ Σ cᵢ·zᵢ²
+///
+/// - `ions`: slice of (concentration_mol_per_L, charge) pairs
+#[must_use]
+pub fn ionic_strength(ions: &[(f64, i32)]) -> f64 {
+    0.5 * ions.iter().map(|&(c, z)| c * (z * z) as f64).sum::<f64>()
+}
+
+/// Debye-Huckel limiting law: log₁₀(γ) = -A·z²·√I
+///
+/// Valid for I < 0.01 M.
+///
+/// - `charge`: ion charge z
+/// - `ionic_str`: ionic strength I (mol/L)
+/// - `a_constant`: Debye-Huckel A parameter (0.509 for water at 25°C)
+///
+/// Returns activity coefficient γ.
+///
+/// # Errors
+///
+/// Returns error if ionic strength is negative.
+#[inline]
+pub fn debye_huckel_limiting(charge: i32, ionic_str: f64, a_constant: f64) -> Result<f64> {
+    if ionic_str < 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "ionic strength must be non-negative".into(),
+        ));
+    }
+    let log_gamma = -a_constant * (charge * charge) as f64 * ionic_str.sqrt();
+    Ok(10.0_f64.powf(log_gamma))
+}
+
+/// Extended Debye-Huckel: log₁₀(γ) = -A·z²·√I / (1 + B·a·√I)
+///
+/// Valid for I < 0.1 M.
+///
+/// - `charge`: ion charge z
+/// - `ionic_str`: ionic strength I (mol/L)
+/// - `a_constant`: Debye-Huckel A (0.509 for water at 25°C)
+/// - `b_constant`: Debye-Huckel B (0.328 × 10¹⁰ m⁻¹ for water at 25°C)
+/// - `ion_size`: effective ion diameter å (Angstroms, typically 3–9)
+///
+/// # Errors
+///
+/// Returns error if ionic strength is negative.
+#[inline]
+pub fn debye_huckel_extended(
+    charge: i32,
+    ionic_str: f64,
+    a_constant: f64,
+    b_constant: f64,
+    ion_size: f64,
+) -> Result<f64> {
+    if ionic_str < 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "ionic strength must be non-negative".into(),
+        ));
+    }
+    let sqrt_i = ionic_str.sqrt();
+    let log_gamma =
+        -a_constant * (charge * charge) as f64 * sqrt_i / (1.0 + b_constant * ion_size * sqrt_i);
+    Ok(10.0_f64.powf(log_gamma))
+}
+
+/// Davies equation: log₁₀(γ) = -A·z²·(√I/(1+√I) - 0.3·I)
+///
+/// Valid for I < 0.5 M. No ion-size parameter needed.
+///
+/// # Errors
+///
+/// Returns error if ionic strength is negative.
+#[inline]
+pub fn davies_activity(charge: i32, ionic_str: f64, a_constant: f64) -> Result<f64> {
+    if ionic_str < 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "ionic strength must be non-negative".into(),
+        ));
+    }
+    let sqrt_i = ionic_str.sqrt();
+    let log_gamma =
+        -a_constant * (charge * charge) as f64 * (sqrt_i / (1.0 + sqrt_i) - 0.3 * ionic_str);
+    Ok(10.0_f64.powf(log_gamma))
+}
+
+/// Debye-Huckel A parameter for water at 25°C.
+pub const DH_A_WATER_25C: f64 = 0.509;
+
+/// Debye-Huckel B parameter for water at 25°C (in Å⁻¹·M⁻¹/²).
+pub const DH_B_WATER_25C: f64 = 0.328;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,7 +431,6 @@ mod tests {
 
     #[test]
     fn weak_acid_base_symmetry() {
-        // Same K and concentration: acid pH + base pH ≈ 14
         let ka = 1.8e-5;
         let c = 0.1;
         let ph_acid = weak_acid_ph(ka, c).unwrap();
@@ -351,5 +442,71 @@ mod tests {
             ph_base,
             ph_acid + ph_base
         );
+    }
+
+    // ── Activity coefficients ────────────────────────────────────────
+
+    #[test]
+    fn ionic_strength_nacl() {
+        // 0.1 M NaCl: I = 0.5 × (0.1×1² + 0.1×1²) = 0.1
+        let i = ionic_strength(&[(0.1, 1), (0.1, -1)]);
+        assert!((i - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn ionic_strength_cacl2() {
+        // 0.1 M CaCl₂: I = 0.5 × (0.1×4 + 0.2×1) = 0.3
+        let i = ionic_strength(&[(0.1, 2), (0.2, -1)]);
+        assert!((i - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn debye_huckel_limiting_monovalent() {
+        // I=0.01, z=1, A=0.509 → log(γ) = -0.509×1×0.1 = -0.0509 → γ ≈ 0.889
+        let gamma = debye_huckel_limiting(1, 0.01, DH_A_WATER_25C).unwrap();
+        assert!(
+            (gamma - 0.889).abs() < 0.01,
+            "γ for z=1 at I=0.01 should be ~0.889, got {gamma}"
+        );
+    }
+
+    #[test]
+    fn debye_huckel_limiting_divalent() {
+        // z=2 at same I should give much lower γ
+        let gamma_1 = debye_huckel_limiting(1, 0.01, DH_A_WATER_25C).unwrap();
+        let gamma_2 = debye_huckel_limiting(2, 0.01, DH_A_WATER_25C).unwrap();
+        assert!(gamma_2 < gamma_1, "divalent should have lower γ");
+    }
+
+    #[test]
+    fn debye_huckel_zero_ionic_strength() {
+        // At I=0, γ = 1 (ideal)
+        let gamma = debye_huckel_limiting(1, 0.0, DH_A_WATER_25C).unwrap();
+        assert!((gamma - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn extended_dh_larger_than_limiting() {
+        // Extended DH gives larger γ (closer to 1) than limiting law at same I
+        let gamma_lim = debye_huckel_limiting(1, 0.05, DH_A_WATER_25C).unwrap();
+        let gamma_ext =
+            debye_huckel_extended(1, 0.05, DH_A_WATER_25C, DH_B_WATER_25C, 3.0).unwrap();
+        assert!(
+            gamma_ext > gamma_lim,
+            "extended DH should give larger γ: {gamma_ext} vs {gamma_lim}"
+        );
+    }
+
+    #[test]
+    fn davies_between_0_and_1() {
+        let gamma = davies_activity(1, 0.1, DH_A_WATER_25C).unwrap();
+        assert!(gamma > 0.0 && gamma < 1.0, "γ should be 0-1, got {gamma}");
+    }
+
+    #[test]
+    fn negative_ionic_strength_is_error() {
+        assert!(debye_huckel_limiting(1, -0.1, 0.509).is_err());
+        assert!(debye_huckel_extended(1, -0.1, 0.509, 0.328, 3.0).is_err());
+        assert!(davies_activity(1, -0.1, 0.509).is_err());
     }
 }

@@ -3,10 +3,11 @@
 //! **Kimiya** (كيمياء — Arabic for "alchemy", the root of "chemistry") — chemistry
 //! engine for the AGNOS ecosystem.
 //!
-//! Full periodic table (118 elements), molecules, reactions, kinetics, gas laws,
-//! solutions, thermochemistry, electrochemistry, spectroscopy, organic chemistry,
-//! thermochemical data tables, reaction dynamics, and data fitting.
-//! Built on [`hisab`] for numerical methods (root finding, ODE solvers, least squares).
+//! Full periodic table (118 elements), molecules, stoichiometry, reactions,
+//! kinetics, gas laws (ideal + Peng-Robinson), solutions (pH + activity coefficients),
+//! thermochemistry, electrochemistry, spectroscopy, organic chemistry,
+//! phase equilibria, nuclear chemistry, reaction dynamics, and data fitting.
+//! Built on [`hisab`] for numerical methods.
 
 pub mod electrochemistry;
 pub mod element;
@@ -15,11 +16,14 @@ pub mod fitting;
 pub mod gas;
 pub mod kinetics;
 pub mod molecule;
+pub mod nuclear;
 pub mod organic;
+pub mod phase;
 pub mod reaction;
 pub mod reaction_dynamics;
 pub mod solution;
 pub mod spectroscopy;
+pub mod stoichiometry;
 pub mod thermo;
 pub mod thermochem;
 
