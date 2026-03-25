@@ -161,6 +161,51 @@ pub fn q_value(reactant_masses_u: &[f64], product_masses_u: &[f64]) -> f64 {
     (sum_r - sum_p) * AMU_MEV
 }
 
+// ── Decay chains ─────────────────────────────────────────────────────
+
+/// Two-step decay chain: A →(λ₁) B →(λ₂) C (Bateman equation)
+///
+/// Returns (N_A(t), N_B(t), N_C(t)) given initial N_A₀.
+///
+/// N_B(t) = N₀ × λ₁/(λ₂-λ₁) × (e^(-λ₁t) - e^(-λ₂t))
+///
+/// # Errors
+///
+/// Returns error if decay constants are not positive or equal.
+pub fn decay_chain_two_step(
+    n0: f64,
+    lambda1: f64,
+    lambda2: f64,
+    time: f64,
+) -> Result<(f64, f64, f64)> {
+    if lambda1 <= 0.0 || lambda2 <= 0.0 {
+        return Err(KimiyaError::InvalidInput(
+            "decay constants must be positive".into(),
+        ));
+    }
+    if (lambda1 - lambda2).abs() < 1e-30 {
+        return Err(KimiyaError::InvalidInput(
+            "decay constants must differ (use single decay for equal rates)".into(),
+        ));
+    }
+    let na = n0 * (-lambda1 * time).exp();
+    let nb =
+        n0 * lambda1 / (lambda2 - lambda1) * ((-lambda1 * time).exp() - (-lambda2 * time).exp());
+    let nc = n0 - na - nb;
+    Ok((na, nb, nc))
+}
+
+/// Secular equilibrium condition: when λ₁ << λ₂ (parent much longer-lived than daughter).
+///
+/// At secular equilibrium: A_daughter = A_parent (activities equal).
+///
+/// Returns true if λ₁ < 0.01 × λ₂.
+#[must_use]
+#[inline]
+pub fn is_secular_equilibrium(lambda_parent: f64, lambda_daughter: f64) -> bool {
+    lambda_parent < 0.01 * lambda_daughter
+}
+
 // ── Isotope data ─────────────────────────────────────────────────────
 
 /// A radioactive isotope with its half-life.
@@ -455,8 +500,49 @@ mod tests {
 
     #[test]
     fn q_value_endothermic_is_negative() {
-        // Reverse reaction has negative Q
         let q = q_value(&[4.00260, 1.00866], &[2.01410, 3.01605]);
         assert!(q < 0.0, "reverse fusion should be endothermic");
+    }
+
+    // ── Decay chains ─────────────────────────────────────────────────
+
+    #[test]
+    fn decay_chain_mass_conservation() {
+        let (na, nb, nc) = decay_chain_two_step(1000.0, 0.1, 0.05, 10.0).unwrap();
+        let total = na + nb + nc;
+        assert!(
+            (total - 1000.0).abs() < 0.1,
+            "mass should be conserved: {total}"
+        );
+    }
+
+    #[test]
+    fn decay_chain_at_t0() {
+        let (na, nb, nc) = decay_chain_two_step(1000.0, 0.1, 0.05, 0.0).unwrap();
+        assert!((na - 1000.0).abs() < f64::EPSILON);
+        assert!(nb.abs() < f64::EPSILON);
+        assert!(nc.abs() < 0.1);
+    }
+
+    #[test]
+    fn decay_chain_long_time() {
+        // After very long time, almost all should be C
+        let (na, nb, nc) = decay_chain_two_step(1000.0, 0.1, 0.05, 200.0).unwrap();
+        assert!(nc > 990.0, "most should be C after long time, got {nc}");
+        assert!(na < 1.0);
+        assert!(nb < 10.0);
+    }
+
+    #[test]
+    fn decay_chain_equal_rates_is_error() {
+        assert!(decay_chain_two_step(1000.0, 0.1, 0.1, 10.0).is_err());
+    }
+
+    #[test]
+    fn secular_equilibrium_check() {
+        // U-238 (λ ~ 5e-18) → Th-234 (λ ~ 3.3e-7) → very secular
+        assert!(is_secular_equilibrium(5e-18, 3.3e-7));
+        // Two similar rates → not secular
+        assert!(!is_secular_equilibrium(0.1, 0.2));
     }
 }

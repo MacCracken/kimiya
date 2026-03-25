@@ -122,15 +122,9 @@ pub fn nth_order_half_life(initial: f64, rate_constant: f64, order: f64) -> Resu
 ///
 /// Returns error if k₂ is not positive.
 #[inline]
-pub fn steady_state_intermediate(
-    k1: f64,
-    concentration_a: f64,
-    k2: f64,
-) -> Result<f64> {
+pub fn steady_state_intermediate(k1: f64, concentration_a: f64, k2: f64) -> Result<f64> {
     if k2 <= 0.0 {
-        return Err(KimiyaError::InvalidInput(
-            "k2 must be positive".into(),
-        ));
+        return Err(KimiyaError::InvalidInput("k2 must be positive".into()));
     }
     Ok(k1 * concentration_a / k2)
 }
@@ -550,5 +544,32 @@ mod tests {
     fn nth_order_below_1_is_error() {
         assert!(nth_order_half_life(1.0, 0.1, 1.0).is_err());
         assert!(nth_order_half_life(1.0, 0.1, 0.5).is_err());
+    }
+
+    // ── Steady-state ─────────────────────────────────────────────────
+
+    #[test]
+    fn steady_state_basic() {
+        // A →(0.1) B →(1.0) C, [A]=1.0 → [B]_ss = 0.1*1.0/1.0 = 0.1
+        let b_ss = steady_state_intermediate(0.1, 1.0, 1.0).unwrap();
+        assert!((b_ss - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn steady_state_rate_basic() {
+        let rate = steady_state_rate(0.05, 2.0);
+        assert!((rate - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pre_equilibrium_basic() {
+        // K_eq = k1/k-1 = 10/2 = 5, rate = k2 × 5 × [A] = 0.1 × 5 × 1.0 = 0.5
+        let rate = pre_equilibrium_rate(10.0, 2.0, 0.1, 1.0).unwrap();
+        assert!((rate - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn pre_equilibrium_zero_kreverse_is_error() {
+        assert!(pre_equilibrium_rate(1.0, 0.0, 0.1, 1.0).is_err());
     }
 }

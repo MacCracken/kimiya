@@ -2,7 +2,7 @@
 
 ## Status
 
-**v0.24.3** — Chemistry engine with 19 modules, 118 elements, 411 tests, 23 benchmarks.
+**v0.24.3** — Chemistry engine with 19 modules, 118 elements, 422 tests, 23 benchmarks.
 
 ## Engineering Backlog
 
@@ -10,18 +10,8 @@ No open items.
 
 ## Remaining Domain Gaps
 
-### Kinetics — MEDIUM
-- Steady-state approximation for intermediates
-
-### Spectroscopy — MEDIUM
+### Spectroscopy — LOW
 - Mass spectrometry isotope patterns
-
-### Inorganic — MEDIUM
-- Born-Haber cycle calculator
-- Coordination geometry prediction
-
-### Nuclear — MEDIUM
-- Decay chains (Bateman equations via hisab ODE)
 
 ## hisab Deepening (blocked on hisab 1.1 publish)
 

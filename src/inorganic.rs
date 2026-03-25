@@ -204,6 +204,34 @@ pub fn born_lande_lattice_energy(
     )
 }
 
+/// Born-Haber cycle: calculate lattice energy from thermodynamic cycle.
+///
+/// ΔH_f° = ΔH_sub + IE + ΔH_diss/2 + EA + U_lattice
+///
+/// Rearranged: U_lattice = ΔH_f° - ΔH_sub - IE - ΔH_diss/2 - EA
+///
+/// - `formation_enthalpy_kj`: ΔH_f° of the ionic compound (kJ/mol)
+/// - `sublimation_enthalpy_kj`: ΔH_sub of the metal (kJ/mol)
+/// - `ionization_energy_kj`: IE of the metal → cation (kJ/mol)
+/// - `dissociation_enthalpy_kj`: bond dissociation of X₂ → 2X (kJ/mol, full value — halved internally for MX)
+/// - `electron_affinity_kj`: EA of the nonmetal (kJ/mol, negative = energy released)
+///
+/// Returns lattice energy in kJ/mol (negative = stable).
+#[must_use]
+pub fn born_haber_lattice_energy(
+    formation_enthalpy_kj: f64,
+    sublimation_enthalpy_kj: f64,
+    ionization_energy_kj: f64,
+    dissociation_enthalpy_kj: f64,
+    electron_affinity_kj: f64,
+) -> f64 {
+    formation_enthalpy_kj
+        - sublimation_enthalpy_kj
+        - ionization_energy_kj
+        - dissociation_enthalpy_kj / 2.0
+        - electron_affinity_kj
+}
+
 /// Common Madelung constants.
 pub const MADELUNG_NACL: f64 = 1.747565;
 pub const MADELUNG_CSCL: f64 = 1.762675;
@@ -561,5 +589,31 @@ mod tests {
     #[test]
     fn radii_count() {
         assert!(IONIC_RADII.len() >= 30);
+    }
+
+    // ── Born-Haber cycle ─────────────────────────────────────────────
+
+    #[test]
+    fn born_haber_nacl() {
+        // NaCl Born-Haber cycle:
+        // ΔH_f° = -411.15, ΔH_sub(Na) = 107.3, IE(Na) = 495.8
+        // ΔH_diss(Cl₂) = 242.0, EA(Cl) = -349.0
+        let u = born_haber_lattice_energy(-411.15, 107.3, 495.8, 242.0, -349.0);
+        // U = -411.15 - 107.3 - 495.8 - 121.0 - (-349.0) = -786.25
+        assert!(
+            (u - (-786.25)).abs() < 1.0,
+            "NaCl Born-Haber U should be ~-786 kJ/mol, got {u}"
+        );
+    }
+
+    #[test]
+    fn born_haber_matches_born_lande() {
+        // Born-Haber and Born-Landé should give similar results for NaCl
+        let u_bh = born_haber_lattice_energy(-411.15, 107.3, 495.8, 242.0, -349.0);
+        let u_bl = born_lande_lattice_energy(MADELUNG_NACL, 1, 1, 2.82e-10, 8.0).unwrap() / 1000.0;
+        assert!(
+            (u_bh - u_bl).abs() < 50.0,
+            "Born-Haber ({u_bh:.0}) and Born-Landé ({u_bl:.0}) should roughly agree"
+        );
     }
 }
