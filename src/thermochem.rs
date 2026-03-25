@@ -341,6 +341,146 @@ pub fn vant_hoff_k(k_ref: f64, delta_h_j: f64, t_ref_k: f64, t_new_k: f64) -> Re
     Ok(k_ref * exponent.exp())
 }
 
+// ── Heat capacity integration ────────────────────────────────────────
+
+/// Shomate equation coefficients for Cp(T) in J/(mol·K).
+///
+/// Cp(T) = A + B·t + C·t² + D·t³ + E/t²
+///
+/// where t = T(K) / 1000.
+#[derive(Debug, Clone, Serialize)]
+pub struct Shomate {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub e: f64,
+    /// Valid temperature range (K).
+    pub t_min: f64,
+    pub t_max: f64,
+}
+
+impl Shomate {
+    /// Evaluate Cp at temperature T (K) in J/(mol·K).
+    #[must_use]
+    #[inline]
+    pub fn cp(&self, temperature_k: f64) -> f64 {
+        let t = temperature_k / 1000.0;
+        self.a + self.b * t + self.c * t * t + self.d * t * t * t + self.e / (t * t)
+    }
+}
+
+/// Built-in Shomate coefficients for common gases (NIST, 298–1200 K range).
+pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
+    (
+        "H2O(g)",
+        Shomate {
+            a: 30.092,
+            b: 6.832514,
+            c: 6.793435,
+            d: -2.534480,
+            e: 0.082139,
+            t_min: 500.0,
+            t_max: 1700.0,
+        },
+    ),
+    (
+        "CO2(g)",
+        Shomate {
+            a: 24.99735,
+            b: 55.18696,
+            c: -33.69137,
+            d: 7.948387,
+            e: -0.136638,
+            t_min: 298.0,
+            t_max: 1200.0,
+        },
+    ),
+    (
+        "N2(g)",
+        Shomate {
+            a: 28.98641,
+            b: 1.853978,
+            c: -9.647459,
+            d: 16.63537,
+            e: 0.000117,
+            t_min: 298.0,
+            t_max: 1400.0,
+        },
+    ),
+    (
+        "O2(g)",
+        Shomate {
+            a: 31.32234,
+            b: -20.23531,
+            c: 57.86644,
+            d: -36.50624,
+            e: -0.007374,
+            t_min: 298.0,
+            t_max: 1200.0,
+        },
+    ),
+    (
+        "CH4(g)",
+        Shomate {
+            a: -0.703029,
+            b: 108.4773,
+            c: -42.52157,
+            d: 5.862788,
+            e: 0.678565,
+            t_min: 298.0,
+            t_max: 1300.0,
+        },
+    ),
+    (
+        "CO(g)",
+        Shomate {
+            a: 25.56759,
+            b: 6.096130,
+            c: 4.054656,
+            d: -2.671301,
+            e: 0.131021,
+            t_min: 298.0,
+            t_max: 1300.0,
+        },
+    ),
+];
+
+/// Look up Shomate coefficients by formula.
+#[must_use]
+#[inline]
+pub fn lookup_shomate(formula: &str) -> Option<&'static Shomate> {
+    SHOMATE_DATA
+        .iter()
+        .find(|(f, _)| *f == formula)
+        .map(|(_, s)| s)
+}
+
+/// Enthalpy change from T₁ to T₂ via Cp(T) integration:
+/// ΔH = ∫[T₁→T₂] Cp(T) dT
+///
+/// Uses [`hisab::calc::integral_simpson`] for numerical integration of
+/// the Shomate polynomial.
+///
+/// Returns enthalpy change in J/mol.
+///
+/// # Errors
+///
+/// Returns error if formula not found, temperatures invalid, or integration fails.
+pub fn enthalpy_change_cp(formula: &str, t1_k: f64, t2_k: f64) -> Result<f64> {
+    let shomate = lookup_shomate(formula)
+        .ok_or_else(|| KimiyaError::InvalidReaction(format!("no Shomate data for '{formula}'")))?;
+    if t1_k <= 0.0 || t2_k <= 0.0 {
+        return Err(KimiyaError::InvalidTemperature(
+            "temperatures must be positive".into(),
+        ));
+    }
+    let cp_fn = |t: f64| shomate.cp(t);
+    let result = hisab::calc::integral_simpson(cp_fn, t1_k, t2_k, 100)
+        .map_err(|e| KimiyaError::ComputationError(format!("integration failed: {e}")))?;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,5 +727,117 @@ mod tests {
             gas.s_standard_j > liquid.s_standard_j,
             "gas entropy should exceed liquid"
         );
+    }
+
+    // ── Shomate / Cp(T) tests (hisab-powered) ───────────────────────
+
+    #[test]
+    fn shomate_co2_cp_at_298() {
+        // CO2 Cp at 298 K ≈ 37.1 J/(mol·K)
+        let s = lookup_shomate("CO2(g)").unwrap();
+        let cp = s.cp(298.0);
+        assert!(
+            (cp - 37.1).abs() < 1.0,
+            "CO2 Cp at 298K should be ~37 J/(mol·K), got {cp}"
+        );
+    }
+
+    #[test]
+    fn shomate_n2_cp_at_298() {
+        // N2 Cp at 298 K ≈ 29.1 J/(mol·K)
+        let s = lookup_shomate("N2(g)").unwrap();
+        let cp = s.cp(298.0);
+        assert!(
+            (cp - 29.1).abs() < 0.5,
+            "N2 Cp at 298K should be ~29.1 J/(mol·K), got {cp}"
+        );
+    }
+
+    #[test]
+    fn shomate_cp_increases_with_temperature() {
+        // For polyatomic molecules, Cp generally increases with T
+        let s = lookup_shomate("CO2(g)").unwrap();
+        let cp_300 = s.cp(300.0);
+        let cp_1000 = s.cp(1000.0);
+        assert!(
+            cp_1000 > cp_300,
+            "CO2 Cp should increase with T: {cp_300} at 300K vs {cp_1000} at 1000K"
+        );
+    }
+
+    #[test]
+    fn enthalpy_change_co2_heating() {
+        // Heat CO2 from 300K to 600K
+        let dh = enthalpy_change_cp("CO2(g)", 300.0, 600.0).unwrap();
+        // Rough estimate: ~37 J/(mol·K) × 300 K ≈ 11,100 J/mol
+        assert!(
+            dh > 10_000.0 && dh < 15_000.0,
+            "CO2 300→600K should be ~11-13 kJ/mol, got {dh}"
+        );
+    }
+
+    #[test]
+    fn enthalpy_change_zero_range() {
+        let dh = enthalpy_change_cp("CO2(g)", 500.0, 500.0).unwrap();
+        assert!(dh.abs() < 0.01, "same T should give ΔH≈0, got {dh}");
+    }
+
+    #[test]
+    fn enthalpy_change_cooling_is_negative() {
+        let dh = enthalpy_change_cp("N2(g)", 600.0, 300.0).unwrap();
+        assert!(dh < 0.0, "cooling should give negative ΔH, got {dh}");
+    }
+
+    #[test]
+    fn enthalpy_change_unknown_formula_is_error() {
+        assert!(enthalpy_change_cp("XeF6(g)", 300.0, 600.0).is_err());
+    }
+
+    #[test]
+    fn enthalpy_change_zero_temp_is_error() {
+        assert!(enthalpy_change_cp("CO2(g)", 0.0, 600.0).is_err());
+    }
+
+    #[test]
+    fn shomate_lookup_nonexistent() {
+        assert!(lookup_shomate("XeF6(g)").is_none());
+    }
+
+    #[test]
+    fn shomate_cp_positive_in_valid_range() {
+        // Cp should always be positive in the valid temperature range
+        for (formula, s) in SHOMATE_DATA.iter() {
+            for t in [s.t_min, (s.t_min + s.t_max) / 2.0, s.t_max] {
+                let cp = s.cp(t);
+                assert!(
+                    cp > 0.0,
+                    "{formula}: Cp should be positive at {t}K, got {cp}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enthalpy_change_cp_n2_matches_constant_cp_approx() {
+        // N2 has nearly constant Cp ≈ 29.1 J/(mol·K)
+        // ΔH from 300→600K ≈ 29.1 × 300 = 8730 J/mol
+        let dh = enthalpy_change_cp("N2(g)", 300.0, 600.0).unwrap();
+        assert!(
+            (dh - 8730.0).abs() < 500.0,
+            "N2 300→600K should be ~8730 J/mol, got {dh}"
+        );
+    }
+
+    #[test]
+    fn all_shomate_data_has_valid_range() {
+        for (formula, s) in SHOMATE_DATA.iter() {
+            assert!(
+                s.t_min < s.t_max,
+                "{formula}: t_min ({}) must be < t_max ({})",
+                s.t_min,
+                s.t_max
+            );
+            assert!(s.t_min > 0.0, "{formula}: t_min must be positive");
+        }
     }
 }

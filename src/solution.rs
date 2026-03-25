@@ -1,4 +1,5 @@
 use crate::error::{KimiyaError, Result};
+use hisab::EPSILON_F64;
 
 /// Molarity: M = moles / volume_liters
 ///
@@ -80,7 +81,7 @@ pub fn ph_from_poh(poh: f64) -> f64 {
     14.0 - poh
 }
 
-/// Henderson-Hasselbalch equation: pH = pKa + log₁₀([A⁻]/[HA])
+/// Henderson-Hasselbalch equation: pH = pKa + log₁₀(\[A⁻\]/\[HA\])
 ///
 /// # Errors
 ///
@@ -100,6 +101,61 @@ pub fn henderson_hasselbalch(pka: f64, conjugate_base: f64, acid: f64) -> Result
 #[inline]
 pub fn h_concentration_from_ph(ph: f64) -> f64 {
     10.0_f64.powf(-ph)
+}
+
+/// pH of a weak acid solution.
+///
+/// Solves the equilibrium equation: Ka = x² / (C - x) where x = [H⁺].
+/// Uses [`hisab::num::bisection`] for robust root finding.
+///
+/// - `ka`: acid dissociation constant
+/// - `concentration`: initial acid concentration (M)
+///
+/// # Errors
+///
+/// Returns error if Ka or concentration is not positive, or if root finding fails.
+pub fn weak_acid_ph(ka: f64, concentration: f64) -> Result<f64> {
+    if ka <= 0.0 {
+        return Err(KimiyaError::InvalidInput("Ka must be positive".into()));
+    }
+    if concentration <= 0.0 {
+        return Err(KimiyaError::InvalidConcentration(
+            "concentration must be positive".into(),
+        ));
+    }
+    // Solve: Ka = x² / (C - x)  →  x² + Ka·x - Ka·C = 0
+    // f(x) = x² + Ka·x - Ka·C, root in (0, C)
+    let f = |x: f64| x * x + ka * x - ka * concentration;
+    let root = hisab::num::bisection(f, EPSILON_F64, concentration, EPSILON_F64, 200)
+        .map_err(|e| KimiyaError::ComputationError(format!("bisection failed: {e}")))?;
+    ph_from_h_concentration(root)
+}
+
+/// pH of a weak base solution.
+///
+/// Solves the equilibrium equation: Kb = x² / (C - x) where x = [OH⁻].
+/// Returns pH = 14 - pOH.
+///
+/// - `kb`: base dissociation constant
+/// - `concentration`: initial base concentration (M)
+///
+/// # Errors
+///
+/// Returns error if Kb or concentration is not positive.
+pub fn weak_base_ph(kb: f64, concentration: f64) -> Result<f64> {
+    if kb <= 0.0 {
+        return Err(KimiyaError::InvalidInput("Kb must be positive".into()));
+    }
+    if concentration <= 0.0 {
+        return Err(KimiyaError::InvalidConcentration(
+            "concentration must be positive".into(),
+        ));
+    }
+    let f = |x: f64| x * x + kb * x - kb * concentration;
+    let root = hisab::num::bisection(f, EPSILON_F64, concentration, EPSILON_F64, 200)
+        .map_err(|e| KimiyaError::ComputationError(format!("bisection failed: {e}")))?;
+    let poh = poh_from_oh_concentration(root)?;
+    Ok(ph_from_poh(poh))
 }
 
 #[cfg(test)]
@@ -205,5 +261,90 @@ mod tests {
         // pH 0 → [H⁺] = 1.0 M
         let h = h_concentration_from_ph(0.0);
         assert!((h - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ── Weak acid/base tests (hisab-powered) ─────────────────────────
+
+    #[test]
+    fn acetic_acid_ph() {
+        // 0.1 M acetic acid, Ka = 1.8e-5 → pH ≈ 2.87
+        let ph = weak_acid_ph(1.8e-5, 0.1).unwrap();
+        assert!(
+            (ph - 2.87).abs() < 0.05,
+            "0.1M acetic acid should have pH ~2.87, got {ph}"
+        );
+    }
+
+    #[test]
+    fn hf_weak_acid_ph() {
+        // 0.1 M HF, Ka = 6.8e-4
+        // x² + 6.8e-4·x - 6.8e-5 = 0 → x ≈ 0.00791 → pH ≈ 2.10
+        let ph = weak_acid_ph(6.8e-4, 0.1).unwrap();
+        assert!(
+            (ph - 2.10).abs() < 0.05,
+            "0.1M HF should have pH ~2.10, got {ph}"
+        );
+    }
+
+    #[test]
+    fn weak_acid_dilute() {
+        // Very dilute: 1e-5 M acetic acid → pH closer to 7
+        let ph = weak_acid_ph(1.8e-5, 1e-5).unwrap();
+        assert!(
+            ph > 5.0 && ph < 7.0,
+            "very dilute weak acid pH should be 5-7, got {ph}"
+        );
+    }
+
+    #[test]
+    fn weak_acid_zero_ka_is_error() {
+        assert!(weak_acid_ph(0.0, 0.1).is_err());
+    }
+
+    #[test]
+    fn weak_acid_zero_concentration_is_error() {
+        assert!(weak_acid_ph(1.8e-5, 0.0).is_err());
+    }
+
+    #[test]
+    fn ammonia_weak_base_ph() {
+        // 0.1 M NH₃, Kb = 1.8e-5 → pOH ≈ 2.87 → pH ≈ 11.13
+        let ph = weak_base_ph(1.8e-5, 0.1).unwrap();
+        assert!(
+            (ph - 11.13).abs() < 0.05,
+            "0.1M ammonia should have pH ~11.13, got {ph}"
+        );
+    }
+
+    #[test]
+    fn weak_base_zero_kb_is_error() {
+        assert!(weak_base_ph(0.0, 0.1).is_err());
+    }
+
+    #[test]
+    fn weak_acid_large_ka_approaches_strong() {
+        // Very large Ka (essentially strong acid) → pH approaches -log₁₀(C)
+        let ph = weak_acid_ph(1.0, 0.1).unwrap();
+        let strong_ph = 1.0; // -log10(0.1)
+        assert!(
+            (ph - strong_ph).abs() < 0.2,
+            "large Ka should approach strong acid pH, got {ph}"
+        );
+    }
+
+    #[test]
+    fn weak_acid_base_symmetry() {
+        // Same K and concentration: acid pH + base pH ≈ 14
+        let ka = 1.8e-5;
+        let c = 0.1;
+        let ph_acid = weak_acid_ph(ka, c).unwrap();
+        let ph_base = weak_base_ph(ka, c).unwrap();
+        assert!(
+            (ph_acid + ph_base - 14.0).abs() < 0.1,
+            "acid pH + base pH should ≈ 14, got {} + {} = {}",
+            ph_acid,
+            ph_base,
+            ph_acid + ph_base
+        );
     }
 }

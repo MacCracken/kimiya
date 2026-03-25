@@ -1,4 +1,5 @@
 use crate::error::{KimiyaError, Result};
+use hisab::EPSILON_F64;
 
 /// Specific heat capacity of water in J/(g·°C).
 pub const WATER_SPECIFIC_HEAT: f64 = 4.184;
@@ -38,7 +39,7 @@ pub fn specific_heat_from_calorimetry(energy_j: f64, mass_g: f64, delta_t: f64) 
     if mass_g <= 0.0 {
         return Err(KimiyaError::InvalidInput("mass must be positive".into()));
     }
-    if delta_t.abs() < f64::EPSILON {
+    if delta_t.abs() < EPSILON_F64 {
         return Err(KimiyaError::InvalidInput(
             "temperature change must be non-zero".into(),
         ));

@@ -37,14 +37,14 @@ pub fn half_life_first_order(rate_constant: f64) -> Result<f64> {
     Ok(std::f64::consts::LN_2 / rate_constant)
 }
 
-/// Concentration remaining for first-order decay: [A] = [A]₀ × exp(-k × t)
+/// Concentration remaining for first-order decay: \[A\] = \[A\]₀ × exp(-k × t)
 #[must_use]
 #[inline]
 pub fn first_order_concentration(initial: f64, rate_constant: f64, time: f64) -> f64 {
     initial * (-rate_constant * time).exp()
 }
 
-/// Concentration remaining for second-order decay: 1/[A] = 1/[A]₀ + k × t
+/// Concentration remaining for second-order decay: 1/\[A\] = 1/\[A\]₀ + k × t
 ///
 /// # Errors
 ///

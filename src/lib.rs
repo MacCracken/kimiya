@@ -27,5 +27,5 @@ pub use error::{KimiyaError, Result};
 pub use gas::ideal_gas_pressure;
 pub use kinetics::arrhenius_rate;
 pub use molecule::Molecule;
-pub use solution::{molarity, ph_from_h_concentration};
-pub use thermochem::{THERMOCHEM_DATA, lookup_thermochem};
+pub use solution::{molarity, ph_from_h_concentration, weak_acid_ph};
+pub use thermochem::{THERMOCHEM_DATA, enthalpy_change_cp, lookup_thermochem};

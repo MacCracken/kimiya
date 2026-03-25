@@ -112,3 +112,19 @@ fn thermochem_enthalpy_entropy_gibbs_triangle() {
         "ΔG should ≈ ΔH - TΔS: calc={dg_calc:.1}, table={dg:.1}"
     );
 }
+
+#[test]
+fn weak_acid_ph_acetic_acid() {
+    // 0.1 M acetic acid (Ka = 1.8e-5) → pH ≈ 2.87
+    let ph = solution::weak_acid_ph(1.8e-5, 0.1).unwrap();
+    assert!((ph - 2.87).abs() < 0.05);
+}
+
+#[test]
+fn cp_integration_heating_co2() {
+    // Heat CO2 from 300K to 600K using Shomate + Simpson integration
+    let dh = thermochem::enthalpy_change_cp("CO2(g)", 300.0, 600.0).unwrap();
+    assert!(dh > 0.0, "heating should be positive enthalpy change");
+    // Rough: ~37-50 J/(mol·K) avg × 300K ≈ 11-15 kJ
+    assert!(dh > 10_000.0 && dh < 15_000.0);
+}

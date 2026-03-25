@@ -110,6 +110,32 @@ fn bench_vant_hoff(c: &mut Criterion) {
     });
 }
 
+fn bench_weak_acid_ph(c: &mut Criterion) {
+    c.bench_function("solution/weak_acid_ph", |b| {
+        b.iter(|| kimiya::solution::weak_acid_ph(black_box(1.8e-5), black_box(0.1)).unwrap());
+    });
+}
+
+fn bench_enthalpy_change_cp(c: &mut Criterion) {
+    c.bench_function("thermochem/enthalpy_change_cp", |b| {
+        b.iter(|| {
+            kimiya::thermochem::enthalpy_change_cp(
+                black_box("CO2(g)"),
+                black_box(300.0),
+                black_box(600.0),
+            )
+            .unwrap()
+        });
+    });
+}
+
+fn bench_shomate_cp(c: &mut Criterion) {
+    let s = kimiya::thermochem::lookup_shomate("CO2(g)").unwrap();
+    c.bench_function("thermochem/shomate_cp", |b| {
+        b.iter(|| black_box(s).cp(black_box(500.0)));
+    });
+}
+
 criterion_group!(
     benches,
     bench_molecular_weight,
@@ -123,6 +149,9 @@ criterion_group!(
     bench_nernst,
     bench_half_reaction_lookup,
     bench_reaction_enthalpy,
-    bench_vant_hoff
+    bench_vant_hoff,
+    bench_weak_acid_ph,
+    bench_enthalpy_change_cp,
+    bench_shomate_cp
 );
 criterion_main!(benches);
