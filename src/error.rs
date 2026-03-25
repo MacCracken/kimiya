@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum KimiyaError {
     #[error("invalid element: {0}")]
@@ -11,6 +11,8 @@ pub enum KimiyaError {
     InvalidConcentration(String),
     #[error("invalid temperature: {0}")]
     InvalidTemperature(String),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     #[error("computation error: {0}")]
     ComputationError(String),
 }

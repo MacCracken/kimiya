@@ -1,3 +1,5 @@
+use crate::error::{KimiyaError, Result};
+
 /// Specific heat capacity of water in J/(g·°C).
 pub const WATER_SPECIFIC_HEAT: f64 = 4.184;
 
@@ -27,11 +29,21 @@ pub fn enthalpy_from_formation(products_hf: &[f64], reactants_hf: &[f64]) -> f64
 
 /// Specific heat at constant pressure from energy and temperature change.
 /// c_p = q / (m × ΔT)
-#[must_use]
+///
+/// # Errors
+///
+/// Returns [`KimiyaError::InvalidInput`] if mass is not positive or temperature change is zero.
 #[inline]
-pub fn specific_heat_from_calorimetry(energy_j: f64, mass_g: f64, delta_t: f64) -> f64 {
-    if mass_g <= 0.0 || delta_t.abs() < f64::EPSILON { return 0.0; }
-    energy_j / (mass_g * delta_t)
+pub fn specific_heat_from_calorimetry(energy_j: f64, mass_g: f64, delta_t: f64) -> Result<f64> {
+    if mass_g <= 0.0 {
+        return Err(KimiyaError::InvalidInput("mass must be positive".into()));
+    }
+    if delta_t.abs() < f64::EPSILON {
+        return Err(KimiyaError::InvalidInput(
+            "temperature change must be non-zero".into(),
+        ));
+    }
+    Ok(energy_j / (mass_g * delta_t))
 }
 
 #[cfg(test)]
@@ -40,7 +52,6 @@ mod tests {
 
     #[test]
     fn heat_1kg_water_1c() {
-        // 1 kg = 1000 g of water heated by 1°C
         let q = heat_transfer(1000.0, WATER_SPECIFIC_HEAT, 1.0);
         assert!((q - 4184.0).abs() < 1.0, "1kg water +1°C = 4184 J, got {q}");
     }
@@ -48,7 +59,10 @@ mod tests {
     #[test]
     fn heat_100g_water_10c() {
         let q = heat_transfer(100.0, WATER_SPECIFIC_HEAT, 10.0);
-        assert!((q - 4184.0).abs() < 1.0, "100g water +10°C = 4184 J, got {q}");
+        assert!(
+            (q - 4184.0).abs() < 1.0,
+            "100g water +10°C = 4184 J, got {q}"
+        );
     }
 
     #[test]
@@ -65,19 +79,28 @@ mod tests {
 
     #[test]
     fn formation_enthalpy() {
-        // Simple: products = [-400], reactants = [-200, -100] → ΔH = -400 - (-300) = -100
         let dh = enthalpy_from_formation(&[-400.0], &[-200.0, -100.0]);
         assert!((dh - (-100.0)).abs() < f64::EPSILON);
     }
 
     #[test]
     fn specific_heat_roundtrip() {
-        let c = specific_heat_from_calorimetry(4184.0, 1000.0, 1.0);
+        let c = specific_heat_from_calorimetry(4184.0, 1000.0, 1.0).unwrap();
         assert!((c - WATER_SPECIFIC_HEAT).abs() < 0.001);
     }
 
     #[test]
     fn water_specific_heat_value() {
         assert!((WATER_SPECIFIC_HEAT - 4.184).abs() < 0.001);
+    }
+
+    #[test]
+    fn zero_mass_calorimetry_is_error() {
+        assert!(specific_heat_from_calorimetry(100.0, 0.0, 1.0).is_err());
+    }
+
+    #[test]
+    fn zero_delta_t_calorimetry_is_error() {
+        assert!(specific_heat_from_calorimetry(100.0, 100.0, 0.0).is_err());
     }
 }
