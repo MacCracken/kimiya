@@ -9,12 +9,16 @@
 //! phase equilibria, nuclear chemistry, reaction dynamics, and data fitting.
 //! Built on [`hisab`] for numerical methods.
 
+/// Cross-crate bridges — primitive-value conversions from other AGNOS science crates.
+pub mod bridge;
 pub mod electrochemistry;
 pub mod element;
 pub mod error;
 pub mod fitting;
 pub mod gas;
 pub mod inorganic;
+/// Integration APIs for downstream consumers (soorat rendering).
+pub mod integration;
 pub mod kinetics;
 pub mod molecule;
 pub mod network;

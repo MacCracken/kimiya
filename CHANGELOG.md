@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0]
+
+### Added
+- **bridge** — cross-crate primitive-value bridges for ushma (reaction heat release, Arrhenius rate factor, equilibrium to Gibbs), tanmatra (atomic number to valence, ionization to bond energy), bijli (electrochemical current density, ionic conductivity)
+- **integration/soorat** — feature-gated `soorat-compat` module with visualization data structures: `MolecularStructure` (ball-and-stick from `Molecule`), `ReactionNetworkVisualization` (species/reaction graph), `SpectrumVisualization` (x/y data with peak detection), `PhaseDiagramVisualization` (boundary curves with critical/triple points)
+
+### Updated
+- hisab 1.1.0 -> 1.3.0, zerocopy 0.8.47 -> 0.8.48
+
 ## [1.0.0] - 2026-03-25
 
 Stable release. API frozen. 21 modules, 118 elements, 444 tests.
