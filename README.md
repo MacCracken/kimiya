@@ -29,4 +29,4 @@ assert!((ph - 7.0).abs() < 0.01); // pure water
 
 ## License
 
-GPL-3.0
+GPL-3.0-only

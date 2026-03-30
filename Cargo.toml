@@ -1,9 +1,9 @@
 [package]
 name = "kimiya"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 rust-version = "1.89"
-license = "GPL-3.0"
+license = "GPL-3.0-only"
 description = "Kimiya — chemistry engine for elements, molecules, reactions, kinetics, and thermochemistry"
 homepage = "https://github.com/MacCracken/kimiya"
 repository = "https://github.com/MacCracken/kimiya"
