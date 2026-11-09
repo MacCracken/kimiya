@@ -58,7 +58,12 @@ jobs:
       - name: Audit (fmt, lint, test, bench)
         run: cyrius audit
 
-      # Added at M1, once [lib] has modules: `cyrius distlib --check` (bundles current).
-      # Added as the port grows: surface parity against rust-old/ and the Rust-test ledger
-      # (port plan §4 gates). The golden corpus is regenerated locally from rust-old/, so
-      # CI has no Rust job; rust-old/.github/workflows/ keeps the 1.2.0 Rust CI for reference.
+      - name: Bundles are current (dist/)
+        run: cyrius distlib --check
+
+      - name: Surface parity against rust-old/
+        run: python3 -I scripts/surface_parity.py .
+
+      # Added at M7: the Rust-test ledger (port plan §4 gates). The golden corpus is
+      # regenerated locally from rust-old/, so CI has no Rust job; rust-old/.github/workflows/
+      # keeps the 1.2.0 Rust CI for reference.

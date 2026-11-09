@@ -1,0 +1,66 @@
+# error.tcyr — the tests of rust-old/src/error.rs, ported one for one (each test_group is the
+# Rust test's name), plus the code table itself.
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+
+alloc_init();
+
+# A Result<f64> that is always Ok, for result_type.
+#must_use
+fn _t_ok_one(): Result {
+    var x: f64 = 1.0;
+    return Ok(x);
+}
+
+# Rust: `KimiyaError::InvalidElement("Unobtainium").to_string()` contains the payload. The port
+# carries no payload (port plan §6.4), so the test pins the fixed text the Display starts with.
+fn _t_error_display() {
+    test_group("error_display");
+    assert(streq(km_error_message(KM_ERR_INVALID_ELEMENT), "invalid element"), "message");
+    assert(streq(km_error_name(KM_ERR_INVALID_ELEMENT), "InvalidElement"), "variant name");
+}
+
+fn _t_result_type() {
+    test_group("result_type");
+    var t, v = _t_ok_one();
+    assert_eq(is_ok(t), 1, "Ok(1.0) is ok");
+    assert_bits_eq(v, 0x3FF0000000000000, "the payload is 1.0");
+}
+
+# Cyrius-only: every code in Rust variant order, with its name and message (thiserror text).
+fn _t_codes() {
+    test_group("codes");
+    assert_eq(KM_ERR_NONE, 0, "NONE");
+    assert_eq(KM_ERR_INVALID_ELEMENT, 1, "INVALID_ELEMENT");
+    assert_eq(KM_ERR_INVALID_REACTION, 2, "INVALID_REACTION");
+    assert_eq(KM_ERR_INVALID_CONCENTRATION, 3, "INVALID_CONCENTRATION");
+    assert_eq(KM_ERR_INVALID_TEMPERATURE, 4, "INVALID_TEMPERATURE");
+    assert_eq(KM_ERR_INVALID_INPUT, 5, "INVALID_INPUT");
+    assert_eq(KM_ERR_COMPUTATION_ERROR, 6, "COMPUTATION_ERROR");
+    assert(streq(km_error_name(KM_ERR_INVALID_REACTION), "InvalidReaction"), "name 2");
+    assert(streq(km_error_name(KM_ERR_INVALID_CONCENTRATION), "InvalidConcentration"), "name 3");
+    assert(streq(km_error_name(KM_ERR_INVALID_TEMPERATURE), "InvalidTemperature"), "name 4");
+    assert(streq(km_error_name(KM_ERR_INVALID_INPUT), "InvalidInput"), "name 5");
+    assert(streq(km_error_name(KM_ERR_COMPUTATION_ERROR), "ComputationError"), "name 6");
+    assert(streq(km_error_message(KM_ERR_INVALID_REACTION), "invalid reaction"), "message 2");
+    assert(streq(km_error_message(KM_ERR_INVALID_CONCENTRATION), "invalid concentration"), "message 3");
+    assert(streq(km_error_message(KM_ERR_INVALID_TEMPERATURE), "invalid temperature"), "message 4");
+    assert(streq(km_error_message(KM_ERR_INVALID_INPUT), "invalid input"), "message 5");
+    assert(streq(km_error_message(KM_ERR_COMPUTATION_ERROR), "computation error"), "message 6");
+    assert(streq(km_error_name(7), "Unknown"), "no code 7");
+    assert(streq(km_error_name(0 - 1), "Unknown"), "no code -1");
+    assert(streq(km_error_message(7), "unknown error"), "no message 7");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_error_display();
+    _t_result_type();
+    _t_codes();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

@@ -1,3 +1,5 @@
 # kimiya golden corpus: one module per line; tests/parity.tcyr replays each
 constants
+element
 math
+molecule

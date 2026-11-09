@@ -1,23 +1,83 @@
-# kimiya benchmarks
-# Stdlib auto-included via cyrius.cyml
+# kimiya.bcyr — benchmarks, mirroring rust-old/benches/benchmarks.rs (criterion).
 #
-# Pattern: bench_new -> bench_batch_start -> tight loop -> bench_batch_stop -> bench_report.
-# For sub-1us ops use batch_size >= 1000 to amortize clock_gettime overhead
-# (~240 ns per start/stop pair on x86_64 Linux). See lib/bench.cyr header for
-# the full overhead-vs-batching guidance.
+# A bench that has a Rust counterpart keeps its name and body, so the two numbers compare
+# directly (docs/benchmarks-rust-v-cyrius.md). Each timed batch is a tight loop of `per_batch`
+# calls, as criterion's `b.iter` loop is, so the per-op time is the call alone: one clock read
+# costs ~1 µs on an HPET host, and lib/bench.cyr subtracts its measured floor. Inputs come from
+# globals (Rust's `black_box`); results go to a sink, so every call is made and used. Port
+# milestones append their benches.
 
-# Empty body: measures the bench harness overhead (scaffold stub).
-fn bench_noop(): i64 { return 0; }
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/element_data.cyr"
+include "src/element.cyr"
+include "src/molecule.cyr"
 
-# Runs the scaffold benchmarks; module benches are added per milestone.
+# A sink the timed loops write to, so their results are used.
+var _bench_sink = 0;
+
+# The inputs, read at run time (Rust black-boxes them).
+var _bench_fe = 0;
+var _bench_z = 0;
+
+# element/lookup_by_symbol: `lookup_by_symbol(black_box("Fe"))`, a linear scan to row 26.
+fn bench_lookup_by_symbol(per_batch, batches) {
+    var b = bench_new("element/lookup_by_symbol");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) { _bench_sink = element_lookup_by_symbol(_bench_fe); i = i + 1; }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# element/lookup_by_number: `lookup_by_number(black_box(26))`, O(1).
+fn bench_lookup_by_number(per_batch, batches) {
+    var b = bench_new("element/lookup_by_number");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) { _bench_sink = element_lookup_by_number(_bench_z); i = i + 1; }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# molecule/molecular_weight_glucose: glucose built once outside the loop, as the Rust bench
+# does, then `molecular_weight()` per call (3 element lookups, 3 multiply-adds).
+fn bench_molecular_weight_glucose(per_batch, batches) {
+    var glucose = KmMolecule_glucose();
+    var b = bench_new("molecule/molecular_weight_glucose");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = glucose.molecular_weight();
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# Runs every bench.
 fn main(): i64 {
     alloc_init();
-    var b = bench_new("noop");
-    bench_batch_start(b);
-    var i = 0;
-    while (i < 1000000) { bench_noop(); i = i + 1; }
-    bench_batch_stop(b, 1000000);
-    bench_report(b);
+    _bench_fe = "Fe";
+    _bench_z = 26;
+    bench_lookup_by_symbol(100000, 20);
+    bench_lookup_by_number(1000000, 20);
+    bench_molecular_weight_glucose(100000, 20);
     return 0;
 }
 

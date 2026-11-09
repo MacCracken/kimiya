@@ -46,8 +46,8 @@ which is glibc). Bit patterns shown where they differ.
   < 1 ulp; the observed maximum is 1). Set in `_par_c_bound`; gated from now on.
 - **One accepted row:** `powf(-1, DBL_MAX)`, ganita's |x| == 1 defect (ADR 0004).
 - **Pending until the M1 helpers:** `round`, `min`, `max`, `signum`, `total_cmp`, `is_finite`,
-  `powi`, `exp_m1`, `log10` (5,320 rows) and the 31 module-data constants.
-- **Result, all three targets:** 13,340 ok, 0 failed, 0 measured, 5,351 pending, 1 accepted.
+  `powi`, `exp_m1`, `log10` (5,320 rows) and the 31 module-data constants. Done in M1 (§4).
+- **Result, all three targets (M0):** 13,340 ok, 0 failed, 0 measured, 5,351 pending, 1 accepted.
 - **glibc vs correct rounding** (validate.py, 60-digit `decimal` reference): glibc is correctly
   rounded on every row except exp_m1 (34 rows), log10 (48), powf (1), exp2 (1) and sin (2), all
   1 ulp. Where the Cyrius result is 1 ulp off on the other rows, the Cyrius side is the one off.
@@ -71,6 +71,43 @@ primitive exact instead (transcribe it, as tanmatra did for sin/cos/log).
   and keeps the literal-base forms as separate functions (`powf_base10`, `powf_base2`).
 - **Platform pin.** Every TSV header records `libm: glibc 2.44 x86_64 fma`; `--check` refuses a
   different glibc or CPU class, since glibc selects FMA code paths per CPU.
+
+## 4. M1: the local math helpers, element and molecule (2026-11-09)
+
+`src/mathx.cyr` closes the 5,320 pending `math` rows (port plan §6.4). Histogram = ulp distance
+from the oracle; identical on x86_64 ELF, x86_64 PE (wine) and aarch64 (qemu).
+
+| Rust → Cyrius | Rows | Class | Result, all three targets |
+|---|---|---|---|
+| round → `_km_round_half_away` (`trunc(x + copysign(0.5 − ε/4, x))`, Rust's libm generic round) | 661 | A | 661 bit-identical |
+| max / min → `_km_max` / `_km_min` (NaN operand ignored; equal operands, ±0 included, give the second) | 500 / 500 | A | all bit-identical |
+| signum → `_km_signum` | 374 | A | 374 bit-identical |
+| total_cmp → `_km_total_cmp` | 256 | A | 256 equal |
+| is_finite → `_km_is_finite` | 33 | A | 33 equal |
+| powi → `_km_powi` (compiler-builtins `__powidf2` loop) | 890 | B | 890 at 0 ulp |
+| exp_m1 → `_km_expm1` (Rust libm 0.2.16 `expm1.rs`, FreeBSD s_expm1.c) | 810 | C, K = 2 | 0: 810 |
+| log10 → `_km_log10` (Rust libm 0.2.16 `log10.rs`, FreeBSD e_log10.c) | 1,296 | C, K = 2 | 0: 1,248 · 1: 48 |
+
+- **K = 2 for exp_m1 and log10**, the math-primitive rule of §2 (each side documents < 1 ulp; log10's
+  glibc bound is 2), set after the rows were first replayed as *measured* and seen to stay within 1 ulp
+  on every target. Not widened: the observed maximum is 1.
+- **The 48 log10 rows are glibc's.** A Python transcription of the same libm code reproduces the 48
+  differing rows, and on all 48 the transcription is the correctly rounded result (60-digit `decimal`
+  reference); they are exactly the 48 rows where `validate.py` finds glibc 1 ulp off. glibc's expm1 is
+  bit-identical to fdlibm's on every row, including the 34 where both are 1 ulp off correct rounding.
+- The transcriptions use only + − × ÷, bit manipulation and `f64_trunc` / `f64_from` / `f64_to`, so the
+  same bits come out on every target (no x87, no polyfill).
+- **math: 0 pending.** The `f64_round` / `f64_min` / `f64_max` / `f64_sign` shadow lines stay, as the
+  record of why the helpers exist.
+
+| Module | Rows | Class | Result, all three targets |
+|---|---|---|---|
+| `element` (`lookup_by_number` 256, `lookup_by_symbol` 463, `lookup_properties` 256) | 975 | A | 975 ok, 0 ulp |
+| `molecule` (presets, `new`, `molecular_weight`, `formula`, `total_atoms`) | 2,472 | A, B | 2,472 ok; `molecular_weight` 0 ulp on all 507 Ok rows |
+| `constants` (the 14 physical) | 14 of 45 | A | 14 ok; 31 module-data rows pending (M2–M4) |
+| `math` | 18,647 | A, B, C | 18,646 ok, 1 accepted (ADR 0004) |
+
+Summary, every target: **4 modules, 0 failing; 22,107 ok, 0 failed, 0 measured, 31 pending, 1 accepted.**
 
 ## How to reproduce
 

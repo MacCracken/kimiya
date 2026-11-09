@@ -1,0 +1,303 @@
+# mathx.cyr — kimiya's private floating-point helpers (port plan §6.1, §6.4).
+#
+# Each helper reproduces what the Rust oracle (rust-old/, rustc 1.99.1) computes where no Cyrius
+# builtin or ganita function has Rust's semantics (probed in M0, docs/development/port-parity.md §1):
+# - min / max: Rust ignores a NaN operand on either side, and on (+0, −0) returns the second
+#   operand (maxsd / minsd); f64_min / f64_max return a NaN second operand;
+# - signum: Rust gives ±1.0 for ±0 and NaN for NaN; f64_sign gives 0.0 for all three;
+# - round: Rust rounds halves away from zero; f64_round rounds them to even;
+# - powi, total_cmp, is_finite, log10, exp_m1: no stdlib function.
+# min, max, signum, round, total_cmp and is_finite are exact (class A); powi is the
+# compiler-builtins square-and-multiply loop, so it is bit-identical (class B, 0 ulp expected).
+#
+# log10 and exp_m1 call glibc in the oracle. glibc's code is not portable to transcribe, so
+# _km_log10 and _km_expm1 transcribe Rust `libm` 0.2.16 (src/math/{log10,expm1}.rs, which are
+# FreeBSD msun / fdlibm, documented < 1 ulp) operation for operation: the same bits on every
+# target, within 2 ulp of glibc (class C, K = 2; port-parity.md). The coefficients are the
+# Rust source's decimal literals as bit patterns in typed f64 locals (never a hex `const`).
+
+# +∞ (0x7FF0000000000000), a compile-time constant.
+const _KM_INF = 1.0 / 0.0;
+
+# The quiet NaN Rust's f64::NAN is (0x7FF8000000000000). The parity rules match any NaN.
+#must_use
+fn _km_nan(): f64 {
+    var n: f64 = 0x7FF8000000000000;
+    return n;
+}
+
+# The bit pattern of an f64, as an integer. The untyped parameter carries the word, and the
+# `: i64` return types the caller's binding as an integer: a bare `var u = x;` copy of an f64
+# is f64-typed, so its `<` would be a float compare.
+#must_use
+fn _km_bits(x): i64 { return x; }
+
+# 1 if x is NaN.
+#must_use
+fn _km_is_nan(x: f64): i64 {
+    if (x != x) { return 1; }
+    return 0;
+}
+
+# 1 if x is finite: neither ±∞ nor NaN. Mirrors `f64::is_finite`.
+#must_use
+fn _km_is_finite(x: f64): i64 {
+    if ((_km_bits(x) & 0x7FF0000000000000) == 0x7FF0000000000000) { return 0; }
+    return 1;
+}
+
+# The larger of x and y, ignoring a NaN operand (NaN only when both are). Equal operands,
+# +0 and −0 included, give y: what rustc 1.99.1's `x.max(y)` returns (maxsd). Mirrors `f64::max`.
+#must_use
+fn _km_max(x: f64, y: f64): f64 {
+    if (x != x) { return y; }
+    if (y != y) { return x; }
+    if (x > y) { return x; }
+    return y;
+}
+
+# The smaller of x and y, ignoring a NaN operand (NaN only when both are). Equal operands,
+# +0 and −0 included, give y (minsd). Mirrors `f64::min`.
+#must_use
+fn _km_min(x: f64, y: f64): f64 {
+    if (x != x) { return y; }
+    if (y != y) { return x; }
+    if (x < y) { return x; }
+    return y;
+}
+
+# 1.0 for +0 and positive x, −1.0 for −0 and negative x (the sign bit), NaN for NaN.
+# Mirrors `f64::signum`.
+#must_use
+fn _km_signum(x: f64): f64 {
+    if (x != x) { return x; }
+    if (_km_bits(x) < 0) { return -1.0; }
+    return 1.0;
+}
+
+# round(x), halves away from zero, as Rust's (compiler-builtins libm generic round):
+# trunc(x + copysign(0.5 − 0.25·ε, x)), where 0.5 − 0.25·ε is 0x3FDFFFFFFFFFFFFF, the double
+# just below ½. Mirrors `f64::round`.
+#must_use
+fn _km_round_half_away(x: f64): f64 {
+    var h: f64 = 0.49999999999999994;
+    if (_km_bits(x) < 0) { h = -h; }
+    var r: f64 = f64_trunc(x + h);
+    return r;
+}
+
+# x^n by compiler-builtins' `__powidf2` (float/pow.rs), the loop Rust's `f64::powi` calls:
+# square-and-multiply over the bits of |n|, low bit first, then 1/r for a negative n. Rust's n
+# is an i32; |n| is taken as an unsigned word here, so i64::MIN is 2^63 as abs_diff gives.
+# Mirrors `f64::powi`.
+#must_use
+fn _km_powi(a: f64, n): f64 {
+    var base: f64 = a;
+    var p = n;
+    var recip = 0;
+    if (n < 0) { recip = 1; p = 0 - n; }
+    var mul: f64 = 1.0;
+    while (1) {
+        if ((p & 1) != 0) { mul = mul * base; }
+        p = p >> 1;
+        if (p == 0) { break; }
+        base = base * base;
+    }
+    if (recip == 1) {
+        var r: f64 = 1.0 / mul;
+        return r;
+    }
+    return mul;
+}
+
+# IEEE 754 totalOrder of x and y as -1 / 0 / 1: −NaN < −∞ < … < −0 < +0 < … < +∞ < +NaN, NaNs
+# ordered by payload. Rust flips the magnitude bits of a negative pattern and compares the words
+# as i64 (`>>>` is the arithmetic shift, `>>` the logical one). Mirrors `f64::total_cmp`.
+#must_use
+fn _km_total_cmp(x: f64, y: f64): i64 {
+    var a = _km_bits(x);
+    var b = _km_bits(y);
+    a = a ^ ((a >>> 63) >> 1);
+    b = b ^ ((b >>> 63) >> 1);
+    if (a < b) { return 0 - 1; }
+    if (a > b) { return 1; }
+    return 0;
+}
+
+# log10(x), Rust libm 0.2.16 (FreeBSD e_log10.c): x = 2^k (1 + f) with √2/2 ≤ 1 + f < √2,
+# log(1 + f) from s = f/(2 + f) and the Remez polynomial of log.c, then
+# log10(x) = (f − f²/2 + r)/ln 10 + k·log10(2), combined in extra precision.
+#must_use
+fn _km_log10(xa: f64): f64 {
+    var x: f64 = xa;
+    var ivln10hi: f64 = 0x3FDBCB7B15200000;
+    var ivln10lo: f64 = 0x3DBB9438CA9AADD5;
+    var log10_2hi: f64 = 0x3FD34413509F6000;
+    var log10_2lo: f64 = 0x3D59FEF311F12B36;
+    var lg1: f64 = 0x3FE5555555555593;
+    var lg2: f64 = 0x3FD999999997FA04;
+    var lg3: f64 = 0x3FD2492494229359;
+    var lg4: f64 = 0x3FCC71C51D8E78AF;
+    var lg5: f64 = 0x3FC7466496CB03DE;
+    var lg6: f64 = 0x3FC39A09D078C69F;
+    var lg7: f64 = 0x3FC2F112DF3E5244;
+    var ui = _km_bits(x);
+    var hx = (ui >> 32) & 0xFFFFFFFF;
+    var k = 0;
+    if (hx < 0x00100000 || (hx >> 31) != 0) {
+        if ((ui << 1) == 0) {
+            var m1: f64 = -1.0;
+            var ninf: f64 = m1 / (x * x);   # log(±0) = −∞
+            return ninf;
+        }
+        if ((hx >> 31) != 0) {
+            var nan: f64 = (x - x) / 0.0;   # log(negative) = NaN
+            return nan;
+        }
+        k = 0 - 54;                         # subnormal: scale by 2^54
+        var p54: f64 = 0x4350000000000000;
+        x = x * p54;
+        ui = _km_bits(x);
+        hx = (ui >> 32) & 0xFFFFFFFF;
+    } elif (hx >= 0x7FF00000) {
+        return x;
+    } elif (hx == 0x3FF00000 && (ui << 32) == 0) {
+        return 0.0;
+    }
+    # Reduce x into [√2/2, √2].
+    hx = hx + (0x3FF00000 - 0x3FE6A09E);
+    k = k + ((hx >> 20) - 0x3FF);
+    hx = (hx & 0x000FFFFF) + 0x3FE6A09E;
+    var mb = (hx << 32) | (ui & 0xFFFFFFFF);
+    var m: f64 = mb;
+    var f: f64 = m - 1.0;
+    var hfsq: f64 = (0.5 * f) * f;
+    var s: f64 = f / (2.0 + f);
+    var z: f64 = s * s;
+    var w: f64 = z * z;
+    var t1: f64 = w * (lg2 + (w * (lg4 + (w * lg6))));
+    var t2: f64 = z * (lg1 + (w * (lg3 + (w * (lg5 + (w * lg7))))));
+    var r: f64 = t2 + t1;
+    # hi + lo = f − hfsq + s·(hfsq + r) ≈ log(1 + f), hi with its low word cleared.
+    var hd: f64 = f - hfsq;
+    var hb = _km_bits(hd) & 0xFFFFFFFF00000000;
+    var hi: f64 = hb;
+    var lo: f64 = ((f - hi) - hfsq) + (s * (hfsq + r));
+    # val_hi + val_lo ≈ log10(1 + f) + k·log10(2).
+    var val_hi: f64 = hi * ivln10hi;
+    var dk: f64 = f64_from(k);
+    var y: f64 = dk * log10_2hi;
+    var val_lo: f64 = ((dk * log10_2lo) + ((lo + hi) * ivln10lo)) + (lo * ivln10hi);
+    var w2: f64 = y + val_hi;
+    val_lo = val_lo + ((y - w2) + val_hi);
+    val_hi = w2;
+    var out: f64 = val_lo + val_hi;
+    return out;
+}
+
+# exp(x) − 1, Rust libm 0.2.16 (FreeBSD s_expm1.c): x = k·ln2 + r with |r| ≤ ln2/2 (hi − lo
+# in extra precision, c the correction), expm1(r) from a rational approximation in r²/2, then
+# rescaled by 2^k. Accurate where exp(x) − 1 would cancel. Mirrors `f64::exp_m1`.
+#must_use
+fn _km_expm1(xa: f64): f64 {
+    var x: f64 = xa;
+    var o_threshold: f64 = 0x40862E42FEFA39EF;
+    var ln2_hi: f64 = 0x3FE62E42FEE00000;
+    var ln2_lo: f64 = 0x3DEA39EF35793C76;
+    var invln2: f64 = 0x3FF71547652B82FE;
+    var q1: f64 = 0xBFA11111111110F4;
+    var q2: f64 = 0x3F5A01A019FE5585;
+    var q3: f64 = 0xBF14CE199EAADBB7;
+    var q4: f64 = 0x3ED0CFCA86E65239;
+    var q5: f64 = 0xBE8AFDB76E09C32D;
+    var ui = _km_bits(x);
+    var hx = (ui >> 32) & 0x7FFFFFFF;
+    var sign = (ui >> 63) & 1;
+    # Huge and non-finite arguments.
+    if (hx >= 0x4043687A) {                 # |x| ≥ 56·ln2
+        if (x != x) { return x; }
+        if (sign != 0) { return -1.0; }
+        if (x > o_threshold) {
+            var huge: f64 = 0x7FE0000000000000;
+            var over: f64 = x * huge;
+            return over;
+        }
+    }
+    # Argument reduction.
+    var hi: f64 = 0.0;
+    var lo: f64 = 0.0;
+    var c: f64 = 0.0;
+    var k = 0;
+    if (hx > 0x3FD62E42) {                  # |x| > ln2/2
+        if (hx < 0x3FF0A2B2) {              # and |x| < 1.5·ln2
+            if (sign == 0) {
+                hi = x - ln2_hi;
+                lo = ln2_lo;
+                k = 1;
+            } else {
+                hi = x + ln2_hi;
+                lo = -ln2_lo;
+                k = 0 - 1;
+            }
+        } else {
+            var half: f64 = 0.5;
+            if (sign != 0) { half = -0.5; }
+            k = f64_to((invln2 * x) + half);
+            var t: f64 = f64_from(k);
+            hi = x - (t * ln2_hi);          # t·ln2_hi is exact here
+            lo = t * ln2_lo;
+        }
+        x = hi - lo;
+        c = (hi - x) - lo;
+    } elif (hx < 0x3C900000) {              # |x| < 2^-54: expm1(x) = x
+        return x;
+    }
+    # x is now in the primary range.
+    var hfx: f64 = 0.5 * x;
+    var hxs: f64 = x * hfx;
+    var r1: f64 = 1.0 + (hxs * (q1 + (hxs * (q2 + (hxs * (q3 + (hxs * (q4 + (hxs * q5)))))))));
+    var t3: f64 = 3.0 - (r1 * hfx);
+    var e: f64 = hxs * ((r1 - t3) / (6.0 - (x * t3)));
+    if (k == 0) {                           # c is 0
+        var r0: f64 = x - ((x * e) - hxs);
+        return r0;
+    }
+    e = (x * (e - c)) - c;
+    e = e - hxs;
+    # exp(x) ≈ 2^k (x_reduced − e + 1)
+    if (k == 0 - 1) {
+        var rm: f64 = (0.5 * (x - e)) - 0.5;
+        return rm;
+    }
+    if (k == 1) {
+        if (x < -0.25) {
+            var m2: f64 = -2.0;
+            var rp: f64 = m2 * (e - (x + 0.5));
+            return rp;
+        }
+        var rq: f64 = 1.0 + (2.0 * (x - e));
+        return rq;
+    }
+    var tb = (0x3FF + k) << 52;
+    var twopk: f64 = tb;                    # 2^k
+    if (k < 0 || k > 56) {                  # exp(x) − 1 is exp(x) to working precision
+        var y: f64 = (x - e) + 1.0;
+        if (k == 1024) {
+            var huge2: f64 = 0x7FE0000000000000;
+            y = (y * 2.0) * huge2;
+        } else {
+            y = y * twopk;
+        }
+        var ry: f64 = y - 1.0;
+        return ry;
+    }
+    var ub = (0x3FF - k) << 52;
+    var uf: f64 = ub;                       # 2^-k
+    var y2: f64 = 0.0;
+    if (k < 20) {
+        y2 = ((x - e) + (1.0 - uf)) * twopk;
+    } else {
+        y2 = ((x - (e + uf)) + 1.0) * twopk;
+    }
+    return y2;
+}

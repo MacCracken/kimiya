@@ -1,0 +1,182 @@
+# molecule.tcyr — the tests of rust-old/src/molecule.rs, ported one for one (each test_group is
+# the Rust test's name), plus a Cyrius-only test of the u32 count and out-of-range inputs.
+# `serde_roundtrip` doesn't port (port plan §2.4: serde isn't carried over). The golden corpus
+# separately checks every method on the presets and 614 compositions bit for bit
+# (tests/parity.tcyr).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/element_data.cyr"
+include "src/element.cyr"
+include "src/molecule.cyr"
+
+alloc_init();
+
+# 1 if |a - b| < eps.
+#must_use
+fn near(a: f64, b: f64, eps: f64): i64 {
+    var d: f64 = f64_abs(a - b);
+    if (d < eps) { return 1; }
+    return 0;
+}
+
+# 1 if m's formula is Ok and equals the C string `want`.
+#must_use
+fn formula_is(m: KmMolecule, want): i64 {
+    var t, v = m.formula();
+    if (is_ok(t) != 1) { return 0; }
+    return str_eq_cstr(v, want);
+}
+
+# A molecule from up to three (Z, count) pairs, the first n of them.
+#must_use
+fn mol3(n, z0, c0, z1, c1, z2, c2): KmMolecule {
+    var p: i64[6];
+    p[0] = z0;
+    p[1] = c0;
+    p[2] = z1;
+    p[3] = c1;
+    p[4] = z2;
+    p[5] = c2;
+    var m = KmMolecule_new(&p, n);
+    return m;
+}
+
+fn _t_water_molecular_weight() {
+    test_group("water_molecular_weight");
+    var t, v = KmMolecule_water().molecular_weight();
+    assert_eq(is_ok(t), 1, "Ok");
+    var mw: f64 = v;
+    assert(near(mw, 18.015, 0.01), "H2O should be ~18.015");
+}
+
+fn _t_co2_molecular_weight() {
+    test_group("co2_molecular_weight");
+    var t, v = KmMolecule_carbon_dioxide().molecular_weight();
+    assert_eq(is_ok(t), 1, "Ok");
+    var mw: f64 = v;
+    assert(near(mw, 44.009, 0.02), "CO2 should be ~44.01");
+}
+
+fn _t_water_formula() {
+    test_group("water_formula");
+    assert(formula_is(KmMolecule_water(), "H2O"), "H2O");
+}
+
+fn _t_co2_formula() {
+    test_group("co2_formula");
+    assert(formula_is(KmMolecule_carbon_dioxide(), "CO2"), "CO2");
+}
+
+fn _t_glucose_molecular_weight() {
+    test_group("glucose_molecular_weight");
+    var t, v = KmMolecule_glucose().molecular_weight();
+    assert_eq(is_ok(t), 1, "Ok");
+    var mw: f64 = v;
+    assert(near(mw, 180.156, 0.1), "glucose should be ~180.16");
+}
+
+fn _t_methane_total_atoms() {
+    test_group("methane_total_atoms");
+    assert_eq(KmMolecule_methane().total_atoms(), 5, "1C + 4H");
+}
+
+fn _t_formula_skips_zero_count_atoms() {
+    test_group("formula_skips_zero_count_atoms");
+    assert(formula_is(mol3(2, 1, 0, 8, 1, 0, 0), "O"), "(H, 0), (O, 1) -> O");
+    assert(formula_is(mol3(2, 6, 1, 1, 0, 0, 0), "C"), "(C, 1), (H, 0) -> C");
+    assert(formula_is(mol3(1, 1, 0, 0, 0, 0, 0), ""), "(H, 0) -> empty");
+}
+
+fn _t_formula_is_molecular_in_input_order() {
+    test_group("formula_is_molecular_in_input_order");
+    # Molecular (not empirical) formula: C6H12O6, not CH2O.
+    assert(formula_is(KmMolecule_glucose(), "C6H12O6"), "C6H12O6");
+    assert(formula_is(mol3(2, 8, 1, 1, 2, 0, 0), "OH2"), "input order: OH2");
+}
+
+fn _t_formula_unknown_element_with_zero_count_is_error() {
+    test_group("formula_unknown_element_with_zero_count_is_error");
+    var t, v = mol3(1, 200, 0, 0, 0, 0, 0).formula();
+    assert_eq(is_err_result(t), 1, "Err");
+    assert_eq(v, KM_ERR_INVALID_ELEMENT, "InvalidElement");
+}
+
+fn _t_total_atoms_saturates() {
+    test_group("total_atoms_saturates");
+    var mol = mol3(2, 1, 0xFFFFFFFF, 8, 2, 0, 0);
+    assert_eq(mol.total_atoms(), 0xFFFFFFFF, "u32::MAX");
+}
+
+fn _t_unknown_element_is_error() {
+    test_group("unknown_element_is_error");
+    var mol = mol3(1, 200, 1, 0, 0, 0, 0);
+    var t1, v1 = mol.molecular_weight();
+    assert_eq(is_err_result(t1), 1, "molecular_weight Err");
+    assert_eq(v1, KM_ERR_INVALID_ELEMENT, "molecular_weight InvalidElement");
+    var t2, v2 = mol.formula();
+    assert_eq(is_err_result(t2), 1, "formula Err");
+    assert_eq(v2, KM_ERR_INVALID_ELEMENT, "formula InvalidElement");
+}
+
+# Cyrius-only: a count is Rust's u32, stored mod 2^32; an atomic number outside 1–118 (or past
+# Rust's u8) names no element; an atom index out of range gives -1; a negative length or a null
+# pair array gives a molecule with no atoms, whose methods return COMPUTATION_ERROR.
+fn _t_cyrius_inputs() {
+    test_group("cyrius_inputs");
+    var m = mol3(3, 1, 0 - 1, 282, 1, 6, 0x100000002);
+    assert_eq(m.atoms_len(), 3, "three entries");
+    assert_eq(m.atom_count(0), 0xFFFFFFFF, "-1 is u32::MAX");
+    assert_eq(m.atom_element_number(1), 282, "Z stored as given");
+    assert_eq(m.atom_count(2), 2, "2^32 + 2 is 2");
+    assert_eq(m.atom_element_number(3), 0 - 1, "entry 3 out of range");
+    assert_eq(m.atom_count(0 - 1), 0 - 1, "entry -1 out of range");
+    var t, v = m.molecular_weight();
+    assert_eq(v, KM_ERR_INVALID_ELEMENT, "Z = 282 is no element (not Fe mod 256)");
+    var e = KmMolecule_new(0, 0);
+    assert_eq(e.atoms_len(), 0, "empty");
+    var te, ve = e.molecular_weight();
+    assert_eq(is_ok(te), 1, "empty weight Ok");
+    assert_bits_eq(ve, 0, "empty weight is +0.0");
+    assert(formula_is(e, ""), "empty formula");
+    var bad = KmMolecule_new(0, 0 - 1);
+    assert_eq(bad.atoms_len(), 0, "n = -1: no atoms");
+    var tb, vb = bad.molecular_weight();
+    assert_eq(vb, KM_ERR_COMPUTATION_ERROR, "n = -1: COMPUTATION_ERROR");
+    var tf, vf = bad.formula();
+    assert_eq(vf, KM_ERR_COMPUTATION_ERROR, "n = -1: formula COMPUTATION_ERROR");
+    assert_eq(bad.total_atoms(), 0, "n = -1: no atoms counted");
+    var null_pairs = KmMolecule_new(0, 2);
+    assert_eq(null_pairs.atoms_len(), 0, "null pairs: no atoms");
+    var big = mol3(3, 1, 0xFFFFFFFF, 1, 0xFFFFFFFF, 8, 0xFFFFFFFF);
+    var tw, vw = big.molecular_weight();
+    var w: f64 = vw;
+    var want: f64 = (1.008 * 4294967295.0) + (1.008 * 4294967295.0);
+    want = want + (15.999 * 4294967295.0);
+    assert_bits_eq(w, want, "u32::MAX counts, summed in atom order");
+    assert(formula_is(big, "H4294967295H4294967295O4294967295"), "repeats kept, big counts");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_water_molecular_weight();
+    _t_co2_molecular_weight();
+    _t_water_formula();
+    _t_co2_formula();
+    _t_glucose_molecular_weight();
+    _t_methane_total_atoms();
+    _t_formula_skips_zero_count_atoms();
+    _t_formula_is_molecular_in_input_order();
+    _t_formula_unknown_element_with_zero_count_is_error();
+    _t_total_atoms_saturates();
+    _t_unknown_element_is_error();
+    _t_cyrius_inputs();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

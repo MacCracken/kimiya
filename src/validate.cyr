@@ -1,0 +1,22 @@
+# validate.cyr — input-validation predicates (port of rust-old/src/validate.rs).
+#
+# Comparisons such as `x <= 0.0` are false for NaN, so a guard written
+# `if (x <= 0.0) { return Err(..); }` lets NaN (and ±∞) through and the function silently
+# returns Ok(NaN). Guards use these predicates in the negated form instead:
+# `if (_km_is_positive(x) != 1) { return Err(..); }`. Crate-private in Rust (`pub(crate)`),
+# so private here; `_km_is_finite` is src/mathx.cyr's.
+
+# 1 if x is finite and strictly greater than zero. Mirrors `validate::is_positive`.
+#must_use
+fn _km_is_positive(x: f64): i64 {
+    if (x > 0.0 && _km_is_finite(x) == 1) { return 1; }
+    return 0;
+}
+
+# 1 if x is finite and greater than or equal to zero (−0 included). Mirrors
+# `validate::is_non_negative`.
+#must_use
+fn _km_is_non_negative(x: f64): i64 {
+    if (x >= 0.0 && _km_is_finite(x) == 1) { return 1; }
+    return 0;
+}

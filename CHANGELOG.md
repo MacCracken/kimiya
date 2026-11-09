@@ -17,10 +17,38 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   `tests/parity.tcyr` — 13,340 rows ok, 0 failed on x86_64 ELF, x86_64 PE and aarch64 (`docs/development/port-parity.md`)
 - ADRs 0001 (port with Rust oracle), 0002 (API changes in the Cyrius 2.0 API), 0003 (transcribe the hisab 1.4.0
   routines hisab 3.4.1 lacks), 0004 (accept ganita `pow(-1, DBL_MAX)`)
+- **M1 foundation** (port plan §4, §6.4):
+  - **error** — `enum KmError` (`KM_ERR_*`, Rust variant order, append-only), `km_error_name`, `km_error_message`;
+    fallible functions return the value-form `Result` with the code as `Err` payload
+  - **mathx** — private `_km_min` / `_km_max` / `_km_signum` / `_km_round_half_away` / `_km_powi` /
+    `_km_total_cmp` / `_km_is_finite` with Rust's semantics, and `_km_log10` / `_km_expm1` transcribed from
+    Rust libm 0.2.16 (fdlibm): the `math` corpus has 0 pending rows; exp_m1 is bit-identical to glibc on all 810
+    rows, log10 within 1 ulp (48 rows, where glibc is the one off correct rounding); class-C K = 2
+  - **validate** — `_km_is_positive`, `_km_is_non_negative` (NaN/±∞-rejecting guards)
+  - **element** — generated `src/element_data.cyr` (`enum KmElementCategory`, 118 element rows with
+    NUL-separated symbol/name blobs, 32 property rows with `i8` oxidation states); `element_lookup_by_number`
+    (O(1)), `element_lookup_by_symbol`, `element_lookup_properties` returning handles (0 for none) and
+    `element_*` / `element_properties_*` accessors that never read out of bounds
+  - **molecule** — `struct KmMolecule` (`new`, `water`, `carbon_dioxide`, `methane`, `glucose`,
+    `molecular_weight`, `formula`, `total_atoms`), bit-identical to Rust
+  - golden modules `element` (975 rows) and `molecule` (2,472 rows): 22,107 rows ok, 0 failed on x86_64 ELF,
+    x86_64 PE and aarch64; `probe_tables.py` compiles all 1,055 element_data cells; `validate.py` recomputes
+    both modules from the Rust source literals
+  - 38 Rust tests ported (`tests/{error,validate,element,molecule}.tcyr`); `tests/kimiya.tcyr` now smoke-tests
+    the bundle
+  - `[lib]` and `dist/kimiya.cyr` (`cyrius distlib`); `scripts/surface_parity.py` (55/55); CI runs
+    `distlib --check` and surface parity
+  - benchmarks `element/lookup_by_symbol`, `element/lookup_by_number`, `molecule/molecular_weight_glucose`
+    against Rust ([`docs/benchmarks-rust-v-cyrius.md`](docs/benchmarks-rust-v-cyrius.md))
 
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
+
+### Performance
+- `molecule/molecular_weight_glucose`: 121 ns → 26.7 ns (−78%; Rust 3.63 ns) by walking the atom buffer and
+  inlining the element range check; `element/lookup_by_number`: 7.03 → 4.54 ns (−35%; Rust 0.84 ns);
+  `element/lookup_by_symbol`: 92.4 → 67.0 ns (−27%, first-byte compare; Rust 44.73 ns)
 
 ## [1.2.0] - 2026-11-08
 

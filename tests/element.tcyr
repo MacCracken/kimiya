@@ -1,0 +1,360 @@
+# element.tcyr — the tests of rust-old/src/element.rs, ported one for one (each test_group is the
+# Rust test's name), plus a Cyrius-only test of out-of-range handles. `ELEMENTS[i]` is row i of
+# the generated columns (src/element_data.cyr); Rust's `lookup_*(..).unwrap()` is a handle that
+# must be non-zero. The golden corpus separately checks every element and property row bit for
+# bit (tests/parity.tcyr).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/element_data.cyr"
+include "src/element.cyr"
+
+alloc_init();
+
+# 1 if |a - b| < eps.
+#must_use
+fn near(a: f64, b: f64, eps: f64): i64 {
+    var d: f64 = f64_abs(a - b);
+    if (d < eps) { return 1; }
+    return 0;
+}
+
+# 1 if property handle p lists oxidation state s (Rust: `oxidation_states.contains(&s)`).
+#must_use
+fn has_state(p, s): i64 {
+    var n = element_properties_oxidation_state_count(p);
+    var k = 0;
+    while (k < n) {
+        var t, v = element_properties_oxidation_state(p, k);
+        if (is_some(t) == 1 && v == s) { return 1; }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# The bits of element h's atomic mass, for exact comparisons.
+#must_use
+fn mass_bits(h): i64 {
+    var m: f64 = element_atomic_mass(h);
+    return _km_bits(m);
+}
+
+fn _t_hydrogen_data() {
+    test_group("hydrogen_data");
+    var h = element_lookup_by_number(1);
+    assert(h != 0, "Z = 1 found");
+    assert(streq(element_symbol(h), "H"), "symbol H");
+    var m: f64 = element_atomic_mass(h);
+    assert(near(m, 1.008, 0.001), "mass 1.008");
+}
+
+fn _t_iron_data() {
+    test_group("iron_data");
+    var fe = element_lookup_by_symbol("Fe");
+    assert(fe != 0, "Fe found");
+    assert_eq(element_atomic_number(fe), 26, "Z = 26");
+    var m: f64 = element_atomic_mass(fe);
+    assert(near(m, 55.845, 0.001), "mass 55.845");
+}
+
+fn _t_all_118_elements() {
+    test_group("all_118_elements");
+    assert_eq(KM_ELEMENT_COUNT, 118, "118 rows");
+    assert_eq(KM_ELEMENT_ATOMIC_NUMBER[0], 1, "first is Z = 1");
+    assert_eq(KM_ELEMENT_ATOMIC_NUMBER[117], 118, "last is Z = 118");
+}
+
+fn _t_noble_gases_light_no_electronegativity() {
+    test_group("noble_gases_light_no_electronegativity");
+    # He, Ne, Ar have no Pauling electronegativity. Kr and Xe do (they form compounds).
+    var t1, v1 = element_electronegativity(element_lookup_by_symbol("He"));
+    assert_eq(is_none(t1), 1, "Helium has none");
+    var t2, v2 = element_electronegativity(element_lookup_by_symbol("Ne"));
+    assert_eq(is_none(t2), 1, "Neon has none");
+    var t3, v3 = element_electronegativity(element_lookup_by_symbol("Ar"));
+    assert_eq(is_none(t3), 1, "Argon has none");
+}
+
+fn _t_lookup_nonexistent() {
+    test_group("lookup_nonexistent");
+    assert_eq(element_lookup_by_number(200), 0, "Z = 200 is none");
+    assert_eq(element_lookup_by_symbol("Xx"), 0, "Xx is none");
+}
+
+fn _t_avogadro_constant() {
+    test_group("avogadro_constant");
+    var want: f64 = 602214076000000000000000.0;   # 6.02214076e23, exact SI value
+    var got: f64 = KM_AVOGADRO;
+    assert_bits_eq(got, want, "N_A = 6.02214076e23");
+}
+
+fn _t_gas_constant_value() {
+    test_group("gas_constant_value");
+    var want: f64 = 8.314462618;
+    var got: f64 = KM_GAS_CONSTANT;
+    assert_bits_eq(got, want, "R = 8.314462618");
+}
+
+fn _t_standard_atomic_weights_current() {
+    test_group("standard_atomic_weights_current");
+    # IUPAC conventional values for Li, Si and S; CIAAW 2024 revision for Zr.
+    var li: f64 = 6.94;
+    var si: f64 = 28.085;
+    var s: f64 = 32.06;
+    var zr: f64 = 91.222;
+    assert_bits_eq(mass_bits(element_lookup_by_symbol("Li")), li, "Li 6.94");
+    assert_bits_eq(mass_bits(element_lookup_by_symbol("Si")), si, "Si 28.085");
+    assert_bits_eq(mass_bits(element_lookup_by_symbol("S")), s, "S 32.06");
+    assert_bits_eq(mass_bits(element_lookup_by_symbol("Zr")), zr, "Zr 91.222");
+    # CIAAW 2024 Gd 157.249(2) and Lu 174.96669(5) round to the stored values.
+    var gd: f64 = element_atomic_mass(element_lookup_by_symbol("Gd"));
+    var lu: f64 = element_atomic_mass(element_lookup_by_symbol("Lu"));
+    assert(near(gd, 157.249, 0.0015), "Gd 157.249(2)");
+    assert(near(lu, 174.96669, 0.0005), "Lu 174.96669(5)");
+}
+
+fn _t_lookup_zero_returns_none() {
+    test_group("lookup_zero_returns_none");
+    assert_eq(element_lookup_by_number(0), 0, "Z = 0 is none");
+}
+
+fn _t_lookup_by_number_o1_correctness() {
+    test_group("lookup_by_number_o1_correctness");
+    # Verify O(1) index lookup matches for all 118 elements
+    var ok = 1;
+    var row = 0;
+    while (row < KM_ELEMENT_COUNT) {
+        var found = element_lookup_by_number(KM_ELEMENT_ATOMIC_NUMBER[row]);
+        var want = &_KM_ELEMENT_SYMBOL_BYTES + _KM_ELEMENT_SYMBOL_OFF[row];
+        if (found == 0 || streq(element_symbol(found), want) != 1) { ok = 0; }
+        row = row + 1;
+    }
+    assert(ok, "every row is found by its Z");
+}
+
+fn _t_elements_contiguous_and_ordered() {
+    test_group("elements_contiguous_and_ordered");
+    var ok = 1;
+    var row = 0;
+    while (row < KM_ELEMENT_COUNT) {
+        if (KM_ELEMENT_ATOMIC_NUMBER[row] != row + 1) { ok = 0; }
+        row = row + 1;
+    }
+    assert(ok, "row i holds Z = i + 1");
+}
+
+fn _t_electronegativity_bounds() {
+    test_group("electronegativity_bounds");
+    # Pauling electronegativity ranges from ~0.7 (Cs, Fr) to 3.98 (F)
+    var ok = 1;
+    var z = 1;
+    while (z <= KM_ELEMENT_COUNT) {
+        var t, v = element_electronegativity(element_lookup_by_number(z));
+        if (is_some(t) == 1) {
+            var en: f64 = v;
+            if (en < 0.5 || en > 4.0) { ok = 0; }
+        }
+        z = z + 1;
+    }
+    assert(ok, "every value in [0.5, 4.0]");
+}
+
+fn _t_atomic_mass_positive() {
+    test_group("atomic_mass_positive");
+    var ok = 1;
+    var z = 1;
+    while (z <= KM_ELEMENT_COUNT) {
+        var m: f64 = element_atomic_mass(element_lookup_by_number(z));
+        if (m > 0.0) { } else { ok = 0; }
+        z = z + 1;
+    }
+    assert(ok, "every mass > 0");
+}
+
+# ── Extended properties ──────────────────────────────────────────────
+
+fn _t_properties_hydrogen() {
+    test_group("properties_hydrogen");
+    var p = element_lookup_properties(1);
+    assert(p != 0, "H has properties");
+    var ie: f64 = element_properties_ionization_energy_1(p);
+    assert(near(ie, 1312.0, 1.0), "IE1 1312 kJ/mol");
+    assert(has_state(p, 1), "+1");
+    assert(has_state(p, 0 - 1), "-1");
+}
+
+fn _t_properties_chlorine_highest_ea() {
+    test_group("properties_chlorine_highest_ea");
+    # Chlorine, not fluorine, has the largest electron affinity (most
+    # negative value, energy released) of all elements.
+    var f = element_lookup_properties(9);
+    var cl = element_lookup_properties(17);
+    var ea_f: f64 = element_properties_electron_affinity(f);
+    var ea_cl: f64 = element_properties_electron_affinity(cl);
+    assert(ea_cl < ea_f, "Cl should have more negative EA than F");
+    var ok = 1;
+    var p = 1;
+    while (p <= KM_ELEMENT_PROPERTIES_COUNT) {
+        var ea: f64 = element_properties_electron_affinity(p);
+        if (ea_cl <= ea) { } else { ok = 0; }
+        p = p + 1;
+    }
+    assert(ok, "no row has a more negative EA than Cl");
+}
+
+fn _t_properties_noble_gas_zero_ea() {
+    test_group("properties_noble_gas_zero_ea");
+    var he = element_lookup_properties(2);
+    var ea: f64 = element_properties_electron_affinity(he);
+    var eps: f64 = 0.0000000000000002220446049250313;   # f64::EPSILON
+    assert(f64_abs(ea) < eps, "|EA| < EPSILON");
+    assert_eq(element_properties_oxidation_state_count(he), 1, "one state");
+    var t, v = element_properties_oxidation_state(he, 0);
+    assert_eq(is_some(t), 1, "state 0 present");
+    assert_eq(v, 0, "the state is 0");
+}
+
+fn _t_properties_iron_oxidation_states() {
+    test_group("properties_iron_oxidation_states");
+    var fe = element_lookup_properties(26);
+    assert(has_state(fe, 2), "+2");
+    assert(has_state(fe, 3), "+3");
+}
+
+fn _t_properties_ie_trend_period2() {
+    test_group("properties_ie_trend_period2");
+    # IE generally increases across a period: Li < Be < B < ... < Ne
+    var li: f64 = element_properties_ionization_energy_1(element_lookup_properties(3));
+    var ne: f64 = element_properties_ionization_energy_1(element_lookup_properties(10));
+    assert(ne > li, "IE1(Ne) > IE1(Li)");
+}
+
+fn _t_properties_covalent_radius_trend() {
+    test_group("properties_covalent_radius_trend");
+    # Covalent radius decreases across period: Na > Cl
+    var na: f64 = element_properties_covalent_radius_pm(element_lookup_properties(11));
+    var cl: f64 = element_properties_covalent_radius_pm(element_lookup_properties(17));
+    assert(na > cl, "r(Na) > r(Cl)");
+}
+
+fn _t_properties_count() {
+    test_group("properties_count");
+    assert(KM_ELEMENT_PROPERTIES_COUNT >= 32, "at least 32 rows");
+}
+
+fn _t_properties_coverage_matches_doc() {
+    test_group("properties_coverage_matches_doc");
+    # Keep in sync with the `ELEMENT_PROPERTIES` doc comment: Z = 1–20, 24–30, 35, 47, 53, 79, 82.
+    var want: i64[32];
+    var n = 0;
+    var z = 1;
+    while (z <= 20) { want[n] = z; n = n + 1; z = z + 1; }
+    z = 24;
+    while (z <= 30) { want[n] = z; n = n + 1; z = z + 1; }
+    want[27] = 35;
+    want[28] = 47;
+    want[29] = 53;
+    want[30] = 79;
+    want[31] = 82;
+    assert_eq(KM_ELEMENT_PROPERTIES_COUNT, 32, "32 rows, as documented");
+    var ok = 1;
+    var k = 0;
+    while (k < 32) {
+        if (element_properties_atomic_number(k + 1) != want[k]) { ok = 0; }
+        k = k + 1;
+    }
+    assert(ok, "the documented atomic numbers, in order");
+}
+
+fn _t_properties_nonexistent() {
+    test_group("properties_nonexistent");
+    assert_eq(element_lookup_properties(200), 0, "Z = 200 has none");
+}
+
+# Cyrius-only: Rust's u8 and its references can't go out of range; a Cyrius word can. Every
+# out-of-range lookup gives 0 and every out-of-range handle its "none" value, without reading
+# out of bounds (`cyrius test --bounds` checks the reads).
+fn _t_out_of_range_handles() {
+    test_group("out_of_range_handles");
+    assert_eq(element_lookup_by_number(0 - 1), 0, "Z = -1");
+    assert_eq(element_lookup_by_number(119), 0, "Z = 119");
+    assert_eq(element_lookup_by_number(256 + 26), 0, "Z = 282 (not 26 mod 256)");
+    assert_eq(element_lookup_by_symbol(0), 0, "a null symbol");
+    assert_eq(element_lookup_by_symbol(""), 0, "an empty symbol");
+    assert_eq(element_lookup_properties(0), 0, "properties of Z = 0");
+    assert_eq(element_lookup_properties(0 - 26), 0, "properties of Z = -26");
+    var bad: i64[4];
+    bad[0] = 0;
+    bad[1] = 0 - 1;
+    bad[2] = 119;
+    bad[3] = 0x10000000000;
+    var k = 0;
+    while (k < 4) {
+        var h = bad[k];
+        assert_eq(element_atomic_number(h), 0, "atomic_number 0");
+        assert_eq(strlen(element_symbol(h)), 0, "symbol empty");
+        assert_eq(strlen(element_name(h)), 0, "name empty");
+        var m: f64 = element_atomic_mass(h);
+        assert_eq(_km_is_nan(m), 1, "mass NaN");
+        var t, v = element_electronegativity(h);
+        assert_eq(is_none(t), 1, "electronegativity None");
+        assert_eq(element_category(h), 0 - 1, "category -1");
+        k = k + 1;
+    }
+    bad[2] = 33;
+    k = 0;
+    while (k < 4) {
+        var p = bad[k];
+        assert_eq(element_properties_atomic_number(p), 0, "properties atomic_number 0");
+        var ie: f64 = element_properties_ionization_energy_1(p);
+        var ea: f64 = element_properties_electron_affinity(p);
+        var r: f64 = element_properties_covalent_radius_pm(p);
+        assert_eq(_km_is_nan(ie) + _km_is_nan(ea) + _km_is_nan(r), 3, "properties NaN");
+        assert_eq(element_properties_oxidation_state_count(p), 0, "no states");
+        var t, v = element_properties_oxidation_state(p, 0);
+        assert_eq(is_none(t), 1, "state 0 None");
+        k = k + 1;
+    }
+    var h1 = element_lookup_properties(1);
+    var t1, v1 = element_properties_oxidation_state(h1, 2);
+    assert_eq(is_none(t1), 1, "H's third state is None (it has two)");
+    var t2, v2 = element_properties_oxidation_state(h1, 0 - 1);
+    assert_eq(is_none(t2), 1, "state -1 is None");
+    assert_eq(element_category(element_lookup_by_symbol("Og")), KM_ELEMENT_CATEGORY_NOBLE_GAS, "Og noble gas");
+    assert_eq(KM_ELEMENT_CATEGORY_COUNT, 10, "10 categories");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_hydrogen_data();
+    _t_iron_data();
+    _t_all_118_elements();
+    _t_noble_gases_light_no_electronegativity();
+    _t_lookup_nonexistent();
+    _t_avogadro_constant();
+    _t_gas_constant_value();
+    _t_standard_atomic_weights_current();
+    _t_lookup_zero_returns_none();
+    _t_lookup_by_number_o1_correctness();
+    _t_elements_contiguous_and_ordered();
+    _t_electronegativity_bounds();
+    _t_atomic_mass_positive();
+    _t_properties_hydrogen();
+    _t_properties_chlorine_highest_ea();
+    _t_properties_noble_gas_zero_ea();
+    _t_properties_iron_oxidation_states();
+    _t_properties_ie_trend_period2();
+    _t_properties_covalent_radius_trend();
+    _t_properties_count();
+    _t_properties_coverage_matches_doc();
+    _t_properties_nonexistent();
+    _t_out_of_range_handles();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

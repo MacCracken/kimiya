@@ -1,0 +1,47 @@
+# error.cyr — kimiya's error codes (port of rust-old/src/error.rs).
+#
+# A fallible kimiya function returns a value-form Result whose Err payload is one of these
+# codes: `var t, v = f(..); if (is_err_result(t) == 1) { .. v is the code .. }`. The golden
+# token `E:InvalidElement` is KM_ERR_INVALID_ELEMENT: KM_ERR_ + snake(variant). The values
+# follow the Rust variant order and are append-only (the Cyrius form of #[non_exhaustive]).
+# Every Rust variant carries a String that only restates the caller's own input, so no detail
+# travels with the code (port plan §6.4); km_error_message(code) gives the fixed text.
+
+enum KmError {
+    KM_ERR_NONE = 0;
+    KM_ERR_INVALID_ELEMENT = 1;
+    KM_ERR_INVALID_REACTION = 2;
+    KM_ERR_INVALID_CONCENTRATION = 3;
+    KM_ERR_INVALID_TEMPERATURE = 4;
+    KM_ERR_INVALID_INPUT = 5;
+    KM_ERR_COMPUTATION_ERROR = 6;
+}
+
+# The Rust variant name of an error code (`"InvalidElement"`), "None" for KM_ERR_NONE, or
+# "Unknown" for a value that is no code.
+#must_use
+fn km_error_name(code): i64 {
+    if (code == KM_ERR_NONE) { return "None"; }
+    if (code == KM_ERR_INVALID_ELEMENT) { return "InvalidElement"; }
+    if (code == KM_ERR_INVALID_REACTION) { return "InvalidReaction"; }
+    if (code == KM_ERR_INVALID_CONCENTRATION) { return "InvalidConcentration"; }
+    if (code == KM_ERR_INVALID_TEMPERATURE) { return "InvalidTemperature"; }
+    if (code == KM_ERR_INVALID_INPUT) { return "InvalidInput"; }
+    if (code == KM_ERR_COMPUTATION_ERROR) { return "ComputationError"; }
+    return "Unknown";
+}
+
+# The Rust error's Display text without its payload: thiserror's message up to the `: {0}`
+# (`"invalid element"` for `invalid element: Unobtainium`). "no error" for KM_ERR_NONE and
+# "unknown error" for a value that is no code.
+#must_use
+fn km_error_message(code): i64 {
+    if (code == KM_ERR_NONE) { return "no error"; }
+    if (code == KM_ERR_INVALID_ELEMENT) { return "invalid element"; }
+    if (code == KM_ERR_INVALID_REACTION) { return "invalid reaction"; }
+    if (code == KM_ERR_INVALID_CONCENTRATION) { return "invalid concentration"; }
+    if (code == KM_ERR_INVALID_TEMPERATURE) { return "invalid temperature"; }
+    if (code == KM_ERR_INVALID_INPUT) { return "invalid input"; }
+    if (code == KM_ERR_COMPUTATION_ERROR) { return "computation error"; }
+    return "unknown error";
+}

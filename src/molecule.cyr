@@ -1,0 +1,167 @@
+# molecule.cyr — molecules: composition as (element, count) pairs, molecular weight and
+# formula strings (port of rust-old/src/molecule.rs).
+#
+# Rust's `Molecule { atoms: Vec<Atom> }` is `struct KmMolecule` over a vec (lib/vec.cyr) that
+# holds two words per atom: its atomic number, then its count. Methods are called on the value,
+# `m.molecular_weight()`; constructors are `KmMolecule_new(pairs, n)` and the presets
+# (`KmMolecule_water()`, …), port plan §6.4.
+# - Rust's `Atom::count` is a u32, so a count is stored mod 2^32 (as `as u32`). An atomic number
+#   is stored as given: outside 1–118 it names no element, so molecular_weight and formula give
+#   Err(KM_ERR_INVALID_ELEMENT), as Rust does for an unknown u8.
+# - The library never aborts: if the atom vec can't be allocated the molecule has no atoms
+#   (`atoms` is 0), and molecular_weight and formula give Err(KM_ERR_COMPUTATION_ERROR).
+# - Every expression keeps Rust's operation order, so molecular_weight is bit-identical (class B,
+#   0 ulp expected).
+# - The three methods walk the vec's buffer directly (lib/vec.cyr documents its layout,
+#   { data, len, cap }): per-atom vec_get calls made molecular_weight 4× slower (M1 bench).
+
+include "lib/vec.cyr"
+include "lib/str.cyr"
+
+struct KmMolecule {
+    atoms;   # vec of 2 words per atom (atomic number, count), or 0 if allocation failed
+}
+
+# The presets' (Z, count) pairs, as in rust-old/src/molecule.rs (the golden rows pin them).
+var _KM_MOLECULE_WATER: i64[4] = { 1, 2, 8, 1 };
+var _KM_MOLECULE_CARBON_DIOXIDE: i64[4] = { 6, 1, 8, 2 };
+var _KM_MOLECULE_METHANE: i64[4] = { 6, 1, 1, 4 };
+var _KM_MOLECULE_GLUCOSE: i64[6] = { 6, 6, 1, 12, 8, 6 };
+
+# The largest pair count a molecule takes: the vec's capacity limit, halved (2 words per atom).
+const _KM_MOLECULE_MAX_ATOMS = 0x4000000;
+
+impl KmMolecule {
+    # A molecule from `n` (atomic number, count) pairs at `pairs`, a flat array of 2n words
+    # (Z0, count0, Z1, count1, …), kept in the order given; repeated elements stay separate
+    # entries. Mirrors `Molecule::new`.
+    #must_use
+    fn new(pairs, n): KmMolecule {
+        var m: KmMolecule;
+        m.atoms = 0;
+        if (n < 0 || n > _KM_MOLECULE_MAX_ATOMS || (n > 0 && pairs == 0)) { return m; }
+        var a = default_alloc();
+        var v = vec_new_a(a);
+        if (v == 0) { return m; }
+        var k = 0;
+        while (k < n) {
+            var z = load64(pairs + k * 16);
+            var c = load64(pairs + k * 16 + 8) & 0xFFFFFFFF;
+            if (vec_push_a(a, v, z) != 0) { return m; }
+            if (vec_push_a(a, v, c) != 0) { return m; }
+            k = k + 1;
+        }
+        m.atoms = v;
+        return m;
+    }
+
+    # Water: H₂O. Mirrors `Molecule::water`.
+    #must_use
+    fn water(): KmMolecule { return KmMolecule_new(&_KM_MOLECULE_WATER, 2); }
+
+    # Carbon dioxide: CO₂. Mirrors `Molecule::carbon_dioxide`.
+    #must_use
+    fn carbon_dioxide(): KmMolecule { return KmMolecule_new(&_KM_MOLECULE_CARBON_DIOXIDE, 2); }
+
+    # Methane: CH₄. Mirrors `Molecule::methane`.
+    #must_use
+    fn methane(): KmMolecule { return KmMolecule_new(&_KM_MOLECULE_METHANE, 2); }
+
+    # Glucose: C₆H₁₂O₆. Mirrors `Molecule::glucose`.
+    #must_use
+    fn glucose(): KmMolecule { return KmMolecule_new(&_KM_MOLECULE_GLUCOSE, 3); }
+
+    # How many atom entries the molecule holds (Rust: `atoms.len()`).
+    #must_use
+    fn atoms_len(self): i64 {
+        if (self.atoms == 0) { return 0; }
+        return vec_len(self.atoms) / 2;
+    }
+
+    # Atom entry k's atomic number (Rust: `atoms[k].element_number`); -1 when k is out of range.
+    #must_use
+    fn atom_element_number(self, k): i64 {
+        if (k < 0 || k >= self.atoms_len()) { return 0 - 1; }
+        return vec_get(self.atoms, 2 * k);
+    }
+
+    # Atom entry k's count (Rust: `atoms[k].count`, a u32); -1 when k is out of range.
+    #must_use
+    fn atom_count(self, k): i64 {
+        if (k < 0 || k >= self.atoms_len()) { return 0 - 1; }
+        return vec_get(self.atoms, 2 * k + 1);
+    }
+
+    # Molecular weight in g/mol, Σ atomic mass × count in atom order: Ok(f64), or
+    # Err(KM_ERR_INVALID_ELEMENT) if an atom names no element (even with count 0). Mirrors
+    # `Molecule::molecular_weight`.
+    #must_use
+    fn molecular_weight(self): Result {
+        if (self.atoms == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        var total: f64 = 0.0;
+        var data = load64(self.atoms);      # lib/vec.cyr's layout: { data, len, cap }
+        var end = data + vec_len(self.atoms) * 8;
+        var at = data;
+        while (at < end) {
+            var h = element_lookup_by_number(load64(at));
+            if (h == 0) { return Err(KM_ERR_INVALID_ELEMENT); }
+            var mass: f64 = KM_ELEMENT_ATOMIC_MASS[h - 1];   # row h − 1, checked above
+            var count: f64 = f64_from(load64(at + 8));
+            total = total + (mass * count);
+            at = at + 16;
+        }
+        return Ok(total);
+    }
+
+    # Molecular formula ("H2O", "CO2", "C6H12O6") as Ok(Str): atoms in stored order (no Hill
+    # ordering, no merging of repeated elements, no reduction to the empirical formula), a count
+    # of 1 without a digit, and atoms with a count of 0 omitted, but only after their element is
+    # looked up, so an unknown element is Err(KM_ERR_INVALID_ELEMENT) whatever its count.
+    # Err(KM_ERR_COMPUTATION_ERROR) if the string can't be allocated. Mirrors `Molecule::formula`.
+    #must_use
+    fn formula(self): Result {
+        if (self.atoms == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        var a = default_alloc();
+        var sb = str_builder_new_a(a);
+        if (sb == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        var data = load64(self.atoms);
+        var end = data + vec_len(self.atoms) * 8;
+        var at = data;
+        while (at < end) {
+            var h = element_lookup_by_number(load64(at));
+            if (h == 0) { return Err(KM_ERR_INVALID_ELEMENT); }
+            var count = load64(at + 8);
+            if (count != 0) {
+                if (str_builder_add_cstr_a(a, sb, element_symbol(h)) != 0) {
+                    return Err(KM_ERR_COMPUTATION_ERROR);
+                }
+                if (count > 1) {
+                    if (str_builder_add_int_a(a, sb, count) != 0) {
+                        return Err(KM_ERR_COMPUTATION_ERROR);
+                    }
+                }
+            }
+            at = at + 16;
+        }
+        var s = str_builder_build_a(a, sb);
+        if (s == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        return Ok(s);
+    }
+
+    # Total number of atoms, saturating at u32::MAX (4294967295) instead of overflowing.
+    # Mirrors `Molecule::total_atoms`.
+    #must_use
+    fn total_atoms(self): i64 {
+        if (self.atoms == 0) { return 0; }
+        var total = 0;
+        var data = load64(self.atoms);
+        var end = data + vec_len(self.atoms) * 8;
+        var at = data + 8;
+        while (at < end) {
+            total = total + load64(at);
+            if (total > 0xFFFFFFFF) { total = 0xFFFFFFFF; }
+            at = at + 16;
+        }
+        return total;
+    }
+}

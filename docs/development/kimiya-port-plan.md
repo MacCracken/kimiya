@@ -185,7 +185,7 @@ expect the same repairs here unless a newer pin fixed it.
    [lib]
    modules = ["src/error.cyr", ...]   # dependency order, below
    ```
-   - `[lib]` order: error → constants → validate → element_data → element → molecule →
+   - `[lib]` order: error → constants → mathx → validate → element_data → element → molecule →
      reaction → thermo → thermochem_data → thermochem → phase_data → phase → gas → solution →
      electrochemistry_data → electrochemistry → kinetics → stoichiometry → organic →
      inorganic_data → inorganic → potential → nuclear_data → nuclear → spectroscopy → numerics →
@@ -212,8 +212,8 @@ expect the same repairs here unless a newer pin fixed it.
      (every std f64 method kimiya calls, over special values and kimiya's ranges).
 6. **Table and constant generator** (same crate). Tables are generated through the oracle's
    public API, never re-typed:
-   - `constants.cyr` (all physical constants); `element_data.cyr` (118 rows × 7 fields + 32
-     property rows); `thermochem_data.cyr` (76 rows, 34 Shomate segments);
+   - `constants.cyr` (all physical constants); `element_data.cyr` (118 rows × 6 fields + 32
+     property rows incl. oxidation states); `thermochem_data.cyr` (76 rows, 34 Shomate segments);
      `electrochemistry_data.cyr` (49 potentials); `phase_data.cyr` (8 Antoine sets, K_b/K_f);
      `inorganic_data.cyr` (30 ionic radii, Madelung, Born); `nuclear_data.cyr` (18 isotopes);
      organic bond energies, isotope abundances, PR parameters and Λ° inline in their modules.
@@ -249,7 +249,7 @@ reason); CHANGELOG and `state.md`.
 
 | Milestone | Modules | Key work | Golden grid (minimum) |
 |---|---|---|---|
-| **M1 Foundation** | error, constants, validate, element, molecule | `KimiyaError` → code enum (`KM_ERR_*`, append-only) + detail; generated constants and element columns; `lookup_by_symbol` string match, `lookup_by_number` O(1); `Molecule` as a struct over an atom vec; NaN/∞ guard helpers | all 118 elements × every field; lookups incl. invalid symbol/Z; molecular weight and formula for the presets and seeded random compositions |
+| **M1 Foundation** | error, constants, validate, element, molecule | `KimiyaError` → code enum (`KM_ERR_*`, append-only), no detail string (§6.4); generated constants and element columns; `lookup_by_symbol` string match, `lookup_by_number` O(1); `Molecule` as a struct over an atom vec; NaN/∞ guard helpers | all 118 elements × every field; lookups incl. invalid symbol/Z; molecular weight and formula for the presets and seeded random compositions |
 | **M2 Thermochemistry & gases** | reaction, thermo, thermochem, phase, gas | Shomate segments + analytic enthalpy; flame temperature (Newton + bisection — §6.2); van 't Hoff; Antoine (#4); kJ→J (#1); Peng–Robinson analytic cubic (acos/cos/cbrt → class C) and `peng_robinson_z_roots`; Van der Waals, Redlich–Kwong, fugacity | every thermochem row; Cp and H over 298–6000 K per segment, both sides of each boundary; the 5 tested flame mixtures + error cases; PR roots on a T × P grid for the 5 gases, incl. the 3-root region and 90–200 MPa |
 | **M3 Solutions & electrochemistry** | solution, electrochemistry, kinetics | Weak acid/base charge-balance Newton (kimiya's own loop — transcribe exactly, class B/D); ionic strength, Debye–Hückel, Davies, Kohlrausch; sorted potential table, Nernst, Faraday; Arrhenius/Eyring/Michaelis–Menten/nth-order (exp, `exp_m1` → class C) | Ka × C grid 1e-40..1e40 × 1e-40..1e20; all 49 couples; kinetics grids over T 1–5000 K and the edge cases the 1.2 tests pin |
 | **M4 Structure, nuclear & spectroscopy** | stoichiometry, organic, inorganic, potential, nuclear, spectroscopy | Exact integer balancing (checked i64/i128 → explicit overflow checks; class A) with integer input (#7); rational oxidation states (#7); VSEPR/bond tables; CFSE tables; Born–Landé; SEMF (#3) with `cbrt`; decay chains incl. equal-λ limit (`exp_m1`); Morse/LJ/Coulomb, atan2 dihedral; isotope pattern (pruned convolution, custom `total_cmp` sort); Rydberg/R_H; `find_peaks`; FFT via hisab `num_fft` | balancing corpus (CH₄, KMnO₄/HCl, CuSO₄ both orders, seeded consistent matrices, every error class); oxidation corpus from the 1.2 tests; all 18 isotopes; SEMF Z ≤ A ≤ 3Z for A ≤ 300; isotope patterns up to C₁₆₈/H₈₈; angles at Å and metre scale; FFT n = 2..2²⁰ |
@@ -342,6 +342,49 @@ ships them, a later kimiya release can switch and re-measure.
 | `validate::is_positive` and friends | the same predicates in `validate.cyr` |
 | `#[must_use]` / `#[non_exhaustive]` | `#must_use` / append-only enum values |
 
+### 6.4 Decisions made at the start of M1 (2026-11-09, probed on 6.7.18)
+
+- **Errors** — `enum KmError` with append-only values in Rust variant order: `KM_ERR_NONE = 0`,
+  `INVALID_ELEMENT = 1`, `INVALID_REACTION = 2`, `INVALID_CONCENTRATION = 3`,
+  `INVALID_TEMPERATURE = 4`, `INVALID_INPUT = 5`, `COMPUTATION_ERROR = 6`. A fallible function
+  returns a value-form `Result` whose `Err` payload is the code; **no detail string** travels with
+  it (as tanmatra: the Rust payloads only restate the caller's input). `km_error_name(code)` gives
+  the Rust variant name (the golden token `E:InvalidElement`), `km_error_message(code)` the fixed text.
+- **String tables** — baked arrays cannot hold string literals ("array initializer elements must
+  be constants"). Generated string columns are a NUL-separated `u8` blob plus a `u16` offset
+  column (`&_KM_X_BYTES + _KM_X_OFF[i]` is a C string; `streq`/`strlen` work, `--bounds` clean).
+- **Lookups** — `Option<&'static T>` becomes a handle: the atomic number (or table row + 1), and
+  0 for `None`. Field accessors take the handle; an out-of-range handle returns the field's
+  documented "none" value, never reads out of bounds.
+- **`Option<f64>` fields** (electronegativity) — the stdlib value-form `Option` if it carries an
+  f64 payload cleanly; otherwise a `has_` flag column plus the value.
+- **Math helpers** — `src/mathx.cyr`, private `_km_*`: `_km_min` / `_km_max` (Rust's NaN-ignoring
+  semantics, including its (+0, −0) operand choice), `_km_signum`, `_km_round_half_away`,
+  `_km_powi` (compiler-rt `__powidf2`'s square-and-multiply order), `_km_total_cmp`,
+  `_km_is_finite`, and `_km_log10` / `_km_expm1` **transcribed from Rust `libm` 0.2.16**
+  (`src/math/{log10,expm1}.rs`, fdlibm/musl, ≤ 1 ulp) so they sit within K = 2 of glibc.
+- **Structs** — `Molecule` becomes `KmMolecule` with an `impl` block; atoms are a vec of
+  (Z, count) pairs; constructors take a flat (Z, count) pair array and its length.
+
+Settled while implementing M1 (2026-11-09), all within the decisions above:
+- **Names.** Free functions get the module prefix where the bare Rust name would be ambiguous in
+  one namespace: `element_lookup_by_number` / `_by_symbol` / `_properties`. Struct fields of a
+  handle are `element_<field>(h)` and `element_properties_<field>(p)`; the oxidation-state slice is
+  `element_properties_oxidation_state_count(p)` + `element_properties_oxidation_state(p, k)`, which
+  returns an `Option` (a state can be 0 or negative, so there is no sentinel). `Atom`'s fields are
+  `m.atom_element_number(k)` / `m.atom_count(k)` (−1 out of range), `atoms.len()` is `m.atoms_len()`.
+- **Electronegativity** is the value-form `Option` (it carries an f64 cleanly); the data is a `bool`
+  presence column plus the value, because a compile-time f64 can't be NaN.
+- **Out-of-type inputs.** A count is stored mod 2^32 (Rust's u32); an atomic number is stored as
+  given, so one outside 1–118 (or past u8) is `Err(INVALID_ELEMENT)`, never aliased mod 256.
+- **No aborts.** `KmMolecule` uses the allocator-taking `vec_*_a` / `str_builder_*_a` calls; an
+  allocation failure leaves a molecule with no atoms (`atoms` 0), and `molecular_weight` / `formula`
+  return `Err(COMPUTATION_ERROR)`.
+- **Stdlib includes in `src/`.** `element.cyr` includes `lib/string.cyr`, `molecule.cyr`
+  `lib/vec.cyr` and `lib/str.cyr`. `cyrius distlib`'s compile-verify only sees calls a compile
+  reaches, and a bundle reaches none, so without them `dist/kimiya.deps` listed only `tagged` and a
+  consumer's build failed on `str_builder_*` (probed). No `src/` file includes another.
+
 Language traps already probed on 6.7.18 by tanmatra (its plan §0, §5): no exponent literals;
 `(0 - x)` on an f64 is wrong; a hex literal in a `const` is an integer; `f64_round` ties to
 even; `+?` aborts the process; `cyrius test` must be warning-free.
@@ -353,7 +396,7 @@ even; `+?` aborts the process; `cyrius test` must be warning-free.
 | Milestone | Status | Golden rows | Reference tests | Benches | Notes |
 |---|---|---|---|---|---|
 | M0 Initialize | ✅ done 2026-11-09 | constants 45 + math 18,647 (2.0 MB): 13,340 ok, 0 failed, 5,351 pending (M1 helpers, module-data constants), 1 accepted (ADR 0004) — identical on x86_64 ELF, x86_64 PE, aarch64 | — | scaffold only | Oracle frozen at tag `1.2.0`; scaffold + repairs; hisab 3.4.1; generator + `constants.cyr` (14 `KM_`) + harness; K = 2 ulp for the math primitives ([`port-parity.md`](port-parity.md)); ADRs 0001–0004 |
-| M1 Foundation | ☐ | | | | |
+| M1 Foundation | ✅ done 2026-11-09 | element 975 + molecule 2,472 + constants 14 (of 45) + math 18,647 (now 0 pending): 22,107 ok, 0 failed, 31 pending (module-data constants), 1 accepted (ADR 0004) — identical on x86_64 ELF, x86_64 PE, aarch64; `molecular_weight` 0 ulp; log10 K = 2 (max 1), exp_m1 K = 2 (max 0) | 38 Rust tests ported (error 2, validate 3, element 22, molecule 11; molecule's `serde_roundtrip` doesn't port), plus 4 Cyrius-only groups: 179 assertions | 3 (`lookup_by_symbol` 1.5× Rust, `lookup_by_number` 5.4×, `molecular_weight_glucose` 7.4×; [benchmarks](../benchmarks-rust-v-cyrius.md)) | `error`, `mathx`, `validate`, generated `element_data` + `element`, `molecule`; `[lib]` + `dist/kimiya.cyr`; surface parity 55/55; settled points in §6.4 |
 | M2 Thermochemistry & gases | ☐ | | | | |
 | M3 Solutions & electrochemistry | ☐ | | | | |
 | M4 Structure, nuclear & spectroscopy | ☐ | | | | |

@@ -1,0 +1,200 @@
+# element.cyr — elements: periodic-table lookups and the extended properties of 32 elements
+# (port of rust-old/src/element.rs).
+#
+# Rust's lookups return `Option<&'static Element>` / `Option<&'static ElementProperties>`. Here
+# they return a handle, 0 for None (port plan §6.4):
+# - an element handle is its table row + 1, which is the atomic number Z (1–118);
+# - a property handle is its row of ELEMENT_PROPERTIES + 1 (1–32).
+# The Rust struct fields become accessors of the handle, reading the generated
+# element_data.cyr columns (IUPAC/CIAAW weights, Pauling electronegativities), so no value is
+# typed here. Rust can't hold a dangling reference; a Cyrius caller can pass any word, and an
+# out-of-range handle never reads out of bounds: it gets the field's "none" value (0, "", NaN,
+# None or -1, as each accessor says). AVOGADRO and GAS_CONSTANT are KM_AVOGADRO and
+# KM_GAS_CONSTANT in src/constants.cyr.
+
+include "lib/string.cyr"
+
+# The element row of handle h (h − 1), or -1 if h is no element handle.
+#must_use
+fn _km_element_row(h): i64 {
+    if (h >= 1 && h <= KM_ELEMENT_COUNT) { return h - 1; }
+    return 0 - 1;
+}
+
+# The property row of handle p (p − 1), or -1 if p is no property handle.
+#must_use
+fn _km_properties_row(p): i64 {
+    if (p >= 1 && p <= KM_ELEMENT_PROPERTIES_COUNT) { return p - 1; }
+    return 0 - 1;
+}
+
+# ── lookups ─────────────────────────────────────────────────────────────────────────
+
+# The element with atomic number z, as a handle (z itself), or 0 for z outside 1–118. O(1):
+# indexes the table directly and checks the row's atomic number, as Rust does. Mirrors
+# `element::lookup_by_number`.
+#must_use
+fn element_lookup_by_number(z): i64 {
+    if (z < 1 || z > KM_ELEMENT_COUNT) { return 0; }
+    if (KM_ELEMENT_ATOMIC_NUMBER[z - 1] != z) { return 0; }
+    return z;
+}
+
+# The element whose symbol is the C string `sym`, exactly and case-sensitively ("Fe", not
+# "fe" or "FE"), as a handle; 0 when none matches (or `sym` is 0). The first match in Z order,
+# as Rust's linear `find`. Mirrors `element::lookup_by_symbol`.
+#must_use
+fn element_lookup_by_symbol(sym): i64 {
+    if (sym == 0) { return 0; }
+    var c0 = load8(sym);
+    if (c0 == 0) { return 0; }
+    var n = strlen(sym);
+    var row = 0;
+    while (row < KM_ELEMENT_COUNT) {
+        var p = &_KM_ELEMENT_SYMBOL_BYTES + _KM_ELEMENT_SYMBOL_OFF[row];
+        # The first byte decides most rows. memeq stops at the first differing byte, so it reads
+        # no further than p's NUL (sym has no NUL in its first n bytes).
+        if (load8(p) == c0) {
+            if (memeq(p, sym, n) == 1 && load8(p + n) == 0) { return row + 1; }
+        }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The extended properties of the element with atomic number z, as a property handle, or 0 when
+# none are tabulated (32 elements: Z = 1–20, 24–30, 35, 47, 53, 79, 82). Mirrors
+# `element::lookup_properties`.
+#must_use
+fn element_lookup_properties(z): i64 {
+    var row = 0;
+    while (row < KM_ELEMENT_PROPERTIES_COUNT) {
+        if (KM_ELEMENT_PROPERTIES_ATOMIC_NUMBER[row] == z) { return row + 1; }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# ── Element fields ──────────────────────────────────────────────────────────────────
+
+# Atomic number Z, 1–118; 0 for an invalid handle. Mirrors `Element::atomic_number`.
+#must_use
+fn element_atomic_number(h): i64 {
+    var row = _km_element_row(h);
+    if (row < 0) { return 0; }
+    return KM_ELEMENT_ATOMIC_NUMBER[row];
+}
+
+# IUPAC chemical symbol (`"Fe"`) as a C string in the baked table; "" for an invalid handle.
+# Mirrors `Element::symbol`.
+#must_use
+fn element_symbol(h): i64 {
+    var row = _km_element_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_ELEMENT_SYMBOL_BYTES + _KM_ELEMENT_SYMBOL_OFF[row];
+}
+
+# English element name (`"Iron"`) as a C string in the baked table; "" for an invalid handle.
+# Mirrors `Element::name`.
+#must_use
+fn element_name(h): i64 {
+    var row = _km_element_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_ELEMENT_NAME_BYTES + _KM_ELEMENT_NAME_OFF[row];
+}
+
+# Standard atomic weight in g/mol (IUPAC/CIAAW abridged or conventional value; the mass number
+# of a long-lived isotope for elements without stable isotopes); NaN for an invalid handle.
+# Mirrors `Element::atomic_mass`.
+#must_use
+fn element_atomic_mass(h): f64 {
+    var row = _km_element_row(h);
+    if (row < 0) { return _km_nan(); }
+    var m: f64 = KM_ELEMENT_ATOMIC_MASS[row];
+    return m;
+}
+
+# Pauling electronegativity: Some(f64), or None where no value is established (He, Ne, Ar and
+# most superheavy elements) and for an invalid handle. Read it with
+# `var t, v = element_electronegativity(h); if (is_some(t) == 1) { var en: f64 = v; .. }`.
+# Mirrors `Element::electronegativity`.
+#must_use
+fn element_electronegativity(h): Option {
+    var row = _km_element_row(h);
+    if (row < 0) { return None(); }
+    if (KM_ELEMENT_HAS_ELECTRONEGATIVITY[row]) {
+        var en: f64 = KM_ELEMENT_ELECTRONEGATIVITY[row];
+        return Some(en);
+    }
+    return None();
+}
+
+# Periodic-table category, a KmElementCategory value; -1 for an invalid handle. Mirrors
+# `Element::category`.
+#must_use
+fn element_category(h): i64 {
+    var row = _km_element_row(h);
+    if (row < 0) { return 0 - 1; }
+    return KM_ELEMENT_CATEGORY[row];
+}
+
+# ── ElementProperties fields ────────────────────────────────────────────────────────
+
+# Atomic number Z of the element the properties describe; 0 for an invalid handle. Mirrors
+# `ElementProperties::atomic_number`.
+#must_use
+fn element_properties_atomic_number(p): i64 {
+    var row = _km_properties_row(p);
+    if (row < 0) { return 0; }
+    return KM_ELEMENT_PROPERTIES_ATOMIC_NUMBER[row];
+}
+
+# First ionization energy, kJ/mol; NaN for an invalid handle. Mirrors
+# `ElementProperties::ionization_energy_1`.
+#must_use
+fn element_properties_ionization_energy_1(p): f64 {
+    var row = _km_properties_row(p);
+    if (row < 0) { return _km_nan(); }
+    var v: f64 = KM_ELEMENT_PROPERTIES_IONIZATION_ENERGY_1[row];
+    return v;
+}
+
+# Electron affinity, kJ/mol (negative = energy released); NaN for an invalid handle. Mirrors
+# `ElementProperties::electron_affinity`.
+#must_use
+fn element_properties_electron_affinity(p): f64 {
+    var row = _km_properties_row(p);
+    if (row < 0) { return _km_nan(); }
+    var v: f64 = KM_ELEMENT_PROPERTIES_ELECTRON_AFFINITY[row];
+    return v;
+}
+
+# Covalent radius, pm; NaN for an invalid handle. Mirrors `ElementProperties::covalent_radius_pm`.
+#must_use
+fn element_properties_covalent_radius_pm(p): f64 {
+    var row = _km_properties_row(p);
+    if (row < 0) { return _km_nan(); }
+    var v: f64 = KM_ELEMENT_PROPERTIES_COVALENT_RADIUS_PM[row];
+    return v;
+}
+
+# How many common oxidation states are listed; 0 for an invalid handle. With
+# element_properties_oxidation_state, this mirrors the slice `ElementProperties::oxidation_states`.
+#must_use
+fn element_properties_oxidation_state_count(p): i64 {
+    var row = _km_properties_row(p);
+    if (row < 0) { return 0; }
+    return KM_ELEMENT_PROPERTIES_OXIDATION_STATE_COUNT[row];
+}
+
+# The k-th common oxidation state (most common first), as Some(state); None when k is outside
+# 0 .. count − 1 or the handle is invalid (a state can be 0 or negative, so there is no sentinel).
+# Mirrors `ElementProperties::oxidation_states[k]`.
+#must_use
+fn element_properties_oxidation_state(p, k): Option {
+    if (k < 0 || k >= element_properties_oxidation_state_count(p)) { return None(); }
+    var row = p - 1;
+    var at = KM_ELEMENT_PROPERTIES_OXIDATION_STATE_START[row] + k;
+    var state = KM_ELEMENT_PROPERTIES_OXIDATION_STATES[at];
+    return Some(state);
+}

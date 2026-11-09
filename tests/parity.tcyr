@@ -20,7 +20,13 @@
 # most a handful, so the 8-bit exit status can't wrap.
 
 include "tests/ulp.cyr"
+include "src/error.cyr"
 include "src/constants.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/element_data.cyr"
+include "src/element.cyr"
+include "src/molecule.cyr"
 
 alloc_init();
 
@@ -98,15 +104,15 @@ fn _par_constant_pending(np, nl): i64 {
     return 0 - 1;
 }
 
-# `f64::` rows: the Cyrius counterpart of each Rust std method (port plan §6.1), where one
-# exists with Rust's semantics. Pending until M1's local helpers, because the stdlib's
-# nearest function differs from Rust (probed 2026-11-09; the shadow lines below show it):
+# `f64::` rows: the Cyrius counterpart of each Rust std method (port plan §6.1). Where the
+# stdlib's nearest function differs from Rust (probed 2026-11-09; the shadow lines below show
+# it), the counterpart is a src/mathx.cyr helper:
 # - min / max: f64_min / f64_max return their second operand when it is NaN; Rust ignores a
 #   NaN on either side (_km_min / _km_max);
 # - round: f64_round ties to even; Rust rounds half away from zero (_km_round_half_away);
 # - signum: f64_sign gives 0 for ±0 and NaN; Rust gives ±1 and NaN (_km_signum);
 # - log10, exp_m1, powi, total_cmp, is_finite: no stdlib function (_km_log10, _km_expm1,
-#   _km_powi, …).
+#   _km_powi, _km_total_cmp, _km_is_finite).
 # clamp is dispatched: f64_clamp has Rust's semantics for valid bounds (min ≤ max, no NaN
 # bound, which Rust asserts), so it is compared rather than assumed.
 fn _par_math(fp, fl): i64 {
@@ -115,9 +121,14 @@ fn _par_math(fp, fl): i64 {
     if (_par_eq(fp, fl, "f64::abs") == 1) { var r: f64 = f64_abs(x); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::floor") == 1) { var r: f64 = f64_floor(x); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::trunc") == 1) { var r: f64 = f64_trunc(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::round") == 1) { var r: f64 = _km_round_half_away(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::signum") == 1) { var r: f64 = _km_signum(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::is_finite") == 1) { _par_got_i(_km_is_finite(x)); return 1; }
     if (_par_eq(fp, fl, "f64::cbrt") == 1) { var r: f64 = ganita_f64_cbrt(x); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::exp") == 1) { var r: f64 = f64_exp(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::exp_m1") == 1) { var r: f64 = _km_expm1(x); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::ln") == 1) { var r: f64 = f64_ln(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::log10") == 1) { var r: f64 = _km_log10(x); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::sin") == 1) { var r: f64 = f64_sin(x); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::cos") == 1) { var r: f64 = f64_cos(x); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::acos") == 1) { var r: f64 = ganita_f64_acos(x); _par_got_f(r); return 1; }
@@ -131,7 +142,12 @@ fn _par_math(fp, fl): i64 {
         _par_got_f(r);
         return 1;
     }
+    # powi's second input is the i32 exponent (`i:n`), an integer word.
+    if (_par_eq(fp, fl, "f64::powi") == 1) { var r: f64 = _km_powi(x, _par_in(1)); _par_got_f(r); return 1; }
     var y: f64 = _par_in(1);
+    if (_par_eq(fp, fl, "f64::max") == 1) { var r: f64 = _km_max(x, y); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::min") == 1) { var r: f64 = _km_min(x, y); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::total_cmp") == 1) { _par_got_i(_km_total_cmp(x, y)); return 1; }
     if (_par_eq(fp, fl, "f64::powf") == 1) { var r: f64 = ganita_f64_pow(x, y); _par_got_f(r); return 1; }
     # Rust's y.atan2(x) is the golden f64::atan2(y, x): inputs in C order.
     if (_par_eq(fp, fl, "f64::atan2") == 1) { var r: f64 = ganita_f64_atan2(x, y); _par_got_f(r); return 1; }
@@ -144,11 +160,137 @@ fn _par_math(fp, fl): i64 {
     return 0;
 }
 
+# The golden name of a KmElementCategory value ("ElementCategory.NobleGas").
+#must_use
+fn _par_category_name(c): i64 {
+    if (c == KM_ELEMENT_CATEGORY_ALKALI_METAL) { return "ElementCategory.AlkaliMetal"; }
+    if (c == KM_ELEMENT_CATEGORY_ALKALINE_EARTH) { return "ElementCategory.AlkalineEarth"; }
+    if (c == KM_ELEMENT_CATEGORY_TRANSITION_METAL) { return "ElementCategory.TransitionMetal"; }
+    if (c == KM_ELEMENT_CATEGORY_POST_TRANSITION_METAL) { return "ElementCategory.PostTransitionMetal"; }
+    if (c == KM_ELEMENT_CATEGORY_METALLOID) { return "ElementCategory.Metalloid"; }
+    if (c == KM_ELEMENT_CATEGORY_NONMETAL) { return "ElementCategory.Nonmetal"; }
+    if (c == KM_ELEMENT_CATEGORY_HALOGEN) { return "ElementCategory.Halogen"; }
+    if (c == KM_ELEMENT_CATEGORY_NOBLE_GAS) { return "ElementCategory.NobleGas"; }
+    if (c == KM_ELEMENT_CATEGORY_LANTHANIDE) { return "ElementCategory.Lanthanide"; }
+    if (c == KM_ELEMENT_CATEGORY_ACTINIDE) { return "ElementCategory.Actinide"; }
+    return "ElementCategory.?";
+}
+
+# Appends an Option<&Element>: `n:` for the 0 handle, else its fields in declaration order.
+fn _par_got_element(h) {
+    if (h == 0) { _par_got_none(); return 0; }
+    _par_got_i(element_atomic_number(h));
+    var sym = element_symbol(h);
+    _par_got_text(sym, strlen(sym));
+    var nm = element_name(h);
+    _par_got_text(nm, strlen(nm));
+    var m: f64 = element_atomic_mass(h);
+    _par_got_f(m);
+    var t, v = element_electronegativity(h);
+    if (is_some(t) == 1) { _par_got_f(v); } else { _par_got_none(); }
+    _par_got_e(_par_category_name(element_category(h)));
+    return 0;
+}
+
+# Appends an Option<&ElementProperties>: `n:` for the 0 handle, else its fields, the
+# oxidation states as `v:n` and n integers.
+fn _par_got_properties(p) {
+    if (p == 0) { _par_got_none(); return 0; }
+    _par_got_i(element_properties_atomic_number(p));
+    var ie: f64 = element_properties_ionization_energy_1(p);
+    _par_got_f(ie);
+    var ea: f64 = element_properties_electron_affinity(p);
+    _par_got_f(ea);
+    var r: f64 = element_properties_covalent_radius_pm(p);
+    _par_got_f(r);
+    var n = element_properties_oxidation_state_count(p);
+    _par_got_seq(n);
+    var k = 0;
+    while (k < n) {
+        var t, v = element_properties_oxidation_state(p, k);
+        if (is_some(t) == 1) { _par_got_i(v); } else { _par_got_none(); }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# `element` rows: src/element.cyr. Every row has one input, Z (`i:`) or a symbol (`s:`).
+fn _par_element(fp, fl): i64 {
+    if (_par_in_n != 1) { return 0 - 1; }
+    if (_par_eq(fp, fl, "element::lookup_by_number") == 1) {
+        _par_got_element(element_lookup_by_number(_par_in(0)));
+        return 1;
+    }
+    if (_par_eq(fp, fl, "element::lookup_properties") == 1) {
+        _par_got_properties(element_lookup_properties(_par_in(0)));
+        return 1;
+    }
+    if (_par_eq(fp, fl, "element::lookup_by_symbol") == 1) {
+        var sym = _par_in_cstr(0);
+        if (sym == 0) { return 0 - 1; }
+        _par_got_element(element_lookup_by_symbol(sym));
+        return 1;
+    }
+    return 0;
+}
+
+# The molecule in inputs k .. : `v:n`, then n (Z, count) pairs as `i:` tokens.
+fn _par_molecule_in(k): KmMolecule {
+    var n = _par_in(k);
+    var buf = alloc(n * 16 + 16);
+    var j = 0;
+    while (j < n) {
+        store64(buf + j * 16, _par_in(k + 1 + 2 * j));
+        store64(buf + j * 16 + 8, _par_in(k + 2 + 2 * j));
+        j = j + 1;
+    }
+    var m = KmMolecule_new(buf, n);
+    return m;
+}
+
+# Appends a molecule's atoms: `v:n`, then each atom's Z and count.
+fn _par_got_atoms(m: KmMolecule) {
+    var n = m.atoms_len();
+    _par_got_seq(n);
+    var k = 0;
+    while (k < n) {
+        _par_got_i(m.atom_element_number(k));
+        _par_got_i(m.atom_count(k));
+        k = k + 1;
+    }
+}
+
+# `molecule` rows: src/molecule.cyr. The presets have no input; every other row's input is a
+# molecule (the receiver, or Molecule::new's pairs).
+fn _par_molecule(fp, fl): i64 {
+    if (_par_eq(fp, fl, "Molecule::water") == 1) { _par_got_atoms(KmMolecule_water()); return 1; }
+    if (_par_eq(fp, fl, "Molecule::carbon_dioxide") == 1) { _par_got_atoms(KmMolecule_carbon_dioxide()); return 1; }
+    if (_par_eq(fp, fl, "Molecule::methane") == 1) { _par_got_atoms(KmMolecule_methane()); return 1; }
+    if (_par_eq(fp, fl, "Molecule::glucose") == 1) { _par_got_atoms(KmMolecule_glucose()); return 1; }
+    if (_par_in_n < 1 || _par_in_n != 1 + 2 * _par_in(0)) { return 0 - 1; }
+    var m = _par_molecule_in(0);
+    if (_par_eq(fp, fl, "Molecule::new") == 1) { _par_got_atoms(m); return 1; }
+    if (_par_eq(fp, fl, "Molecule::molecular_weight") == 1) {
+        var t, v = m.molecular_weight();
+        if (is_ok(t) == 1) { _par_got_f(v); } else { _par_got_err(v); }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "Molecule::formula") == 1) {
+        var t, v = m.formula();
+        if (is_ok(t) == 1) { _par_got_text(str_data(v), str_len(v)); } else { _par_got_err(v); }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "Molecule::total_atoms") == 1) { _par_got_i(m.total_atoms()); return 1; }
+    return 0;
+}
+
 # Routes a row to its module's dispatcher. 0 (pending) for a module with none yet.
 fn _par_dispatch(mp, ml, fp, fl): i64 {
     _par_got_n = 0;
     if (_par_eq(mp, ml, "constants") == 1) { return _par_constants(fp, fl); }
+    if (_par_eq(mp, ml, "element") == 1) { return _par_element(fp, fl); }
     if (_par_eq(mp, ml, "math") == 1) { return _par_math(fp, fl); }
+    if (_par_eq(mp, ml, "molecule") == 1) { return _par_molecule(fp, fl); }
     return 0;
 }
 
@@ -211,11 +353,15 @@ fn _par_shadows(mp, ml, fp, fl, cls) {
 #
 # The math primitives get 2 ulp: glibc and each Cyrius counterpart (lib/math.cyr, ganita) document
 # < 1 ulp, so two implementations can differ by up to 2. Measured 2026-11-08 on x86_64 ELF, x86_64
-# PE and aarch64: max 1 ulp on every row (port-parity.md §2). log10 and exp_m1 get their bound
-# when their M1 helpers exist.
+# PE and aarch64: max 1 ulp on every row (port-parity.md §2). log10 and exp_m1 (M1, 2026-11-09):
+# _km_log10 / _km_expm1 transcribe Rust libm 0.2.16 (fdlibm, < 1 ulp) against glibc (< 1 ulp, 2
+# for log10); measured as unbounded rows first, max 1 ulp (log10) and 0 ulp (exp_m1) on all three
+# targets, so the same K = 2 holds.
 #must_use
 fn _par_c_bound(fp, fl): i64 {
     if (_par_eq(fp, fl, "f64::exp") == 1) { return 2; }
+    if (_par_eq(fp, fl, "f64::exp_m1") == 1) { return 2; }
+    if (_par_eq(fp, fl, "f64::log10") == 1) { return 2; }
     if (_par_eq(fp, fl, "f64::ln") == 1) { return 2; }
     if (_par_eq(fp, fl, "f64::powf") == 1) { return 2; }
     if (_par_eq(fp, fl, "f64::powf_base10") == 1) { return 2; }

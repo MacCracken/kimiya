@@ -1,7 +1,8 @@
 # parity_core.cyr — the golden-corpus replay machinery.
 #
 # Adapted from tanmatra's tests/parity_core.cyr (same format, same outcomes). tests/parity.tcyr
-# includes the src modules it needs, then this file, and defines:
+# includes the src modules it needs (src/error.cyr first: _par_got_err names a code with
+# km_error_name), then this file, and defines:
 # - `_par_dispatch(mp, ml, fp, fl)`: fill the got list for one row (1 handled, 0 pending, -1 unusable);
 # - `_par_c_bound(fp, fl)`: a class-C function's ulp bound, or -1;
 # - `_par_accepted(fp, fl, ip, il)`: the ADR accepting a divergent row, or 0;
@@ -117,6 +118,46 @@ fn _par_tokens(p, len, kinds, vals, lens): i64 {
 #must_use
 fn _par_in(k): i64 { return load64(_par_in_v + k * 8); }
 
+# The value of an uppercase hex digit byte `c` (the `%XX` escapes of `s:` tokens), or -1.
+#must_use
+fn _par_hex_upper(c): i64 {
+    if (c >= 48 && c <= 57) { return c - 48; }
+    if (c >= 65 && c <= 70) { return c - 55; }
+    return 0 - 1;
+}
+
+# Input token k, an `s:` token, as a fresh NUL-terminated C string with its `%XX` escapes
+# decoded. 0 if the token is no `s:` token, an escape is malformed, or the text holds a NUL
+# byte (which a C string can't).
+fn _par_in_cstr(k): i64 {
+    var at = k * 8;
+    if (k >= _par_in_n || load64(_par_in_k + at) != 115) { return 0; }
+    var p = load64(_par_in_v + at);
+    var len = load64(_par_in_l + at);
+    var out = alloc(len + 1);
+    if (out == 0) { return 0; }
+    var n = 0;
+    var j = 0;
+    while (j < len) {
+        var c = load8(p + j);
+        if (c == 37) {
+            if (j + 2 >= len) { return 0; }
+            var hi = _par_hex_upper(load8(p + j + 1));
+            var lo = _par_hex_upper(load8(p + j + 2));
+            if (hi < 0 || lo < 0) { return 0; }
+            c = hi * 16 + lo;
+            j = j + 3;
+        } else {
+            j = j + 1;
+        }
+        if (c == 0) { return 0; }
+        store8(out + n, c);
+        n = n + 1;
+    }
+    store8(out + n, 0);
+    return out;
+}
+
 # Appends an f64 result word to the got list.
 fn _par_got_f(bits) {
     var at = _par_got_n * 8;
@@ -148,6 +189,16 @@ fn _par_got_seq(n) {
 fn _par_got_e(name) {
     var at = _par_got_n * 8;
     store64(_par_got_k + at, 101);
+    store64(_par_got_v + at, name);
+    store64(_par_got_l + at, strlen(name));
+    _par_got_n = _par_got_n + 1;
+}
+
+# Appends an error (`E:Variant`) to the got list, by its Rust variant name.
+fn _par_got_err(code) {
+    var name = km_error_name(code);
+    var at = _par_got_n * 8;
+    store64(_par_got_k + at, 69);
     store64(_par_got_v + at, name);
     store64(_par_got_l + at, strlen(name));
     _par_got_n = _par_got_n + 1;

@@ -1,12 +1,27 @@
-# kimiya test suite
+# kimiya.tcyr — smoke test of the published bundle, as a consumer sees it.
 # Stdlib auto-included via cyrius.cyml
+#
+# It includes dist/kimiya.cyr (written by `cyrius distlib --all`; `cyrius distlib --check` proves it
+# current), not src/, so the bundle compiles warning-free as one unit and its modules work
+# together. The reference tests are tests/{error,validate,element,molecule}.tcyr; the golden
+# corpus is tests/parity.tcyr.
 
-# Scaffold smoke test: proves the test build links and the assert library runs.
+include "dist/kimiya.cyr"
+
+# One call into each module of the bundle.
 fn main() {
     alloc_init();
-    test_group("smoke");
-    assert(1, "true is true");
-    assert_eq(1 + 1, 2, "math works");
+    test_group("bundle");
+    assert(streq(km_error_name(KM_ERR_INVALID_ELEMENT), "InvalidElement"), "error");
+    var r: f64 = KM_GAS_CONSTANT;
+    assert(r > 8.3 && r < 8.4, "constants");
+    var m: f64 = _km_max(1.0, 2.0);
+    assert(m == 2.0, "mathx");
+    assert_eq(_km_is_positive(1.0), 1, "validate");
+    assert_eq(KM_ELEMENT_COUNT, 118, "element_data");
+    assert_eq(element_lookup_by_symbol("Og"), 118, "element");
+    var t, v = KmMolecule_glucose().formula();
+    assert(is_ok(t) == 1 && str_eq_cstr(v, "C6H12O6") == 1, "molecule");
     return assert_summary();
 }
 

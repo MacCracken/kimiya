@@ -1,0 +1,53 @@
+# validate.tcyr — the tests of rust-old/src/validate.rs, ported one for one (each test_group is
+# the Rust test's name). ±1e-300 are bit patterns (the lexer has no exponent notation).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+
+alloc_init();
+
+fn _t_positive_rejects_nan_inf_zero_negative() {
+    test_group("positive_rejects_nan_inf_zero_negative");
+    var tiny: f64 = 0x01A56E1FC2F8F359;   # 1e-300
+    var nan: f64 = _km_nan();
+    assert_eq(_km_is_positive(tiny), 1, "1e-300");
+    assert_eq(_km_is_positive(0.0), 0, "0.0");
+    assert_eq(_km_is_positive(-1.0), 0, "-1.0");
+    assert_eq(_km_is_positive(nan), 0, "NaN");
+    assert_eq(_km_is_positive(_KM_INF), 0, "+inf");
+}
+
+fn _t_non_negative_accepts_zero() {
+    test_group("non_negative_accepts_zero");
+    var neg_tiny: f64 = 0x81A56E1FC2F8F359;   # -1e-300
+    var nan: f64 = _km_nan();
+    assert_eq(_km_is_non_negative(0.0), 1, "0.0");
+    assert_eq(_km_is_non_negative(-0.0), 1, "-0.0");
+    assert_eq(_km_is_non_negative(neg_tiny), 0, "-1e-300");
+    assert_eq(_km_is_non_negative(nan), 0, "NaN");
+    assert_eq(_km_is_non_negative(_KM_INF), 0, "+inf");
+}
+
+fn _t_finite_rejects_nan_inf() {
+    test_group("finite_rejects_nan_inf");
+    var nan: f64 = _km_nan();
+    var ninf: f64 = -_KM_INF;
+    assert_eq(_km_is_finite(-1.0), 1, "-1.0");
+    assert_eq(_km_is_finite(nan), 0, "NaN");
+    assert_eq(_km_is_finite(ninf), 0, "-inf");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_positive_rejects_nan_inf_zero_negative();
+    _t_non_negative_accepts_zero();
+    _t_finite_rejects_nan_inf();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

@@ -48,7 +48,9 @@ python3 -I scripts/oracle/probe_tables.py .                                     
 | Module | Milestone | Golden rows | Golden emitter | Generated Cyrius |
 |---|---|---|---|---|
 | `constants` | M0 | 45 | `src/m_constants.rs` | `src/constants.cyr` (`src/t_constants.rs`): the 14 physical constants. The other 31 rows (K_b/K_f, Madelung, Born exponents, Λ°, Debye–Hückel, K_w, STP, c_water) are generated with their module's data at M2–M4 |
+| `element` | M1 | 975 | `src/m_element.rs`: `lookup_by_number` and `lookup_properties` over every u8 (0..=255), `lookup_by_symbol` over every symbol, its lower- and upper-case forms, every name, and `""`, `"Xx"`, `"FE"`, `"Fe "`, `" Fe"`, a 300-byte string | `src/element_data.cyr` (`src/t_element.rs`): `enum KmElementCategory`, the 118 `ELEMENTS` rows (atomic number, symbol and name blobs, mass, electronegativity flag + value, category) and the 32 `ELEMENT_PROPERTIES` rows (oxidation states flattened over an `i8` table) |
 | `math` | M0 step 8 | 18,647 | `src/m_math.rs` | — |
+| `molecule` | M1 | 2,472 | `src/m_molecule.rs`: the four presets, the cases the 1.2 tests pin, 600 seeded compositions (1–8 atoms, counts 0..=200, repeats, invalid Z 0/119/255, u32::MAX counts); `new`, `molecular_weight` (B), `formula`, `total_atoms` on each | — |
 
 ## glibc, not the `libm` crate
 
@@ -172,8 +174,16 @@ the generator:
   arithmetic.
 - **±∞ are `(1.0 / 0.0)` and `-(1.0 / 0.0)`.** A NaN is a generator error: Cyrius refuses a
   compile-time NaN, whose bits depend on the target.
-- **Tables (from M1) are baked column arrays**, `var KM_<X>_<FIELD>: f64|u8|bool[N] = { .. };`,
-  one element per line with a label comment (tanmatra's `cyr::table`).
+- **Tables (from M1) are baked column arrays**, `var KM_<X>_<FIELD>: f64|u8|u16|i8|bool[N] = { .. };`,
+  one element per line with a label comment (`cyr::table`, tanmatra's). `i8` arrays sign-extend on
+  read (probed on x86_64 ELF/PE and aarch64), so oxidation states keep Rust's `i8`.
+- **String columns are a NUL-separated `u8` blob plus a `u16` offset column** (`cyr::string_column`):
+  an array initializer can't hold a string literal. `&_KM_X_BYTES + _KM_X_OFF[i]` is row i's C string;
+  one blob line per row, its bytes then the text as the label. ASCII and NUL-free, or a generator error.
+- **`Option<f64>` cells are a `bool` presence column plus the value** (0.0 for `None`), since a
+  compile-time f64 can't be NaN; the accessor returns the value-form `Option`.
+- **Per-cell `//` notes in the Rust literal** (the IUPAC conventional and CIAAW 2024 atomic weights)
+  travel as that cell's label comment. Only comments are read from the source.
 - **The output is `cyrius fmt`- and `cyrius lint`-clean as generated.**
 
 ### Names
@@ -183,17 +193,23 @@ A bundle is concatenated into its consumers, so every generated global is prefix
 | Oracle / golden token | Generated Cyrius |
 |---|---|
 | `const` row `s:element::AVOGADRO` | `const KM_AVOGADRO` (the generator refuses two modules' constants with one name) |
-| enum `ElementCategory` (M1) | `enum KmElementCategory`, plus `const KM_ELEMENT_CATEGORY_COUNT`; variant `KM_` + snake(enum) + `_` + snake(variant), as tanmatra |
+| enum `ElementCategory` (M1) | `enum KmElementCategory`, plus `const KM_ELEMENT_CATEGORY_COUNT`; variant `KM_` + snake(enum) + `_` + snake(variant), as tanmatra (`e:ElementCategory.NobleGas` is `KM_ELEMENT_CATEGORY_NOBLE_GAS`). `t_element` proves the variant list against the Rust declaration |
+| `ELEMENTS[i].field` (M1) | `KM_ELEMENT_<FIELD>[i]`, row i = Z − 1; symbol and name `_KM_ELEMENT_{SYMBOL,NAME}_{BYTES,OFF}`; `KM_ELEMENT_COUNT` |
+| `ELEMENT_PROPERTIES[k].field` (M1) | `KM_ELEMENT_PROPERTIES_<FIELD>[k]`; oxidation states `..._OXIDATION_STATE_START` / `_COUNT` over `..._OXIDATION_STATES`; `KM_ELEMENT_PROPERTIES_COUNT` |
 
 Each constant's comment block ends with `# Rust: kimiya::<module>::<NAME>`, which
 `validate.py` and `probe_tables.py` read to tie it to its golden row.
 
 ### `probe_tables.py`
 
-`probe_tables.py` compiles a program that prints every generated constant (and, from M1, table
-cell). It builds in `build/oracle-probe/` with the project's manifest, then compares each value
-bit for bit with the golden rows. It fails on any mismatch, any compiler warning, and a
-generated constant with no golden row. A constant tampered by one digit fails.
+`probe_tables.py` compiles a program that prints every generated constant and every
+`element_data.cyr` cell (1,055 in M1: each `ELEMENTS` field, symbol and name read through the blob
+offsets, each property and oxidation state, and each category checked against the enum member the
+golden variant names). It reads the arrays directly, not through `src/element.cyr`, so it tests the
+data while the harness tests the accessors. It builds in `build/oracle-probe/` with the project's
+manifest, then compares each value bit for bit with the golden rows. It fails on any mismatch, any
+compiler warning, a generated constant with no golden row, and a table it doesn't probe. A mass, an
+oxidation state or a symbol byte tampered by one digit fails (checked in M1).
 
 ## `validate.py`
 
@@ -225,6 +241,16 @@ needs only Python 3, with no packages (run it with `-I`).
   | powf_base2 (exp2) | 369 | 368 | 1 |
   | sin | 710 | 708 | 2 |
 
-Every function in `math.tsv` must have a rule in `validate.py`: a new one fails until it gets
-one. Extend it as modules arrive. A check that recomputes a row independently is worth more
-than one that re-reads the oracle.
+- **element** (M1): every row against the `ELEMENTS` and `ELEMENT_PROPERTIES` literals parsed from
+  `rust-old/src/element.rs` (Python's `float()` is correctly rounded, like rustc), with
+  `lookup_by_symbol` recomputed as an exact, case-sensitive match; every u8 covered; and the
+  generated `KmElementCategory` in the Rust declaration order.
+- **molecule** (M1): every row recomputed from those masses with Rust's semantics — the molecular
+  weight summed in atom order (`total += mass * count`, bit-exact: Python floats are IEEE doubles),
+  the formula (input order, count 1 without a digit, zero counts skipped after the element check),
+  saturating `total_atoms`, `InvalidElement` for Z outside 1–118, and the presets parsed from
+  `rust-old/src/molecule.rs`.
+
+Every function in `math.tsv`, `element.tsv` and `molecule.tsv` must have a rule in `validate.py`:
+a new one fails until it gets one. Extend it as modules arrive. A check that recomputes a row
+independently is worth more than one that re-reads the oracle.

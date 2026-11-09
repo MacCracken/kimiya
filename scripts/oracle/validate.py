@@ -20,7 +20,14 @@ and no Python packages. Usage, from the repo root:
    at 60+ digits. Each function must be within glibc's documented bound (1 ulp; log10 2) of
    it; the histogram is printed. This proves the reference is the function it names, on
    every row, independently of the platform that recorded it.
-Every function in math.tsv must have a rule here: a new one fails until it gets one.
+6. element.tsv against the ELEMENTS / ELEMENT_PROPERTIES literals parsed from
+   rust-old/src/element.rs: every lookup_by_number and lookup_properties row (all 256 u8), every
+   lookup_by_symbol row (exact, case-sensitive match), and the generated KmElementCategory order.
+7. molecule.tsv recomputed from the Rust semantics with those masses: molecular weight summed in
+   atom order (bit-exact; Python floats are IEEE doubles), formula, saturating total_atoms, the
+   InvalidElement errors, and the presets parsed from rust-old/src/molecule.rs.
+Every function in math.tsv, element.tsv and molecule.tsv must have a rule here: a new one fails
+until it gets one.
 """
 import math, re, struct, sys
 from decimal import Decimal, localcontext, Overflow, Underflow, InvalidOperation
@@ -468,5 +475,114 @@ print("glibc vs correctly rounded (decimal reference), ulp histogram:")
 for fn in sorted(hist):
     h = hist[fn]
     print(f"  {fn:20} 0:{h[0]} 1:{h[1]} 2:{h[2]} more:{h['more']} max:{h['max']} (bound {transcendental[fn][1]})")
+# ── 6. element.tsv against the Rust source literals ──────────────────────────────────
+esrc = (root / "rust-old/src/element.rs").read_text()
+def literal_blocks(name, struct):
+    body = esrc[esrc.index(f"pub static {name}:"):]
+    body = body[: body.index("\n];")]
+    return re.findall(rf"{struct} \{{(.*?)\n    \}}", body, re.S)
+ELEMS = {}
+for b in literal_blocks("ELEMENTS", "Element"):
+    f_ = dict(re.findall(r"^\s*(\w+): (.+?),\s*$", b, re.M))
+    z = int(f_["atomic_number"])
+    en = f_["electronegativity"]
+    ELEMS[z] = (z, f_["symbol"].strip('"'), f_["name"].strip('"'), float(f_["atomic_mass"]),
+                None if en == "None" else float(re.fullmatch(r"Some\((.+)\)", en).group(1)),
+                f_["category"].split("::")[1])
+PROPS = {}
+for b in literal_blocks("ELEMENT_PROPERTIES", "ElementProperties"):
+    f_ = dict(re.findall(r"^\s*(\w+): (.+?),\s*$", b, re.M))
+    states = [int(x) for x in re.fullmatch(r"&\[(.*)\]", f_["oxidation_states"]).group(1).split(",")]
+    PROPS[int(f_["atomic_number"])] = (int(f_["atomic_number"]), float(f_["ionization_energy_1"]),
+                                       float(f_["electron_affinity"]), float(f_["covalent_radius_pm"]), states)
+check(sorted(ELEMS) == list(range(1, 119)), f"element.rs: ELEMENTS parsed as Z {sorted(ELEMS)[:3]}.. ({len(ELEMS)})")
+check(len(PROPS) == 32, f"element.rs: ELEMENT_PROPERTIES parsed as {len(PROPS)} rows")
+cats = re.findall(r"^    ([A-Z]\w+),$", esrc[esrc.index("pub enum ElementCategory {"):esrc.index("pub struct Element {")], re.M)
+def element_out(e):
+    if e is None: return [("n", "", None)]
+    z, sym, name, mass, en, cat = e
+    return [("i", z, None), ("s", sym, None), ("s", name, None), ("f", mass, f2b(mass)),
+            ("n", "", None) if en is None else ("f", en, f2b(en)), ("e", f"ElementCategory.{cat}", None)]
+def props_out(pr):
+    if pr is None: return [("n", "", None)]
+    z, ie, ea, rad, st = pr
+    return ([("i", z, None), ("f", ie, f2b(ie)), ("f", ea, f2b(ea)), ("f", rad, f2b(rad)), ("v", len(st), None)]
+            + [("i", x, None) for x in st])
+def same_toks(got, want):
+    return [(k, v if k != "f" else None, b) for k, v, b in got] == [(k, v if k != "f" else None, b) for k, v, b in want]
+ecount = {}
+for fn, cls, ins, outs, where in R.get("element", []):
+    ecount[fn] = ecount.get(fn, 0) + 1
+    check(cls == "A", f"{where}: {fn} class {cls}")
+    if fn == "element::lookup_by_number":
+        z = ins[0][1]
+        check(same_toks(outs, element_out(ELEMS.get(z))), f"{where}: lookup_by_number({z})")
+    elif fn == "element::lookup_by_symbol":
+        sym = ins[0][1]
+        hit = next((e for e in ELEMS.values() if e[1] == sym), None)  # exact, case-sensitive
+        check(same_toks(outs, element_out(hit)), f"{where}: lookup_by_symbol({sym!r})")
+    elif fn == "element::lookup_properties":
+        z = ins[0][1]
+        check(same_toks(outs, props_out(PROPS.get(z))), f"{where}: lookup_properties({z})")
+    else:
+        check(False, f"{where}: element.tsv function {fn} has no rule here")
+check(ecount.get("element::lookup_by_number") == 256 and ecount.get("element::lookup_properties") == 256,
+      "element.tsv: lookup_by_number / lookup_properties must cover every u8")
+syms = {i[0][1] for fn, _, i, _, _ in R.get("element", []) if fn == "element::lookup_by_symbol"}
+check(all(e[1] in syms for e in ELEMS.values()), "element.tsv: a symbol is not probed")
+print(f"element rows checked: {sum(ecount.values())} against {len(ELEMS)} ELEMENTS and {len(PROPS)} "
+      f"ELEMENT_PROPERTIES literals; categories in source order: {len(cats)}")
+# The generated enum follows the Rust declaration order.
+edata = (root / "src/element_data.cyr").read_text()
+gen = re.findall(r"^    (KM_ELEMENT_CATEGORY_[A-Z_]+) = (\d+);", edata, re.M)
+check([g[0] for g in gen] == ["KM_ELEMENT_CATEGORY_" + re.sub(r"(?<=[a-z])([A-Z])", r"_\1", c).upper() for c in cats]
+      and [int(g[1]) for g in gen] == list(range(len(cats))), "element_data.cyr: KmElementCategory is not ElementCategory in order")
+
+# ── 7. molecule.tsv, recomputed from the Rust source's semantics ────────────────────
+msrc = (root / "rust-old/src/molecule.rs").read_text()
+presets = {}
+for name, pairs in re.findall(r"pub fn (\w+)\(\) -> Self \{\s*Self::new\(&\[(.*?)\]\)", msrc, re.S):
+    presets[f"Molecule::{name}"] = [(int(a), int(b)) for a, b in re.findall(r"\((\d+), (\d+)\)", pairs)]
+check(sorted(presets) == ["Molecule::carbon_dioxide", "Molecule::glucose", "Molecule::methane", "Molecule::water"],
+      f"molecule.rs: presets parsed as {sorted(presets)}")
+def mol_in(toks):
+    n = toks[0][1]
+    check(toks[0][0] == "v" and len(toks) == 1 + 2 * n, "molecule tokens")
+    return [(toks[1 + 2 * k][1], toks[2 + 2 * k][1]) for k in range(n)]
+def mol_toks(pairs):
+    return [("v", len(pairs), None)] + [t for z, c in pairs for t in (("i", z, None), ("i", c, None))]
+mcount = {}
+for fn, cls, ins, outs, where in R.get("molecule", []):
+    mcount[fn] = mcount.get(fn, 0) + 1
+    if fn in presets:
+        check(cls == "A" and ins == [] and same_toks(outs, mol_toks(presets[fn])), f"{where}: {fn}")
+        continue
+    pairs = mol_in(ins)
+    check(all(0 <= z <= 255 and 0 <= c <= 0xFFFFFFFF for z, c in pairs), f"{where}: (u8, u32) inputs")
+    bad = any(z not in ELEMS for z, _ in pairs)
+    if fn == "Molecule::new":
+        check(cls == "A" and same_toks(outs, mol_toks(pairs)), f"{where}: new")
+    elif fn == "Molecule::molecular_weight":
+        check(cls == "B", f"{where}: class {cls}")
+        if bad:
+            check(outs == [("E", "InvalidElement", None)], f"{where}: molecular_weight error")
+        else:
+            total = 0.0
+            for z, c in pairs:
+                total += ELEMS[z][3] * float(c)   # Rust: total += mass * count as f64, in atom order
+            check(outs[0][0] == "f" and outs[0][2] == f2b(total), f"{where}: molecular_weight = {outs[0][1]!r}, recomputed {total!r}")
+    elif fn == "Molecule::formula":
+        check(cls == "A", f"{where}: class {cls}")
+        if bad:
+            check(outs == [("E", "InvalidElement", None)], f"{where}: formula error")
+        else:
+            want = "".join(ELEMS[z][1] + (str(c) if c > 1 else "") for z, c in pairs if c != 0)
+            check(outs == [("s", want, None)], f"{where}: formula {outs[0][1]!r}, want {want!r}")
+    elif fn == "Molecule::total_atoms":
+        check(cls == "A" and outs == [("i", min(sum(c for _, c in pairs), 0xFFFFFFFF), None)], f"{where}: total_atoms")
+    else:
+        check(False, f"{where}: molecule.tsv function {fn} has no rule here")
+print(f"molecule rows checked: {sum(mcount.values())} ({len(presets)} presets parsed from molecule.rs)")
+
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

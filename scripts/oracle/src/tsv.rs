@@ -37,7 +37,6 @@ impl Class {
 }
 
 /// One typed value.
-#[allow(dead_code)] // E, N, Err and V arrive with the module emitters (M1 on)
 #[derive(Clone, Debug)]
 pub enum Tok {
     /// `f:<16 hex digits>` — the IEEE-754 bit pattern, lowercase.
@@ -70,6 +69,18 @@ pub fn b(x: bool) -> Tok {
 
 pub fn s(x: impl Into<String>) -> Tok {
     Tok::S(x.into())
+}
+
+/// `e:<Enum>.<Variant>`, the variant named by its `Debug` text.
+pub fn e(name: &'static str, v: impl std::fmt::Debug) -> Tok {
+    Tok::E(name, format!("{v:?}"))
+}
+
+/// `E:<Variant>` for a `KimiyaError`: its `Debug` text up to the payload, so
+/// `InvalidElement("unknown atomic number 0")` is `E:InvalidElement`.
+pub fn err(x: &kimiya::error::KimiyaError) -> Tok {
+    let text = format!("{x:?}");
+    Tok::Err(text.split('(').next().unwrap_or_default().to_string())
 }
 
 /// Percent-encode every byte that is not printable ASCII, plus `%`.

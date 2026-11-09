@@ -1,8 +1,8 @@
 //! `oracle` — writes everything the Cyrius port derives from the frozen Rust kimiya 1.2.0
 //! in `rust-old/`:
 //! - the golden corpus, `tests/golden/<module>.tsv` (port plan §3 step 5);
-//! - the generated Cyrius sources, `src/constants.cyr` now and `src/<module>_data.cyr` at
-//!   their milestones (port plan §3 step 6).
+//! - the generated Cyrius sources, `src/constants.cyr` and `src/<module>_data.cyr`
+//!   (`src/element_data.cyr` from M1), at their milestones (port plan §3 step 6).
 //!
 //! ```sh
 //! cargo run --release --locked --manifest-path scripts/oracle/Cargo.toml            # write
@@ -17,14 +17,18 @@
 //!
 //! Adapted from tanmatra's `scripts/oracle/` (same format, same rules). Modules are added at
 //! the start of their milestone, with the golden grid from the port plan §4: `constants` and
-//! `math` (M0); element and molecule (M1); thermochem, phase, gas (M2); …
+//! `math` (M0); `element` and `molecule`, with `src/element_data.cyr` (M1); thermochem, phase,
+//! gas (M2); …
 
 mod cyr;
 mod glibc;
 mod grids;
 mod m_constants;
+mod m_element;
 mod m_math;
+mod m_molecule;
 mod t_constants;
+mod t_element;
 mod tsv;
 
 use std::collections::BTreeSet;
@@ -34,7 +38,12 @@ use std::process::ExitCode;
 
 /// Every golden emitter, in file-name order.
 fn golden_modules() -> Vec<tsv::Module> {
-    vec![m_constants::emit(), m_math::emit()]
+    vec![
+        m_constants::emit(),
+        m_element::emit(),
+        m_math::emit(),
+        m_molecule::emit(),
+    ]
 }
 
 /// One generated file: its path from the repo root, its contents, and a summary.
@@ -49,15 +58,24 @@ fn read(path: &Path) -> Result<String, String> {
 }
 
 /// Every generated Cyrius source, in file-name order. Each is built from the oracle's API;
-/// the Rust source is read for doc comments only.
+/// the Rust source is read for comments only.
 fn cyrius_outputs(root: &Path, prov: &str) -> Result<Vec<Output>, String> {
-    let text = t_constants::emit(root, prov)?;
-    let lines = text.lines().count();
-    Ok(vec![Output {
-        rel: "src/constants.cyr".to_string(),
-        text,
-        summary: format!("{lines} lines"),
-    }])
+    let element_src = read(&root.join("rust-old/src/element.rs"))?;
+    let files = [
+        ("src/constants.cyr", t_constants::emit(root, prov)?),
+        ("src/element_data.cyr", t_element::emit(&element_src, prov)?),
+    ];
+    Ok(files
+        .into_iter()
+        .map(|(rel, text)| {
+            let lines = text.lines().count();
+            Output {
+                rel: rel.to_string(),
+                text,
+                summary: format!("{lines} lines"),
+            }
+        })
+        .collect())
 }
 
 /// `version = "x"` from the first line that starts with it (the `[package]` one).
