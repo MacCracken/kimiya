@@ -2,17 +2,22 @@
 //!
 //! Standard electrode potentials are given for reduction half-reactions at 25°C,
 //! 1 atm, 1 M concentrations, referenced to the Standard Hydrogen Electrode (SHE).
+//! Potentials are in volts, charges in coulombs, masses in grams.
 
 use crate::element::GAS_CONSTANT;
 use crate::error::{KimiyaError, Result};
+use crate::validate::{is_finite, is_positive};
 use serde::Serialize;
 
 // ── Constants ────────────────────────────────────────────────────────
 
 /// Faraday constant (C/mol) — charge of one mole of electrons.
-pub const FARADAY: f64 = 96_485.332_12;
+///
+/// Exact in the 2019 SI: F = N_A·e = 6.022 140 76 × 10²³ mol⁻¹ ×
+/// 1.602 176 634 × 10⁻¹⁹ C = 96 485.332 123 310 0184 C/mol (CODATA 2018).
+pub const FARADAY: f64 = 96_485.332_123_310_01;
 
-/// Elementary charge (C).
+/// Elementary charge (C), exact in the 2019 SI.
 pub const ELEMENTARY_CHARGE: f64 = 1.602176634e-19;
 
 // ── Standard electrode potentials ────────────────────────────────────
@@ -32,7 +37,12 @@ pub struct HalfReaction {
 
 /// Built-in standard reduction potentials (V vs SHE at 25°C).
 ///
-/// Ordered from most negative (strongest reductant) to most positive (strongest oxidant).
+/// Sorted by E° from most negative (strongest reductant) to most positive
+/// (strongest oxidant). Values largely follow the CRC Handbook of Chemistry
+/// and Physics, "Electrochemical Series" table (a few entries carry older
+/// textbook values).
+/// Look entries up by couple with [`lookup_half_reaction`] rather than by
+/// position.
 pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
     HalfReaction {
         equation: "Li⁺ + e⁻ → Li",
@@ -44,7 +54,13 @@ pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
         equation: "K⁺ + e⁻ → K",
         couple: "K+/K",
         electrons: 1,
-        standard_potential: -2.924,
+        standard_potential: -2.931, // CRC Handbook, Electrochemical Series
+    },
+    HalfReaction {
+        equation: "Ba²⁺ + 2e⁻ → Ba",
+        couple: "Ba2+/Ba",
+        electrons: 2,
+        standard_potential: -2.912,
     },
     HalfReaction {
         equation: "Ca²⁺ + 2e⁻ → Ca",
@@ -65,90 +81,6 @@ pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
         standard_potential: -2.372,
     },
     HalfReaction {
-        equation: "Al³⁺ + 3e⁻ → Al",
-        couple: "Al3+/Al",
-        electrons: 3,
-        standard_potential: -1.662,
-    },
-    HalfReaction {
-        equation: "Zn²⁺ + 2e⁻ → Zn",
-        couple: "Zn2+/Zn",
-        electrons: 2,
-        standard_potential: -0.762,
-    },
-    HalfReaction {
-        equation: "Fe²⁺ + 2e⁻ → Fe",
-        couple: "Fe2+/Fe",
-        electrons: 2,
-        standard_potential: -0.447,
-    },
-    HalfReaction {
-        equation: "Ni²⁺ + 2e⁻ → Ni",
-        couple: "Ni2+/Ni",
-        electrons: 2,
-        standard_potential: -0.257,
-    },
-    HalfReaction {
-        equation: "Sn²⁺ + 2e⁻ → Sn",
-        couple: "Sn2+/Sn",
-        electrons: 2,
-        standard_potential: -0.136,
-    },
-    HalfReaction {
-        equation: "Pb²⁺ + 2e⁻ → Pb",
-        couple: "Pb2+/Pb",
-        electrons: 2,
-        standard_potential: -0.126,
-    },
-    HalfReaction {
-        equation: "2H⁺ + 2e⁻ → H₂",
-        couple: "H+/H2",
-        electrons: 2,
-        standard_potential: 0.000,
-    },
-    HalfReaction {
-        equation: "Cu²⁺ + 2e⁻ → Cu",
-        couple: "Cu2+/Cu",
-        electrons: 2,
-        standard_potential: 0.342,
-    },
-    HalfReaction {
-        equation: "I₂ + 2e⁻ → 2I⁻",
-        couple: "I2/I-",
-        electrons: 2,
-        standard_potential: 0.536,
-    },
-    HalfReaction {
-        equation: "Ag⁺ + e⁻ → Ag",
-        couple: "Ag+/Ag",
-        electrons: 1,
-        standard_potential: 0.7996,
-    },
-    HalfReaction {
-        equation: "Br₂ + 2e⁻ → 2Br⁻",
-        couple: "Br2/Br-",
-        electrons: 2,
-        standard_potential: 1.066,
-    },
-    HalfReaction {
-        equation: "Cl₂ + 2e⁻ → 2Cl⁻",
-        couple: "Cl2/Cl-",
-        electrons: 2,
-        standard_potential: 1.358,
-    },
-    HalfReaction {
-        equation: "Au³⁺ + 3e⁻ → Au",
-        couple: "Au3+/Au",
-        electrons: 3,
-        standard_potential: 1.498,
-    },
-    HalfReaction {
-        equation: "Ba²⁺ + 2e⁻ → Ba",
-        couple: "Ba2+/Ba",
-        electrons: 2,
-        standard_potential: -2.912,
-    },
-    HalfReaction {
         equation: "Sc³⁺ + 3e⁻ → Sc",
         couple: "Sc3+/Sc",
         electrons: 3,
@@ -159,6 +91,12 @@ pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
         couple: "Be2+/Be",
         electrons: 2,
         standard_potential: -1.847,
+    },
+    HalfReaction {
+        equation: "Al³⁺ + 3e⁻ → Al",
+        couple: "Al3+/Al",
+        electrons: 3,
+        standard_potential: -1.662,
     },
     HalfReaction {
         equation: "Ti²⁺ + 2e⁻ → Ti",
@@ -182,13 +120,25 @@ pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
         equation: "V²⁺ + 2e⁻ → V",
         couple: "V2+/V",
         electrons: 2,
-        standard_potential: -1.130,
+        standard_potential: -1.175, // CRC Handbook, Electrochemical Series
+    },
+    HalfReaction {
+        equation: "Zn²⁺ + 2e⁻ → Zn",
+        couple: "Zn2+/Zn",
+        electrons: 2,
+        standard_potential: -0.762,
     },
     HalfReaction {
         equation: "Cr³⁺ + 3e⁻ → Cr",
         couple: "Cr3+/Cr",
         electrons: 3,
         standard_potential: -0.744,
+    },
+    HalfReaction {
+        equation: "Fe²⁺ + 2e⁻ → Fe",
+        couple: "Fe2+/Fe",
+        electrons: 2,
+        standard_potential: -0.447,
     },
     HalfReaction {
         equation: "Cd²⁺ + 2e⁻ → Cd",
@@ -203,16 +153,40 @@ pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
         standard_potential: -0.280,
     },
     HalfReaction {
+        equation: "Ni²⁺ + 2e⁻ → Ni",
+        couple: "Ni2+/Ni",
+        electrons: 2,
+        standard_potential: -0.257,
+    },
+    HalfReaction {
         equation: "V³⁺ + e⁻ → V²⁺",
         couple: "V3+/V2+",
         electrons: 1,
         standard_potential: -0.255,
     },
     HalfReaction {
+        equation: "Sn²⁺ + 2e⁻ → Sn",
+        couple: "Sn2+/Sn",
+        electrons: 2,
+        standard_potential: -0.136,
+    },
+    HalfReaction {
+        equation: "Pb²⁺ + 2e⁻ → Pb",
+        couple: "Pb2+/Pb",
+        electrons: 2,
+        standard_potential: -0.126,
+    },
+    HalfReaction {
         equation: "Fe³⁺ + 3e⁻ → Fe",
         couple: "Fe3+/Fe",
         electrons: 3,
         standard_potential: -0.037,
+    },
+    HalfReaction {
+        equation: "2H⁺ + 2e⁻ → H₂",
+        couple: "H+/H2",
+        electrons: 2,
+        standard_potential: 0.000,
     },
     HalfReaction {
         equation: "Cu²⁺ + e⁻ → Cu⁺",
@@ -233,6 +207,12 @@ pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
         standard_potential: 0.337,
     },
     HalfReaction {
+        equation: "Cu²⁺ + 2e⁻ → Cu",
+        couple: "Cu2+/Cu",
+        electrons: 2,
+        standard_potential: 0.342,
+    },
+    HalfReaction {
         equation: "O₂ + 2H₂O + 4e⁻ → 4OH⁻",
         couple: "O2/OH-",
         electrons: 4,
@@ -245,6 +225,12 @@ pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
         standard_potential: 0.521,
     },
     HalfReaction {
+        equation: "I₂ + 2e⁻ → 2I⁻",
+        couple: "I2/I-",
+        electrons: 2,
+        standard_potential: 0.536,
+    },
+    HalfReaction {
         equation: "Fe³⁺ + e⁻ → Fe²⁺",
         couple: "Fe3+/Fe2+",
         electrons: 1,
@@ -255,6 +241,12 @@ pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
         couple: "Hg22+/Hg",
         electrons: 2,
         standard_potential: 0.797,
+    },
+    HalfReaction {
+        equation: "Ag⁺ + e⁻ → Ag",
+        couple: "Ag+/Ag",
+        electrons: 1,
+        standard_potential: 0.7996,
     },
     HalfReaction {
         equation: "Hg²⁺ + 2e⁻ → Hg",
@@ -281,6 +273,12 @@ pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
         standard_potential: 0.957,
     },
     HalfReaction {
+        equation: "Br₂ + 2e⁻ → 2Br⁻",
+        couple: "Br2/Br-",
+        electrons: 2,
+        standard_potential: 1.066,
+    },
+    HalfReaction {
         equation: "O₂ + 4H⁺ + 4e⁻ → 2H₂O",
         couple: "O2/H2O",
         electrons: 4,
@@ -293,10 +291,22 @@ pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
         standard_potential: 1.330,
     },
     HalfReaction {
+        equation: "Cl₂ + 2e⁻ → 2Cl⁻",
+        couple: "Cl2/Cl-",
+        electrons: 2,
+        standard_potential: 1.358,
+    },
+    HalfReaction {
         equation: "PbO₂ + 4H⁺ + 2e⁻ → Pb²⁺ + 2H₂O",
         couple: "PbO2/Pb2+",
         electrons: 2,
         standard_potential: 1.455,
+    },
+    HalfReaction {
+        equation: "Au³⁺ + 3e⁻ → Au",
+        couple: "Au3+/Au",
+        electrons: 3,
+        standard_potential: 1.498,
     },
     HalfReaction {
         equation: "MnO₄⁻ + 8H⁺ + 5e⁻ → Mn²⁺ + 4H₂O",
@@ -331,6 +341,8 @@ pub static STANDARD_POTENTIALS: &[HalfReaction] = &[
 ];
 
 /// Look up a half-reaction by its couple string (e.g., "Cu2+/Cu").
+///
+/// Returns `None` if the couple is not in [`STANDARD_POTENTIALS`].
 #[must_use]
 #[inline]
 pub fn lookup_half_reaction(couple: &str) -> Option<&'static HalfReaction> {
@@ -348,9 +360,13 @@ pub fn lookup_half_reaction(couple: &str) -> Option<&'static HalfReaction> {
 /// - `temperature_k`: temperature in Kelvin
 /// - `reaction_quotient`: Q (ratio of product activities to reactant activities)
 ///
+/// Returns E in volts.
+///
 /// # Errors
 ///
-/// Returns error if temperature, electron count, or reaction quotient is invalid.
+/// Returns [`KimiyaError::InvalidTemperature`] if the temperature is not
+/// positive and finite, and [`KimiyaError::InvalidInput`] if the electron
+/// count is zero, Q is not positive and finite, or E° is not finite.
 #[inline]
 pub fn nernst_potential(
     standard_potential: f64,
@@ -358,7 +374,7 @@ pub fn nernst_potential(
     temperature_k: f64,
     reaction_quotient: f64,
 ) -> Result<f64> {
-    if temperature_k <= 0.0 {
+    if !is_positive(temperature_k) {
         return Err(KimiyaError::InvalidTemperature(
             "temperature must be positive".into(),
         ));
@@ -368,21 +384,30 @@ pub fn nernst_potential(
             "electron count must be at least 1".into(),
         ));
     }
-    if reaction_quotient <= 0.0 {
+    if !is_positive(reaction_quotient) {
         return Err(KimiyaError::InvalidInput(
             "reaction quotient must be positive".into(),
+        ));
+    }
+    if !is_finite(standard_potential) {
+        return Err(KimiyaError::InvalidInput(
+            "standard potential must be finite".into(),
         ));
     }
     Ok(standard_potential
         - (GAS_CONSTANT * temperature_k / (n_electrons as f64 * FARADAY)) * reaction_quotient.ln())
 }
 
-/// Simplified Nernst equation at 25°C (298.15 K) using log₁₀:
-/// E = E° − (0.05916 / n) log₁₀(Q)
+/// Nernst equation at 25°C (298.15 K), equivalent to
+/// E = E° − (0.05916 / n) log₁₀(Q).
+///
+/// Evaluated as [`nernst_potential`] at T = 298.15 K, so the 0.05916 V
+/// factor is not rounded. Returns E in volts.
 ///
 /// # Errors
 ///
-/// Returns error if electron count or reaction quotient is invalid.
+/// Returns [`KimiyaError::InvalidInput`] if the electron count is zero, Q is
+/// not positive and finite, or E° is not finite.
 #[inline]
 pub fn nernst_potential_25c(
     standard_potential: f64,
@@ -396,7 +421,8 @@ pub fn nernst_potential_25c(
 
 /// Standard cell potential: E°_cell = E°_cathode − E°_anode.
 ///
-/// Both potentials are standard reduction potentials.
+/// Both potentials are standard reduction potentials in volts; returns volts.
+/// Non-finite input propagates to the result.
 #[must_use]
 #[inline]
 pub fn standard_cell_potential(e_cathode: f64, e_anode: f64) -> f64 {
@@ -406,6 +432,7 @@ pub fn standard_cell_potential(e_cathode: f64, e_anode: f64) -> f64 {
 /// Standard cell potential from couple strings.
 ///
 /// `cathode_couple` is reduced (gains electrons), `anode_couple` is oxidized.
+/// Returns E°_cell in volts.
 ///
 /// # Errors
 ///
@@ -423,7 +450,9 @@ pub fn cell_potential_from_couples(cathode_couple: &str, anode_couple: &str) -> 
     ))
 }
 
-/// Check if a galvanic cell is spontaneous (E°_cell > 0).
+/// Check if a galvanic cell is spontaneous (E°_cell > 0, in volts).
+///
+/// NaN is not spontaneous.
 #[must_use]
 #[inline]
 pub fn is_spontaneous_cell(e_cell: f64) -> bool {
@@ -432,16 +461,25 @@ pub fn is_spontaneous_cell(e_cell: f64) -> bool {
 
 /// Gibbs free energy of an electrochemical cell: ΔG = −nFE
 ///
+/// - `n_electrons`: electrons transferred per reaction
+/// - `cell_potential`: E_cell in volts
+///
 /// Returns energy in Joules per mole of reaction.
 ///
 /// # Errors
 ///
-/// Returns error if electron count is zero.
+/// Returns [`KimiyaError::InvalidInput`] if the electron count is zero or the
+/// cell potential is not finite.
 #[inline]
 pub fn cell_gibbs_energy(n_electrons: u8, cell_potential: f64) -> Result<f64> {
     if n_electrons == 0 {
         return Err(KimiyaError::InvalidInput(
             "electron count must be at least 1".into(),
+        ));
+    }
+    if !is_finite(cell_potential) {
+        return Err(KimiyaError::InvalidInput(
+            "cell potential must be finite".into(),
         ));
     }
     Ok(-(n_electrons as f64) * FARADAY * cell_potential)
@@ -455,11 +493,12 @@ pub fn cell_gibbs_energy(n_electrons: u8, cell_potential: f64) -> Result<f64> {
 /// - `molar_mass_g`: molar mass of substance (g/mol)
 /// - `n_electrons`: electrons per ion (valence)
 ///
-/// Returns mass in grams.
+/// Returns mass in grams (negative for a negative charge, i.e. dissolution).
 ///
 /// # Errors
 ///
-/// Returns error if electron count is zero.
+/// Returns [`KimiyaError::InvalidInput`] if the electron count is zero, the
+/// molar mass is not positive and finite, or the charge is not finite.
 #[inline]
 pub fn faraday_mass_deposited(charge_c: f64, molar_mass_g: f64, n_electrons: u8) -> Result<f64> {
     if n_electrons == 0 {
@@ -467,16 +506,29 @@ pub fn faraday_mass_deposited(charge_c: f64, molar_mass_g: f64, n_electrons: u8)
             "electron count must be at least 1".into(),
         ));
     }
+    if !is_positive(molar_mass_g) {
+        return Err(KimiyaError::InvalidInput(
+            "molar mass must be positive".into(),
+        ));
+    }
+    if !is_finite(charge_c) {
+        return Err(KimiyaError::InvalidInput("charge must be finite".into()));
+    }
     Ok(charge_c * molar_mass_g / (n_electrons as f64 * FARADAY))
 }
 
 /// Charge required to deposit a given mass: Q = (m × n × F) / M
 ///
+/// - `mass_g`: mass to deposit (g)
+/// - `molar_mass_g`: molar mass of substance (g/mol)
+/// - `n_electrons`: electrons per ion (valence)
+///
 /// Returns charge in Coulombs.
 ///
 /// # Errors
 ///
-/// Returns error if molar mass is not positive or electron count is zero.
+/// Returns [`KimiyaError::InvalidInput`] if the molar mass is not positive and
+/// finite, the electron count is zero, or the mass is not finite.
 #[inline]
 pub fn faraday_charge_required(mass_g: f64, molar_mass_g: f64, n_electrons: u8) -> Result<f64> {
     if n_electrons == 0 {
@@ -484,10 +536,13 @@ pub fn faraday_charge_required(mass_g: f64, molar_mass_g: f64, n_electrons: u8) 
             "electron count must be at least 1".into(),
         ));
     }
-    if molar_mass_g <= 0.0 {
+    if !is_positive(molar_mass_g) {
         return Err(KimiyaError::InvalidInput(
             "molar mass must be positive".into(),
         ));
+    }
+    if !is_finite(mass_g) {
+        return Err(KimiyaError::InvalidInput("mass must be finite".into()));
     }
     Ok(mass_g * n_electrons as f64 * FARADAY / molar_mass_g)
 }
@@ -495,12 +550,13 @@ pub fn faraday_charge_required(mass_g: f64, molar_mass_g: f64, n_electrons: u8) 
 /// Faraday's second law: mass ratio of substances deposited by the same charge
 /// equals the ratio of their equivalent weights (M/n).
 ///
-/// Returns the mass of substance B deposited when `mass_a_g` of substance A
-/// is deposited by the same charge.
+/// Returns the mass of substance B (g) deposited when `mass_a_g` grams of
+/// substance A is deposited by the same charge. Molar masses are in g/mol.
 ///
 /// # Errors
 ///
-/// Returns error if electron counts are zero or molar mass A is not positive.
+/// Returns [`KimiyaError::InvalidInput`] if an electron count is zero, either
+/// molar mass is not positive and finite, or `mass_a_g` is not finite.
 #[inline]
 pub fn faraday_mass_ratio(
     mass_a_g: f64,
@@ -514,15 +570,18 @@ pub fn faraday_mass_ratio(
             "electron counts must be at least 1".into(),
         ));
     }
-    if molar_mass_a <= 0.0 {
+    if !is_positive(molar_mass_a) {
         return Err(KimiyaError::InvalidInput(
             "molar mass A must be positive".into(),
         ));
     }
-    if molar_mass_b <= 0.0 {
+    if !is_positive(molar_mass_b) {
         return Err(KimiyaError::InvalidInput(
             "molar mass B must be positive".into(),
         ));
+    }
+    if !is_finite(mass_a_g) {
+        return Err(KimiyaError::InvalidInput("mass A must be finite".into()));
     }
     let equiv_a = molar_mass_a / n_electrons_a as f64;
     let equiv_b = molar_mass_b / n_electrons_b as f64;
@@ -531,14 +590,18 @@ pub fn faraday_mass_ratio(
 
 // ── Utility ──────────────────────────────────────────────────────────
 
-/// Convert charge to moles of electrons: n_e = Q / F
+/// Convert charge (C) to moles of electrons: n_e = Q / F
+///
+/// Non-finite input propagates to the result.
 #[must_use]
 #[inline]
 pub fn charge_to_moles_electrons(charge_c: f64) -> f64 {
     charge_c / FARADAY
 }
 
-/// Convert moles of electrons to charge: Q = n_e × F
+/// Convert moles of electrons to charge (C): Q = n_e × F
+///
+/// Non-finite input propagates to the result.
 #[must_use]
 #[inline]
 pub fn moles_electrons_to_charge(moles: f64) -> f64 {
@@ -553,11 +616,12 @@ mod tests {
 
     #[test]
     fn faraday_constant_value() {
-        // F = N_A × e
+        // F = N_A × e exactly in the 2019 SI (the old 96 485.332 12 was off by
+        // 3.4e-11 relative).
         let computed = crate::element::AVOGADRO * ELEMENTARY_CHARGE;
         assert!(
-            (computed - FARADAY).abs() / FARADAY < 1e-6,
-            "F should equal N_A × e, got {computed}"
+            (computed - FARADAY).abs() / FARADAY < 1e-12,
+            "F should equal N_A × e, got {computed} vs {FARADAY}"
         );
     }
 
@@ -579,6 +643,40 @@ mod tests {
     #[test]
     fn lookup_nonexistent() {
         assert!(lookup_half_reaction("Xx/Xx").is_none());
+    }
+
+    #[test]
+    fn potentials_sorted_ascending() {
+        for pair in STANDARD_POTENTIALS.windows(2) {
+            assert!(
+                pair[0].standard_potential <= pair[1].standard_potential,
+                "{} ({} V) listed before {} ({} V)",
+                pair[0].couple,
+                pair[0].standard_potential,
+                pair[1].couple,
+                pair[1].standard_potential
+            );
+        }
+    }
+
+    #[test]
+    fn couples_are_unique() {
+        // lookup_half_reaction finds the first match, so duplicates would
+        // make lookups depend on table order.
+        for (i, a) in STANDARD_POTENTIALS.iter().enumerate() {
+            for b in &STANDARD_POTENTIALS[i + 1..] {
+                assert_ne!(a.couple, b.couple, "duplicate couple");
+            }
+        }
+    }
+
+    #[test]
+    fn potassium_and_vanadium_match_crc() {
+        // CRC Handbook, Electrochemical Series: K⁺/K −2.931 V, V²⁺/V −1.175 V
+        let k = lookup_half_reaction("K+/K").unwrap();
+        assert!((k.standard_potential - (-2.931)).abs() < 1e-12);
+        let v = lookup_half_reaction("V2+/V").unwrap();
+        assert!((v.standard_potential - (-1.175)).abs() < 1e-12);
     }
 
     #[test]
@@ -673,7 +771,7 @@ mod tests {
         let dg = cell_gibbs_energy(2, 1.104).unwrap();
         assert!(dg < 0.0, "spontaneous cell should have negative ΔG");
         assert!(
-            (dg - (-213_038.0)).abs() < 100.0,
+            (dg - (-213_039.613_328_268_52)).abs() < 1e-8,
             "ΔG should be ~-213 kJ/mol, got {dg}"
         );
     }
@@ -690,7 +788,7 @@ mod tests {
         // 1 Faraday of charge deposits M/(n) = 63.546/2 = 31.773 g of Cu
         let mass = faraday_mass_deposited(FARADAY, 63.546, 2).unwrap();
         assert!(
-            (mass - 31.773).abs() < 0.01,
+            (mass - 31.773).abs() < 1e-12,
             "1F should deposit ~31.77g Cu, got {mass}"
         );
     }
@@ -701,7 +799,7 @@ mod tests {
         let q = faraday_charge_required(mass, 63.546, 2).unwrap();
         let back = faraday_mass_deposited(q, 63.546, 2).unwrap();
         assert!(
-            (back - mass).abs() < 0.001,
+            (back - mass).abs() < 1e-12,
             "roundtrip failed: {mass} → {q}C → {back}g"
         );
     }
@@ -720,7 +818,7 @@ mod tests {
         // If 31.773g Cu deposited, should get 107.868g Ag
         let mass_ag = faraday_mass_ratio(31.773, 63.546, 2, 107.868, 1).unwrap();
         assert!(
-            (mass_ag - 107.868).abs() < 0.1,
+            (mass_ag - 107.868).abs() < 1e-12,
             "should deposit ~107.87g Ag, got {mass_ag}"
         );
     }
@@ -751,7 +849,7 @@ mod tests {
         // E = 0.342 − (0.025693/2) × ln(0.01) = 0.342 − 0.012847 × (-4.6052) = 0.342 + 0.05916 ≈ 0.4012
         let e = nernst_potential_25c(0.342, 2, 0.01).unwrap();
         assert!(
-            (e - 0.40116).abs() < 0.001,
+            (e - 0.401159349683692).abs() < 1e-14,
             "Cu²⁺/Cu at Q=0.01 should be ~0.401V, got {e}"
         );
     }
@@ -771,6 +869,36 @@ mod tests {
     #[test]
     fn faraday_mass_ratio_zero_molar_mass_b_is_error() {
         assert!(faraday_mass_ratio(10.0, 63.546, 2, 0.0, 1).is_err());
+    }
+
+    #[test]
+    fn faraday_mass_deposited_validates_molar_mass() {
+        // Siblings already rejected these; mass_deposited returned Ok(0),
+        // Ok(negative) and Ok(NaN).
+        assert!(faraday_mass_deposited(FARADAY, 0.0, 2).is_err());
+        assert!(faraday_mass_deposited(FARADAY, -63.546, 2).is_err());
+        assert!(faraday_mass_deposited(FARADAY, f64::NAN, 2).is_err());
+        assert!(faraday_mass_deposited(FARADAY, f64::INFINITY, 2).is_err());
+    }
+
+    #[test]
+    fn non_finite_inputs_are_rejected() {
+        let nan = f64::NAN;
+        let inf = f64::INFINITY;
+        assert!(nernst_potential(0.342, 2, nan, 1.0).is_err());
+        assert!(nernst_potential(0.342, 2, inf, 1.0).is_err());
+        assert!(nernst_potential(0.342, 2, 298.15, nan).is_err());
+        assert!(nernst_potential(0.342, 2, 298.15, inf).is_err());
+        assert!(nernst_potential(nan, 2, 298.15, 1.0).is_err());
+        assert!(nernst_potential_25c(0.342, 2, nan).is_err());
+        assert!(cell_gibbs_energy(2, nan).is_err());
+        assert!(cell_gibbs_energy(2, inf).is_err());
+        assert!(faraday_mass_deposited(nan, 63.546, 2).is_err());
+        assert!(faraday_charge_required(nan, 63.546, 2).is_err());
+        assert!(faraday_charge_required(10.0, nan, 2).is_err());
+        assert!(faraday_mass_ratio(nan, 63.546, 2, 107.868, 1).is_err());
+        assert!(faraday_mass_ratio(10.0, nan, 2, 107.868, 1).is_err());
+        assert!(faraday_mass_ratio(10.0, 63.546, 2, inf, 1).is_err());
     }
 
     #[test]

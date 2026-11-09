@@ -9,6 +9,8 @@
 //! phase equilibria, nuclear chemistry, reaction dynamics, and data fitting.
 //! Built on [`hisab`] for numerical methods.
 
+#![warn(missing_docs)]
+
 /// Cross-crate bridges — primitive-value conversions from other AGNOS science crates.
 pub mod bridge;
 pub mod electrochemistry;
@@ -34,9 +36,15 @@ pub mod spectroscopy;
 pub mod stoichiometry;
 pub mod thermo;
 pub mod thermochem;
+mod validate;
 
 #[cfg(feature = "logging")]
 pub mod logging;
+
+/// Compiles and runs the README's Rust code blocks as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 pub use electrochemistry::{FARADAY, nernst_potential};
 pub use element::{ELEMENTS, Element, ElementCategory};

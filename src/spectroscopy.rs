@@ -1,20 +1,44 @@
-//! Spectroscopy — Beer-Lambert law, Bohr model, photon energy conversions.
+//! Spectroscopy — Beer-Lambert law, Bohr model, photon energy conversions,
+//! vibrational/rotational levels, isotope patterns and peak detection.
 
 use crate::error::{KimiyaError, Result};
+use crate::validate::{is_finite, is_positive};
 
 // ── Physical constants ───────────────────────────────────────────────
 
-/// Planck's constant (J·s).
+/// Planck's constant h (J·s), exact (SI 2019).
 pub const PLANCK: f64 = 6.62607015e-34;
 
-/// Speed of light in vacuum (m/s).
+/// Speed of light in vacuum c (m/s), exact.
 pub const SPEED_OF_LIGHT: f64 = 299_792_458.0;
 
-/// Rydberg constant (m⁻¹).
+/// Rydberg constant R∞ for infinite nuclear mass (m⁻¹), CODATA 2018.
 pub const RYDBERG: f64 = 1.097_373_156_816_0e7;
 
-/// Rydberg energy (eV) — ionization energy of hydrogen.
+/// Rydberg energy R∞·h·c (eV), CODATA 2018.
+///
+/// This is the Bohr-model ground-state binding energy for an infinitely
+/// heavy nucleus, not hydrogen's ionization energy (13.598 eV, lower because
+/// of the reduced-mass correction).
 pub const RYDBERG_EV: f64 = 13.605693122994;
+
+/// Electron-to-proton mass ratio mₑ/mₚ (dimensionless), CODATA 2018.
+const ELECTRON_PROTON_MASS_RATIO: f64 = 5.446_170_214_87e-4;
+
+/// Rydberg constant for ¹H with the reduced-mass correction,
+/// R_H = R∞ / (1 + mₑ/mₚ) ≈ 10 967 758.34 m⁻¹.
+const RYDBERG_HYDROGEN: f64 = RYDBERG / (1.0 + ELECTRON_PROTON_MASS_RATIO);
+
+/// Peaks below this fraction of the current base peak are discarded after
+/// each convolution step in [`isotope_pattern`].
+const ISOTOPE_PRUNE_REL: f64 = 1e-12;
+
+/// Peaks below this fraction of the base peak are omitted from the
+/// [`isotope_pattern`] result.
+const ISOTOPE_REPORT_REL: f64 = 0.001;
+
+/// Peaks closer than this (u) are merged in [`isotope_pattern`].
+const ISOTOPE_BIN_WIDTH_U: f64 = 0.5;
 
 // ── Beer-Lambert law ─────────────────────────────────────────────────
 
@@ -42,10 +66,10 @@ pub fn transmittance(absorbance: f64) -> f64 {
 ///
 /// # Errors
 ///
-/// Returns error if transmittance is not in (0, 1].
+/// Returns error if transmittance is not in (0, 1] (NaN is rejected).
 #[inline]
 pub fn absorbance_from_transmittance(transmittance: f64) -> Result<f64> {
-    if transmittance <= 0.0 || transmittance > 1.0 {
+    if !is_positive(transmittance) || transmittance > 1.0 {
         return Err(KimiyaError::InvalidInput(
             "transmittance must be in (0, 1]".into(),
         ));
@@ -55,21 +79,27 @@ pub fn absorbance_from_transmittance(transmittance: f64) -> Result<f64> {
 
 /// Concentration from absorbance: c = A / (ε × l)
 ///
+/// - `absorbance`: A (dimensionless)
+/// - `molar_absorptivity`: ε in L/(mol·cm)
+/// - `path_length`: l in cm
+///
+/// Returns concentration in mol/L.
+///
 /// # Errors
 ///
-/// Returns error if molar absorptivity or path length is not positive.
+/// Returns error if molar absorptivity or path length is not positive and finite.
 #[inline]
 pub fn concentration_from_absorbance(
     absorbance: f64,
     molar_absorptivity: f64,
     path_length: f64,
 ) -> Result<f64> {
-    if molar_absorptivity <= 0.0 {
+    if !is_positive(molar_absorptivity) {
         return Err(KimiyaError::InvalidInput(
             "molar absorptivity must be positive".into(),
         ));
     }
-    if path_length <= 0.0 {
+    if !is_positive(path_length) {
         return Err(KimiyaError::InvalidInput(
             "path length must be positive".into(),
         ));
@@ -80,6 +110,8 @@ pub fn concentration_from_absorbance(
 // ── Photon energy/wavelength/frequency ───────────────────────────────
 
 /// Photon energy from frequency: E = hν
+///
+/// `frequency_hz` in Hz; returns energy in J.
 #[must_use]
 #[inline]
 pub fn photon_energy_from_frequency(frequency_hz: f64) -> f64 {
@@ -88,12 +120,14 @@ pub fn photon_energy_from_frequency(frequency_hz: f64) -> f64 {
 
 /// Photon energy from wavelength: E = hc/λ
 ///
+/// `wavelength_m` in m; returns energy in J.
+///
 /// # Errors
 ///
-/// Returns error if wavelength is not positive.
+/// Returns error if wavelength is not positive and finite.
 #[inline]
 pub fn photon_energy_from_wavelength(wavelength_m: f64) -> Result<f64> {
-    if wavelength_m <= 0.0 {
+    if !is_positive(wavelength_m) {
         return Err(KimiyaError::InvalidInput(
             "wavelength must be positive".into(),
         ));
@@ -103,12 +137,14 @@ pub fn photon_energy_from_wavelength(wavelength_m: f64) -> Result<f64> {
 
 /// Wavelength from photon energy: λ = hc/E
 ///
+/// `energy_j` in J; returns wavelength in m.
+///
 /// # Errors
 ///
-/// Returns error if energy is not positive.
+/// Returns error if energy is not positive and finite.
 #[inline]
 pub fn wavelength_from_energy(energy_j: f64) -> Result<f64> {
-    if energy_j <= 0.0 {
+    if !is_positive(energy_j) {
         return Err(KimiyaError::InvalidInput("energy must be positive".into()));
     }
     Ok(PLANCK * SPEED_OF_LIGHT / energy_j)
@@ -116,12 +152,14 @@ pub fn wavelength_from_energy(energy_j: f64) -> Result<f64> {
 
 /// Frequency from wavelength: ν = c/λ
 ///
+/// `wavelength_m` in m; returns frequency in Hz.
+///
 /// # Errors
 ///
-/// Returns error if wavelength is not positive.
+/// Returns error if wavelength is not positive and finite.
 #[inline]
 pub fn frequency_from_wavelength(wavelength_m: f64) -> Result<f64> {
-    if wavelength_m <= 0.0 {
+    if !is_positive(wavelength_m) {
         return Err(KimiyaError::InvalidInput(
             "wavelength must be positive".into(),
         ));
@@ -133,22 +171,24 @@ pub fn frequency_from_wavelength(wavelength_m: f64) -> Result<f64> {
 #[must_use]
 #[inline]
 pub fn joules_to_ev(energy_j: f64) -> f64 {
-    energy_j / 1.602176634e-19
+    energy_j / crate::electrochemistry::ELEMENTARY_CHARGE
 }
 
 /// Convert energy in electron-volts to Joules.
 #[must_use]
 #[inline]
 pub fn ev_to_joules(energy_ev: f64) -> f64 {
-    energy_ev * 1.602176634e-19
+    energy_ev * crate::electrochemistry::ELEMENTARY_CHARGE
 }
 
 // ── Bohr model ───────────────────────────────────────────────────────
 
-/// Bohr model energy level for hydrogen-like atoms: E_n = -13.6 × Z² / n² (eV)
+/// Bohr model energy level for hydrogen-like atoms: E_n = −R∞hc × Z² / n² (eV)
 ///
 /// - `z`: nuclear charge (1 for hydrogen)
 /// - `n`: principal quantum number (≥ 1)
+///
+/// Uses [`RYDBERG_EV`] (13.6057 eV), i.e. assumes an infinitely heavy nucleus.
 ///
 /// # Errors
 ///
@@ -170,28 +210,45 @@ pub fn bohr_energy_level(z: u8, n: u32) -> Result<f64> {
 
 /// Energy of a photon emitted in a transition from n_upper to n_lower.
 ///
-/// Returns positive energy (the photon energy released).
+/// Returns positive energy in eV (the photon energy released), Bohr model
+/// with infinite nuclear mass (see [`bohr_energy_level`]).
 ///
 /// # Errors
 ///
-/// Returns error if n_lower or n_upper is zero.
+/// Returns error if Z, n_lower or n_upper is zero, or n_upper ≤ n_lower.
 #[inline]
 pub fn bohr_transition_energy(z: u8, n_lower: u32, n_upper: u32) -> Result<f64> {
     let e_lower = bohr_energy_level(z, n_lower)?;
     let e_upper = bohr_energy_level(z, n_upper)?;
+    if n_upper <= n_lower {
+        return Err(KimiyaError::InvalidInput(
+            "n_upper must be greater than n_lower".into(),
+        ));
+    }
     Ok(e_upper - e_lower) // upper is less negative, so this is positive for emission
 }
 
 /// Wavelength of a photon from a hydrogen-like transition (Rydberg formula).
 ///
-/// 1/λ = R × Z² × (1/n₁² - 1/n₂²) where n₂ > n₁
+/// 1/λ = R∞ × Z² × (1/n₁² - 1/n₂²) where n₂ > n₁
 ///
-/// Returns wavelength in meters.
+/// Uses [`RYDBERG`] (R∞), i.e. assumes an infinitely heavy nucleus; for ¹H
+/// this gives wavelengths about 0.05 % short (Hα 656.112 nm vs 656.470 nm).
+/// [`SpectralSeries::wavelength`] applies the hydrogen reduced-mass
+/// correction.
+///
+/// Returns wavelength in meters (vacuum).
 ///
 /// # Errors
 ///
 /// Returns error if quantum numbers are invalid or n_upper ≤ n_lower.
 pub fn rydberg_wavelength(z: u8, n_lower: u32, n_upper: u32) -> Result<f64> {
+    rydberg_formula(RYDBERG, z, n_lower, n_upper)
+}
+
+/// Rydberg formula with an explicit Rydberg constant `rydberg` (m⁻¹).
+#[inline]
+fn rydberg_formula(rydberg: f64, z: u8, n_lower: u32, n_upper: u32) -> Result<f64> {
     if z == 0 {
         return Err(KimiyaError::InvalidInput("Z must be positive".into()));
     }
@@ -205,14 +262,14 @@ pub fn rydberg_wavelength(z: u8, n_lower: u32, n_upper: u32) -> Result<f64> {
             "n_upper must be greater than n_lower".into(),
         ));
     }
-    let inv_lambda = RYDBERG
+    let inv_lambda = rydberg
         * (z as f64)
         * (z as f64)
         * (1.0 / (n_lower as f64 * n_lower as f64) - 1.0 / (n_upper as f64 * n_upper as f64));
     Ok(1.0 / inv_lambda)
 }
 
-/// Named hydrogen spectral series.
+/// Named hydrogen (¹H) spectral series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SpectralSeries {
@@ -241,16 +298,29 @@ impl SpectralSeries {
         }
     }
 
-    /// Wavelength of a specific line in this series.
+    /// Vacuum wavelength (m) of a specific line in this ¹H series.
     ///
-    /// `line` is the line number (1 = first line, α; 2 = β; etc.)
+    /// `line` is the line number (1 = first line, α; 2 = β; etc.), so
+    /// n_upper = n_lower + line.
+    ///
+    /// Uses the reduced-mass-corrected hydrogen Rydberg constant
+    /// R_H = R∞/(1 + mₑ/mₚ) = 10 967 758.34 m⁻¹ (Bohr model, no fine
+    /// structure): Lyα 121.568 nm, Hα 656.470 nm.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if `line` is zero or n_lower + line overflows `u32`.
     pub fn wavelength(self, line: u32) -> Result<f64> {
         if line == 0 {
             return Err(KimiyaError::InvalidInput(
                 "line number must be at least 1".into(),
             ));
         }
-        rydberg_wavelength(1, self.n_lower(), self.n_lower() + line)
+        let n_upper = self
+            .n_lower()
+            .checked_add(line)
+            .ok_or_else(|| KimiyaError::InvalidInput("line number too large".into()))?;
+        rydberg_formula(RYDBERG_HYDROGEN, 1, self.n_lower(), n_upper)
     }
 }
 
@@ -260,10 +330,10 @@ impl SpectralSeries {
 ///
 /// # Errors
 ///
-/// Returns error if wavelength is not positive.
+/// Returns error if wavelength is not positive and finite.
 #[inline]
 pub fn wavenumber_from_wavelength(wavelength_m: f64) -> Result<f64> {
-    if wavelength_m <= 0.0 {
+    if !is_positive(wavelength_m) {
         return Err(KimiyaError::InvalidInput(
             "wavelength must be positive".into(),
         ));
@@ -275,10 +345,10 @@ pub fn wavenumber_from_wavelength(wavelength_m: f64) -> Result<f64> {
 ///
 /// # Errors
 ///
-/// Returns error if wavenumber is not positive.
+/// Returns error if wavenumber is not positive and finite.
 #[inline]
 pub fn wavelength_from_wavenumber(wavenumber_cm_inv: f64) -> Result<f64> {
-    if wavenumber_cm_inv <= 0.0 {
+    if !is_positive(wavenumber_cm_inv) {
         return Err(KimiyaError::InvalidInput(
             "wavenumber must be positive".into(),
         ));
@@ -294,10 +364,10 @@ pub fn wavelength_from_wavenumber(wavenumber_cm_inv: f64) -> Result<f64> {
 ///
 /// # Errors
 ///
-/// Returns error if either mass is not positive.
+/// Returns error if either mass is not positive and finite.
 #[inline]
 pub fn reduced_mass(m1: f64, m2: f64) -> Result<f64> {
-    if m1 <= 0.0 || m2 <= 0.0 {
+    if !is_positive(m1) || !is_positive(m2) {
         return Err(KimiyaError::InvalidInput("masses must be positive".into()));
     }
     Ok(m1 * m2 / (m1 + m2))
@@ -326,15 +396,15 @@ pub fn harmonic_oscillator_energy(n: u32, angular_frequency: f64) -> f64 {
 ///
 /// # Errors
 ///
-/// Returns error if parameters are not positive.
+/// Returns error if parameters are not positive and finite.
 #[inline]
 pub fn vibrational_frequency(force_constant: f64, reduced_mass_kg: f64) -> Result<f64> {
-    if force_constant <= 0.0 {
+    if !is_positive(force_constant) {
         return Err(KimiyaError::InvalidInput(
             "force constant must be positive".into(),
         ));
     }
-    if reduced_mass_kg <= 0.0 {
+    if !is_positive(reduced_mass_kg) {
         return Err(KimiyaError::InvalidInput(
             "reduced mass must be positive".into(),
         ));
@@ -367,10 +437,10 @@ pub fn rigid_rotor_energy(j: u32, rotational_constant_hz: f64) -> f64 {
 ///
 /// # Errors
 ///
-/// Returns error if moment of inertia is not positive.
+/// Returns error if moment of inertia is not positive and finite.
 #[inline]
 pub fn rotational_constant(moment_of_inertia: f64) -> Result<f64> {
-    if moment_of_inertia <= 0.0 {
+    if !is_positive(moment_of_inertia) {
         return Err(KimiyaError::InvalidInput(
             "moment of inertia must be positive".into(),
         ));
@@ -394,37 +464,47 @@ pub fn diatomic_moment_of_inertia(reduced_mass_kg: f64, bond_length_m: f64) -> f
 
 /// Natural abundance data for common isotopes.
 ///
-/// Returns (mass, abundance) pairs for a given element.
-/// Only elements with significant isotope patterns are included.
+/// Returns (isotope mass in u, abundance as a mole fraction) pairs for a
+/// given element; abundances are IUPAC 2009 representative isotopic
+/// compositions. Only elements with significant isotope patterns are
+/// included; all others return an empty slice.
 #[must_use]
 pub fn isotope_abundances(atomic_number: u8) -> &'static [(f64, f64)] {
     match atomic_number {
-        1 => &[(1.00783, 0.99985), (2.01410, 0.00015)], // H, D
-        6 => &[(12.0, 0.9893), (13.00335, 0.0107)],     // 12C, 13C
-        7 => &[(14.00307, 0.99636), (15.00011, 0.00364)], // 14N, 15N
+        1 => &[(1.00783, 0.999_885), (2.01410, 0.000_115)], // H, D (IUPAC 2009)
+        6 => &[(12.0, 0.9893), (13.00335, 0.0107)],         // 12C, 13C
+        7 => &[(14.00307, 0.99636), (15.00011, 0.00364)],   // 14N, 15N
         8 => &[
             (15.99491, 0.99757),
             (16.99913, 0.00038),
             (17.99916, 0.00205),
         ], // 16O, 17O, 18O
         16 => &[(31.97207, 0.9499), (32.97146, 0.0075), (33.96787, 0.0425)], // 32S, 33S, 34S
-        17 => &[(34.96885, 0.7576), (36.96590, 0.2424)], // 35Cl, 37Cl
-        35 => &[(78.91834, 0.5069), (80.91629, 0.4931)], // 79Br, 81Br
+        17 => &[(34.96885, 0.7576), (36.96590, 0.2424)],    // 35Cl, 37Cl
+        35 => &[(78.91834, 0.5069), (80.91629, 0.4931)],    // 79Br, 81Br
         _ => &[],
     }
 }
 
-/// Compute isotope pattern for a molecule.
+/// Compute the isotope pattern (mass spectrum envelope) of a molecule.
 ///
 /// Takes a list of (atomic_number, count) pairs and returns
-/// (relative_mass, relative_intensity) peaks.
+/// (mass in u, relative intensity) peaks sorted by mass.
 ///
-/// Uses the polynomial expansion method for small molecules.
-/// Intensities are normalized to the base peak (most abundant = 1.0).
+/// The isotope distribution is convolved atom by atom; peaks closer than
+/// 0.5 u are merged (intensity-weighted mean mass) and intermediate peaks
+/// below 10⁻¹² of the base peak are discarded, which keeps large molecules
+/// fast and free of underflow. Intensities are normalized to the base peak
+/// (most abundant = 1.0), and peaks below 0.1 % of it are omitted.
+///
+/// Elements without data in [`isotope_abundances`] contribute a single peak
+/// at their *standard atomic weight* (not their monoisotopic mass) — a known
+/// limitation: their own isotopic structure is ignored.
 ///
 /// # Errors
 ///
-/// Returns error if the molecule is empty.
+/// Returns [`KimiyaError::InvalidInput`] if the molecule is empty, or
+/// [`KimiyaError::InvalidElement`] for an unknown atomic number (0 or > 118).
 pub fn isotope_pattern(atoms: &[(u8, u32)]) -> Result<Vec<(f64, f64)>> {
     if atoms.is_empty() {
         return Err(KimiyaError::InvalidInput("need at least one atom".into()));
@@ -432,56 +512,61 @@ pub fn isotope_pattern(atoms: &[(u8, u32)]) -> Result<Vec<(f64, f64)>> {
 
     // Start with a single peak at mass=0, intensity=1
     let mut pattern: Vec<(f64, f64)> = vec![(0.0, 1.0)];
+    let mut scratch: Vec<(f64, f64)> = Vec::new();
 
     for &(z, count) in atoms {
         let abundances = isotope_abundances(z);
         if abundances.is_empty() {
-            // No isotope data — use monoisotopic mass from element table
-            if let Some(elem) = crate::element::lookup_by_number(z) {
-                let mono_mass = elem.atomic_mass;
-                for _ in 0..count {
-                    pattern = pattern.iter().map(|&(m, i)| (m + mono_mass, i)).collect();
-                }
+            // No isotope data — shift every peak by count × standard atomic weight.
+            let elem = crate::element::lookup_by_number(z)
+                .ok_or_else(|| KimiyaError::InvalidElement(format!("unknown atomic number {z}")))?;
+            let shift = f64::from(count) * elem.atomic_mass;
+            for peak in &mut pattern {
+                peak.0 += shift;
             }
             continue;
         }
 
         // Convolve pattern with this element's isotope distribution, `count` times
         for _ in 0..count {
-            let mut new_pattern: Vec<(f64, f64)> = Vec::new();
+            scratch.clear();
             for &(m1, i1) in &pattern {
                 for &(m2, i2) in abundances {
-                    new_pattern.push((m1 + m2, i1 * i2));
+                    scratch.push((m1 + m2, i1 * i2));
                 }
             }
-            // Bin peaks within 0.5 Da
-            new_pattern.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-            let mut binned: Vec<(f64, f64)> = Vec::new();
-            for (m, i) in new_pattern {
-                if let Some(last) = binned.last_mut()
-                    && (m - last.0).abs() < 0.5
+            scratch.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+            // Bin peaks within 0.5 u
+            pattern.clear();
+            for &(m, i) in &scratch {
+                if let Some(last) = pattern.last_mut()
+                    && (m - last.0).abs() < ISOTOPE_BIN_WIDTH_U
                 {
                     let total = last.1 + i;
-                    last.0 = (last.0 * last.1 + m * i) / total;
+                    if total > 0.0 {
+                        last.0 = (last.0 * last.1 + m * i) / total;
+                    }
                     last.1 = total;
                     continue;
                 }
-                binned.push((m, i));
+                pattern.push((m, i));
             }
-            pattern = binned;
+
+            // Renormalize to the base peak and prune the negligible tail, so
+            // intensities never underflow and the peak count stays bounded.
+            let max_intensity = pattern.iter().fold(0.0_f64, |acc, p| acc.max(p.1));
+            if max_intensity > 0.0 {
+                for peak in &mut pattern {
+                    peak.1 /= max_intensity;
+                }
+            }
+            pattern.retain(|p| p.1 >= ISOTOPE_PRUNE_REL);
         }
     }
 
-    // Normalize to base peak
-    let max_intensity = pattern.iter().map(|(_, i)| *i).fold(0.0_f64, f64::max);
-    if max_intensity > 0.0 {
-        for peak in &mut pattern {
-            peak.1 /= max_intensity;
-        }
-    }
-
-    // Filter out very small peaks
-    pattern.retain(|(_, i)| *i > 0.001);
+    // Filter out very small peaks (intensities are already relative to the base peak)
+    pattern.retain(|(_, i)| *i > ISOTOPE_REPORT_REL);
 
     Ok(pattern)
 }
@@ -514,26 +599,38 @@ pub fn fft_spectrum(signal: &[f64]) -> Result<Vec<f64>> {
     Ok(data.iter().take(n / 2 + 1).map(|c| c.abs()).collect())
 }
 
-/// Simple peak detection: find local maxima above a threshold.
+/// Simple peak detection: find strict local maxima above a threshold.
 ///
 /// - `data`: spectrum values
-/// - `threshold`: minimum intensity for a peak (fraction of max, 0–1)
+/// - `threshold`: minimum peak height as a fraction (0–1) of the data range;
+///   a peak must exceed min + threshold × (max − min), where min and max are
+///   taken over the finite values
 ///
-/// Returns indices of detected peaks.
+/// Returns indices of detected peaks (end points are never peaks). Returns
+/// an empty `Vec` if `data` has fewer than 3 points, has no finite values,
+/// or `threshold` is not in \[0, 1\] (including NaN).
 #[must_use]
 pub fn find_peaks(data: &[f64], threshold: f64) -> Vec<usize> {
-    if data.len() < 3 {
+    if data.len() < 3 || !(0.0..=1.0).contains(&threshold) {
         return Vec::new();
     }
-    let max_val = data.iter().cloned().fold(0.0_f64, f64::max);
-    let abs_threshold = threshold * max_val;
-    let mut peaks = Vec::new();
-    for i in 1..data.len() - 1 {
-        if data[i] > data[i - 1] && data[i] > data[i + 1] && data[i] > abs_threshold {
-            peaks.push(i);
-        }
+    let (min_val, max_val) = data
+        .iter()
+        .copied()
+        .filter(|v| is_finite(*v))
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v), hi.max(v))
+        });
+    if min_val > max_val {
+        return Vec::new(); // no finite values
     }
-    peaks
+    // Interpolate without forming (max − min), which can overflow.
+    let abs_threshold = min_val * (1.0 - threshold) + max_val * threshold;
+    data.windows(3)
+        .enumerate()
+        .filter(|(_, w)| w[1] > w[0] && w[1] > w[2] && w[1] > abs_threshold)
+        .map(|(i, _)| i + 1)
+        .collect()
 }
 
 #[cfg(test)]
@@ -585,6 +682,14 @@ mod tests {
     fn concentration_from_absorbance_basic() {
         let c = concentration_from_absorbance(1.0, 100.0, 1.0).unwrap();
         assert!((c - 0.01).abs() < 1e-10);
+    }
+
+    #[test]
+    fn beer_lambert_nan_is_error() {
+        assert!(absorbance_from_transmittance(f64::NAN).is_err());
+        assert!(concentration_from_absorbance(1.0, f64::NAN, 1.0).is_err());
+        assert!(concentration_from_absorbance(1.0, 100.0, f64::NAN).is_err());
+        assert!(concentration_from_absorbance(1.0, f64::INFINITY, 1.0).is_err());
     }
 
     // ── Photon conversions ───────────────────────────────────────────
@@ -639,6 +744,17 @@ mod tests {
         assert!(wavelength_from_energy(0.0).is_err());
     }
 
+    #[test]
+    fn photon_nan_inf_is_error() {
+        assert!(photon_energy_from_wavelength(f64::NAN).is_err());
+        assert!(photon_energy_from_wavelength(f64::INFINITY).is_err());
+        assert!(wavelength_from_energy(f64::NAN).is_err());
+        assert!(frequency_from_wavelength(f64::NAN).is_err());
+        assert!(wavenumber_from_wavelength(f64::NAN).is_err());
+        assert!(wavelength_from_wavenumber(f64::NAN).is_err());
+        assert!(wavelength_from_wavenumber(f64::INFINITY).is_err());
+    }
+
     // ── Bohr model ───────────────────────────────────────────────────
 
     #[test]
@@ -681,23 +797,23 @@ mod tests {
 
     #[test]
     fn hydrogen_lyman_alpha() {
-        // Lyman-α: n=2→1, λ ≈ 121.6 nm
+        // Lyman-α with R∞ (infinite nuclear mass): 4/(3R∞) = 121.502 nm
         let lambda = rydberg_wavelength(1, 1, 2).unwrap();
         let lambda_nm = lambda * 1e9;
         assert!(
-            (lambda_nm - 121.6).abs() < 0.5,
-            "Lyman-α should be ~121.6 nm, got {lambda_nm}"
+            (lambda_nm - 121.502).abs() < 0.01,
+            "R∞ Lyman-α should be 121.502 nm, got {lambda_nm}"
         );
     }
 
     #[test]
     fn hydrogen_balmer_alpha() {
-        // Balmer-α (Hα): n=3→2, λ ≈ 656.3 nm
+        // Balmer-α with R∞ (infinite nuclear mass): 36/(5R∞) = 656.112 nm
         let lambda = rydberg_wavelength(1, 2, 3).unwrap();
         let lambda_nm = lambda * 1e9;
         assert!(
-            (lambda_nm - 656.3).abs() < 0.5,
-            "Hα should be ~656.3 nm, got {lambda_nm}"
+            (lambda_nm - 656.112).abs() < 0.01,
+            "R∞ Hα should be 656.112 nm, got {lambda_nm}"
         );
     }
 
@@ -715,25 +831,62 @@ mod tests {
         assert!(e > 0.0);
     }
 
+    #[test]
+    fn transition_energy_requires_upper_above_lower() {
+        // Used to return a negative (or zero) "emitted" energy.
+        assert!(bohr_transition_energy(1, 3, 1).is_err());
+        assert!(bohr_transition_energy(1, 2, 2).is_err());
+        assert!(bohr_transition_energy(1, 0, 2).is_err());
+    }
+
     // ── Spectral series ──────────────────────────────────────────────
 
     #[test]
     fn lyman_alpha_from_series() {
+        // ¹H with R_H = R∞/(1 + mₑ/mₚ): 4/(3R_H) = 121.568 nm (vacuum)
         let lambda = SpectralSeries::Lyman.wavelength(1).unwrap();
         let lambda_nm = lambda * 1e9;
-        assert!((lambda_nm - 121.6).abs() < 0.5);
+        assert!(
+            (lambda_nm - 121.568).abs() < 0.01,
+            "Lyα should be 121.568 nm, got {lambda_nm}"
+        );
     }
 
     #[test]
     fn balmer_alpha_from_series() {
+        // ¹H with R_H: 36/(5R_H) = 656.470 nm (vacuum)
         let lambda = SpectralSeries::Balmer.wavelength(1).unwrap();
         let lambda_nm = lambda * 1e9;
-        assert!((lambda_nm - 656.3).abs() < 0.5);
+        assert!(
+            (lambda_nm - 656.470).abs() < 0.01,
+            "Hα should be 656.470 nm, got {lambda_nm}"
+        );
+    }
+
+    #[test]
+    fn balmer_beta_and_paschen_alpha_from_series() {
+        let hb = SpectralSeries::Balmer.wavelength(2).unwrap() * 1e9;
+        assert!((hb - 486.274).abs() < 0.01, "Hβ: {hb}");
+        let pa = SpectralSeries::Paschen.wavelength(1).unwrap() * 1e9;
+        assert!((pa - 1875.627).abs() < 0.01, "Paα: {pa}");
+    }
+
+    #[test]
+    fn rydberg_hydrogen_value() {
+        // R_H = 10 967 758.34 m⁻¹
+        assert!((RYDBERG_HYDROGEN - 10_967_758.34).abs() < 0.01);
     }
 
     #[test]
     fn series_zero_line_is_error() {
         assert!(SpectralSeries::Lyman.wavelength(0).is_err());
+    }
+
+    #[test]
+    fn series_line_overflow_is_error() {
+        // n_lower + line used to overflow u32 (panic in debug builds).
+        assert!(SpectralSeries::Pfund.wavelength(u32::MAX).is_err());
+        assert!(SpectralSeries::Lyman.wavelength(u32::MAX - 1).is_ok());
     }
 
     #[test]
@@ -770,6 +923,15 @@ mod tests {
     fn reduced_mass_equal_masses() {
         let mu = reduced_mass(1.0, 1.0).unwrap();
         assert!((mu - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn oscillator_rotor_nan_is_error() {
+        assert!(reduced_mass(f64::NAN, 1.0).is_err());
+        assert!(reduced_mass(1.0, f64::INFINITY).is_err());
+        assert!(vibrational_frequency(f64::NAN, 1.0).is_err());
+        assert!(vibrational_frequency(1.0, f64::NAN).is_err());
+        assert!(rotational_constant(f64::NAN).is_err());
     }
 
     #[test]
@@ -848,21 +1010,91 @@ mod tests {
         // Base peak should be near 16
         assert!((pattern[0].0 - 16.0).abs() < 0.1);
         assert!((pattern[0].1 - 1.0).abs() < f64::EPSILON); // normalized to 1
-        // M+1 peak should exist (from 13C)
-        assert!(pattern.len() >= 2);
+        // M+1 / M = 0.0107/0.9893 + 4 × 0.000115/0.999885 = 0.011276 (IUPAC 2009)
+        assert_eq!(pattern.len(), 2);
+        assert!(
+            (pattern[1].1 - 0.011_276).abs() < 1e-6,
+            "M+1 = {}",
+            pattern[1].1
+        );
+    }
+
+    #[test]
+    fn hydrogen_abundances_iupac_2009() {
+        let h = isotope_abundances(1);
+        assert_eq!(h, &[(1.00783, 0.999_885), (2.01410, 0.000_115)]);
+        for z in [1, 6, 7, 8, 17, 35] {
+            let total: f64 = isotope_abundances(z).iter().map(|(_, a)| a).sum();
+            assert!((total - 1.0).abs() < 1e-9, "Z={z}: Σ = {total}");
+        }
     }
 
     #[test]
     fn isotope_pattern_chlorine_doublet() {
-        // Cl₂: characteristic 3:1 pattern from 35Cl/37Cl
+        // Cl₂: M : M+2 : M+4 = 0.7576² : 2·0.7576·0.2424 : 0.2424²
+        //                     = 1 : 0.6399 : 0.1024
         let pattern = isotope_pattern(&[(17, 2)]).unwrap();
-        // Should have M, M+2, M+4 peaks
-        assert!(pattern.len() >= 2);
+        assert_eq!(pattern.len(), 3, "{pattern:?}");
+        let expected = [(69.9377, 1.0), (71.9348, 0.6399), (73.9318, 0.1024)];
+        for (&(m, i), (em, ei)) in pattern.iter().zip(expected) {
+            assert!((m - em).abs() < 1e-3, "mass {m} vs {em}");
+            assert!((i - ei).abs() < 1e-4, "intensity {i} vs {ei}");
+        }
     }
 
     #[test]
     fn isotope_pattern_empty_is_error() {
         assert!(isotope_pattern(&[]).is_err());
+    }
+
+    #[test]
+    fn isotope_pattern_large_molecules_do_not_panic() {
+        // Tail intensities used to underflow to 0, merging two zero peaks
+        // gave a NaN mass (0/0) and the next sort's unwrap() panicked.
+        for atoms in [
+            &[(1u8, 88u32)][..],
+            &[(6, 168)][..],
+            &[(6, 1000), (1, 2000), (8, 500), (16, 50), (35, 20)][..],
+        ] {
+            let pattern = isotope_pattern(atoms).unwrap();
+            assert!(!pattern.is_empty());
+            assert!(pattern.iter().all(|(m, i)| m.is_finite() && i.is_finite()));
+            assert!(pattern.windows(2).all(|w| w[0].0 < w[1].0), "sorted");
+            let base = pattern.iter().fold(0.0_f64, |acc, p| acc.max(p.1));
+            assert!((base - 1.0).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn isotope_pattern_c168_matches_binomial() {
+        // 168 C: P(k ¹³C) ∝ C(168, k)·0.0107^k·0.9893^(168−k).
+        // M+1/M = 168 × 0.0107/0.9893 = 1.8170 → M+1 is the base peak.
+        let pattern = isotope_pattern(&[(6, 168)]).unwrap();
+        let r = 0.0107 / 0.9893;
+        let m0 = 1.0 / (168.0 * r);
+        assert!((pattern[0].1 - m0).abs() < 1e-9, "M = {}", pattern[0].1);
+        assert!((pattern[1].1 - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn isotope_pattern_unknown_element_is_error() {
+        assert!(matches!(
+            isotope_pattern(&[(0, 1)]),
+            Err(KimiyaError::InvalidElement(_))
+        ));
+        assert!(matches!(
+            isotope_pattern(&[(6, 1), (119, 2)]),
+            Err(KimiyaError::InvalidElement(_))
+        ));
+    }
+
+    #[test]
+    fn isotope_pattern_element_without_data_uses_standard_weight() {
+        // Fe has no isotope table: one peak at 2 × 55.845 (standard atomic weight).
+        let fe = crate::element::lookup_by_number(26).unwrap().atomic_mass;
+        let pattern = isotope_pattern(&[(26, 2)]).unwrap();
+        assert_eq!(pattern.len(), 1);
+        assert!((pattern[0].0 - 2.0 * fe).abs() < 1e-12);
     }
 
     // ── FFT spectroscopy ─────────────────────────────────────────────
@@ -910,5 +1142,38 @@ mod tests {
     #[test]
     fn find_peaks_empty() {
         assert!(find_peaks(&[1.0, 2.0], 0.1).is_empty());
+        assert!(find_peaks(&[], 0.1).is_empty());
+    }
+
+    #[test]
+    fn find_peaks_all_negative() {
+        // The max fold used to start at 0.0, so negative spectra found nothing.
+        let data = [-5.0, -3.0, -1.0, -3.0, -5.0, -4.0, -5.0];
+        assert_eq!(find_peaks(&data, 0.5), vec![2]); // −4 < −5 + 0.5·4 = −3
+        assert_eq!(find_peaks(&data, 0.0), vec![2, 5]);
+    }
+
+    #[test]
+    fn find_peaks_threshold_relative_to_range() {
+        // Baseline offset: threshold is measured from the minimum.
+        let data = [10.0, 10.2, 10.0, 11.0, 10.0];
+        assert_eq!(find_peaks(&data, 0.5), vec![3]); // 10.2 < 10.5
+    }
+
+    #[test]
+    fn find_peaks_invalid_threshold_is_empty() {
+        let data = [0.0, 1.0, 3.0, 1.0, 0.0];
+        assert!(find_peaks(&data, f64::NAN).is_empty());
+        assert!(find_peaks(&data, -0.1).is_empty());
+        assert!(find_peaks(&data, 1.5).is_empty());
+        assert!(find_peaks(&data, f64::INFINITY).is_empty());
+        assert_eq!(find_peaks(&data, 1.0), Vec::<usize>::new()); // nothing exceeds max
+    }
+
+    #[test]
+    fn find_peaks_ignores_non_finite() {
+        let data = [0.0, f64::NAN, 0.0, 2.0, 0.0, 1.0, 0.0];
+        assert_eq!(find_peaks(&data, 0.25), vec![3, 5]);
+        assert!(find_peaks(&[f64::NAN; 4], 0.5).is_empty());
     }
 }

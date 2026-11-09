@@ -1,18 +1,32 @@
+//! Elements — periodic-table data (Z = 1–118), extended properties for
+//! common elements, and fundamental constants.
+
 use serde::{Deserialize, Serialize};
 
 /// Category of an element in the periodic table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ElementCategory {
+    /// Group 1 metals: Li, Na, K, Rb, Cs, Fr (hydrogen is [`Self::Nonmetal`]).
     AlkaliMetal,
+    /// Group 2 metals: Be, Mg, Ca, Sr, Ba, Ra.
     AlkalineEarth,
+    /// d-block metals of groups 3–12: Sc–Zn, Y–Cd, Hf–Hg, Rf–Cn
+    /// (La and Ac are classified as [`Self::Lanthanide`] / [`Self::Actinide`]).
     TransitionMetal,
+    /// p-block metals: Al, Ga, In, Sn, Tl, Pb, Bi, Po, Nh, Fl, Mc, Lv.
     PostTransitionMetal,
+    /// Metalloids: B, Si, Ge, As, Sb, Te.
     Metalloid,
+    /// Reactive nonmetals other than the halogens: H, C, N, O, P, S, Se.
     Nonmetal,
+    /// Group 17: F, Cl, Br, I, At, Ts.
     Halogen,
+    /// Group 18: He, Ne, Ar, Kr, Xe, Rn, Og.
     NobleGas,
+    /// La–Lu (Z = 57–71).
     Lanthanide,
+    /// Ac–Lr (Z = 89–103).
     Actinide,
 }
 
@@ -23,18 +37,29 @@ pub enum ElementCategory {
 /// [`lookup_by_number`] or [`lookup_by_symbol`] to obtain element references.
 #[derive(Debug, Clone, Serialize)]
 pub struct Element {
+    /// Atomic number Z (number of protons), 1–118.
     pub atomic_number: u8,
+    /// IUPAC chemical symbol, e.g. `"Fe"`.
     pub symbol: &'static str,
+    /// English element name, e.g. `"Iron"`.
     pub name: &'static str,
+    /// Standard atomic weight in g/mol (IUPAC/CIAAW abridged or conventional
+    /// value).
+    /// For elements without stable isotopes, the mass number of a long-lived
+    /// isotope is used instead.
     pub atomic_mass: f64,
+    /// Pauling electronegativity (dimensionless), or `None` where no value is
+    /// established (e.g. He, Ne, Ar).
     pub electronegativity: Option<f64>,
+    /// Periodic-table category.
     pub category: ElementCategory,
 }
 
-/// Avogadro's number (mol⁻¹).
+/// Avogadro constant N_A in mol⁻¹ (exact by the 2019 SI definition).
 pub const AVOGADRO: f64 = 6.02214076e23;
 
-/// Universal gas constant (J/(mol·K)).
+/// Molar gas constant R in J/(mol·K) (R = N_A·k_B, exact by the 2019 SI
+/// definition; stored to 10 significant figures).
 pub const GAS_CONSTANT: f64 = 8.314462618;
 
 /// Built-in element data for Z=1 through Z=118 (full periodic table).
@@ -59,7 +84,8 @@ pub static ELEMENTS: &[Element] = &[
         atomic_number: 3,
         symbol: "Li",
         name: "Lithium",
-        atomic_mass: 6.941,
+        // IUPAC conventional value (interval [6.938, 6.997]).
+        atomic_mass: 6.94,
         electronegativity: Some(0.98),
         category: ElementCategory::AlkaliMetal,
     },
@@ -147,7 +173,8 @@ pub static ELEMENTS: &[Element] = &[
         atomic_number: 14,
         symbol: "Si",
         name: "Silicon",
-        atomic_mass: 28.086,
+        // IUPAC conventional value (interval [28.084, 28.086]).
+        atomic_mass: 28.085,
         electronegativity: Some(1.90),
         category: ElementCategory::Metalloid,
     },
@@ -163,7 +190,8 @@ pub static ELEMENTS: &[Element] = &[
         atomic_number: 16,
         symbol: "S",
         name: "Sulfur",
-        atomic_mass: 32.065,
+        // IUPAC conventional value (interval [32.059, 32.076]).
+        atomic_mass: 32.06,
         electronegativity: Some(2.58),
         category: ElementCategory::Nonmetal,
     },
@@ -355,7 +383,8 @@ pub static ELEMENTS: &[Element] = &[
         atomic_number: 40,
         symbol: "Zr",
         name: "Zirconium",
-        atomic_mass: 91.224,
+        // CIAAW 2024 revision: 91.222(3).
+        atomic_mass: 91.222,
         electronegativity: Some(1.33),
         category: ElementCategory::TransitionMetal,
     },
@@ -987,7 +1016,7 @@ pub static ELEMENTS: &[Element] = &[
 
 /// Look up an element by atomic number (1-based).
 ///
-/// O(1) for elements within the built-in range (Z=1..118), O(n) fallback otherwise.
+/// O(1): indexes [`ELEMENTS`] directly. Returns `None` for Z = 0 or Z > 118.
 #[must_use]
 #[inline]
 pub fn lookup_by_number(atomic_number: u8) -> Option<&'static Element> {
@@ -1009,6 +1038,7 @@ pub fn lookup_by_symbol(symbol: &str) -> Option<&'static Element> {
 /// Extended properties for an element (ionization energy, electron affinity, radii, oxidation states).
 #[derive(Debug, Clone, Serialize)]
 pub struct ElementProperties {
+    /// Atomic number Z of the element these properties describe.
     pub atomic_number: u8,
     /// First ionization energy (kJ/mol).
     pub ionization_energy_1: f64,
@@ -1020,7 +1050,9 @@ pub struct ElementProperties {
     pub oxidation_states: &'static [i8],
 }
 
-/// Extended properties for common elements (first 36 + selected heavier elements).
+/// Extended properties for 32 common elements, ordered by atomic number:
+/// Z = 1–20 (H–Ca), 24–30 (Cr–Zn), 35 (Br), 47 (Ag), 53 (I), 79 (Au) and
+/// 82 (Pb). [`lookup_properties`] returns `None` for every other element.
 pub static ELEMENT_PROPERTIES: &[ElementProperties] = &[
     ElementProperties {
         atomic_number: 1,
@@ -1302,13 +1334,28 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // exact SI-defined values: any typo must fail
     fn avogadro_constant() {
-        assert!((AVOGADRO - 6.022e23).abs() < 1e20);
+        assert_eq!(AVOGADRO, 6.02214076e23);
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // exact stored value: any typo must fail
     fn gas_constant_value() {
-        assert!((GAS_CONSTANT - 8.314).abs() < 0.001);
+        assert_eq!(GAS_CONSTANT, 8.314462618);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // stored reference values, compared exactly
+    fn standard_atomic_weights_current() {
+        // IUPAC conventional values for Li, Si and S; CIAAW 2024 revision for Zr.
+        assert_eq!(lookup_by_symbol("Li").unwrap().atomic_mass, 6.94);
+        assert_eq!(lookup_by_symbol("Si").unwrap().atomic_mass, 28.085);
+        assert_eq!(lookup_by_symbol("S").unwrap().atomic_mass, 32.06);
+        assert_eq!(lookup_by_symbol("Zr").unwrap().atomic_mass, 91.222);
+        // CIAAW 2024 Gd 157.249(2) and Lu 174.96669(5) round to the stored values.
+        assert!((lookup_by_symbol("Gd").unwrap().atomic_mass - 157.249).abs() < 0.0015);
+        assert!((lookup_by_symbol("Lu").unwrap().atomic_mass - 174.96669).abs() < 0.0005);
     }
 
     #[test]
@@ -1318,7 +1365,7 @@ mod tests {
 
     #[test]
     fn lookup_by_number_o1_correctness() {
-        // Verify O(1) index lookup matches for all 36 elements
+        // Verify O(1) index lookup matches for all 118 elements
         for element in ELEMENTS.iter() {
             let found = lookup_by_number(element.atomic_number).unwrap();
             assert_eq!(found.symbol, element.symbol);
@@ -1372,14 +1419,22 @@ mod tests {
     }
 
     #[test]
-    fn properties_fluorine_highest_ea() {
-        // Chlorine actually has higher EA than fluorine
+    fn properties_chlorine_highest_ea() {
+        // Chlorine, not fluorine, has the largest electron affinity (most
+        // negative value, energy released) of all elements.
         let f = lookup_properties(9).unwrap();
         let cl = lookup_properties(17).unwrap();
         assert!(
             cl.electron_affinity < f.electron_affinity,
-            "Cl should have more negative EA"
+            "Cl should have more negative EA than F"
         );
+        for p in ELEMENT_PROPERTIES {
+            assert!(
+                cl.electron_affinity <= p.electron_affinity,
+                "Z={} has a more negative EA than Cl",
+                p.atomic_number
+            );
+        }
     }
 
     #[test]
@@ -1415,6 +1470,17 @@ mod tests {
     #[test]
     fn properties_count() {
         assert!(ELEMENT_PROPERTIES.len() >= 32);
+    }
+
+    #[test]
+    fn properties_coverage_matches_doc() {
+        // Keep in sync with the `ELEMENT_PROPERTIES` doc comment.
+        let documented: Vec<u8> = (1..=20)
+            .chain(24..=30)
+            .chain([35, 47, 53, 79, 82])
+            .collect();
+        let actual: Vec<u8> = ELEMENT_PROPERTIES.iter().map(|p| p.atomic_number).collect();
+        assert_eq!(actual, documented);
     }
 
     #[test]

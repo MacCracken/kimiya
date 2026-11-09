@@ -1,3 +1,6 @@
+//! Molecules — composition as (element, count) pairs, molecular weight and
+//! formula strings.
+
 use crate::element::lookup_by_number;
 use crate::error::{KimiyaError, Result};
 use serde::{Deserialize, Serialize};
@@ -5,13 +8,17 @@ use serde::{Deserialize, Serialize};
 /// An atom count in a molecule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Atom {
+    /// Atomic number Z of the element (see [`crate::element::lookup_by_number`]).
     pub element_number: u8,
+    /// Number of atoms of this element in one molecule (formula unit).
     pub count: u32,
 }
 
 /// A molecule defined by its constituent atoms.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Molecule {
+    /// Constituent atoms in the order given at construction. Repeated
+    /// entries for the same element are kept as separate entries.
     pub atoms: Vec<Atom>,
 }
 
@@ -73,7 +80,12 @@ impl Molecule {
         Ok(total)
     }
 
-    /// Empirical formula string (e.g., "H2O", "CO2").
+    /// Molecular formula string (e.g., "H2O", "CO2", "C6H12O6").
+    ///
+    /// Atoms are written in the order stored in [`Self::atoms`] (no Hill
+    /// ordering, no merging of repeated elements, no reduction to the
+    /// empirical formula). A count of 1 is written without a subscript and
+    /// atoms with a count of 0 are omitted.
     ///
     /// # Errors
     ///
@@ -87,6 +99,9 @@ impl Molecule {
                     atom.element_number
                 ))
             })?;
+            if atom.count == 0 {
+                continue;
+            }
             s.push_str(element.symbol);
             if atom.count > 1 {
                 s.push_str(&atom.count.to_string());
@@ -96,9 +111,13 @@ impl Molecule {
     }
 
     /// Total number of atoms in the molecule.
+    ///
+    /// Saturates at [`u32::MAX`] instead of overflowing.
     #[must_use]
     pub fn total_atoms(&self) -> u32 {
-        self.atoms.iter().map(|a| a.count).sum()
+        self.atoms
+            .iter()
+            .fold(0u32, |acc, a| acc.saturating_add(a.count))
     }
 }
 
@@ -151,6 +170,31 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         let back: Molecule = serde_json::from_str(&json).unwrap();
         assert!((back.molecular_weight().unwrap() - m.molecular_weight().unwrap()).abs() < 0.001);
+    }
+
+    #[test]
+    fn formula_skips_zero_count_atoms() {
+        assert_eq!(Molecule::new(&[(1, 0), (8, 1)]).formula().unwrap(), "O");
+        assert_eq!(Molecule::new(&[(6, 1), (1, 0)]).formula().unwrap(), "C");
+        assert_eq!(Molecule::new(&[(1, 0)]).formula().unwrap(), "");
+    }
+
+    #[test]
+    fn formula_is_molecular_in_input_order() {
+        // Molecular (not empirical) formula: C6H12O6, not CH2O.
+        assert_eq!(Molecule::glucose().formula().unwrap(), "C6H12O6");
+        assert_eq!(Molecule::new(&[(8, 1), (1, 2)]).formula().unwrap(), "OH2");
+    }
+
+    #[test]
+    fn formula_unknown_element_with_zero_count_is_error() {
+        assert!(Molecule::new(&[(200, 0)]).formula().is_err());
+    }
+
+    #[test]
+    fn total_atoms_saturates() {
+        let mol = Molecule::new(&[(1, u32::MAX), (8, 2)]);
+        assert_eq!(mol.total_atoms(), u32::MAX);
     }
 
     #[test]

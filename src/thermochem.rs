@@ -1,15 +1,32 @@
-//! Thermochemical data — standard formation enthalpies, Gibbs energies, entropies.
+//! Thermochemical data — standard formation enthalpies, Gibbs energies,
+//! entropies, and Shomate heat-capacity fits.
 //!
-//! All values at standard conditions: 25°C (298.15 K), 1 atm.
+//! Tabulated values are at 298.15 K and the IUPAC standard pressure
+//! p° = 1 bar (100 kPa), the convention of the NBS, CODATA, and CRC tables.
 //! Reference state: elements in their most stable form have ΔH_f° = 0, ΔG_f° = 0.
+//!
+//! # Units
+//!
+//! Energy units differ between functions; check before chaining them:
+//!
+//! | Function | Energy unit |
+//! |---|---|
+//! | [`reaction_enthalpy`], [`reaction_gibbs_energy`] | returns **kJ/mol** |
+//! | [`reaction_entropy`] | returns J/(mol·K) |
+//! | [`enthalpy_change_cp`] | returns **J/mol** |
+//! | [`vant_hoff_k`], [`adiabatic_flame_temperature`] | take **J/mol** |
+//!
+//! Multiply a kJ/mol result by 1000 before passing it to a function that
+//! takes J/mol. "Per mol" means per mole of reaction as written.
 
 use crate::element::GAS_CONSTANT;
 use crate::error::{KimiyaError, Result};
+use crate::validate::{is_finite, is_positive};
 use serde::Serialize;
 
 // ── Thermochemical data table ────────────────────────────────────────
 
-/// Standard thermochemical data for a substance at 25°C, 1 atm.
+/// Standard thermochemical data for a substance at 298.15 K and 1 bar.
 #[derive(Debug, Clone, Serialize)]
 pub struct ThermochemData {
     /// Chemical formula (e.g., "H2O(l)").
@@ -24,9 +41,10 @@ pub struct ThermochemData {
     pub s_standard_j: f64,
 }
 
-/// Built-in thermochemical data for common substances.
+/// Built-in thermochemical data for common substances at 298.15 K, 1 bar.
 ///
-/// Values from NIST/JANAF and CRC Handbook.
+/// ΔH_f° and ΔG_f° in kJ/mol, S° in J/(mol·K). Values from the NBS tables
+/// (Wagman et al. 1982), NIST/JANAF, CODATA, and the CRC Handbook.
 /// Elements in standard state have ΔH_f° = 0 and ΔG_f° = 0.
 pub static THERMOCHEM_DATA: &[ThermochemData] = &[
     // ── Elements in standard state ───────────────────────────────
@@ -319,6 +337,42 @@ pub static THERMOCHEM_DATA: &[ThermochemData] = &[
         delta_gf_kj: 0.0,
         s_standard_j: 18.83,
     },
+    // S° from CODATA key values (Zn, Ti, Ag, F2) and the CRC Handbook (Ba).
+    ThermochemData {
+        formula: "Zn(s)",
+        name: "Zinc",
+        delta_hf_kj: 0.0,
+        delta_gf_kj: 0.0,
+        s_standard_j: 41.63,
+    },
+    ThermochemData {
+        formula: "Ti(s)",
+        name: "Titanium",
+        delta_hf_kj: 0.0,
+        delta_gf_kj: 0.0,
+        s_standard_j: 30.72,
+    },
+    ThermochemData {
+        formula: "Ba(s)",
+        name: "Barium",
+        delta_hf_kj: 0.0,
+        delta_gf_kj: 0.0,
+        s_standard_j: 62.5,
+    },
+    ThermochemData {
+        formula: "Ag(s)",
+        name: "Silver",
+        delta_hf_kj: 0.0,
+        delta_gf_kj: 0.0,
+        s_standard_j: 42.55,
+    },
+    ThermochemData {
+        formula: "F2(g)",
+        name: "Fluorine gas",
+        delta_hf_kj: 0.0,
+        delta_gf_kj: 0.0,
+        s_standard_j: 202.79,
+    },
     // ── Inorganic compounds (additional) ──────────────────────────
     ThermochemData {
         formula: "MgO(s)",
@@ -339,7 +393,8 @@ pub static THERMOCHEM_DATA: &[ThermochemData] = &[
         name: "Potassium oxide",
         delta_hf_kj: -361.50,
         delta_gf_kj: -322.09,
-        s_standard_j: 102.00,
+        // CRC Handbook / NBS (94.14); 102.00 was not a tabulated value.
+        s_standard_j: 94.10,
     },
     ThermochemData {
         formula: "ZnO(s)",
@@ -510,11 +565,13 @@ pub static THERMOCHEM_DATA: &[ThermochemData] = &[
         delta_gf_kj: -23.40,
         s_standard_j: 270.02,
     },
+    // n-Butane: all three values from the NBS tables (Wagman et al. 1982),
+    // which are mutually consistent (ΔG = ΔH − TΔS within 0.05 kJ/mol).
     ThermochemData {
         formula: "C4H10(g)",
         name: "Butane",
-        delta_hf_kj: -125.60,
-        delta_gf_kj: -15.71,
+        delta_hf_kj: -126.15,
+        delta_gf_kj: -17.03,
         s_standard_j: 310.23,
     },
     ThermochemData {
@@ -542,10 +599,14 @@ pub fn lookup_thermochem(formula: &str) -> Option<&'static ThermochemData> {
 
 // ── Reaction thermochemistry from tables ─────────────────────────────
 
-/// Standard reaction enthalpy from formation enthalpies:
+/// Standard reaction enthalpy from formation enthalpies at 298.15 K:
 /// ΔH°_rxn = Σ n_i·ΔH_f°(products) − Σ n_j·ΔH_f°(reactants)
 ///
 /// Each entry is (formula, stoichiometric coefficient).
+///
+/// Returns ΔH°_rxn in **kJ/mol** (per mole of reaction as written).
+/// [`vant_hoff_k`] and [`adiabatic_flame_temperature`] take J/mol:
+/// multiply this result by 1000 before passing it to them.
 ///
 /// # Errors
 ///
@@ -556,8 +617,13 @@ pub fn reaction_enthalpy(products: &[(&str, f64)], reactants: &[(&str, f64)]) ->
     Ok(sum_products - sum_reactants)
 }
 
-/// Standard reaction Gibbs energy:
+/// Standard reaction Gibbs energy at 298.15 K:
 /// ΔG°_rxn = Σ n_i·ΔG_f°(products) − Σ n_j·ΔG_f°(reactants)
+///
+/// Each entry is (formula, stoichiometric coefficient).
+///
+/// Returns ΔG°_rxn in **kJ/mol** (per mole of reaction as written).
+/// Multiply by 1000 for functions that take J/mol.
 ///
 /// # Errors
 ///
@@ -568,10 +634,14 @@ pub fn reaction_gibbs_energy(products: &[(&str, f64)], reactants: &[(&str, f64)]
     Ok(sum_products - sum_reactants)
 }
 
-/// Standard reaction entropy change:
+/// Standard reaction entropy change at 298.15 K:
 /// ΔS°_rxn = Σ n_i·S°(products) − Σ n_j·S°(reactants)
 ///
-/// Returns entropy in J/(mol·K).
+/// Each entry is (formula, stoichiometric coefficient).
+///
+/// Returns ΔS°_rxn in **J/(mol·K)** (per mole of reaction as written) —
+/// note J, not kJ: divide by 1000 before combining with
+/// [`reaction_enthalpy`] in ΔG = ΔH − TΔS.
 ///
 /// # Errors
 ///
@@ -601,23 +671,33 @@ fn sum_property(species: &[(&str, f64)], prop: impl Fn(&ThermochemData) -> f64) 
 /// Calculates equilibrium constant at a new temperature given K at a reference
 /// temperature, assuming ΔH° is constant over the temperature range.
 ///
-/// - `k_ref`: equilibrium constant at `t_ref_k`
-/// - `delta_h_j`: standard reaction enthalpy in J/mol (not kJ!)
+/// - `k_ref`: equilibrium constant at `t_ref_k` (dimensionless, > 0)
+/// - `delta_h_j`: standard reaction enthalpy in **J/mol** (not kJ!) —
+///   multiply a [`reaction_enthalpy`] result by 1000
 /// - `t_ref_k`: reference temperature (K)
 /// - `t_new_k`: target temperature (K)
 ///
+/// Returns K at `t_new_k` (dimensionless). May overflow to `+∞` for
+/// extreme ΔH°.
+///
 /// # Errors
 ///
-/// Returns error if temperatures or K_ref are not positive.
+/// Returns error if temperatures or K_ref are not positive and finite, or if
+/// ΔH° is not finite.
 pub fn vant_hoff_k(k_ref: f64, delta_h_j: f64, t_ref_k: f64, t_new_k: f64) -> Result<f64> {
-    if t_ref_k <= 0.0 || t_new_k <= 0.0 {
+    if !is_positive(t_ref_k) || !is_positive(t_new_k) {
         return Err(KimiyaError::InvalidTemperature(
             "temperatures must be positive".into(),
         ));
     }
-    if k_ref <= 0.0 {
+    if !is_positive(k_ref) {
         return Err(KimiyaError::InvalidInput(
             "reference K must be positive".into(),
+        ));
+    }
+    if !is_finite(delta_h_j) {
+        return Err(KimiyaError::InvalidInput(
+            "reaction enthalpy must be finite".into(),
         ));
     }
     let exponent = -(delta_h_j / GAS_CONSTANT) * (1.0 / t_new_k - 1.0 / t_ref_k);
@@ -626,47 +706,110 @@ pub fn vant_hoff_k(k_ref: f64, delta_h_j: f64, t_ref_k: f64, t_new_k: f64) -> Re
 
 // ── Heat capacity integration ────────────────────────────────────────
 
-/// Shomate equation coefficients for Cp(T) in J/(mol·K).
+/// Shomate equation coefficients for one temperature segment.
 ///
-/// Cp(T) = A + B·t + C·t² + D·t³ + E/t²
+/// Cp(T) = A + B·t + C·t² + D·t³ + E/t²  in J/(mol·K), where t = T(K) / 1000.
 ///
-/// where t = T(K) / 1000.
+/// The fit is valid only for `t_min ≤ T ≤ t_max`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Shomate {
+    /// Coefficient A, J/(mol·K).
     pub a: f64,
+    /// Coefficient B (multiplies t), J/(mol·K) per kK.
     pub b: f64,
+    /// Coefficient C (multiplies t²), J/(mol·K) per kK².
     pub c: f64,
+    /// Coefficient D (multiplies t³), J/(mol·K) per kK³.
     pub d: f64,
+    /// Coefficient E (multiplies 1/t²), J/(mol·K)·kK².
     pub e: f64,
-    /// Valid temperature range (K).
+    /// Lower bound of the fit's valid temperature range (K).
     pub t_min: f64,
+    /// Upper bound of the fit's valid temperature range (K).
     pub t_max: f64,
 }
 
 impl Shomate {
     /// Evaluate Cp at temperature T (K) in J/(mol·K).
+    ///
+    /// Does not check `t_min`/`t_max`: outside that range the polynomial is
+    /// an extrapolation. Use [`lookup_shomate_at`] to pick the right segment.
     #[must_use]
     #[inline]
     pub fn cp(&self, temperature_k: f64) -> f64 {
         let t = temperature_k / 1000.0;
         self.a + self.b * t + self.c * t * t + self.d * t * t * t + self.e / (t * t)
     }
+
+    /// Antiderivative of [`Shomate::cp`] with respect to T, in J/mol:
+    ///
+    /// ∫Cp dT = 1000·(A·t + B·t²/2 + C·t³/3 + D·t⁴/4 − E/t),  t = T(K)/1000
+    ///
+    /// The integration constant (NIST's F − H terms) is omitted, so the value
+    /// itself is not H(T) − H(298.15). Only differences are meaningful:
+    /// within one segment, H(T₂) − H(T₁) =
+    /// `enthalpy_antiderivative(T₂) − enthalpy_antiderivative(T₁)`.
+    /// Use [`enthalpy_change_cp`] for ranges that span several segments.
+    #[must_use]
+    #[inline]
+    pub fn enthalpy_antiderivative(&self, temperature_k: f64) -> f64 {
+        let t = temperature_k / 1000.0;
+        1000.0
+            * (t * (self.a + t * (self.b / 2.0 + t * (self.c / 3.0 + t * (self.d / 4.0))))
+                - self.e / t)
+    }
+
+    /// `t_min ≤ T ≤ t_max` (false for NaN).
+    #[inline]
+    #[must_use]
+    fn covers(&self, temperature_k: f64) -> bool {
+        temperature_k >= self.t_min && temperature_k <= self.t_max
+    }
 }
 
-/// Built-in Shomate coefficients for common gases (NIST, 298–1200 K range).
+/// Built-in Shomate coefficients for common gases.
+///
+/// Coefficients give Cp in J/(mol·K) with t = T(K)/1000. Source is the NIST
+/// Chemistry WebBook unless an entry says otherwise. Valid ranges differ per
+/// entry: read each entry's `t_min`/`t_max`.
+///
+/// Species that need several fits to cover their range (N₂, O₂, CO₂, H₂O)
+/// appear once per temperature segment under the same formula string. The
+/// segments of one species are adjacent, in increasing temperature order,
+/// and contiguous (each `t_max` equals the next segment's `t_min`). Use
+/// [`lookup_shomate_at`] to select the segment for a temperature;
+/// [`lookup_shomate`] returns the lowest-temperature segment.
 pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
+    // NIST WebBook gives no gas-phase set below 500 K. Its 500–1700 K set is
+    // used down to 298 K as a documented extrapolation so flame calculations
+    // can start at 298.15 K: Cp(298.15) = 33.59 and Cp(400) = 34.26 J/(mol·K),
+    // matching JANAF (33.590, 34.262) to < 0.1 %.
     (
         "H2O(g)",
         Shomate {
-            a: 30.092,
+            a: 30.09200,
             b: 6.832514,
             c: 6.793435,
             d: -2.534480,
             e: 0.082139,
-            t_min: 500.0,
+            t_min: 298.0,
             t_max: 1700.0,
         },
     ),
+    // NIST WebBook Shomate, 1700–6000 K.
+    (
+        "H2O(g)",
+        Shomate {
+            a: 41.96426,
+            b: 8.622053,
+            c: -1.499780,
+            d: 0.098119,
+            e: -11.15764,
+            t_min: 1700.0,
+            t_max: 6000.0,
+        },
+    ),
+    // NIST WebBook Shomate, 298–1200 K.
     (
         "CO2(g)",
         Shomate {
@@ -679,6 +822,20 @@ pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
             t_max: 1200.0,
         },
     ),
+    // NIST WebBook Shomate, 1200–6000 K.
+    (
+        "CO2(g)",
+        Shomate {
+            a: 58.16639,
+            b: 2.720074,
+            c: -0.492289,
+            d: 0.038844,
+            e: -6.447293,
+            t_min: 1200.0,
+            t_max: 6000.0,
+        },
+    ),
+    // NIST WebBook Shomate, 100–500 K.
     (
         "N2(g)",
         Shomate {
@@ -687,10 +844,37 @@ pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
             c: -9.647459,
             d: 16.63537,
             e: 0.000117,
-            t_min: 298.0,
-            t_max: 1400.0,
+            t_min: 100.0,
+            t_max: 500.0,
         },
     ),
+    // NIST WebBook Shomate, 500–2000 K.
+    (
+        "N2(g)",
+        Shomate {
+            a: 19.50583,
+            b: 19.88705,
+            c: -8.598535,
+            d: 1.369784,
+            e: 0.527601,
+            t_min: 500.0,
+            t_max: 2000.0,
+        },
+    ),
+    // NIST WebBook Shomate, 2000–6000 K.
+    (
+        "N2(g)",
+        Shomate {
+            a: 35.51872,
+            b: 1.128728,
+            c: -0.196103,
+            d: 0.014662,
+            e: -4.553760,
+            t_min: 2000.0,
+            t_max: 6000.0,
+        },
+    ),
+    // NIST WebBook Shomate, 100–700 K.
     (
         "O2(g)",
         Shomate {
@@ -699,8 +883,34 @@ pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
             c: 57.86644,
             d: -36.50624,
             e: -0.007374,
-            t_min: 298.0,
-            t_max: 1200.0,
+            t_min: 100.0,
+            t_max: 700.0,
+        },
+    ),
+    // NIST WebBook Shomate, 700–2000 K.
+    (
+        "O2(g)",
+        Shomate {
+            a: 30.03235,
+            b: 8.772972,
+            c: -3.988133,
+            d: 0.788313,
+            e: -0.741599,
+            t_min: 700.0,
+            t_max: 2000.0,
+        },
+    ),
+    // NIST WebBook Shomate, 2000–6000 K.
+    (
+        "O2(g)",
+        Shomate {
+            a: 20.91111,
+            b: 10.72071,
+            c: -2.020498,
+            d: 0.146449,
+            e: 9.245722,
+            t_min: 2000.0,
+            t_max: 6000.0,
         },
     ),
     (
@@ -715,6 +925,19 @@ pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
             t_max: 1300.0,
         },
     ),
+    // NIST WebBook Shomate, 1300–6000 K
+    (
+        "CH4(g)",
+        Shomate {
+            a: 85.81217,
+            b: 11.26467,
+            c: -2.114146,
+            d: 0.13819,
+            e: -26.42221,
+            t_min: 1300.0,
+            t_max: 6000.0,
+        },
+    ),
     (
         "CO(g)",
         Shomate {
@@ -727,6 +950,19 @@ pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
             t_max: 1300.0,
         },
     ),
+    // NIST WebBook Shomate, 1300–6000 K
+    (
+        "CO(g)",
+        Shomate {
+            a: 35.1507,
+            b: 1.300095,
+            c: -0.205921,
+            d: 0.01355,
+            e: -3.28278,
+            t_min: 1300.0,
+            t_max: 6000.0,
+        },
+    ),
     (
         "H2(g)",
         Shomate {
@@ -737,6 +973,32 @@ pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
             e: -0.158558,
             t_min: 298.0,
             t_max: 1000.0,
+        },
+    ),
+    // NIST WebBook Shomate, 1000–2500 K
+    (
+        "H2(g)",
+        Shomate {
+            a: 18.563083,
+            b: 12.257357,
+            c: -2.859786,
+            d: 0.268238,
+            e: 1.97799,
+            t_min: 1000.0,
+            t_max: 2500.0,
+        },
+    ),
+    // NIST WebBook Shomate, 2500–6000 K
+    (
+        "H2(g)",
+        Shomate {
+            a: 43.41356,
+            b: -4.293079,
+            c: 1.272428,
+            d: -0.096876,
+            e: -20.533862,
+            t_min: 2500.0,
+            t_max: 6000.0,
         },
     ),
     (
@@ -799,6 +1061,9 @@ pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
             t_max: 1200.0,
         },
     ),
+    // Approximate: not a NIST WebBook Shomate set (NIST publishes none for
+    // ethane) and the source is unknown. Known error: Cp(298.15) = 54.3 vs
+    // reference 52.5 J/(mol·K) (+3.4 %). Use with caution.
     (
         "C2H6(g)",
         Shomate {
@@ -811,14 +1076,15 @@ pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
             t_max: 1200.0,
         },
     ),
+    // NIST WebBook Shomate, 298–1200 K (Cp(298.15) = 42.85 J/(mol·K)).
     (
         "C2H4(g)",
         Shomate {
-            a: 3.806800,
-            b: 156.5700,
-            c: -84.76060,
-            d: 17.54950,
-            e: 0.135519,
+            a: -6.387880,
+            b: 184.4019,
+            c: -112.9718,
+            d: 28.49593,
+            e: 0.315540,
             t_min: 298.0,
             t_max: 1200.0,
         },
@@ -835,7 +1101,10 @@ pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
             t_max: 1100.0,
         },
     ),
-    // ── Additional Shomate data (NIST) ───────────────────────────
+    // ── Additional Shomate data ──────────────────────────────────
+    // Approximate: not a NIST WebBook Shomate set (NIST publishes none for
+    // propane) and the source is unknown. Known error: Cp(298.15) = 79.8 vs
+    // reference 73.6 J/(mol·K) (+8.4 %). Use with caution.
     (
         "C3H8(g)",
         Shomate {
@@ -872,18 +1141,24 @@ pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
             t_max: 1000.0,
         },
     ),
+    // NIST WebBook Shomate, 332.5–3400 K.
     (
         "Br2(g)",
         Shomate {
-            a: 37.5767,
-            b: 0.5506,
-            c: -0.2987,
-            d: 0.0654,
-            e: -0.3773,
-            t_min: 332.0,
-            t_max: 1600.0,
+            a: 38.52723,
+            b: -1.976835,
+            c: 1.526107,
+            d: -0.198398,
+            e: -0.185815,
+            t_min: 332.5,
+            t_max: 3400.0,
         },
     ),
+    // KNOWN DEFECT — not the NIST set and of unknown source. This fit gives
+    // Cp(298.15) = 28.77 J/(mol·K) (JANAF: 29.14), falls to ~27.8 near 700 K,
+    // and stays below the 7R/2 = 29.10 floor of a diatomic gas across its
+    // whole range, which is physically impossible. Do not rely on HF heat
+    // capacities until this is replaced with a sourced fit.
     (
         "HF(g)",
         Shomate {
@@ -947,6 +1222,9 @@ pub static SHOMATE_DATA: &[(&str, Shomate)] = &[
 ];
 
 /// Look up Shomate coefficients by formula.
+///
+/// Returns the first (lowest-temperature) segment. For species with several
+/// segments (see [`SHOMATE_DATA`]) use [`lookup_shomate_at`] instead.
 #[must_use]
 #[inline]
 pub fn lookup_shomate(formula: &str) -> Option<&'static Shomate> {
@@ -956,116 +1234,263 @@ pub fn lookup_shomate(formula: &str) -> Option<&'static Shomate> {
         .map(|(_, s)| s)
 }
 
-/// Enthalpy change from T₁ to T₂ via Cp(T) integration:
+/// Look up the Shomate segment for `formula` whose range covers
+/// `temperature_k` (K), i.e. `t_min ≤ T ≤ t_max`.
+///
+/// At a boundary shared by two segments the lower-temperature segment is
+/// returned (both are valid there). Returns `None` if the formula is unknown
+/// or no segment covers the temperature (including NaN).
+#[must_use]
+#[inline]
+pub fn lookup_shomate_at(formula: &str, temperature_k: f64) -> Option<&'static Shomate> {
+    SHOMATE_DATA
+        .iter()
+        .find(|(f, s)| *f == formula && s.covers(temperature_k))
+        .map(|(_, s)| s)
+}
+
+/// The contiguous run of Shomate segments for one species.
+struct Segments {
+    segs: &'static [(&'static str, Shomate)],
+    /// Lowest temperature covered (K).
+    t_min: f64,
+    /// Highest temperature covered (K).
+    t_max: f64,
+}
+
+impl Segments {
+    /// Resolve the segments of `formula` (adjacent entries in [`SHOMATE_DATA`]).
+    #[must_use]
+    fn lookup(formula: &str) -> Option<Self> {
+        let start = SHOMATE_DATA.iter().position(|(f, _)| *f == formula)?;
+        let rest = SHOMATE_DATA.get(start..)?;
+        let len = rest.iter().take_while(|(f, _)| *f == formula).count();
+        let segs = rest.get(..len)?;
+        let (_, first) = segs.first()?;
+        let (_, last) = segs.last()?;
+        Some(Self {
+            segs,
+            t_min: first.t_min,
+            t_max: last.t_max,
+        })
+    }
+
+    /// Cp(T) in J/(mol·K) from the segment covering T. Below the first or
+    /// above the last segment, that end segment is extrapolated.
+    #[inline]
+    #[must_use]
+    fn cp(&self, temperature_k: f64) -> f64 {
+        self.segs
+            .iter()
+            .find(|(_, s)| temperature_k <= s.t_max)
+            .or_else(|| self.segs.last())
+            .map_or(f64::NAN, |(_, s)| s.cp(temperature_k))
+    }
+
+    /// ∫[T₁→T₂] Cp dT in J/mol, summed analytically segment by segment.
+    /// Segment boundaries are the interior `t_max` values; the first and
+    /// last segments are extrapolated beyond the covered range.
+    #[inline]
+    #[must_use]
+    fn enthalpy_change(&self, t1_k: f64, t2_k: f64) -> f64 {
+        let (lo, hi, sign) = if t1_k <= t2_k {
+            (t1_k, t2_k, 1.0)
+        } else {
+            (t2_k, t1_k, -1.0)
+        };
+        let n = self.segs.len();
+        let mut total = 0.0;
+        let mut lower = f64::NEG_INFINITY;
+        for (i, (_, s)) in self.segs.iter().enumerate() {
+            let upper = if i + 1 == n { f64::INFINITY } else { s.t_max };
+            let a = lo.max(lower);
+            let b = hi.min(upper);
+            if b > a {
+                total += s.enthalpy_antiderivative(b) - s.enthalpy_antiderivative(a);
+            }
+            if upper >= hi {
+                break;
+            }
+            lower = upper;
+        }
+        sign * total
+    }
+}
+
+/// Enthalpy change of one species from T₁ to T₂ via Cp(T) integration:
 /// ΔH = ∫[T₁→T₂] Cp(T) dT
 ///
-/// Uses [`hisab::calc::integral_simpson`] for numerical integration of
-/// the Shomate polynomial.
+/// Integrates the Shomate polynomial analytically, piecewise across the
+/// species' temperature segments (see [`SHOMATE_DATA`]).
 ///
-/// Returns enthalpy change in J/mol.
+/// Returns the sensible-enthalpy change in **J/mol** (not kJ); negative when
+/// T₂ < T₁.
 ///
 /// # Errors
 ///
-/// Returns error if formula not found, temperatures invalid, or integration fails.
+/// Returns error if the formula has no Shomate data, if a temperature is not
+/// positive and finite, or if any part of [T₁, T₂] lies outside the range
+/// covered by the species' Shomate segments.
 pub fn enthalpy_change_cp(formula: &str, t1_k: f64, t2_k: f64) -> Result<f64> {
-    let shomate = lookup_shomate(formula)
+    let segments = Segments::lookup(formula)
         .ok_or_else(|| KimiyaError::InvalidReaction(format!("no Shomate data for '{formula}'")))?;
-    if t1_k <= 0.0 || t2_k <= 0.0 {
+    if !is_positive(t1_k) || !is_positive(t2_k) {
         return Err(KimiyaError::InvalidTemperature(
             "temperatures must be positive".into(),
         ));
     }
-    let cp_fn = |t: f64| shomate.cp(t);
-    let result = hisab::calc::integral_simpson(cp_fn, t1_k, t2_k, 100)
-        .map_err(|e| KimiyaError::ComputationError(format!("integration failed: {e}")))?;
-    Ok(result)
+    let (lo, hi) = (t1_k.min(t2_k), t1_k.max(t2_k));
+    if lo < segments.t_min || hi > segments.t_max {
+        return Err(KimiyaError::InvalidTemperature(format!(
+            "{lo}–{hi} K is outside the Shomate range {}–{} K for '{formula}'",
+            segments.t_min, segments.t_max
+        )));
+    }
+    Ok(segments.enthalpy_change(t1_k, t2_k))
 }
 
-/// Adiabatic flame temperature estimate.
+/// Newton–Raphson stopping tolerance on the energy balance (J/mol).
+const FLAME_NEWTON_TOL_J: f64 = 1e-3;
+/// Bisection stopping tolerance (K, and J/mol on the residual).
+const FLAME_BISECTION_TOL: f64 = 1e-6;
+
+/// Adiabatic flame temperature (no dissociation, constant pressure).
 ///
 /// Finds T where: ΔH_rxn + Σ nᵢ·∫\[T₀→T\] Cpᵢ(T) dT = 0
 ///
-/// Uses [`hisab::num::newton_raphson`] with derivative f'(T) = -Σ nᵢ·Cpᵢ(T).
-/// Falls back to [`hisab::num::bisection`] if Newton-Raphson fails.
+/// Sensible enthalpies are integrated analytically and piecewise across each
+/// product's Shomate segments. Uses [`hisab::num::newton_raphson`] with
+/// derivative f'(T) = −Σ nᵢ·Cpᵢ(T), falling back to [`hisab::num::bisection`]
+/// on the bracket [T₀, T_max].
 ///
-/// - `reaction_enthalpy_j`: ΔH_rxn in J/mol (exothermic = negative)
-/// - `products`: list of (formula, moles) for product gases
-/// - `t_initial_k`: initial temperature (K)
+/// - `reaction_enthalpy_j`: ΔH_rxn in **J/mol** (not kJ; exothermic =
+///   negative), evaluated at `t_initial_k`. [`reaction_enthalpy`] returns
+///   kJ/mol at 298.15 K — multiply it by 1000, and correct it to T₀ if
+///   T₀ ≠ 298.15 K.
+/// - `products`: list of (formula, moles) for product gases, per mole of
+///   reaction as written; every product needs Shomate data.
+/// - `t_initial_k`: initial (reactant) temperature T₀ (K).
 ///
-/// Returns adiabatic flame temperature in Kelvin.
+/// Returns adiabatic flame temperature in Kelvin. The search is restricted
+/// to the range covered by every product's Shomate data, T_max being the
+/// lowest upper bound among them.
+///
+/// # Examples
+///
+/// ```
+/// use kimiya::thermochem::{adiabatic_flame_temperature, reaction_enthalpy};
+///
+/// // CH₄ + 2 O₂ → CO₂ + 2 H₂O(g), burned in air (7.52 mol N₂ per mol CH₄).
+/// let dh_kj = reaction_enthalpy(
+///     &[("CO2(g)", 1.0), ("H2O(g)", 2.0)],
+///     &[("CH4(g)", 1.0), ("O2(g)", 2.0)],
+/// )?;
+/// let t = adiabatic_flame_temperature(
+///     dh_kj * 1000.0, // kJ/mol → J/mol
+///     &[("CO2(g)", 1.0), ("H2O(g)", 2.0), ("N2(g)", 7.52)],
+///     298.15,
+/// )?;
+/// assert!((t - 2327.0).abs() < 10.0);
+/// # Ok::<(), kimiya::KimiyaError>(())
+/// ```
 ///
 /// # Errors
 ///
-/// Returns error if any product formula has no Shomate data, or if root finding fails.
+/// Returns error if `t_initial_k` is not positive and finite or lies outside
+/// the products' common Shomate range, if ΔH_rxn is not finite, if
+/// `products` is empty, if any product has no Shomate data or non-positive /
+/// non-finite moles, if the root cannot be bracketed (ΔH_rxn ≥ 0, or the
+/// flame temperature exceeds the products' common Shomate range), or if
+/// root finding fails.
 pub fn adiabatic_flame_temperature(
     reaction_enthalpy_j: f64,
     products: &[(&str, f64)],
     t_initial_k: f64,
 ) -> Result<f64> {
-    if t_initial_k <= 0.0 {
+    if !is_positive(t_initial_k) {
         return Err(KimiyaError::InvalidTemperature(
             "initial temperature must be positive".into(),
         ));
     }
-    // Verify all products have Shomate data
-    for &(formula, _) in products {
-        lookup_shomate(formula).ok_or_else(|| {
-            KimiyaError::InvalidReaction(format!("no Shomate data for '{formula}'"))
-        })?;
+    if !is_finite(reaction_enthalpy_j) {
+        return Err(KimiyaError::InvalidInput(
+            "reaction enthalpy must be finite".into(),
+        ));
+    }
+    if products.is_empty() {
+        return Err(KimiyaError::InvalidInput(
+            "at least one product is required".into(),
+        ));
     }
 
-    // f(T) = -ΔH_rxn - Σ nᵢ × ∫[T₀→T] Cpᵢ dT
-    // f'(T) = -Σ nᵢ × Cpᵢ(T)
-    let f = |t: f64| -> f64 {
-        let mut heat_absorbed = 0.0;
-        for &(formula, moles) in products {
-            if let Some(shomate) = lookup_shomate(formula) {
-                let cp_fn = |temp: f64| shomate.cp(temp);
-                if let Ok(dh) = hisab::calc::integral_simpson(cp_fn, t_initial_k, t, 50) {
-                    heat_absorbed += moles * dh;
-                }
-            }
+    // Resolve each product's Shomate segments once, and the temperature
+    // range covered by all of them.
+    let mut resolved = Vec::with_capacity(products.len());
+    let mut range_min = f64::NEG_INFINITY;
+    let mut range_max = f64::INFINITY;
+    for &(formula, moles) in products {
+        let segments = Segments::lookup(formula).ok_or_else(|| {
+            KimiyaError::InvalidReaction(format!("no Shomate data for '{formula}'"))
+        })?;
+        if !is_positive(moles) {
+            return Err(KimiyaError::InvalidInput(format!(
+                "moles of '{formula}' must be positive and finite"
+            )));
         }
+        range_min = range_min.max(segments.t_min);
+        range_max = range_max.min(segments.t_max);
+        resolved.push((segments, moles));
+    }
+    if t_initial_k < range_min || t_initial_k >= range_max {
+        return Err(KimiyaError::InvalidTemperature(format!(
+            "initial temperature {t_initial_k} K is outside the Shomate range \
+             {range_min}–{range_max} K shared by the products"
+        )));
+    }
+
+    // f(T) = −ΔH_rxn − Σ nᵢ × ∫[T₀→T] Cpᵢ dT
+    // f'(T) = −Σ nᵢ × Cpᵢ(T)
+    let f = |t: f64| -> f64 {
+        let heat_absorbed: f64 = resolved
+            .iter()
+            .map(|(s, moles)| moles * s.enthalpy_change(t_initial_k, t))
+            .sum();
         -reaction_enthalpy_j - heat_absorbed
     };
-
     let df = |t: f64| -> f64 {
-        let mut total_cp = 0.0;
-        for &(formula, moles) in products {
-            if let Some(shomate) = lookup_shomate(formula) {
-                total_cp += moles * shomate.cp(t);
-            }
-        }
+        let total_cp: f64 = resolved.iter().map(|(s, moles)| moles * s.cp(t)).sum();
         -total_cp
     };
 
-    // Initial guess: assume average Cp ~ 40 J/(mol·K) per mol of product
-    let total_moles: f64 = products.iter().map(|(_, n)| n).sum();
-    let avg_cp = total_moles * 40.0;
-    let t_guess = t_initial_k + (-reaction_enthalpy_j) / avg_cp;
+    let t_lo = t_initial_k;
+    let t_hi = range_max;
+    // f(T₀) = −ΔH_rxn and f is decreasing, so a sign change on [T₀, T_max]
+    // means the reaction is exothermic and the root lies in the data range.
+    // Written as a product test so NaN fails it.
+    let bracketed = f(t_lo) * f(t_hi) < 0.0;
+    if !bracketed {
+        return Err(KimiyaError::ComputationError(format!(
+            "cannot bracket flame temperature in {t_lo}–{t_hi} K — reaction enthalpy \
+             must be negative (J/mol) and the flame temperature within the \
+             products' Shomate range"
+        )));
+    }
 
-    // Try Newton-Raphson first (fast convergence)
-    #[allow(clippy::needless_borrows_for_generic_args)]
-    if let Ok(t) = hisab::num::newton_raphson(&f, &df, t_guess, 1.0, 100)
-        && t > t_initial_k
-        && t < 6000.0
+    // Initial guess: assume average Cp ~ 40 J/(mol·K) per mol of product.
+    let total_moles: f64 = resolved.iter().map(|(_, moles)| moles).sum();
+    let t_guess = (t_initial_k - reaction_enthalpy_j / (total_moles * 40.0))
+        .max(t_lo)
+        .min(t_hi);
+
+    // Newton–Raphson first (fast convergence); accept only roots in range.
+    if let Ok(t) = hisab::num::newton_raphson(f, df, t_guess, FLAME_NEWTON_TOL_J, 50)
+        && (t_lo..=t_hi).contains(&t)
     {
         return Ok(t);
     }
 
-    // Fallback to bisection for robustness
-    let t_lo = t_initial_k + 1.0;
-    let t_hi = 6000.0;
-    let f_lo = f(t_lo);
-    let f_hi = f(t_hi);
-
-    if f_lo.signum() == f_hi.signum() {
-        return Err(KimiyaError::ComputationError(
-            "cannot bracket flame temperature — check reaction enthalpy and products".into(),
-        ));
-    }
-
-    hisab::num::bisection(f, t_lo, t_hi, 1.0, 200)
+    // Fallback: bisection on the verified bracket.
+    hisab::num::bisection(f, t_lo, t_hi, FLAME_BISECTION_TOL, 200)
         .map_err(|e| KimiyaError::ComputationError(format!("flame temperature solver failed: {e}")))
 }
 
@@ -1321,22 +1746,22 @@ mod tests {
 
     #[test]
     fn shomate_co2_cp_at_298() {
-        // CO2 Cp at 298 K ≈ 37.1 J/(mol·K)
+        // CO2 Cp at 298.15 K = 37.12 J/(mol·K) (NIST)
         let s = lookup_shomate("CO2(g)").unwrap();
-        let cp = s.cp(298.0);
+        let cp = s.cp(298.15);
         assert!(
-            (cp - 37.1).abs() < 1.0,
-            "CO2 Cp at 298K should be ~37 J/(mol·K), got {cp}"
+            (cp - 37.12).abs() < 0.1,
+            "CO2 Cp at 298K should be ~37.12 J/(mol·K), got {cp}"
         );
     }
 
     #[test]
     fn shomate_n2_cp_at_298() {
-        // N2 Cp at 298 K ≈ 29.1 J/(mol·K)
+        // N2 Cp at 298.15 K = 29.12 J/(mol·K) (NIST)
         let s = lookup_shomate("N2(g)").unwrap();
-        let cp = s.cp(298.0);
+        let cp = s.cp(298.15);
         assert!(
-            (cp - 29.1).abs() < 0.5,
+            (cp - 29.12).abs() < 0.1,
             "N2 Cp at 298K should be ~29.1 J/(mol·K), got {cp}"
         );
     }
@@ -1432,17 +1857,18 @@ mod tests {
     #[test]
     fn expanded_shomate_h2_cp_at_298() {
         let s = lookup_shomate("H2(g)").unwrap();
-        let cp = s.cp(298.0);
-        // H2 Cp at 298K ≈ 28.8 J/(mol·K)
+        let cp = s.cp(298.15);
+        // H2 Cp at 298.15 K = 28.84 J/(mol·K) (NIST)
         assert!(
-            (cp - 28.8).abs() < 1.0,
+            (cp - 28.84).abs() < 0.1,
             "H2 Cp at 298K should be ~28.8, got {cp}"
         );
     }
 
     #[test]
     fn shomate_data_count() {
-        assert_eq!(SHOMATE_DATA.len(), 24, "should have 24 Shomate entries");
+        // 24 species; N2 and O2 have 3 segments, CO2 and H2O have 2.
+        assert_eq!(SHOMATE_DATA.len(), 34, "should have 34 Shomate entries");
     }
 
     // ── Adiabatic flame temperature ──────────────────────────────────
@@ -1452,30 +1878,27 @@ mod tests {
         // H₂ + ½O₂ + 1.88 N₂ → H₂O(g) + 1.88 N₂ (stoichiometric in air)
         // ΔH = -241.82 kJ/mol = -241820 J/mol
         // N₂ diluent absorbs heat, bringing flame temp to a solvable range
+        // No-dissociation literature value ≈ 2520 K; this data gives 2524.7 K.
         let t =
             adiabatic_flame_temperature(-241_820.0, &[("H2O(g)", 1.0), ("N2(g)", 1.88)], 298.15)
                 .unwrap();
-        assert!(
-            t > 1800.0 && t < 3000.0,
-            "H₂/air flame should be ~2300K, got {t}"
-        );
+        assert!((t - 2520.0).abs() < 30.0, "H₂/air vs literature: {t}");
+        assert!((t - 2524.7).abs() < 10.0, "H₂/air flame: {t}");
     }
 
     #[test]
     fn adiabatic_flame_ch4_air() {
         // CH₄ + 2O₂ → CO₂ + 2H₂O(g), ΔH = -802.3 kJ/mol = -802300 J/mol
         // In air with excess N₂ (~7.52 mol N₂ per mol CH₄)
-        // Starting from 298K. Shomate accuracy varies — accept wider range.
+        // No-dissociation literature value ≈ 2325 K; this data gives 2327.2 K.
         let t = adiabatic_flame_temperature(
             -802_300.0,
             &[("CO2(g)", 1.0), ("H2O(g)", 2.0), ("N2(g)", 7.52)],
             298.15,
         )
         .unwrap();
-        assert!(
-            t > 1700.0 && t < 2500.0,
-            "CH₄/air flame should be ~1800-2300K, got {t}"
-        );
+        assert!((t - 2325.0).abs() < 30.0, "CH₄/air vs literature: {t}");
+        assert!((t - 2327.2).abs() < 10.0, "CH₄/air flame: {t}");
     }
 
     #[test]
@@ -1486,5 +1909,485 @@ mod tests {
     #[test]
     fn adiabatic_flame_zero_temp_is_error() {
         assert!(adiabatic_flame_temperature(-100_000.0, &[("CO2(g)", 1.0)], 0.0).is_err());
+    }
+
+    // ── Multi-segment Shomate data (audit fixes) ─────────────────────
+
+    /// Segment-aware Cp, J/(mol·K).
+    fn cp_at(formula: &str, t: f64) -> f64 {
+        lookup_shomate_at(formula, t)
+            .unwrap_or_else(|| panic!("no {formula} segment at {t} K"))
+            .cp(t)
+    }
+
+    #[test]
+    fn cp_matches_reference_at_298_1000_2000() {
+        // JANAF / NIST WebBook Cp, J/(mol·K).
+        let cases = [
+            ("N2(g)", 298.15, 29.12),
+            ("N2(g)", 1000.0, 32.70),
+            ("N2(g)", 2000.0, 35.97),
+            ("O2(g)", 298.15, 29.38),
+            ("O2(g)", 1000.0, 34.87),
+            ("O2(g)", 2000.0, 37.78),
+            ("CO2(g)", 298.15, 37.12),
+            ("CO2(g)", 1000.0, 54.31),
+            ("CO2(g)", 2000.0, 60.35),
+            ("H2O(g)", 298.15, 33.59),
+            ("H2O(g)", 1000.0, 41.27),
+            ("H2O(g)", 2000.0, 51.18),
+        ];
+        for (formula, t, expected) in cases {
+            let cp = cp_at(formula, t);
+            assert!(
+                (cp - expected).abs() < 0.1,
+                "{formula} Cp({t} K) = {cp}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn shomate_segments_are_adjacent_ordered_and_contiguous() {
+        for (i, (formula, s)) in SHOMATE_DATA.iter().enumerate() {
+            // All segments of a formula form one adjacent run.
+            let first = SHOMATE_DATA.iter().position(|(f, _)| f == formula).unwrap();
+            let run = SHOMATE_DATA[first..]
+                .iter()
+                .take_while(|(f, _)| f == formula)
+                .count();
+            assert!(
+                i < first + run,
+                "{formula}: segment at index {i} is not adjacent to its other segments"
+            );
+            if let Some((next_formula, next)) = SHOMATE_DATA.get(i + 1)
+                && next_formula == formula
+            {
+                assert!(
+                    (s.t_max - next.t_min).abs() < f64::EPSILON,
+                    "{formula}: gap/overlap {}–{} K",
+                    s.t_max,
+                    next.t_min
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shomate_segment_continuity() {
+        let mut boundaries = 0;
+        for pair in SHOMATE_DATA.windows(2) {
+            let [(fa, a), (fb, b)] = pair else { continue };
+            if fa != fb {
+                continue;
+            }
+            boundaries += 1;
+            let t = a.t_max;
+            let dcp = (a.cp(t) - b.cp(t)).abs();
+            assert!(dcp < 0.5, "{fa}: Cp jump {dcp} J/(mol·K) at {t} K");
+        }
+        assert_eq!(
+            boundaries, 10,
+            "N2 ×2, O2 ×2, CO2 ×1, H2O ×1, CH4 ×1, CO ×1, H2 ×2"
+        );
+    }
+
+    #[test]
+    fn lookup_shomate_at_selects_covering_segment() {
+        assert_eq!(lookup_shomate_at("N2(g)", 300.0).unwrap().t_max, 500.0);
+        assert_eq!(lookup_shomate_at("N2(g)", 1000.0).unwrap().t_min, 500.0);
+        assert_eq!(lookup_shomate_at("N2(g)", 3000.0).unwrap().t_min, 2000.0);
+        // Shared boundary → lower segment.
+        assert_eq!(lookup_shomate_at("CO2(g)", 1200.0).unwrap().t_max, 1200.0);
+        assert!(lookup_shomate_at("N2(g)", 50.0).is_none());
+        assert!(lookup_shomate_at("N2(g)", 7000.0).is_none());
+        assert!(lookup_shomate_at("N2(g)", f64::NAN).is_none());
+        assert!(lookup_shomate_at("XeF6(g)", 500.0).is_none());
+        // lookup_shomate keeps returning the first segment.
+        assert_eq!(lookup_shomate("N2(g)").unwrap().t_min, 100.0);
+    }
+
+    #[test]
+    fn enthalpy_antiderivative_differentiates_to_cp() {
+        for (formula, s) in SHOMATE_DATA.iter() {
+            let t = 0.5 * (s.t_min + s.t_max);
+            let h = 1e-3;
+            let numeric =
+                (s.enthalpy_antiderivative(t + h) - s.enthalpy_antiderivative(t - h)) / (2.0 * h);
+            assert!(
+                (numeric - s.cp(t)).abs() < 1e-4,
+                "{formula}: d/dT antiderivative {numeric} vs Cp {}",
+                s.cp(t)
+            );
+        }
+    }
+
+    #[test]
+    fn enthalpy_change_matches_janaf() {
+        // JANAF H°(T) − H°(298.15), kJ/mol.
+        let cases = [
+            ("N2(g)", 1000.0, 21.463),
+            ("N2(g)", 2000.0, 56.137),
+            ("N2(g)", 3000.0, 92.715),
+            ("O2(g)", 1000.0, 22.707),
+            ("O2(g)", 2000.0, 59.199),
+            ("CO2(g)", 1000.0, 33.397),
+            ("CO2(g)", 2000.0, 91.439),
+            ("CO2(g)", 3000.0, 152.852),
+            ("H2O(g)", 1000.0, 26.000),
+            ("H2O(g)", 2000.0, 72.790),
+            ("H2O(g)", 3000.0, 126.549),
+        ];
+        for (formula, t, expected_kj) in cases {
+            let dh = enthalpy_change_cp(formula, 298.15, t).unwrap() / 1000.0;
+            assert!(
+                (dh - expected_kj).abs() < 0.05,
+                "{formula} H({t})−H(298.15) = {dh} kJ/mol, JANAF {expected_kj}"
+            );
+        }
+    }
+
+    #[test]
+    fn enthalpy_change_across_segments_matches_numeric_integral() {
+        // CO2 crosses 1200 K; N2 crosses 500 and 2000 K; O2 crosses 700 and 2000 K.
+        for (formula, t1, t2) in [
+            ("CO2(g)", 1000.0, 1500.0),
+            ("N2(g)", 400.0, 2500.0),
+            ("O2(g)", 298.15, 3000.0),
+            ("H2O(g)", 298.15, 2500.0),
+        ] {
+            let analytic = enthalpy_change_cp(formula, t1, t2).unwrap();
+            // Composite midpoint rule on the segment-aware Cp(T).
+            let steps = 20_000;
+            let h = (t2 - t1) / f64::from(steps);
+            let numeric: f64 = (0..steps)
+                .map(|i| h * cp_at(formula, t1 + (f64::from(i) + 0.5) * h))
+                .sum();
+            assert!(
+                (analytic - numeric).abs() < 0.5,
+                "{formula} {t1}→{t2}: analytic {analytic} vs numeric {numeric}"
+            );
+            let reverse = enthalpy_change_cp(formula, t2, t1).unwrap();
+            assert!(
+                (analytic + reverse).abs() < 1e-6,
+                "{formula}: not antisymmetric"
+            );
+        }
+    }
+
+    #[test]
+    fn enthalpy_change_outside_data_range_is_error() {
+        let out_of_range = [
+            ("CO2(g)", 250.0, 600.0),  // below 298 K
+            ("NH3(g)", 300.0, 1500.0), // above 1400 K
+            ("N2(g)", 300.0, 6500.0),  // above 6000 K
+            ("Br2(g)", 298.15, 400.0), // below 332.5 K
+        ];
+        for (formula, t1, t2) in out_of_range {
+            assert!(
+                matches!(
+                    enthalpy_change_cp(formula, t1, t2),
+                    Err(KimiyaError::InvalidTemperature(_))
+                ),
+                "{formula} {t1}→{t2} should be out of range"
+            );
+        }
+        assert!(enthalpy_change_cp("N2(g)", 100.0, 6000.0).is_ok());
+    }
+
+    #[test]
+    fn enthalpy_change_nan_inf_is_error() {
+        for (t1, t2) in [
+            (f64::NAN, 600.0),
+            (300.0, f64::NAN),
+            (f64::INFINITY, 600.0),
+            (300.0, f64::INFINITY),
+            (-300.0, 600.0),
+        ] {
+            assert!(
+                matches!(
+                    enthalpy_change_cp("N2(g)", t1, t2),
+                    Err(KimiyaError::InvalidTemperature(_))
+                ),
+                "{t1}→{t2} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn c2h4_cp_matches_nist() {
+        // NIST: Cp(C2H4, 298.15 K) = 42.90 J/(mol·K)
+        let cp = lookup_shomate("C2H4(g)").unwrap().cp(298.15);
+        assert!((cp - 42.90).abs() < 0.1, "C2H4 Cp(298.15) = {cp}");
+    }
+
+    #[test]
+    fn br2_cp_at_lower_bound() {
+        // JANAF Cp(Br2, g, 298.15 K) = 36.06 J/(mol·K) and Cp rises with T,
+        // so Cp at the 332.5 K lower bound must be ≥ 36.06.
+        let s = lookup_shomate("Br2(g)").unwrap();
+        assert!((s.t_min - 332.5).abs() < f64::EPSILON);
+        let cp = s.cp(332.5);
+        assert!(cp > 36.06 && cp < 36.6, "Br2 Cp(332.5) = {cp}");
+    }
+
+    // ── Van't Hoff NaN guards ────────────────────────────────────────
+
+    #[test]
+    fn vant_hoff_nan_inf_is_error() {
+        let nan = f64::NAN;
+        let inf = f64::INFINITY;
+        assert!(vant_hoff_k(1.0, -50_000.0, nan, 400.0).is_err());
+        assert!(vant_hoff_k(1.0, -50_000.0, 298.15, nan).is_err());
+        assert!(vant_hoff_k(1.0, -50_000.0, inf, 400.0).is_err());
+        assert!(vant_hoff_k(1.0, -50_000.0, 298.15, inf).is_err());
+        assert!(vant_hoff_k(nan, -50_000.0, 298.15, 400.0).is_err());
+        assert!(vant_hoff_k(inf, -50_000.0, 298.15, 400.0).is_err());
+        assert!(vant_hoff_k(1.0, nan, 298.15, 400.0).is_err());
+        assert!(vant_hoff_k(1.0, -inf, 298.15, 400.0).is_err());
+    }
+
+    // ── Adiabatic flame (audit fixes) ────────────────────────────────
+
+    #[test]
+    fn adiabatic_flame_satisfies_energy_balance() {
+        let products = [("CO2(g)", 1.0), ("H2O(g)", 2.0), ("N2(g)", 7.52)];
+        let t = adiabatic_flame_temperature(-802_300.0, &products, 298.15).unwrap();
+        let absorbed: f64 = products
+            .iter()
+            .map(|&(f, n)| n * enthalpy_change_cp(f, 298.15, t).unwrap())
+            .sum();
+        assert!((absorbed - 802_300.0).abs() < 1.0, "residual {absorbed}");
+    }
+
+    #[test]
+    fn adiabatic_flame_nan_enthalpy_is_error() {
+        // Previously returned Ok(≈299.5 K): NaN.signum() == NaN.signum() is false.
+        let p = [("CO2(g)", 1.0), ("N2(g)", 3.76)];
+        assert!(adiabatic_flame_temperature(f64::NAN, &p, 298.15).is_err());
+        assert!(adiabatic_flame_temperature(f64::NEG_INFINITY, &p, 298.15).is_err());
+    }
+
+    #[test]
+    fn adiabatic_flame_invalid_inputs_are_errors() {
+        let p = [("CO2(g)", 1.0)];
+        assert!(adiabatic_flame_temperature(-100_000.0, &p, f64::NAN).is_err());
+        assert!(adiabatic_flame_temperature(-100_000.0, &p, f64::INFINITY).is_err());
+        assert!(adiabatic_flame_temperature(-100_000.0, &[], 298.15).is_err());
+        for moles in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                adiabatic_flame_temperature(-100_000.0, &[("CO2(g)", moles)], 298.15).is_err(),
+                "moles = {moles} should be rejected"
+            );
+        }
+        // Endothermic / zero ΔH: no flame temperature above T₀.
+        assert!(adiabatic_flame_temperature(100_000.0, &p, 298.15).is_err());
+        assert!(adiabatic_flame_temperature(0.0, &p, 298.15).is_err());
+    }
+
+    #[test]
+    fn adiabatic_flame_root_outside_data_range_is_error() {
+        // NH3(g) data end at 1400 K; the root here lies far above that.
+        assert!(adiabatic_flame_temperature(-200_000.0, &[("NH3(g)", 1.0)], 298.15).is_err());
+        // Mixed products: the common range ends at SO2's 1200 K.
+        assert!(
+            adiabatic_flame_temperature(-241_820.0, &[("H2O(g)", 1.0), ("SO2(g)", 1.0)], 298.15)
+                .is_err()
+        );
+        // Below the products' data range (CO2 starts at 298 K).
+        assert!(adiabatic_flame_temperature(-100_000.0, &[("CO2(g)", 1.0)], 250.0).is_err());
+    }
+
+    // ── Table data (audit fixes) ─────────────────────────────────────
+
+    #[test]
+    fn k2o_entropy_matches_crc() {
+        let d = lookup_thermochem("K2O(s)").unwrap();
+        assert!(
+            (d.s_standard_j - 94.1).abs() < 0.05,
+            "K2O S° = {}",
+            d.s_standard_j
+        );
+    }
+
+    #[test]
+    fn butane_row_is_self_consistent() {
+        // NBS: ΔHf −126.15, ΔGf −17.03, S° 310.23.
+        let d = lookup_thermochem("C4H10(g)").unwrap();
+        let elements = 4.0 * lookup_thermochem("C(graphite)").unwrap().s_standard_j
+            + 5.0 * lookup_thermochem("H2(g)").unwrap().s_standard_j;
+        let dg_calc = d.delta_hf_kj - 298.15 * (d.s_standard_j - elements) / 1000.0;
+        assert!(
+            (dg_calc - d.delta_gf_kj).abs() < 0.2,
+            "butane: ΔG_calc = {dg_calc}, table {}",
+            d.delta_gf_kj
+        );
+    }
+
+    #[test]
+    fn added_standard_state_elements() {
+        for (formula, s) in [
+            ("Zn(s)", 41.63),
+            ("Ti(s)", 30.72),
+            ("Ba(s)", 62.5),
+            ("Ag(s)", 42.55),
+            ("F2(g)", 202.79),
+        ] {
+            let d = lookup_thermochem(formula).unwrap();
+            assert!(d.delta_hf_kj.abs() < f64::EPSILON && d.delta_gf_kj.abs() < f64::EPSILON);
+            assert!((d.s_standard_j - s).abs() < 0.01, "{formula}");
+        }
+        // Formation reactions that needed them now resolve.
+        let dg =
+            reaction_gibbs_energy(&[("ZnO(s)", 1.0)], &[("Zn(s)", 1.0), ("O2(g)", 0.5)]).unwrap();
+        assert!((dg - (-320.48)).abs() < 0.01);
+    }
+
+    /// Reference standard state of each element: (formula, atoms per unit).
+    fn reference_state(symbol: &str) -> Option<(&'static str, f64)> {
+        Some(match symbol {
+            "H" => ("H2(g)", 2.0),
+            "O" => ("O2(g)", 2.0),
+            "N" => ("N2(g)", 2.0),
+            "F" => ("F2(g)", 2.0),
+            "Cl" => ("Cl2(g)", 2.0),
+            "Br" => ("Br2(l)", 2.0),
+            "I" => ("I2(s)", 2.0),
+            "C" => ("C(graphite)", 1.0),
+            "S" => ("S(rhombic)", 1.0),
+            "P" => ("P(white)", 1.0),
+            "Fe" => ("Fe(s)", 1.0),
+            "Cu" => ("Cu(s)", 1.0),
+            "Al" => ("Al(s)", 1.0),
+            "Na" => ("Na(s)", 1.0),
+            "K" => ("K(s)", 1.0),
+            "Ca" => ("Ca(s)", 1.0),
+            "Mg" => ("Mg(s)", 1.0),
+            "Si" => ("Si(s)", 1.0),
+            "Zn" => ("Zn(s)", 1.0),
+            "Ti" => ("Ti(s)", 1.0),
+            "Ba" => ("Ba(s)", 1.0),
+            "Ag" => ("Ag(s)", 1.0),
+            _ => return None,
+        })
+    }
+
+    /// Parse a parenthesis-free formula such as "CH3COOH(l)" into
+    /// (element symbol, count) pairs; the phase suffix is ignored.
+    fn parse_simple_formula(formula: &str) -> Vec<(String, f64)> {
+        let body = formula.split('(').next().unwrap();
+        let mut out: Vec<(String, f64)> = Vec::new();
+        let chars: Vec<char> = body.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let mut symbol = chars[i].to_string();
+            i += 1;
+            while i < chars.len() && chars[i].is_ascii_lowercase() {
+                symbol.push(chars[i]);
+                i += 1;
+            }
+            let mut digits = String::new();
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                digits.push(chars[i]);
+                i += 1;
+            }
+            let n: f64 = if digits.is_empty() {
+                1.0
+            } else {
+                digits.parse().unwrap()
+            };
+            match out.iter_mut().find(|(s, _)| *s == symbol) {
+                Some((_, count)) => *count += n,
+                None => out.push((symbol, n)),
+            }
+        }
+        out
+    }
+
+    /// Rows whose source values (NBS / CRC) are themselves inconsistent
+    /// beyond 2 kJ/mol, with the observed ΔG_calc − ΔG_table. Pinned so a
+    /// data change forces a re-check.
+    const KNOWN_INCONSISTENT: &[(&str, f64)] = &[("Na2CO3(s)", -2.55)];
+
+    #[test]
+    fn table_gibbs_enthalpy_entropy_consistency() {
+        // ΔG_f° ≈ ΔH_f° − 298.15·ΔS_f°, ΔS_f° = S°(compound) − Σ S°(elements).
+        let mut checked = 0;
+        for d in THERMOCHEM_DATA.iter() {
+            let composition = parse_simple_formula(d.formula);
+            // Skip reference-state elements themselves.
+            if composition.len() == 1
+                && reference_state(&composition[0].0).map(|(f, _)| f) == Some(d.formula)
+            {
+                continue;
+            }
+            let mut s_elements = 0.0;
+            let mut all_present = true;
+            for (symbol, count) in &composition {
+                let ref_data = reference_state(symbol)
+                    .and_then(|(f, atoms)| lookup_thermochem(f).map(|r| (r, atoms)));
+                match ref_data {
+                    Some((r, atoms)) => s_elements += count / atoms * r.s_standard_j,
+                    None => all_present = false,
+                }
+            }
+            if !all_present {
+                continue;
+            }
+            checked += 1;
+            let dg_calc = d.delta_hf_kj - 298.15 * (d.s_standard_j - s_elements) / 1000.0;
+            let diff = dg_calc - d.delta_gf_kj;
+            if let Some(&(_, pinned)) = KNOWN_INCONSISTENT.iter().find(|(f, _)| *f == d.formula) {
+                assert!(
+                    (diff - pinned).abs() < 0.05,
+                    "{}: deviation changed to {diff:.2} — re-check data",
+                    d.formula
+                );
+                continue;
+            }
+            assert!(
+                diff.abs() < 2.0,
+                "{}: ΔG_calc = {dg_calc:.2}, table {:.2} (diff {diff:.2} kJ/mol)",
+                d.formula,
+                d.delta_gf_kj
+            );
+        }
+        // Every non-element row has all its elements in the table.
+        assert_eq!(checked, THERMOCHEM_DATA.len() - 22, "rows checked");
+    }
+
+    #[test]
+    fn high_temperature_segments_match_janaf() {
+        // JANAF Cp° at 2000 K (J/(mol·K)): H2 34.280, CO 36.250, CH4 94.399; H2 at 3000 K 37.087.
+        let cases = [
+            ("H2(g)", 2000.0, 34.280),
+            ("H2(g)", 3000.0, 37.087),
+            ("CO(g)", 2000.0, 36.250),
+            ("CH4(g)", 2000.0, 94.399),
+        ];
+        for (formula, t, expected) in cases {
+            let cp = lookup_shomate_at(formula, t).unwrap().cp(t);
+            assert!(
+                (cp - expected).abs() < 0.1,
+                "{formula} Cp({t}) = {cp}, JANAF {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn adiabatic_flame_rich_methane_with_co_product() {
+        // CH4 + 1.5 O2 (+ 5.64 N2) -> CO + 2 H2O (+ 5.64 N2):
+        // ΔH = -110.53 - 2(241.83) + 74.87 = -519.32 kJ/mol.
+        // CO must be usable above 1300 K for this to solve.
+        let products = [("CO(g)", 1.0), ("H2O(g)", 2.0), ("N2(g)", 5.64)];
+        let t = adiabatic_flame_temperature(-519_320.0, &products, 298.15).unwrap();
+        assert!(t > 1300.0 && t < 3000.0, "rich CH4 flame T = {t}");
+        let absorbed: f64 = products
+            .iter()
+            .map(|&(f, n)| n * enthalpy_change_cp(f, 298.15, t).unwrap())
+            .sum();
+        assert!(
+            (absorbed - 519_320.0).abs() < 1.0,
+            "energy balance off: {absorbed}"
+        );
     }
 }

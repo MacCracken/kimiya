@@ -31,9 +31,11 @@ fn main() {
     let e_cell = electrochemistry::cell_potential_from_couples("Cu2+/Cu", "Zn2+/Zn").unwrap();
     println!("Daniell cell E°: {e_cell:.3} V");
 
-    // Nernst equation — Cu²⁺/Cu at non-standard [Cu²⁺] = 0.01 M
-    let e = electrochemistry::nernst_potential_25c(0.342, 2, 0.01).unwrap();
-    println!("Cu²⁺/Cu at [Cu²⁺]=0.01M: {e:.4} V");
+    // Nernst equation — Cu²⁺ + 2e⁻ → Cu at non-standard [Cu²⁺] = 0.01 M.
+    // Q = [products]/[reactants] = 1/[Cu²⁺] = 100 (solid Cu has activity 1).
+    let cu2 = 0.01;
+    let e = electrochemistry::nernst_potential_25c(0.342, 2, 1.0 / cu2).unwrap();
+    println!("Cu²⁺/Cu at [Cu²⁺]=0.01M (Q=100): {e:.4} V");
 
     // Methane combustion enthalpy (thermochem)
     let dh = thermochem::reaction_enthalpy(

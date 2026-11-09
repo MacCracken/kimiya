@@ -1,4 +1,14 @@
+//! Basic calorimetry and thermochemistry — heat transfer (q = mcΔT),
+//! Hess's law, reaction enthalpy from formation enthalpies, and specific heat
+//! from calorimetry.
+//!
+//! Calorimetry functions use grams and J/(g·°C) (a temperature *difference*
+//! in °C equals one in K); enthalpies are in J or J/mol as passed in. For
+//! tabulated standard-state data and Cp(T) integration see
+//! [`crate::thermochem`].
+
 use crate::error::{KimiyaError, Result};
+use crate::validate::{is_finite, is_positive};
 use hisab::EPSILON_F64;
 
 /// Specific heat capacity of water in J/(g·°C).
@@ -14,14 +24,21 @@ pub fn heat_transfer(mass_g: f64, specific_heat: f64, delta_t: f64) -> f64 {
 }
 
 /// Hess's law: total enthalpy change = sum of step enthalpies.
+///
+/// Returns the sum in the unit of the inputs (e.g. J/mol).
 #[must_use]
+#[inline]
 pub fn hess_law(enthalpies_j: &[f64]) -> f64 {
     enthalpies_j.iter().sum()
 }
 
 /// Enthalpy of reaction from formation enthalpies:
 /// ΔH_rxn = Σ ΔH_f(products) - Σ ΔH_f(reactants)
+///
+/// Each entry is ΔH_f already multiplied by its stoichiometric coefficient
+/// (e.g. J/mol of reaction); returns ΔH_rxn in the same unit.
 #[must_use]
+#[inline]
 pub fn enthalpy_from_formation(products_hf: &[f64], reactants_hf: &[f64]) -> f64 {
     let sum_products: f64 = products_hf.iter().sum();
     let sum_reactants: f64 = reactants_hf.iter().sum();
@@ -31,15 +48,22 @@ pub fn enthalpy_from_formation(products_hf: &[f64], reactants_hf: &[f64]) -> f64
 /// Specific heat at constant pressure from energy and temperature change.
 /// c_p = q / (m × ΔT)
 ///
+/// `energy_j` in J, `mass_g` in g, `delta_t` in °C (or K). Returns J/(g·°C).
+///
 /// # Errors
 ///
-/// Returns [`KimiyaError::InvalidInput`] if mass is not positive or temperature change is zero.
+/// Returns [`KimiyaError::InvalidInput`] if energy is not finite, mass is not
+/// positive and finite, or the temperature change is zero (|ΔT| < 10⁻¹²) or
+/// non-finite.
 #[inline]
 pub fn specific_heat_from_calorimetry(energy_j: f64, mass_g: f64, delta_t: f64) -> Result<f64> {
-    if mass_g <= 0.0 {
+    if !is_finite(energy_j) {
+        return Err(KimiyaError::InvalidInput("energy must be finite".into()));
+    }
+    if !is_positive(mass_g) {
         return Err(KimiyaError::InvalidInput("mass must be positive".into()));
     }
-    if delta_t.abs() < EPSILON_F64 {
+    if !is_finite(delta_t) || delta_t.abs() < EPSILON_F64 {
         return Err(KimiyaError::InvalidInput(
             "temperature change must be non-zero".into(),
         ));
@@ -54,14 +78,17 @@ mod tests {
     #[test]
     fn heat_1kg_water_1c() {
         let q = heat_transfer(1000.0, WATER_SPECIFIC_HEAT, 1.0);
-        assert!((q - 4184.0).abs() < 1.0, "1kg water +1°C = 4184 J, got {q}");
+        assert!(
+            (q - 4184.0).abs() < 1e-9,
+            "1kg water +1°C = 4184 J, got {q}"
+        );
     }
 
     #[test]
     fn heat_100g_water_10c() {
         let q = heat_transfer(100.0, WATER_SPECIFIC_HEAT, 10.0);
         assert!(
-            (q - 4184.0).abs() < 1.0,
+            (q - 4184.0).abs() < 1e-9,
             "100g water +10°C = 4184 J, got {q}"
         );
     }
@@ -87,7 +114,7 @@ mod tests {
     #[test]
     fn specific_heat_roundtrip() {
         let c = specific_heat_from_calorimetry(4184.0, 1000.0, 1.0).unwrap();
-        assert!((c - WATER_SPECIFIC_HEAT).abs() < 0.001);
+        assert!((c - WATER_SPECIFIC_HEAT).abs() < 1e-12);
     }
 
     #[test]
@@ -103,5 +130,14 @@ mod tests {
     #[test]
     fn zero_delta_t_calorimetry_is_error() {
         assert!(specific_heat_from_calorimetry(100.0, 100.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn nan_calorimetry_is_error() {
+        assert!(specific_heat_from_calorimetry(100.0, f64::NAN, 1.0).is_err());
+        assert!(specific_heat_from_calorimetry(100.0, 100.0, f64::NAN).is_err());
+        assert!(specific_heat_from_calorimetry(f64::NAN, 100.0, 1.0).is_err());
+        assert!(specific_heat_from_calorimetry(100.0, f64::INFINITY, 1.0).is_err());
+        assert!(specific_heat_from_calorimetry(100.0, 100.0, f64::INFINITY).is_err());
     }
 }

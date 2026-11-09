@@ -1,8 +1,8 @@
 [package]
 name = "kimiya"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.99"
 license = "GPL-3.0-only"
 description = "Kimiya — chemistry engine for elements, molecules, reactions, kinetics, and thermochemistry"
 homepage = "https://github.com/MacCracken/kimiya"
@@ -19,15 +19,14 @@ logging = ["dep:tracing-subscriber"]
 soorat-compat = []
 
 [dependencies]
-hisab = { version = "1.1", features = ["autodiff"] }
-serde = { version = "1", features = ["derive"] }
-thiserror = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
+hisab = { version = "1.4", default-features = false, features = ["num", "autodiff"] }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"], optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-serde_json = "1"
+criterion = { version = "0.8", features = ["html_reports"] }
+serde_json = "1.0.154"
 
 [[bench]]
 name = "benchmarks"

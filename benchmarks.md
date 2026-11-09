@@ -1,96 +1,123 @@
 # Benchmarks
 
-Three-point tracking: **baseline** (pre-migration) / **previous** (post-migration) / **latest** (post-audit)
+Three-point tracking: **baseline** (v1.1.1, criterion 0.5) / **previous** (v1.2 dependency refresh, criterion 0.8, pre-repair) / **latest** (v1.2 post-audit repair).
+
+Criterion medians on the same machine (x86_64 Linux, rustc 1.99.1). The baseline → previous step changed only the harness
+(criterion 0.8 uses `std::hint::black_box`), not library code, so compare **previous → latest** for the effect of the repair.
+Benchmarks marked — in the baseline column were added in v1.2 and measured on the pre-repair code.
 
 | Point | Date | Commit |
 |-------|------|--------|
-| Baseline | 2026-03-25 | `228c55e` |
-| Previous | 2026-03-25 | (hisab deepening) |
-| Latest | 2026-03-25 | (post-audit) |
+| Baseline | 2026-11-08 | `c9f9826` (v1.1.1) |
+| Previous | 2026-11-08 | v1.2 refresh (uncommitted) |
+| Latest | 2026-11-08 | v1.2 repair (uncommitted) |
 
 ## element
 
-| Benchmark | Baseline | Previous | Latest |
-|-----------|----------|----------|--------|
-| `lookup_by_symbol` | 52.37 ns | 48.24 ns | 48.52 ns |
-| `lookup_by_number` | 938.14 ps | 850.05 ps | 855.77 ps |
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `lookup_by_number` | 0.91 ns | 0.89 ns | 0.84 ns | -6.2% |
+| `lookup_by_symbol` | 49.08 ns | 48.22 ns | 44.73 ns | -7.2% |
 
 ## molecule
 
-| Benchmark | Baseline | Previous | Latest |
-|-----------|----------|----------|--------|
-| `molecular_weight_glucose` | 4.87 ns | 4.32 ns | 4.31 ns |
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `molecular_weight_glucose` | 4.74 ns | 4.17 ns | 3.63 ns | -13.0% |
+
+## stoichiometry
+
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `balance_ch4_combustion` | — | 218.22 ns | 233.90 ns | +7.2% |
+| `oxidation_states_kmno4` | — | 47.03 ns | 22.38 ns | -52.4% |
 
 ## gas
 
-| Benchmark | Baseline | Previous | Latest |
-|-----------|----------|----------|--------|
-| `ideal_gas_pressure` | 1.45 ns | 1.81 ns | 1.79 ns |
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `ideal_gas_pressure` | 1.80 ns | 1.25 ns | 2.18 ns | +74.7% |
+| `peng_robinson_z_n2_1mpa` | — | 33.16 ns | 61.39 ns | +85.1% |
 
 ## reaction
 
-| Benchmark | Baseline | Previous | Latest |
-|-----------|----------|----------|--------|
-| `gibbs_free_energy` | 1.16 ns | 1.04 ns | 1.07 ns |
-
-## kinetics
-
-| Benchmark | Baseline | Previous | Latest |
-|-----------|----------|----------|--------|
-| `arrhenius_rate` | 6.19 ns | 5.86 ns | 5.86 ns |
-| `michaelis_menten` | 3.38 ns | 3.08 ns | 3.13 ns |
-| `eyring_rate` | 7.19 ns | 5.91 ns | 6.16 ns |
-
-## solution
-
-| Benchmark | Baseline | Previous | Latest |
-|-----------|----------|----------|--------|
-| `ph_from_h` | 8.36 ns | 7.76 ns | 7.90 ns |
-| `weak_acid_ph` | 166.23 ns | **20.04 ns** | **20.73 ns** |
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `gibbs_free_energy` | 1.01 ns | 1.03 ns | 1.75 ns | +70.4% |
 
 ## thermo
 
-| Benchmark | Baseline | Previous | Latest |
-|-----------|----------|----------|--------|
-| `heat_transfer` | 1.13 ns | 1.06 ns | 1.05 ns |
-
-## electrochemistry
-
-| Benchmark | Baseline | Previous | Latest |
-|-----------|----------|----------|--------|
-| `nernst_potential` | 6.46 ns | 5.91 ns | 6.00 ns |
-| `lookup_half_reaction` | 36.48 ns | 24.29 ns | 24.61 ns |
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `heat_transfer` | 1.02 ns | 1.01 ns | 0.95 ns | -6.1% |
 
 ## thermochem
 
-| Benchmark | Baseline | Previous | Latest |
-|-----------|----------|----------|--------|
-| `reaction_enthalpy_ch4` | 51.29 ns | 41.94 ns | 42.92 ns |
-| `vant_hoff_k` | 10.74 ns | 9.00 ns | 9.28 ns |
-| `enthalpy_change_cp` | 316.76 ns | 289.48 ns | 294.47 ns |
-| `shomate_cp` | 3.11 ns | 2.61 ns | 2.63 ns |
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `adiabatic_flame_ch4_air` | — | 2.76 µs | 301.48 ns | -89.1% |
+| `enthalpy_change_cp` | 471.34 ns | 473.12 ns | 24.00 ns | -94.9% |
+| `reaction_enthalpy_ch4` | 38.55 ns | 37.01 ns | 38.58 ns | +4.2% |
+| `shomate_cp` | 2.51 ns | 2.48 ns | 2.34 ns | -5.8% |
+| `vant_hoff_k` | 9.26 ns | 9.21 ns | 9.51 ns | +3.3% |
+
+## kinetics
+
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `arrhenius_rate` | 5.88 ns | 5.80 ns | 6.78 ns | +16.9% |
+| `eyring_rate` | 6.29 ns | 5.60 ns | 6.73 ns | +20.2% |
+| `michaelis_menten` | 3.04 ns | 1.16 ns | 2.92 ns | +151.4% |
+
+## dynamics
+
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `consecutive_100steps` | 5.45 µs | 5.28 µs | 5.04 µs | -4.7% |
+| `first_order_100steps` | 4.58 µs | 4.44 µs | 4.41 µs | -0.9% |
+
+## solution
+
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `ph_from_h` | 7.71 ns | 6.96 ns | 9.73 ns | +39.8% |
+| `weak_acid_ph` | 19.68 ns | 19.59 ns | 34.85 ns | +77.9% |
+
+## electrochemistry
+
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `lookup_half_reaction` | 27.34 ns | 29.73 ns | 57.06 ns | +92.0% |
+| `nernst_potential` | 5.79 ns | 5.36 ns | 6.42 ns | +19.9% |
 
 ## spectroscopy
 
-| Benchmark | Baseline | Previous | Latest |
-|-----------|----------|----------|--------|
-| `bohr_energy_level` | 2.00 ns | 1.34 ns | 1.37 ns |
-| `absorbance` | 1.54 ns | 1.04 ns | 1.05 ns |
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `absorbance` | 1.02 ns | 1.01 ns | 0.98 ns | -2.1% |
+| `bohr_energy_level` | 1.34 ns | 1.26 ns | 1.21 ns | -3.9% |
+| `isotope_pattern_glucose` | — | 12.72 µs | 2.80 µs | -78.0% |
 
-## reaction_dynamics (new)
+## nuclear
 
-| Benchmark | Baseline | Previous | Latest |
-|-----------|----------|----------|--------|
-| `first_order_100steps` | — | 4.64 µs | 4.80 µs |
-| `consecutive_100steps` | — | 5.39 µs | 5.53 µs |
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `binding_energy_per_nucleon_fe56` | — | 1.66 ns | 2.02 ns | +21.6% |
+| `semi_empirical_fe56` | — | 25.09 ns | 18.50 ns | -26.3% |
 
-## fitting (new)
+## potential
 
-| Benchmark | Baseline | Previous | Latest |
-|-----------|----------|----------|--------|
-| `arrhenius_6pts` | — | 244.64 ns | 302.03 ns |
-| `polynomial_deg2_20pts` | — | 518.55 ns | 528.50 ns |
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `dihedral_angle` | — | 27.22 ns | 20.35 ns | -25.2% |
+
+## fitting
+
+| Benchmark | Baseline | Previous | Latest | Δ prev→latest |
+|-----------|----------|----------|--------|---------------|
+| `arrhenius_6pts` | 237.36 ns | 232.70 ns | 233.40 ns | +0.3% |
+| `polynomial_deg2_20pts` | 494.73 ns | 502.94 ns | 500.05 ns | -0.6% |
 
 ---
 
-Generated by `cargo bench`. Full history in `bench-history.csv`.
+Generated by `cargo bench` (`./scripts/bench-history.sh`). Bencher-format history in `bench-history.csv`.

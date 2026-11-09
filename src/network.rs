@@ -1,21 +1,29 @@
-//! Reaction network analysis — sparse stoichiometric matrices, pathway analysis.
+//! Reaction network analysis — stoichiometric matrices, rank and
+//! conservation laws, species rates of change.
 //!
-//! Uses [`hisab`] sparse matrices (CsrMatrix) and SVD for efficient
-//! analysis of large reaction networks.
+//! Matrices are dense row-major `Vec<Vec<f64>>` (rows = species, columns =
+//! reactions); [`sparse_stoichiometric_matrix`] converts to [`hisab`]'s CSR
+//! format, and the rank uses hisab's SVD.
 
 use crate::error::{KimiyaError, Result};
 
 /// A reaction defined as (reactants, products) where each is a list of (species_index, coefficient).
 pub type ReactionDef = (Vec<(usize, f64)>, Vec<(usize, f64)>);
 
-/// Build a sparse stoichiometric matrix from reaction definitions.
+/// Build a dense stoichiometric matrix from reaction definitions.
 ///
 /// Each reaction is defined as:
 /// - `reactants`: \[(species_index, coefficient)\]
 /// - `products`: \[(species_index, coefficient)\]
 ///
-/// Returns a dense stoichiometric matrix where rows = species, columns = reactions.
-/// Positive entries = products, negative = reactants.
+/// Returns a dense `n_species × reactions.len()` matrix (rows = species,
+/// columns = reactions). Positive entries = products, negative = reactants;
+/// a species listed more than once in a reaction has its coefficients summed.
+///
+/// # Errors
+///
+/// Returns [`KimiyaError::InvalidInput`] if there are no species or no
+/// reactions, or a species index is out of range.
 pub fn stoichiometric_matrix(n_species: usize, reactions: &[ReactionDef]) -> Result<Vec<Vec<f64>>> {
     if n_species == 0 {
         return Err(KimiyaError::InvalidInput(
@@ -53,9 +61,16 @@ pub fn stoichiometric_matrix(n_species: usize, reactions: &[ReactionDef]) -> Res
     Ok(matrix)
 }
 
-/// Build a sparse (CSR) stoichiometric matrix.
+/// Build a stoichiometric matrix in CSR (compressed sparse row) form.
 ///
-/// More memory-efficient for large networks with many species and few reactions per species.
+/// The dense matrix from [`stoichiometric_matrix`] is built first and then
+/// compressed (entries with |v| ≤ `hisab::EPSILON_F64` are dropped), so peak
+/// memory is that of the dense matrix. The CSR result is smaller to keep and
+/// faster to multiply when most species take part in few reactions.
+///
+/// # Errors
+///
+/// Same as [`stoichiometric_matrix`].
 pub fn sparse_stoichiometric_matrix(
     n_species: usize,
     reactions: &[ReactionDef],
@@ -66,11 +81,13 @@ pub fn sparse_stoichiometric_matrix(
 
 /// Compute the rank of a stoichiometric matrix.
 ///
-/// The rank tells you the number of independent reactions.
+/// The rank tells you the number of independent reactions. Singular values
+/// above 1e-10 are counted.
 ///
 /// # Errors
 ///
-/// Returns error if SVD fails.
+/// Returns [`KimiyaError::ComputationError`] if the matrix is empty or ragged,
+/// or the SVD fails.
 pub fn reaction_network_rank(matrix: &[Vec<f64>]) -> Result<usize> {
     hisab::num::matrix_rank(matrix, Some(1e-10))
         .map_err(|e| KimiyaError::ComputationError(format!("SVD rank computation failed: {e}")))
@@ -78,7 +95,9 @@ pub fn reaction_network_rank(matrix: &[Vec<f64>]) -> Result<usize> {
 
 /// Compute the null space dimension (number of conservation laws).
 ///
-/// conservation_laws = n_species - rank(S)
+/// conservation_laws = n_species - rank(S), saturating at 0.
+#[must_use]
+#[inline]
 pub fn conservation_law_count(n_species: usize, rank: usize) -> usize {
     n_species.saturating_sub(rank)
 }
@@ -88,20 +107,25 @@ pub fn conservation_law_count(n_species: usize, rank: usize) -> usize {
 /// - `stoich_matrix`: S (n_species × n_reactions)
 /// - `rates`: v (n_reactions)
 ///
-/// Returns dx/dt (n_species).
+/// Returns dx/dt (n_species), in the units of `rates` (e.g. mol·L⁻¹·s⁻¹).
 ///
 /// # Errors
 ///
-/// Returns error if dimensions don't match.
+/// Returns [`KimiyaError::InvalidInput`] if the matrix is empty or any row's
+/// length differs from `rates.len()`.
 pub fn rate_from_stoichiometry(stoich_matrix: &[Vec<f64>], rates: &[f64]) -> Result<Vec<f64>> {
     if stoich_matrix.is_empty() {
         return Err(KimiyaError::InvalidInput("empty matrix".into()));
     }
-    let n_rxns = stoich_matrix[0].len();
-    if rates.len() != n_rxns {
+    if let Some((i, row)) = stoich_matrix
+        .iter()
+        .enumerate()
+        .find(|(_, row)| row.len() != rates.len())
+    {
         return Err(KimiyaError::InvalidInput(format!(
-            "rate vector length {} != n_reactions {n_rxns}",
-            rates.len()
+            "rate vector length {} != n_reactions {} (row {i})",
+            rates.len(),
+            row.len()
         )));
     }
 
@@ -189,5 +213,21 @@ mod tests {
     fn rate_dimension_mismatch() {
         let m = stoichiometric_matrix(2, &[(vec![(0, 1.0)], vec![(1, 1.0)])]).unwrap();
         assert!(rate_from_stoichiometry(&m, &[0.5, 0.3]).is_err());
+    }
+
+    #[test]
+    fn rate_ragged_matrix_is_error() {
+        // Only row 0 was checked: shorter later rows were silently truncated
+        // by `zip`, giving a wrong dx/dt.
+        let ragged = vec![vec![-1.0, 0.0], vec![1.0]];
+        assert!(rate_from_stoichiometry(&ragged, &[0.5, 0.3]).is_err());
+        let long = vec![vec![-1.0, 0.0], vec![1.0, -1.0, 7.0]];
+        assert!(rate_from_stoichiometry(&long, &[0.5, 0.3]).is_err());
+    }
+
+    #[test]
+    fn rate_empty_matrix_is_error() {
+        assert!(rate_from_stoichiometry(&[], &[]).is_err());
+        assert!(rate_from_stoichiometry(&[], &[1.0]).is_err());
     }
 }

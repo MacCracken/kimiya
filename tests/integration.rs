@@ -22,7 +22,8 @@ fn water_weight_from_elements() {
 fn ideal_gas_at_stp() {
     let v = gas::ideal_gas_volume(1.0, gas::STP_TEMPERATURE, gas::STP_PRESSURE).unwrap();
     let v_liters = v * 1000.0;
-    assert!((v_liters - 22.414).abs() < 0.1);
+    // V = RT/P = 8.314462618 × 273.15 / 101325 m³ = 22.413969 L
+    assert!((v_liters - 22.413_969).abs() < 1e-5, "V = {v_liters} L");
 }
 
 #[test]
@@ -120,18 +121,20 @@ fn thermochem_enthalpy_entropy_gibbs_triangle() {
 
 #[test]
 fn weak_acid_ph_acetic_acid() {
-    // 0.1 M acetic acid (Ka = 1.8e-5) → pH ≈ 2.87
+    // 0.1 M acetic acid (Ka = 1.8e-5): full charge balance gives pH 2.875277.
     let ph = solution::weak_acid_ph(1.8e-5, 0.1).unwrap();
-    assert!((ph - 2.87).abs() < 0.05);
+    assert!((ph - 2.875_277).abs() < 1e-6, "pH = {ph}");
 }
 
 #[test]
 fn cp_integration_heating_co2() {
-    // Heat CO2 from 300K to 600K using Shomate + Simpson integration
+    // Heat CO2 from 300 K to 600 K using the analytic Shomate enthalpy.
     let dh = thermochem::enthalpy_change_cp("CO2(g)", 300.0, 600.0).unwrap();
-    assert!(dh > 0.0, "heating should be positive enthalpy change");
-    // Rough: ~37-50 J/(mol·K) avg × 300K ≈ 11-15 kJ
-    assert!(dh > 10_000.0 && dh < 15_000.0);
+    // JANAF: H(600) - H(298.15) = 12.906 kJ/mol, H(300) - H(298.15) = 0.069 kJ/mol.
+    assert!(
+        (dh - 12_837.0).abs() < 50.0,
+        "CO2 300→600 K ΔH = {dh} J/mol"
+    );
 }
 
 #[test]
@@ -210,7 +213,7 @@ fn reaction_dynamics_first_order_matches_analytical() {
     let final_a = traj.last().unwrap().1[0];
     let analytical = (-1.0_f64).exp(); // exp(-0.1*10)
     assert!(
-        (final_a - analytical).abs() < 0.001,
+        (final_a - analytical).abs() < 1e-10,
         "ODE should match analytical: {final_a} vs {analytical}"
     );
 }
@@ -221,7 +224,8 @@ fn reaction_dynamics_reversible_equilibrium() {
     let traj = reaction_dynamics::simulate_reversible(1.0, 0.0, 2.0, 1.0, 10.0, 1000).unwrap();
     let final_state = &traj.last().unwrap().1;
     let k_eq = final_state[1] / final_state[0];
-    assert!((k_eq - 2.0).abs() < 0.05, "should reach K_eq=2, got {k_eq}");
+    // Deviation from K after t = 10 decays as exp(-(kf + kr)·t) ≈ 1e-13.
+    assert!((k_eq - 2.0).abs() < 1e-9, "should reach K_eq=2, got {k_eq}");
 }
 
 #[test]
@@ -234,8 +238,9 @@ fn fitting_arrhenius_roundtrip() {
     let rates: Vec<f64> = temps.iter().map(|&t| a * (-ea / (r * t)).exp()).collect();
     let fit = fitting::fit_arrhenius(&temps, &rates).unwrap();
     assert!(
-        (fit.activation_energy_j - ea).abs() / ea < 0.01,
-        "Ea recovery should be < 1%"
+        (fit.activation_energy_j - ea).abs() / ea < 1e-8,
+        "Ea recovery from exact data should be exact to 1e-8, got {}",
+        fit.activation_energy_j
     );
 }
 
@@ -246,7 +251,7 @@ fn fitting_calibration_curve() {
     let abs: Vec<f64> = conc.iter().map(|&c| 150.0 * c + 0.005).collect();
     let epsilon = fitting::fit_beer_lambert(&conc, &abs, 1.0).unwrap();
     assert!(
-        (epsilon - 150.0).abs() < 1.0,
+        (epsilon - 150.0).abs() < 1e-8,
         "ε should be ~150, got {epsilon}"
     );
 }

@@ -1,0 +1,154 @@
+test molecule/molecular_weight_glucose ... bench:           4 ns/iter (+/- 0)
+
+test gas/ideal_gas_pressure ... bench:           1 ns/iter (+/- 0)
+
+test kinetics/arrhenius_rate ... bench:           5 ns/iter (+/- 0)
+
+test solution/ph_from_h ... bench:           7 ns/iter (+/- 0)
+
+test element/lookup_by_symbol ... bench:          49 ns/iter (+/- 0)
+
+test element/lookup_by_number ... bench:           0 ns/iter (+/- 0)
+
+test reaction/gibbs_free_energy ... bench:           1 ns/iter (+/- 0)
+
+test thermo/heat_transfer ... bench:           1 ns/iter (+/- 0)
+
+test electrochemistry/nernst_potential ... bench:           5 ns/iter (+/- 0)
+
+test electrochemistry/lookup_half_reaction ... bench:          27 ns/iter (+/- 0)
+
+test thermochem/reaction_enthalpy_ch4 ... bench:          38 ns/iter (+/- 0)
+
+test thermochem/vant_hoff_k ... bench:           9 ns/iter (+/- 0)
+
+test solution/weak_acid_ph ... bench:          19 ns/iter (+/- 0)
+
+test thermochem/enthalpy_change_cp ... bench:         471 ns/iter (+/- 2)
+
+test thermochem/shomate_cp ... bench:           2 ns/iter (+/- 0)
+
+test spectroscopy/bohr_energy_level ... bench:           1 ns/iter (+/- 0)
+
+test spectroscopy/absorbance ... bench:           1 ns/iter (+/- 0)
+
+test kinetics/michaelis_menten ... bench:           3 ns/iter (+/- 0)
+
+test kinetics/eyring_rate ... bench:           6 ns/iter (+/- 0)
+
+test dynamics/first_order_100steps ... bench:        4578 ns/iter (+/- 149)
+
+test dynamics/consecutive_100steps ... bench:        5451 ns/iter (+/- 103)
+
+test fitting/arrhenius_6pts ... bench:         237 ns/iter (+/- 6)
+
+test fitting/polynomial_deg2_20pts ... bench:         494 ns/iter (+/- 6)
+
+test molecule/molecular_weight_glucose ... bench:           4 ns/iter (+/- 0)
+
+test gas/ideal_gas_pressure ... bench:           1 ns/iter (+/- 0)
+
+test kinetics/arrhenius_rate ... bench:           5 ns/iter (+/- 0)
+
+test solution/ph_from_h ... bench:           6 ns/iter (+/- 0)
+
+test element/lookup_by_symbol ... bench:          48 ns/iter (+/- 0)
+
+test element/lookup_by_number ... bench:           0 ns/iter (+/- 0)
+
+test reaction/gibbs_free_energy ... bench:           1 ns/iter (+/- 0)
+
+test thermo/heat_transfer ... bench:           1 ns/iter (+/- 0)
+
+test electrochemistry/nernst_potential ... bench:           5 ns/iter (+/- 0)
+
+test electrochemistry/lookup_half_reaction ... bench:          29 ns/iter (+/- 0)
+
+test thermochem/reaction_enthalpy_ch4 ... bench:          37 ns/iter (+/- 0)
+
+test thermochem/vant_hoff_k ... bench:           9 ns/iter (+/- 0)
+
+test solution/weak_acid_ph ... bench:          19 ns/iter (+/- 0)
+
+test thermochem/enthalpy_change_cp ... bench:         473 ns/iter (+/- 3)
+
+test thermochem/shomate_cp ... bench:           2 ns/iter (+/- 0)
+
+test spectroscopy/bohr_energy_level ... bench:           1 ns/iter (+/- 0)
+
+test spectroscopy/absorbance ... bench:           1 ns/iter (+/- 0)
+
+test kinetics/michaelis_menten ... bench:           1 ns/iter (+/- 0)
+
+test kinetics/eyring_rate ... bench:           5 ns/iter (+/- 0)
+
+test dynamics/first_order_100steps ... bench:       4,443 ns/iter (+/- 20)
+
+test dynamics/consecutive_100steps ... bench:       5,284 ns/iter (+/- 23)
+
+test fitting/arrhenius_6pts ... bench:         232 ns/iter (+/- 1)
+
+test fitting/polynomial_deg2_20pts ... bench:         502 ns/iter (+/- 9)
+
+test molecule/molecular_weight_glucose ... bench:           3 ns/iter (+/- 0)
+
+test gas/ideal_gas_pressure ... bench:           2 ns/iter (+/- 0)
+
+test kinetics/arrhenius_rate ... bench:           6 ns/iter (+/- 0)
+
+test solution/ph_from_h ... bench:           9 ns/iter (+/- 0)
+
+test element/lookup_by_symbol ... bench:          44 ns/iter (+/- 1)
+
+test element/lookup_by_number ... bench:           0 ns/iter (+/- 0)
+
+test reaction/gibbs_free_energy ... bench:           1 ns/iter (+/- 0)
+
+test thermo/heat_transfer ... bench:           0 ns/iter (+/- 0)
+
+test electrochemistry/nernst_potential ... bench:           6 ns/iter (+/- 0)
+
+test electrochemistry/lookup_half_reaction ... bench:          57 ns/iter (+/- 0)
+
+test thermochem/reaction_enthalpy_ch4 ... bench:          38 ns/iter (+/- 0)
+
+test thermochem/vant_hoff_k ... bench:           9 ns/iter (+/- 0)
+
+test solution/weak_acid_ph ... bench:          34 ns/iter (+/- 0)
+
+test thermochem/enthalpy_change_cp ... bench:          23 ns/iter (+/- 0)
+
+test thermochem/shomate_cp ... bench:           2 ns/iter (+/- 0)
+
+test spectroscopy/bohr_energy_level ... bench:           1 ns/iter (+/- 0)
+
+test spectroscopy/absorbance ... bench:           0 ns/iter (+/- 0)
+
+test kinetics/michaelis_menten ... bench:           2 ns/iter (+/- 0)
+
+test kinetics/eyring_rate ... bench:           6 ns/iter (+/- 0)
+
+test dynamics/first_order_100steps ... bench:       4,405 ns/iter (+/- 86)
+
+test dynamics/consecutive_100steps ... bench:       5,037 ns/iter (+/- 68)
+
+test fitting/arrhenius_6pts ... bench:         233 ns/iter (+/- 3)
+
+test fitting/polynomial_deg2_20pts ... bench:         500 ns/iter (+/- 8)
+
+test stoichiometry/balance_ch4_combustion ... bench:         233 ns/iter (+/- 4)
+
+test stoichiometry/oxidation_states_kmno4 ... bench:          22 ns/iter (+/- 0)
+
+test spectroscopy/isotope_pattern_glucose ... bench:       2,795 ns/iter (+/- 30)
+
+test nuclear/binding_energy_per_nucleon_fe56 ... bench:           2 ns/iter (+/- 0)
+
+test nuclear/semi_empirical_fe56 ... bench:          18 ns/iter (+/- 0)
+
+test gas/peng_robinson_z_n2_1mpa ... bench:          61 ns/iter (+/- 1)
+
+test thermochem/adiabatic_flame_ch4_air ... bench:         301 ns/iter (+/- 12)
+
+test potential/dihedral_angle ... bench:          20 ns/iter (+/- 0)
+

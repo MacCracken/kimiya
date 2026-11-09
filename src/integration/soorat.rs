@@ -7,22 +7,34 @@ use serde::{Deserialize, Serialize};
 
 // ── Molecular structure visualization ──────────────────────────────────────
 
-/// A molecule's 3D structure for ball-and-stick rendering.
+/// Layout units per picometre of covalent radius, chosen so derived radii
+/// track the earlier hand-tuned values (H 0.15, C 0.35, N 0.30, O 0.28,
+/// S 0.45) to within ±0.025.
+const RADIUS_SCALE_PER_PM: f64 = 0.0045;
+
+/// Render radius (layout units) for elements without covalent-radius data.
+const DEFAULT_RADIUS: f32 = 0.30;
+
+/// A molecule's schematic 2D structure for ball-and-stick rendering.
 ///
-/// Note: kimiya stores composition (which atoms, how many) but not
-/// 3D coordinates. This struct provides a 2D layout based on composition
-/// for schematic rendering. Full 3D coordinates require a molecular
-/// mechanics solver.
+/// Note: kimiya's [`Molecule`](crate::molecule::Molecule) stores composition
+/// (which atoms, how many) but neither coordinates nor connectivity. This
+/// struct provides a schematic 2D layout with schematic bonds (see
+/// [`MolecularStructure::from_molecule`]). Real geometry requires a
+/// molecular mechanics solver.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MolecularStructure {
-    /// Atoms in the molecule: `(atomic_number, symbol, x, y)`.
-    /// Positions are in schematic layout units (not physical coordinates).
+    /// One entry per atom: atomic number, schematic 2D position and render
+    /// radius. Positions are in schematic layout units (not physical
+    /// coordinates).
     pub atoms: Vec<MolAtom>,
-    /// Bonds connecting atoms: `(atom_idx_a, atom_idx_b, bond_order)`.
+    /// Bonds as indices into [`atoms`](Self::atoms) plus a bond order.
     pub bonds: Vec<MolBond>,
-    /// Molecular formula string (e.g. "H2O").
+    /// Molecular formula string (e.g. "H2O"); empty if the molecule
+    /// references an unknown element.
     pub formula: String,
-    /// Molecular weight (g/mol).
+    /// Molecular weight (g/mol); 0.0 if the molecule references an unknown
+    /// element.
     pub molecular_weight: f64,
 }
 
@@ -31,11 +43,13 @@ pub struct MolecularStructure {
 pub struct MolAtom {
     /// Atomic number (1-118).
     pub atomic_number: u8,
-    /// 2D layout position (schematic).
+    /// Horizontal 2D layout position (schematic layout units).
     pub x: f32,
-    /// 2D layout position (schematic).
+    /// Vertical 2D layout position (schematic layout units).
     pub y: f32,
-    /// Atom radius for rendering (proportional to covalent radius).
+    /// Atom radius for rendering (layout units): covalent radius in pm ×
+    /// 0.0045 (H 0.14, C 0.34, O 0.30), or 0.30 for elements without
+    /// covalent-radius data.
     pub radius: f32,
 }
 
@@ -51,40 +65,56 @@ pub struct MolBond {
 }
 
 impl MolecularStructure {
-    /// Create from a kimiya `Molecule` with a simple circular layout.
+    /// Create from a kimiya `Molecule` with a schematic star layout.
+    ///
+    /// Because `Molecule` has no connectivity, the bonds are schematic: every
+    /// other atom gets a single bond to one central atom, chosen by the VSEPR
+    /// convention as the least electronegative non-hydrogen atom (the first
+    /// such atom on ties; elements without a Pauling value rank last; the
+    /// first atom if all atoms are hydrogen). Water gives two O–H bonds,
+    /// CO₂ two C–O, CH₄ four C–H; molecules with several heavy atoms
+    /// (e.g. ethanol) get a star, not their real bonding. The central atom
+    /// is placed at the origin and the others evenly on a unit circle.
+    ///
+    /// This constructor cannot report errors: if the molecule references an
+    /// unknown element, `formula` is empty and `molecular_weight` is 0.0.
     #[must_use]
     pub fn from_molecule(mol: &crate::molecule::Molecule) -> Self {
-        let mut atoms = Vec::new();
-        let mut idx = 0usize;
+        let total = total_atoms(mol);
+        let center = central_atom_index(mol);
+        // Ligands share the unit circle; guard the single-atom case.
+        let ligands = total.saturating_sub(1).max(1) as f32;
 
-        // Expand each atom type into individual atoms
+        let mut atoms = Vec::new();
+        let mut ligand = 0usize;
         for atom in &mol.atoms {
+            let radius = covalent_radius(atom.element_number);
             for _ in 0..atom.count {
-                let angle = idx as f32 * std::f32::consts::TAU
-                    / mol.atoms.iter().map(|a| a.count).sum::<u32>().max(1) as f32;
-                let r = 1.0;
+                let (x, y) = if atoms.len() == center {
+                    (0.0, 0.0)
+                } else {
+                    let angle = ligand as f32 * std::f32::consts::TAU / ligands;
+                    ligand += 1;
+                    (angle.cos(), angle.sin())
+                };
                 atoms.push(MolAtom {
                     atomic_number: atom.element_number,
-                    x: r * angle.cos(),
-                    y: r * angle.sin(),
-                    radius: covalent_radius(atom.element_number),
+                    x,
+                    y,
+                    radius,
                 });
-                idx += 1;
             }
         }
 
-        // Simple bonds: connect sequential atoms
-        let bonds: Vec<MolBond> = if atoms.len() > 1 {
-            (0..atoms.len() - 1)
-                .map(|i| MolBond {
-                    atom_a: i,
-                    atom_b: i + 1,
-                    order: 1,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // Schematic star: bond every other atom to the central atom.
+        let bonds: Vec<MolBond> = (0..atoms.len())
+            .filter(|&i| i != center)
+            .map(|i| MolBond {
+                atom_a: center,
+                atom_b: i,
+                order: 1,
+            })
+            .collect();
 
         Self {
             atoms,
@@ -95,16 +125,38 @@ impl MolecularStructure {
     }
 }
 
-/// Approximate covalent radius in layout units (scaled for rendering).
-fn covalent_radius(atomic_number: u8) -> f32 {
-    match atomic_number {
-        1 => 0.15,  // H
-        6 => 0.35,  // C
-        7 => 0.30,  // N
-        8 => 0.28,  // O
-        16 => 0.45, // S
-        _ => 0.30,  // default
+/// Total number of atoms, saturating instead of overflowing.
+fn total_atoms(mol: &crate::molecule::Molecule) -> usize {
+    mol.atoms.iter().fold(0usize, |acc, a| {
+        acc.saturating_add(usize::try_from(a.count).unwrap_or(usize::MAX))
+    })
+}
+
+/// Index (in the expanded one-entry-per-atom list) of the central atom: the
+/// least electronegative non-hydrogen atom, first on ties, else atom 0.
+fn central_atom_index(mol: &crate::molecule::Molecule) -> usize {
+    let mut start = 0usize;
+    let mut best: Option<(f64, usize)> = None;
+    for atom in &mol.atoms {
+        if atom.count > 0 && atom.element_number != 1 {
+            let en = crate::element::lookup_by_number(atom.element_number)
+                .and_then(|e| e.electronegativity)
+                .unwrap_or(f64::INFINITY);
+            if best.is_none_or(|(best_en, _)| en < best_en) {
+                best = Some((en, start));
+            }
+        }
+        start = start.saturating_add(usize::try_from(atom.count).unwrap_or(usize::MAX));
     }
+    best.map_or(0, |(_, idx)| idx)
+}
+
+/// Render radius in layout units, proportional to the element's covalent
+/// radius ([`crate::element::ElementProperties::covalent_radius_pm`]).
+fn covalent_radius(atomic_number: u8) -> f32 {
+    crate::element::lookup_properties(atomic_number).map_or(DEFAULT_RADIUS, |p| {
+        (p.covalent_radius_pm * RADIUS_SCALE_PER_PM) as f32
+    })
 }
 
 // ── Reaction network graph ─────────────────────────────────────────────────
@@ -150,6 +202,10 @@ pub struct SpectrumVisualization {
 
 impl SpectrumVisualization {
     /// Create from parallel x/y arrays with automatic peak detection.
+    ///
+    /// `peak_threshold` is passed to [`crate::spectroscopy::find_peaks`]: a
+    /// fraction (0–1) of the y-value range a peak must rise above the
+    /// minimum; an out-of-range threshold yields no peaks.
     #[must_use]
     pub fn from_data(
         x_values: Vec<f64>,
@@ -199,30 +255,109 @@ pub struct PhaseBoundary {
 mod tests {
     use super::*;
 
+    use crate::molecule::Molecule;
+
+    /// Bonds as sorted (atomic number, atomic number) pairs.
+    fn bond_elements(viz: &MolecularStructure) -> Vec<(u8, u8)> {
+        let mut pairs: Vec<(u8, u8)> = viz
+            .bonds
+            .iter()
+            .map(|b| {
+                let za = viz.atoms[b.atom_a].atomic_number;
+                let zb = viz.atoms[b.atom_b].atomic_number;
+                (za.min(zb), za.max(zb))
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
     #[test]
     fn molecular_structure_water() {
-        // H₂O: 2 hydrogen + 1 oxygen
-        let mol = crate::molecule::Molecule::new(&[(1, 2), (8, 1)]);
-        let viz = MolecularStructure::from_molecule(&mol);
+        // H₂O: 2 hydrogen + 1 oxygen → two O–H bonds (was H–H and H–O)
+        let viz = MolecularStructure::from_molecule(&Molecule::water());
         assert_eq!(viz.atoms.len(), 3); // 2H + 1O
-        assert!(!viz.bonds.is_empty());
+        assert_eq!(bond_elements(&viz), vec![(1, 8), (1, 8)]);
         assert!(viz.formula.contains('H'));
         assert!(viz.formula.contains('O'));
         assert!(viz.molecular_weight > 17.0 && viz.molecular_weight < 19.0);
+        // Central O at the origin.
+        assert_eq!((viz.atoms[2].x, viz.atoms[2].y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn molecular_structure_co2() {
+        let viz = MolecularStructure::from_molecule(&Molecule::carbon_dioxide());
+        assert_eq!(bond_elements(&viz), vec![(6, 8), (6, 8)]);
+    }
+
+    #[test]
+    fn molecular_structure_ch4() {
+        let viz = MolecularStructure::from_molecule(&Molecule::methane());
+        assert_eq!(bond_elements(&viz), vec![(1, 6); 4]);
+        // Ligands on the unit circle around the central C.
+        for atom in viz.atoms.iter().filter(|a| a.atomic_number == 1) {
+            assert!(((atom.x * atom.x + atom.y * atom.y).sqrt() - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn molecular_structure_central_atom_rules() {
+        // All hydrogen → first atom is central.
+        let viz = MolecularStructure::from_molecule(&Molecule::new(&[(1, 2)]));
+        assert_eq!(bond_elements(&viz), vec![(1, 1)]);
+        assert_eq!(viz.bonds[0].atom_a, 0);
+        // Ties → first: two C groups, the first C (expanded index 1) wins.
+        let viz = MolecularStructure::from_molecule(&Molecule::new(&[(1, 1), (6, 1), (6, 1)]));
+        assert!(viz.bonds.iter().all(|b| b.atom_a == 1));
+        // SF₆: S (2.58) is less electronegative than F (3.98).
+        let viz = MolecularStructure::from_molecule(&Molecule::new(&[(9, 6), (16, 1)]));
+        assert_eq!(bond_elements(&viz), vec![(9, 16); 6]);
     }
 
     #[test]
     fn molecular_structure_single_atom() {
-        let mol = crate::molecule::Molecule::new(&[(2, 1)]); // He
+        let mol = Molecule::new(&[(2, 1)]); // He
         let viz = MolecularStructure::from_molecule(&mol);
         assert_eq!(viz.atoms.len(), 1);
         assert!(viz.bonds.is_empty());
     }
 
     #[test]
+    fn molecular_structure_empty_and_invalid() {
+        let viz = MolecularStructure::from_molecule(&Molecule::new(&[]));
+        assert!(viz.atoms.is_empty() && viz.bonds.is_empty());
+        // Unknown element: documented defaults instead of an error.
+        let viz = MolecularStructure::from_molecule(&Molecule::new(&[(0, 1), (8, 1)]));
+        assert!(viz.formula.is_empty());
+        assert_eq!(viz.molecular_weight, 0.0);
+        assert_eq!(viz.atoms.len(), 2);
+    }
+
+    #[test]
+    fn total_atoms_does_not_overflow() {
+        // The old inline `sum::<u32>()` overflowed (panic in debug builds).
+        let mol = Molecule::new(&[(1, u32::MAX), (8, u32::MAX)]);
+        assert_eq!(total_atoms(&mol), 2 * u32::MAX as usize);
+    }
+
+    #[test]
     fn covalent_radius_known() {
-        assert!((covalent_radius(1) - 0.15).abs() < 0.01); // H
-        assert!((covalent_radius(6) - 0.35).abs() < 0.01); // C
+        // Derived from covalent radii; close to the old hand-tuned table.
+        for (z, old) in [(1, 0.15), (6, 0.35), (7, 0.30), (8, 0.28), (16, 0.45)] {
+            assert!(
+                (covalent_radius(z) - old).abs() < 0.025,
+                "Z={z}: {}",
+                covalent_radius(z)
+            );
+        }
+        // H (31 pm) < O (66) < N (71) < C (76) < S (105)
+        let r: Vec<f32> = [1, 8, 7, 6, 16].map(covalent_radius).to_vec();
+        assert!(r.windows(2).all(|w| w[0] < w[1]), "{r:?}");
+        // Fe (132 pm) now comes from the element table instead of the default.
+        assert!((covalent_radius(26) - 0.594).abs() < 1e-6);
+        // No covalent-radius data → fallback.
+        assert_eq!(covalent_radius(118), DEFAULT_RADIUS);
     }
 
     #[test]

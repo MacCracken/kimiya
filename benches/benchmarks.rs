@@ -1,4 +1,5 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 fn bench_molecular_weight(c: &mut Criterion) {
     let glucose = kimiya::molecule::Molecule::glucose();
@@ -216,6 +217,98 @@ fn bench_fit_polynomial(c: &mut Criterion) {
     });
 }
 
+fn bench_balance_equation(c: &mut Criterion) {
+    // CH4 + 2 O2 -> CO2 + 2 H2O
+    let m = vec![
+        vec![1.0, 0.0, -1.0, 0.0],
+        vec![4.0, 0.0, 0.0, -2.0],
+        vec![0.0, 2.0, -2.0, -1.0],
+    ];
+    c.bench_function("stoichiometry/balance_ch4_combustion", |b| {
+        b.iter(|| kimiya::stoichiometry::balance_equation(black_box(&m)).unwrap());
+    });
+}
+
+fn bench_oxidation_states(c: &mut Criterion) {
+    // KMnO4
+    let atoms = [(19u8, 1u32), (25, 1), (8, 4)];
+    c.bench_function("stoichiometry/oxidation_states_kmno4", |b| {
+        b.iter(|| kimiya::stoichiometry::assign_oxidation_states(black_box(&atoms), 0).unwrap());
+    });
+}
+
+fn bench_isotope_pattern(c: &mut Criterion) {
+    let glucose = [(6u8, 6u32), (1, 12), (8, 6)];
+    c.bench_function("spectroscopy/isotope_pattern_glucose", |b| {
+        b.iter(|| kimiya::spectroscopy::isotope_pattern(black_box(&glucose)).unwrap());
+    });
+}
+
+fn bench_binding_energy(c: &mut Criterion) {
+    c.bench_function("nuclear/binding_energy_per_nucleon_fe56", |b| {
+        b.iter(|| {
+            kimiya::nuclear::binding_energy_per_nucleon(
+                black_box(26),
+                black_box(30),
+                black_box(55.934_936_33),
+            )
+            .unwrap()
+        });
+    });
+}
+
+fn bench_semi_empirical(c: &mut Criterion) {
+    c.bench_function("nuclear/semi_empirical_fe56", |b| {
+        b.iter(|| kimiya::nuclear::semi_empirical_binding_energy(black_box(26), black_box(56)));
+    });
+}
+
+fn bench_peng_robinson_z(c: &mut Criterion) {
+    c.bench_function("gas/peng_robinson_z_n2_1mpa", |b| {
+        b.iter(|| {
+            kimiya::gas::peng_robinson_z(
+                black_box(&kimiya::gas::PR_NITROGEN),
+                black_box(300.0),
+                black_box(1.0e6),
+            )
+            .unwrap()
+        });
+    });
+}
+
+fn bench_adiabatic_flame(c: &mut Criterion) {
+    let products = [("CO2(g)", 1.0), ("H2O(g)", 2.0), ("N2(g)", 7.52)];
+    c.bench_function("thermochem/adiabatic_flame_ch4_air", |b| {
+        b.iter(|| {
+            kimiya::thermochem::adiabatic_flame_temperature(
+                black_box(-802_300.0),
+                black_box(&products),
+                black_box(298.15),
+            )
+            .unwrap()
+        });
+    });
+}
+
+fn bench_dihedral(c: &mut Criterion) {
+    // Butane-like gauche geometry in angstroms.
+    let a = [1.0, 1.0, 0.0];
+    let b2 = [0.0, 0.0, 0.0];
+    let c2 = [1.5, 0.0, 0.0];
+    let d = [2.5, 0.0, 1.0];
+    c.bench_function("potential/dihedral_angle", |b| {
+        b.iter(|| {
+            kimiya::potential::dihedral_angle(
+                black_box(a),
+                black_box(b2),
+                black_box(c2),
+                black_box(d),
+            )
+            .unwrap()
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_molecular_weight,
@@ -240,6 +333,14 @@ criterion_group!(
     bench_simulate_first_order,
     bench_simulate_consecutive,
     bench_fit_arrhenius,
-    bench_fit_polynomial
+    bench_fit_polynomial,
+    bench_balance_equation,
+    bench_oxidation_states,
+    bench_isotope_pattern,
+    bench_binding_energy,
+    bench_semi_empirical,
+    bench_peng_robinson_z,
+    bench_adiabatic_flame,
+    bench_dihedral
 );
 criterion_main!(benches);

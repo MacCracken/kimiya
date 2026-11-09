@@ -1,13 +1,60 @@
 //! Inorganic chemistry — crystal field theory, lattice energy, ionic radii.
 
 use crate::error::{KimiyaError, Result};
+use crate::validate::{is_finite, is_positive};
 use serde::Serialize;
 
 // ── Crystal field theory ─────────────────────────────────────────────
 
-/// Crystal field splitting energy Δ_oct for octahedral complexes.
+/// Octahedral (t₂g, e_g) occupancies for high-spin dⁿ, n = 0..=10
+/// (Hund's rule: singly occupy all five d orbitals before pairing).
+const OCT_OCCUPANCY_HIGH_SPIN: [(u8, u8); 11] = [
+    (0, 0),
+    (1, 0),
+    (2, 0),
+    (3, 0),
+    (3, 1),
+    (3, 2),
+    (4, 2),
+    (5, 2),
+    (6, 2),
+    (6, 3),
+    (6, 4),
+];
+
+/// Octahedral (t₂g, e_g) occupancies for low-spin dⁿ, n = 0..=10
+/// (t₂g filled completely before e_g).
+const OCT_OCCUPANCY_LOW_SPIN: [(u8, u8); 11] = [
+    (0, 0),
+    (1, 0),
+    (2, 0),
+    (3, 0),
+    (4, 0),
+    (5, 0),
+    (6, 0),
+    (6, 1),
+    (6, 2),
+    (6, 3),
+    (6, 4),
+];
+
+/// Unpaired electrons for high-spin octahedral dⁿ, n = 0..=10.
+const OCT_UNPAIRED_HIGH_SPIN: [u8; 11] = [0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0];
+
+/// Unpaired electrons for low-spin octahedral dⁿ, n = 0..=10.
+const OCT_UNPAIRED_LOW_SPIN: [u8; 11] = [0, 1, 2, 3, 2, 1, 0, 1, 2, 1, 0];
+
+/// Error for a d-electron count outside 0–10.
+fn invalid_d_count() -> KimiyaError {
+    KimiyaError::InvalidInput("d electron count must be 0-10".into())
+}
+
+/// Crystal field stabilization energy (CFSE) of an octahedral dⁿ complex,
+/// in units of Δ_oct (dimensionless multiplier; negative = stabilizing).
 ///
-/// Returns CFSE (Crystal Field Stabilization Energy) in units of Δ_oct.
+/// CFSE = −0.4·n(t₂g) + 0.6·n(e_g). Electron-pairing energy is **not**
+/// included, so for d⁴–d⁷ the low-spin value is more negative than the
+/// high-spin one even when the high-spin state is the ground state.
 ///
 /// - `d_electrons`: number of d electrons (0–10)
 /// - `high_spin`: true for high-spin (weak field), false for low-spin (strong field)
@@ -16,80 +63,64 @@ use serde::Serialize;
 ///
 /// Returns error if d_electrons > 10.
 pub fn cfse_octahedral(d_electrons: u8, high_spin: bool) -> Result<f64> {
-    if d_electrons > 10 {
-        return Err(KimiyaError::InvalidInput(
-            "d electron count must be 0-10".into(),
-        ));
-    }
-    // CFSE = (# in t2g × -0.4 + # in eg × +0.6) × Δ_oct
-    // High-spin filling: t2g fills 1 each, then eg 1 each, then pair
-    // Low-spin filling: t2g fills completely (6) before eg
-    let (t2g, eg) = if high_spin {
-        match d_electrons {
-            0 => (0, 0),
-            1 => (1, 0),
-            2 => (2, 0),
-            3 => (3, 0),
-            4 => (3, 1),
-            5 => (3, 2),
-            6 => (4, 2),
-            7 => (5, 2),
-            8 => (6, 2),
-            9 => (6, 3),
-            10 => (6, 4),
-            _ => unreachable!(),
-        }
+    let table = if high_spin {
+        &OCT_OCCUPANCY_HIGH_SPIN
     } else {
-        match d_electrons {
-            0 => (0, 0),
-            1 => (1, 0),
-            2 => (2, 0),
-            3 => (3, 0),
-            4 => (4, 0),
-            5 => (5, 0),
-            6 => (6, 0),
-            7 => (6, 1),
-            8 => (6, 2),
-            9 => (6, 3),
-            10 => (6, 4),
-            _ => unreachable!(),
-        }
+        &OCT_OCCUPANCY_LOW_SPIN
     };
-    Ok(t2g as f64 * (-0.4) + eg as f64 * 0.6)
+    let &(t2g, eg) = table
+        .get(usize::from(d_electrons))
+        .ok_or_else(invalid_d_count)?;
+    Ok(f64::from(t2g) * (-0.4) + f64::from(eg) * 0.6)
 }
 
-/// Crystal field splitting energy Δ_tet for tetrahedral complexes.
+/// Crystal field splitting energy Δ_tet for tetrahedral complexes, in the
+/// same units as `delta_oct`.
 ///
-/// Δ_tet ≈ (4/9) × Δ_oct
+/// Δ_tet ≈ (4/9) × Δ_oct (same metal, ligands and metal–ligand distance).
 #[must_use]
 #[inline]
 pub fn delta_tet_from_oct(delta_oct: f64) -> f64 {
     delta_oct * 4.0 / 9.0
 }
 
-/// Spectrochemical series — common ligands ordered by field strength.
+/// Spectrochemical series — common ligands, ordered from weakest to
+/// strongest field.
 ///
-/// Returns approximate Δ_oct in cm⁻¹ for a given ligand with a generic M²⁺ ion.
-/// These are qualitative/relative values.
+/// [`Ligand::field_strength`] gives a dimensionless ordinal rank (1–12), not
+/// a Δ_oct value; only the ordering is meaningful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[non_exhaustive]
 pub enum Ligand {
+    /// I⁻ — weakest-field ligand in this list.
     Iodide,
+    /// Br⁻.
     Bromide,
+    /// Cl⁻.
     Chloride,
+    /// F⁻.
     Fluoride,
+    /// OH⁻.
     Hydroxide,
+    /// H₂O.
     Water,
+    /// NH₃ — intermediate/borderline field strength.
     Ammonia,
+    /// Ethylenediamine (en), bidentate.
     Ethylenediamine,
+    /// NO₂⁻ (N-bound nitro).
     Nitrite,
+    /// CN⁻.
     Cyanide,
+    /// CO — strongest-field ligand in this list.
     CarbonMonoxide,
 }
 
 impl Ligand {
-    /// Relative field strength (higher = stronger field).
+    /// Relative field strength as an ordinal rank 1–12 (dimensionless;
+    /// higher = stronger field). Gaps between ranks carry no meaning.
     #[must_use]
+    #[inline]
     pub const fn field_strength(self) -> u8 {
         match self {
             Self::Iodide => 1,
@@ -106,7 +137,12 @@ impl Ligand {
         }
     }
 
-    /// Whether this is a strong-field ligand (typically causes low-spin).
+    /// Whether this is a strong-field ligand (typically causes low-spin),
+    /// i.e. rank ≥ 8 ([`Ligand::Ammonia`] and stronger).
+    ///
+    /// NH₃ is borderline/intermediate: whether its complexes are low-spin
+    /// depends on the metal ion and its oxidation state (e.g. \[Co(NH₃)₆\]³⁺
+    /// is low-spin, \[Co(NH₃)₆\]²⁺ is high-spin).
     #[must_use]
     pub const fn is_strong_field(self) -> bool {
         self.field_strength() >= 8
@@ -115,7 +151,7 @@ impl Ligand {
 
 // ── Spin-only magnetic moment ────────────────────────────────────────
 
-/// Spin-only magnetic moment: μ = √(n(n+2)) Bohr magnetons
+/// Spin-only magnetic moment in Bohr magnetons (μ_B): μ = √(n(n+2))
 ///
 /// - `unpaired_electrons`: n
 #[must_use]
@@ -125,37 +161,24 @@ pub fn spin_only_moment(unpaired_electrons: u8) -> f64 {
     (n * (n + 2.0)).sqrt()
 }
 
-/// Number of unpaired electrons for octahedral d^n.
+/// Number of unpaired electrons for octahedral dⁿ.
+///
+/// - `d_electrons`: number of d electrons (0–10)
+/// - `high_spin`: true for high-spin (weak field), false for low-spin (strong field)
 ///
 /// # Errors
 ///
 /// Returns error if d_electrons > 10.
 pub fn unpaired_electrons_oct(d_electrons: u8, high_spin: bool) -> Result<u8> {
-    if d_electrons > 10 {
-        return Err(KimiyaError::InvalidInput(
-            "d electron count must be 0-10".into(),
-        ));
-    }
-    let n = if high_spin {
-        match d_electrons {
-            0 | 10 => 0,
-            1 | 9 => 1,
-            2 | 8 => 2,
-            3 | 7 => 3,
-            4 | 6 => 4,
-            5 => 5,
-            _ => unreachable!(),
-        }
+    let table = if high_spin {
+        &OCT_UNPAIRED_HIGH_SPIN
     } else {
-        match d_electrons {
-            0 | 6 | 10 => 0,
-            1 | 5 | 7 => 1,
-            2 | 4 | 8 => 2,
-            3 | 9 => 3,
-            _ => unreachable!(),
-        }
+        &OCT_UNPAIRED_LOW_SPIN
     };
-    Ok(n)
+    table
+        .get(usize::from(d_electrons))
+        .copied()
+        .ok_or_else(invalid_d_count)
 }
 
 // ── Lattice energy ───────────────────────────────────────────────────
@@ -166,17 +189,19 @@ pub fn unpaired_electrons_oct(d_electrons: u8, high_spin: bool) -> Result<u8> {
 /// Simplified form using Coulomb constant:
 /// U = -(k_e × N_A × M × z⁺ × z⁻ × e²) / r₀ × (1 - 1/n)
 ///
-/// - `madelung`: Madelung constant M
-/// - `z_cation`: cation charge (positive integer)
-/// - `z_anion`: anion charge (positive integer, sign handled internally)
+/// - `madelung`: Madelung constant M (dimensionless, positive)
+/// - `z_cation`: cation charge magnitude (positive integer)
+/// - `z_anion`: anion charge magnitude (positive integer, sign handled internally)
 /// - `r0_m`: nearest-neighbor distance in meters
-/// - `born_exponent`: Born exponent n (typically 5-12)
+/// - `born_exponent`: Born exponent n (dimensionless, typically 5–12)
 ///
 /// Returns lattice energy in J/mol (negative = stable).
 ///
 /// # Errors
 ///
-/// Returns error if parameters are invalid.
+/// Returns [`KimiyaError::InvalidInput`] if `r0_m` or `madelung` is not
+/// positive and finite, if `born_exponent` is not finite and > 1, or if
+/// either charge is zero.
 pub fn born_lande_lattice_energy(
     madelung: f64,
     z_cation: u32,
@@ -184,14 +209,24 @@ pub fn born_lande_lattice_energy(
     r0_m: f64,
     born_exponent: f64,
 ) -> Result<f64> {
-    if r0_m <= 0.0 {
+    if !is_positive(r0_m) {
         return Err(KimiyaError::InvalidInput(
             "interionic distance must be positive".into(),
         ));
     }
-    if born_exponent <= 1.0 {
+    if !is_finite(born_exponent) || born_exponent <= 1.0 {
         return Err(KimiyaError::InvalidInput(
             "Born exponent must be > 1".into(),
+        ));
+    }
+    if !is_positive(madelung) {
+        return Err(KimiyaError::InvalidInput(
+            "Madelung constant must be positive".into(),
+        ));
+    }
+    if z_cation == 0 || z_anion == 0 {
+        return Err(KimiyaError::InvalidInput(
+            "ion charges must be non-zero".into(),
         ));
     }
     let na = crate::element::AVOGADRO;
@@ -199,7 +234,7 @@ pub fn born_lande_lattice_energy(
     let ke = crate::potential::COULOMB_CONSTANT;
 
     Ok(
-        -ke * na * madelung * z_cation as f64 * z_anion as f64 * e * e / r0_m
+        -ke * na * madelung * f64::from(z_cation) * f64::from(z_anion) * e * e / r0_m
             * (1.0 - 1.0 / born_exponent),
     )
 }
@@ -232,32 +267,59 @@ pub fn born_haber_lattice_energy(
         - electron_affinity_kj
 }
 
-/// Common Madelung constants.
+// Madelung constants (dimensionless), referred to the nearest cation–anion
+// distance r₀ and used with |z₊·z₋| in [`born_lande_lattice_energy`].
+
+/// Madelung constant of the rock-salt (NaCl) structure, 6:6 coordination.
 pub const MADELUNG_NACL: f64 = 1.747565;
+/// Madelung constant of the caesium chloride (CsCl) structure, 8:8 coordination.
 pub const MADELUNG_CSCL: f64 = 1.762675;
+/// Madelung constant of the zinc blende (sphalerite, cubic ZnS) structure,
+/// 4:4 coordination (wurtzite: 1.6413).
 pub const MADELUNG_ZNS: f64 = 1.6381;
+/// Madelung constant of the fluorite (CaF₂) structure, 8:4 coordination.
 pub const MADELUNG_FLUORITE: f64 = 2.51939;
+/// Madelung constant of the rutile (TiO₂) structure, 6:3 coordination.
 pub const MADELUNG_RUTILE: f64 = 2.408;
 
-/// Common Born exponents (based on electron configuration).
+// Born exponents n (dimensionless) by the ion's noble-gas electron
+// configuration (Pauling). For a salt whose ions have different
+// configurations use the mean, e.g. NaCl: (7 + 9) / 2 = 8.
+
+/// Born exponent for ions with the He configuration (Li⁺, Be²⁺, H⁻).
 pub const BORN_EXP_HE: f64 = 5.0;
+/// Born exponent for ions with the Ne configuration (Na⁺, Mg²⁺, F⁻, O²⁻).
 pub const BORN_EXP_NE: f64 = 7.0;
+/// Born exponent for ions with the Ar configuration or \[Ar\]3d¹⁰ (K⁺, Ca²⁺,
+/// Cl⁻, S²⁻, Cu⁺).
 pub const BORN_EXP_AR: f64 = 9.0;
+/// Born exponent for ions with the Kr configuration or \[Kr\]4d¹⁰ (Rb⁺, Sr²⁺,
+/// Br⁻, Ag⁺).
 pub const BORN_EXP_KR: f64 = 10.0;
+/// Born exponent for ions with the Xe configuration or \[Xe\]4f¹⁴5d¹⁰ (Cs⁺,
+/// Ba²⁺, I⁻, Au⁺).
 pub const BORN_EXP_XE: f64 = 12.0;
 
 // ── Ionic radii ──────────────────────────────────────────────────────
 
-/// Shannon ionic radius entry (pm).
+/// Shannon (1976) effective ionic radius entry.
 #[derive(Debug, Clone, Serialize)]
 pub struct IonicRadius {
+    /// Element symbol, e.g. `"Fe"`.
     pub symbol: &'static str,
+    /// Ion charge in units of e (negative for anions).
     pub charge: i8,
+    /// Coordination number the radius applies to.
     pub coordination: u8,
+    /// Effective ionic radius in pm.
     pub radius_pm: f64,
 }
 
-/// Common Shannon ionic radii (6-coordinate, pm).
+/// Common Shannon (1976) effective ionic radii in pm, one entry per ion.
+///
+/// All entries are 6-coordinate except Sn²⁺, which Shannon lists only for
+/// coordination number 8 — check [`IonicRadius::coordination`]. The Fe²⁺,
+/// Fe³⁺, Mn²⁺ and Co²⁺ values are the high-spin radii.
 pub static IONIC_RADII: &[IonicRadius] = &[
     IonicRadius {
         symbol: "Li",
@@ -436,12 +498,16 @@ pub static IONIC_RADII: &[IonicRadius] = &[
     IonicRadius {
         symbol: "Sn",
         charge: 2,
-        coordination: 6,
-        radius_pm: 93.0,
+        // Shannon (1976) lists Sn²⁺ only at CN 8.
+        coordination: 8,
+        radius_pm: 122.0,
     },
 ];
 
-/// Look up ionic radius by symbol and charge.
+/// Look up an ionic radius by symbol and charge (case-sensitive symbol).
+///
+/// Returns the single [`IONIC_RADII`] entry for that ion, whatever its
+/// coordination number.
 #[must_use]
 #[inline]
 pub fn lookup_ionic_radius(symbol: &str, charge: i8) -> Option<&'static IonicRadius> {
@@ -486,6 +552,49 @@ mod tests {
     #[test]
     fn cfse_invalid_d_electrons() {
         assert!(cfse_octahedral(11, true).is_err());
+        assert!(cfse_octahedral(11, false).is_err());
+        assert!(cfse_octahedral(u8::MAX, false).is_err());
+    }
+
+    #[test]
+    fn cfse_all_d_counts_both_spins() {
+        // CFSE in units of Δ_oct, pairing energy excluded.
+        let high = [
+            0.0, -0.4, -0.8, -1.2, -0.6, 0.0, -0.4, -0.8, -1.2, -0.6, 0.0,
+        ];
+        let low = [
+            0.0, -0.4, -0.8, -1.2, -1.6, -2.0, -2.4, -1.8, -1.2, -0.6, 0.0,
+        ];
+        for n in 0..=10u8 {
+            let i = usize::from(n);
+            let hs = cfse_octahedral(n, true).unwrap();
+            let ls = cfse_octahedral(n, false).unwrap();
+            assert!((hs - high[i]).abs() < 1e-12, "HS d{n}: {hs}");
+            assert!((ls - low[i]).abs() < 1e-12, "LS d{n}: {ls}");
+        }
+    }
+
+    #[test]
+    fn unpaired_all_d_counts_both_spins() {
+        let high = [0u8, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0];
+        let low = [0u8, 1, 2, 3, 2, 1, 0, 1, 2, 1, 0];
+        for n in 0..=10u8 {
+            let i = usize::from(n);
+            assert_eq!(unpaired_electrons_oct(n, true).unwrap(), high[i], "HS d{n}");
+            assert_eq!(unpaired_electrons_oct(n, false).unwrap(), low[i], "LS d{n}");
+        }
+    }
+
+    #[test]
+    fn unpaired_low_spin_d9_is_one() {
+        // Cu²⁺ (d⁹) has one unpaired electron in any octahedral field.
+        assert_eq!(unpaired_electrons_oct(9, false).unwrap(), 1);
+    }
+
+    #[test]
+    fn unpaired_invalid_d_electrons() {
+        assert!(unpaired_electrons_oct(11, true).is_err());
+        assert!(unpaired_electrons_oct(11, false).is_err());
     }
 
     #[test]
@@ -530,14 +639,22 @@ mod tests {
 
     #[test]
     fn nacl_lattice_energy() {
-        // NaCl: M=1.7476, z+=1, z-=1, r0=2.82e-10 m, n≈8 (avg Ne+Ar)
+        // NaCl: M=1.747565, z+=1, z-=1, r0=2.82e-10 m, n=8 (mean of Ne 7, Ar 9)
+        // Analytic Born–Landé: −k_e·N_A·M·e²/r₀·(1 − 1/8) = −753.365 kJ/mol
+        // (the Born–Haber value, −786 kJ/mol, differs by model error).
         let u = born_lande_lattice_energy(MADELUNG_NACL, 1, 1, 2.82e-10, 8.0).unwrap();
-        // Known: ~-786 kJ/mol
         let u_kj = u / 1000.0;
         assert!(
-            (u_kj - (-786.0)).abs() < 50.0,
-            "NaCl lattice energy should be ~-786 kJ/mol, got {u_kj}"
+            (u_kj - (-753.365)).abs() < 0.5,
+            "NaCl Born–Landé lattice energy should be -753.4 kJ/mol, got {u_kj}"
         );
+    }
+
+    #[test]
+    fn lattice_energy_scales_with_charges() {
+        let u1 = born_lande_lattice_energy(MADELUNG_NACL, 1, 1, 2.82e-10, 8.0).unwrap();
+        let u4 = born_lande_lattice_energy(MADELUNG_NACL, 2, 2, 2.82e-10, 8.0).unwrap();
+        assert!((u4 / u1 - 4.0).abs() < 1e-12);
     }
 
     #[test]
@@ -548,6 +665,36 @@ mod tests {
     #[test]
     fn lattice_energy_born_exp_too_low_is_error() {
         assert!(born_lande_lattice_energy(1.748, 1, 1, 2.82e-10, 1.0).is_err());
+    }
+
+    #[test]
+    fn lattice_energy_non_finite_inputs_are_errors() {
+        let ok = born_lande_lattice_energy(1.748, 1, 1, 2.82e-10, 8.0);
+        assert!(ok.is_ok());
+        for r0 in [f64::NAN, f64::INFINITY, -2.82e-10] {
+            assert!(
+                born_lande_lattice_energy(1.748, 1, 1, r0, 8.0).is_err(),
+                "r0={r0}"
+            );
+        }
+        for n in [f64::NAN, f64::INFINITY, 0.5] {
+            assert!(
+                born_lande_lattice_energy(1.748, 1, 1, 2.82e-10, n).is_err(),
+                "n={n}"
+            );
+        }
+        for m in [f64::NAN, f64::INFINITY, 0.0, -1.748] {
+            assert!(
+                born_lande_lattice_energy(m, 1, 1, 2.82e-10, 8.0).is_err(),
+                "M={m}"
+            );
+        }
+    }
+
+    #[test]
+    fn lattice_energy_zero_charge_is_error() {
+        assert!(born_lande_lattice_energy(1.748, 0, 1, 2.82e-10, 8.0).is_err());
+        assert!(born_lande_lattice_energy(1.748, 1, 0, 2.82e-10, 8.0).is_err());
     }
 
     // ── Ionic radii ──────────────────────────────────────────────────
@@ -587,6 +734,26 @@ mod tests {
     }
 
     #[test]
+    fn lookup_sn2_is_shannon_cn8() {
+        let sn = lookup_ionic_radius("Sn", 2).unwrap();
+        assert_eq!(sn.coordination, 8);
+        assert!((sn.radius_pm - 122.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn radii_coordination_matches_doc() {
+        // Doc: every entry is 6-coordinate except Sn²⁺ (CN 8).
+        for r in IONIC_RADII {
+            let expected = if r.symbol == "Sn" && r.charge == 2 {
+                8
+            } else {
+                6
+            };
+            assert_eq!(r.coordination, expected, "{}{:+}", r.symbol, r.charge);
+        }
+    }
+
+    #[test]
     fn radii_count() {
         assert!(IONIC_RADII.len() >= 30);
     }
@@ -608,7 +775,8 @@ mod tests {
 
     #[test]
     fn born_haber_matches_born_lande() {
-        // Born-Haber and Born-Landé should give similar results for NaCl
+        // Born-Haber (−786) and Born-Landé (−753) agree only to within the
+        // ~4 % model error of Born-Landé, hence the loose tolerance.
         let u_bh = born_haber_lattice_energy(-411.15, 107.3, 495.8, 242.0, -349.0);
         let u_bl = born_lande_lattice_energy(MADELUNG_NACL, 1, 1, 2.82e-10, 8.0).unwrap() / 1000.0;
         assert!(
