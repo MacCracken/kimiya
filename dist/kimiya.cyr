@@ -73,9 +73,10 @@ fn km_error_message(code): i64 {
 # correctly rounded (6.6.10+). tests/golden/constants.tsv pins every bit.
 #
 # Module data constants are generated with their module's data, not here: K_b/K_f in
-# src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung, Born exponents, Λ°,
-# Debye–Hückel and K_w at M3–M4. The exception is thermo::WATER_SPECIFIC_HEAT (M2a), at
-# the end: thermo has no data file, and this file precedes it in [lib].
+# src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung and Born exponents at M4.
+# The exceptions are the solution constants (M3a: K_w, Debye–Hückel A / B, Λ°) and
+# thermo::WATER_SPECIFIC_HEAT (M2a): neither module has a data file, and this file
+# precedes both in [lib].
 
 # Faraday constant (C/mol) — charge of one mole of electrons.
 #
@@ -123,6 +124,50 @@ const KM_HYDROGEN_ATOM_MASS_U = 1.007825031898;
 # Coulomb constant k_e = 1/(4πε₀) (N·m²/C²), CODATA 2018.
 # Rust: kimiya::potential::COULOMB_CONSTANT
 const KM_COULOMB_CONSTANT = 8987551792.3;
+
+# Ion product of water at 25 °C: Kw = \[H⁺\]·\[OH⁻\] = 1.0 × 10⁻¹⁴ (mol/L)².
+#
+# This is the conventional value (pKw = 14) that [`ph_from_poh`] also
+# assumes; the measured value at 25 °C is 1.008 × 10⁻¹⁴ (pKw = 13.995).
+# Rust: kimiya::solution::KW_WATER_25C
+const KM_KW_WATER_25C = 0.00000000000001;
+
+# Debye-Huckel A parameter for water at 25°C, in (L/mol)^½.
+# Rust: kimiya::solution::DH_A_WATER_25C
+const KM_DH_A_WATER_25C = 0.509;
+
+# Debye-Huckel B parameter for water at 25°C, in Å⁻¹·(mol/L)^−½.
+# Rust: kimiya::solution::DH_B_WATER_25C
+const KM_DH_B_WATER_25C = 0.328;
+
+# Limiting ionic conductivity λ° of H⁺ at 25°C (S·cm²/mol).
+# Rust: kimiya::solution::LAMBDA_H_PLUS
+const KM_LAMBDA_H_PLUS = 349.8;
+
+# Limiting ionic conductivity λ° of OH⁻ at 25°C (S·cm²/mol).
+# Rust: kimiya::solution::LAMBDA_OH_MINUS
+const KM_LAMBDA_OH_MINUS = 198.0;
+
+# Limiting ionic conductivity λ° of Na⁺ at 25°C (S·cm²/mol).
+# Rust: kimiya::solution::LAMBDA_NA_PLUS
+const KM_LAMBDA_NA_PLUS = 50.1;
+
+# Limiting ionic conductivity λ° of K⁺ at 25°C (S·cm²/mol).
+# Rust: kimiya::solution::LAMBDA_K_PLUS
+const KM_LAMBDA_K_PLUS = 73.5;
+
+# Limiting ionic conductivity λ° of Cl⁻ at 25°C (S·cm²/mol).
+# Rust: kimiya::solution::LAMBDA_CL_MINUS
+const KM_LAMBDA_CL_MINUS = 76.3;
+
+# Limiting ionic conductivity λ° of NO₃⁻ at 25°C (S·cm²/mol).
+# Rust: kimiya::solution::LAMBDA_NO3_MINUS
+const KM_LAMBDA_NO3_MINUS = 71.4;
+
+# Limiting ionic conductivity λ° of SO₄²⁻ at 25°C (S·cm²/mol), per mole of
+# SO₄²⁻ ions (i.e. 2 × λ°(½SO₄²⁻) = 2 × 80.0).
+# Rust: kimiya::solution::LAMBDA_SO4_2MINUS
+const KM_LAMBDA_SO4_2MINUS = 160.0;
 
 # Planck's constant h (J·s), exact (SI 2019).
 # Rust: kimiya::spectroscopy::PLANCK
@@ -460,7 +505,7 @@ fn _km_expm1(xa: f64): f64 {
     return y2;
 }
 
-# ── correctly rounded acos, cos, ln and x^2.5 (M2a, ADR 0005) ─────────────────────────
+# ── correctly rounded acos, cos, ln and x^2.5 (M2a), log10 over ln (M3a): ADR 0005 ───
 #
 # The Peng–Robinson cubic (gas.cyr) is ill-conditioned near a double root and at the critical
 # point, its fugacity coefficient goes as exp(ln φ) with |ln φ| up to hundreds at extreme states,
@@ -767,6 +812,60 @@ fn _km_ln(xa: f64): f64 {
     var ah, al = _km_dd_add(kh, ke, kl, kt);
     var rh, rl = _km_dd_add(ah, al, lh, ll);
     return rh;
+}
+
+# log10(x) as glibc 2.44 composes it over its log (sysdeps/ieee754/dbl-64/e_log10.c, Sun's, M3a): x = 2ᵏ·x′
+# with x′ in [1, 2) for k ≥ 0 and [½, 1) for k < 0, y = k (+ 1 when k < 0), and
+# log10(x) = (y·log10_2lo + ivln10·ln x′) + y·log10_2hi, with ln x′ the correctly rounded _km_ln. glibc's log10
+# is that formula over glibc's log (bit-identical on 500,000 seeded arguments, every golden one included), and
+# is not correctly rounded (about 0.25 % of arguments are 1 ulp off), so a correctly rounded log10 would
+# differ from the oracle exactly there; this one differs only where glibc's log at x′ is not correctly rounded
+# (ADR 0005, amendment M3a). + − × ÷ and _km_ln only: the same bits on every target. log10(±0) = −∞,
+# log10(+∞) = +∞, NaN for NaN and x < 0. For henderson_hasselbalch, whose pKa + log10(ratio) cancels near pH 0;
+# elsewhere _km_log10 (fdlibm, faster) is within K. Mirrors `f64::log10`.
+#must_use
+fn _km_log10_ln(xa: f64): f64 {
+    var x: f64 = xa;
+    var ivln10: f64 = 0x3FDBCB7B1526E50E;
+    var log10_2hi: f64 = 0x3FD34413509F6000;
+    var log10_2lo: f64 = 0x3D59FEF311F12B36;
+    var ui = _km_bits(x);
+    var hx = (ui >> 32) & 0xFFFFFFFF;
+    var k = 0;
+    if (hx < 0x00100000 || (hx >> 31) != 0) {
+        if ((ui << 1) == 0) {
+            var m1: f64 = -1.0;
+            var ninf: f64 = m1 / 0.0;      # log10(±0) = −∞
+            return ninf;
+        }
+        if ((hx >> 31) != 0) {
+            var nan: f64 = (x - x) / 0.0;   # log10(negative) = NaN
+            return nan;
+        }
+        k = 0 - 54;                         # subnormal: scale by 2⁵⁴
+        var p54: f64 = 0x4350000000000000;
+        x = x * p54;
+        ui = _km_bits(x);
+        hx = (ui >> 32) & 0xFFFFFFFF;
+    }
+    if (hx >= 0x7FF00000) {
+        var same: f64 = x + x;              # +∞ and NaN
+        return same;
+    }
+    k = k + ((hx >> 20) - 1023);
+    var i = 0;
+    if (k < 0) { i = 1; }
+    hx = (hx & 0x000FFFFF) | ((0x3FF - i) << 20);
+    var y: f64 = f64_from(k + i);
+    var xb = (hx << 32) | (ui & 0xFFFFFFFF);
+    var xr: f64 = xb;
+    var l: f64 = _km_ln(xr);
+    var lo: f64 = y * log10_2lo;
+    var t: f64 = ivln10 * l;
+    var z: f64 = lo + t;
+    var hi: f64 = y * log10_2hi;
+    var r: f64 = z + hi;
+    return r;
 }
 
 # x^2.5 = x²·√x, correctly rounded for x from 2⁻³⁸⁷ to overflow at 2⁴⁰⁹·⁶: x² is exact as a
@@ -5309,4 +5408,1267 @@ fn redlich_kwong_pressure(tc: f64, pc: f64, temperature_k: f64, molar_volume: f6
 #must_use
 fn joule_thomson_ideal(): f64 {
     return 0.0;
+}
+
+# --- solution.cyr ---
+
+# solution.cyr — solution chemistry: concentration units, pH, weak acid/base equilibria, ionic strength and
+# activity coefficients, and electrolytic conductivity (port of rust-old/src/solution.rs).
+#
+# Concentrations are in mol/L (M) unless stated otherwise. The acid–base functions assume aqueous solution
+# at 25 °C (Kw = KM_KW_WATER_25C, pH + pOH = 14). The constants — KM_KW_WATER_25C, KM_DH_A_WATER_25C,
+# KM_DH_B_WATER_25C and the seven KM_LAMBDA_* — are src/constants.cyr's (generated; solution has no data file
+# of its own). Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and
+# reject NaN and ±∞ inputs. Every expression keeps Rust's operation order, so the arithmetic functions are
+# bit-identical (class B); the log10, 10^x and Newton functions are class C (docs/development/port-parity.md
+# §7).
+#
+# - log10: _km_log10 (src/mathx.cyr, Rust libm's fdlibm log10, within 1 ulp of glibc), except
+#   henderson_hasselbalch, whose pKa + log10(ratio) cancels near pH 0: it calls _km_log10_ln, glibc's own
+#   log10 composition over the correctly rounded _km_ln (ADR 0005, amendment M3a), which gives the oracle's
+#   bits wherever glibc's log is correctly rounded. 10^x is ganita_f64_pow(10, x), as the Antoine
+#   equation's.
+# - weak_acid_ph / weak_base_ph: kimiya's own Newton iteration on the charge-balance cubic, transcribed
+#   operation for operation as _km_charge_balance_root / _km_checked_root. Its iteration cap (Rust's
+#   CHARGE_BALANCE_MAX_ITER = 50) and relative-step tolerance (CHARGE_BALANCE_REL_TOL = 10⁻¹²) are private
+#   Rust consts, so they are typed formula constants inline here (port plan §6.4), pinned by the golden rows
+#   and tests/solution.tcyr. The loop is + − × ÷ and √, so the root is bit-identical to Rust's; the pH is
+#   class C only through its one log10.
+# - Rust's `charge: i32` is a word here: one outside the i32 range is Err(KM_ERR_INVALID_INPUT), checked
+#   first (Rust's type rejects it at compile time), never wrapped.
+# - ionic_strength's `&[(f64, i32)]` is a pointer to n 16-byte records — the concentration's f64 bits, then
+#   the charge as an i64 word — and the count n, as thermochem's species lists. It has no error channel (Rust
+#   returns a bare f64): a negative n, a null pointer with n > 0, or a charge outside the i32 range gives NaN.
+
+include "lib/ganita.cyr"
+
+# 1 if the word z is a Rust i32 (−2³¹ ..= 2³¹ − 1).
+#must_use
+fn _km_is_i32(z): i64 {
+    if (z < (0 - 0x80000000) || z > 0x7FFFFFFF) { return 0; }
+    return 1;
+}
+
+# ── concentration units ─────────────────────────────────────────────────────────────
+
+# Molarity M = moles / volume_liters in mol/L, from the amount of solute (mol) and the solution volume (L).
+# Ok(M), or Err(KM_ERR_INVALID_INPUT) if the volume is not positive and finite or `moles` is not finite.
+# Mirrors `solution::molarity`.
+#must_use
+fn molarity(moles: f64, volume_liters: f64): Result {
+    if (_km_is_positive(volume_liters) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var m: f64 = moles / volume_liters;
+    return Ok(m);
+}
+
+# Molality m = moles / solvent_kg in mol/kg, from the amount of solute (mol) and the solvent mass (kg).
+# Ok(m), or Err(KM_ERR_INVALID_INPUT) if the solvent mass is not positive and finite or `moles` is not
+# finite. Mirrors `solution::molality`.
+#must_use
+fn molality(moles: f64, solvent_kg: f64): Result {
+    if (_km_is_positive(solvent_kg) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var m: f64 = moles / solvent_kg;
+    return Ok(m);
+}
+
+# Dilution M₁V₁ = M₂V₂: the final concentration M₂ = M₁·V₁/V₂ in mol/L, from the initial concentration
+# (mol/L) and the initial and final volumes (any one volume unit). Ok(M₂), or Err(KM_ERR_INVALID_INPUT) if
+# V₂ is not positive and finite or M₁ or V₁ is not finite. Mirrors `solution::dilution`.
+#must_use
+fn dilution(m1: f64, v1: f64, v2: f64): Result {
+    if (_km_is_positive(v2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(m1) != 1 || _km_is_finite(v1) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var m2: f64 = (m1 * v1) / v2;
+    return Ok(m2);
+}
+
+# ── pH ──────────────────────────────────────────────────────────────────────────────
+
+# pH from the hydrogen ion concentration, pH = −log₁₀[H⁺], [H⁺] in mol/L. Ok(pH), or
+# Err(KM_ERR_INVALID_CONCENTRATION) if [H⁺] is not positive and finite. Mirrors
+# `solution::ph_from_h_concentration`.
+#must_use
+fn ph_from_h_concentration(h_molar: f64): Result {
+    if (_km_is_positive(h_molar) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var l: f64 = _km_log10(h_molar);
+    var ph: f64 = -l;
+    return Ok(ph);
+}
+
+# pOH from the hydroxide ion concentration, pOH = −log₁₀[OH⁻], [OH⁻] in mol/L. Ok(pOH), or
+# Err(KM_ERR_INVALID_CONCENTRATION) if [OH⁻] is not positive and finite. Mirrors
+# `solution::poh_from_oh_concentration`.
+#must_use
+fn poh_from_oh_concentration(oh_molar: f64): Result {
+    if (_km_is_positive(oh_molar) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var l: f64 = _km_log10(oh_molar);
+    var poh: f64 = -l;
+    return Ok(poh);
+}
+
+# pH = 14 − pOH (pH + pOH = 14 at 25 °C). Non-finite input propagates to the result. Mirrors
+# `solution::ph_from_poh`.
+#must_use
+fn ph_from_poh(poh: f64): f64 {
+    var ph: f64 = 14.0 - poh;
+    return ph;
+}
+
+# The Henderson–Hasselbalch equation pH = pKa + log₁₀([A⁻]/[HA]), from the acid's pKa = −log₁₀(Ka) and the
+# conjugate base and acid concentrations (mol/L). Ok(pH); Err(KM_ERR_INVALID_CONCENTRATION) if either
+# concentration is not positive and finite (the acid's checked first); Err(KM_ERR_INVALID_INPUT) if pKa is not
+# finite. The log10 is _km_log10_ln (glibc's composition over the correctly rounded ln): pKa + log10(ratio)
+# cancels near pH 0, where one ulp of the log moves the pH by many (ADR 0005, amendment M3a). Mirrors
+# `solution::henderson_hasselbalch`.
+#must_use
+fn henderson_hasselbalch(pka: f64, conjugate_base: f64, acid: f64): Result {
+    if (_km_is_positive(acid) != 1 || _km_is_positive(conjugate_base) != 1) {
+        return Err(KM_ERR_INVALID_CONCENTRATION);
+    }
+    if (_km_is_finite(pka) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var ratio: f64 = conjugate_base / acid;
+    var l: f64 = _km_log10_ln(ratio);
+    var ph: f64 = pka + l;
+    return Ok(ph);
+}
+
+# The H⁺ concentration from pH, [H⁺] = 10^(−pH) in mol/L. Non-finite input propagates to the result. Mirrors
+# `solution::h_concentration_from_ph`.
+#must_use
+fn h_concentration_from_ph(ph: f64): f64 {
+    var x: f64 = -ph;
+    var h: f64 = ganita_f64_pow(10.0, x);
+    return h;
+}
+
+# ── weak acids and bases ────────────────────────────────────────────────────────────
+
+# Accepts a charge-balance root only if it is a usable concentration: Ok(x) if x is positive and finite,
+# else Err(KM_ERR_COMPUTATION_ERROR). Mirrors Rust's private `solution::checked_root`.
+#must_use
+fn _km_checked_root(x: f64): Result {
+    if (_km_is_positive(x) == 1) { return Ok(x); }
+    return Err(KM_ERR_COMPUTATION_ERROR);
+}
+
+# The positive root x of the monoprotic weak-electrolyte charge balance
+# x³ + K·x² − (K·C + Kw)·x − K·Kw = 0, x = [H⁺] for an acid (K = Ka) or [OH⁻] for a base (K = Kb), from
+# x = K·C/(K + x) + Kw/x. Newton from the smaller of the upper bounds √(K·C + Kw) and (C + √(C² + 4·Kw))/2,
+# which decreases monotonically onto the root. Per iteration (at most 50, Rust's CHARGE_BALANCE_MAX_ITER):
+# f(x) ≤ 0 accepts x (the root to within rounding); a non-finite step (only when K·C or x³ overflows) stops;
+# else x −= f/f′, and a step ≤ 10⁻¹²·x (Rust's CHARGE_BALANCE_REL_TOL, the step against the updated x)
+# accepts x. An accepted x goes through _km_checked_root; a stop or 50 iterations without acceptance is
+# Err(KM_ERR_COMPUTATION_ERROR). Mirrors Rust's private `solution::charge_balance_root`, operation for
+# operation.
+#must_use
+fn _km_charge_balance_root(k: f64, c: f64): Result {
+    var kw: f64 = KM_KW_WATER_25C;
+    var tol: f64 = 0.000000000001;          # CHARGE_BALANCE_REL_TOL = 1e-12
+    var kc_kw: f64 = (k * c) + kw;
+    var weak_bound: f64 = f64_sqrt(kc_kw);
+    var disc: f64 = (c * c) + (4.0 * kw);
+    var sq: f64 = f64_sqrt(disc);
+    var strong_bound: f64 = 0.5 * (c + sq);
+    var x: f64 = _km_min(weak_bound, strong_bound);
+    var it = 0;
+    while (it < 50) {                       # CHARGE_BALANCE_MAX_ITER = 50
+        var fx: f64 = (((x * x) * (x + k)) - (k * ((c * x) + kw))) - (kw * x);
+        if (fx <= 0.0) { return _km_checked_root(x); }
+        var dfx: f64 = (x * ((3.0 * x) + (2.0 * k))) - kc_kw;
+        var step: f64 = fx / dfx;
+        if (_km_is_finite(step) != 1) { break; }
+        x = x - step;
+        var lim: f64 = tol * x;
+        if (step <= lim) { return _km_checked_root(x); }
+        it = it + 1;
+    }
+    return Err(KM_ERR_COMPUTATION_ERROR);
+}
+
+# The pH of a monoprotic weak acid solution at 25 °C, from Ka (mol/L) and the analytical acid concentration C
+# (mol/L): the full charge balance [H⁺] = [A⁻] + [OH⁻], water's autoionisation included, solved for [H⁺] by
+# _km_charge_balance_root (dilute solutions approach pH 7 from below; a very large Ka gives the strong-acid
+# limit), then pH = −log₁₀[H⁺]. Ok(pH); Err(KM_ERR_INVALID_INPUT) if Ka is not positive and finite;
+# Err(KM_ERR_INVALID_CONCENTRATION) if C is not; Err(KM_ERR_COMPUTATION_ERROR) if the root can't be
+# represented (e.g. Ka·C overflows). Mirrors `solution::weak_acid_ph`.
+#must_use
+fn weak_acid_ph(ka: f64, concentration: f64): Result {
+    if (_km_is_positive(ka) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(concentration) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var t, v = _km_charge_balance_root(ka, concentration);
+    if (is_ok(t) != 1) { return Err(v); }
+    var h: f64 = v;
+    return ph_from_h_concentration(h);
+}
+
+# The pH of a monoprotic weak base solution at 25 °C, from Kb (mol/L) and the analytical base concentration C
+# (mol/L): weak_acid_ph's mirror, the charge balance [OH⁻] = [BH⁺] + [H⁺] solved for [OH⁻], then
+# pH = 14 − pOH (dilute solutions approach pH 7 from above). Ok(pH); Err(KM_ERR_INVALID_INPUT) if Kb is not
+# positive and finite; Err(KM_ERR_INVALID_CONCENTRATION) if C is not; Err(KM_ERR_COMPUTATION_ERROR) if the root
+# can't be represented (e.g. Kb·C overflows). Mirrors `solution::weak_base_ph`.
+#must_use
+fn weak_base_ph(kb: f64, concentration: f64): Result {
+    if (_km_is_positive(kb) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(concentration) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var t, v = _km_charge_balance_root(kb, concentration);
+    if (is_ok(t) != 1) { return Err(v); }
+    var oh: f64 = v;
+    var tp, vp = poh_from_oh_concentration(oh);
+    if (is_ok(tp) != 1) { return Err(vp); }
+    var poh: f64 = vp;
+    var ph: f64 = ph_from_poh(poh);
+    return Ok(ph);
+}
+
+# ── ionic strength and activity coefficients ────────────────────────────────────────
+
+# Ionic strength I = ½ Σ cᵢ·zᵢ² in mol/L, over the n (concentration, charge) records at `ions`: each 16 bytes,
+# the concentration's f64 bits (mol/L), then the charge zᵢ as an i64 word. The charge is squared in f64, so any
+# i32 charge is accepted; the terms (c·z)·z are summed in list order from −0.0 (Rust's `.sum()`), so no ions give
+# 0.5 × −0.0 = −0.0. Concentrations are not validated: negative or non-finite ones propagate. NaN if (ions, n)
+# is no list or a charge is outside the i32 range (Rust's type), since there is no error channel. Mirrors
+# `solution::ionic_strength`.
+#must_use
+fn ionic_strength(ions, n): f64 {
+    if (n < 0 || (n > 0 && ions == 0)) { return _km_nan(); }
+    var s: f64 = -0.0;
+    var k = 0;
+    while (k < n) {
+        var c: f64 = load64(ions + k * 16);
+        var zi = load64(ions + k * 16 + 8);
+        if (_km_is_i32(zi) != 1) { return _km_nan(); }
+        var z: f64 = f64_from(zi);
+        var term: f64 = (c * z) * z;
+        s = s + term;
+        k = k + 1;
+    }
+    var i: f64 = 0.5 * s;
+    return i;
+}
+
+# The checks shared by the activity-coefficient models: KM_ERR_INVALID_INPUT if the ionic strength is negative
+# or not finite, or the Debye–Hückel A parameter is not finite; else KM_ERR_NONE. Mirrors Rust's private
+# `solution::validate_ionic_strength_and_a`.
+#must_use
+fn _km_validate_ionic_strength_and_a(ionic_str: f64, a_constant: f64): i64 {
+    if (_km_is_non_negative(ionic_str) != 1) { return KM_ERR_INVALID_INPUT; }
+    if (_km_is_finite(a_constant) != 1) { return KM_ERR_INVALID_INPUT; }
+    return KM_ERR_NONE;
+}
+
+# The Debye–Hückel limiting law log₁₀ γ = −A·z²·√I (valid for I < 0.01 M): the dimensionless activity
+# coefficient γ of an ion of charge z (a Rust i32, as a word) at ionic strength I (mol/L), with the
+# Debye–Hückel A parameter in (L/mol)^½ (KM_DH_A_WATER_25C = 0.509 for water at 25 °C). Ok(γ), or
+# Err(KM_ERR_INVALID_INPUT) if z is outside the i32 range, I is negative or not finite, or A is not finite.
+# Mirrors `solution::debye_huckel_limiting`.
+#must_use
+fn debye_huckel_limiting(charge, ionic_str: f64, a_constant: f64): Result {
+    if (_km_is_i32(charge) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_validate_ionic_strength_and_a(ionic_str, a_constant);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var z: f64 = f64_from(charge);
+    var sqrt_i: f64 = f64_sqrt(ionic_str);
+    var log_gamma: f64 = (((-a_constant) * z) * z) * sqrt_i;
+    var gamma: f64 = ganita_f64_pow(10.0, log_gamma);
+    return Ok(gamma);
+}
+
+# The extended Debye–Hückel equation log₁₀ γ = −A·z²·√I / (1 + B·å·√I) (valid for I < 0.1 M): γ of an ion of
+# charge z (a word) at ionic strength I (mol/L), with A in (L/mol)^½ (KM_DH_A_WATER_25C), B in Å⁻¹·(mol/L)^−½
+# (KM_DH_B_WATER_25C = 0.328 for water at 25 °C) and the effective ion diameter å in Å (typically 3–9). Ok(γ),
+# or Err(KM_ERR_INVALID_INPUT) if z is outside the i32 range, I is negative or not finite, A is not finite, or B
+# or å is negative or not finite (a negative B·å could make 1 + B·å·√I zero). Mirrors
+# `solution::debye_huckel_extended`.
+#must_use
+fn debye_huckel_extended(charge, ionic_str: f64, a_constant: f64, b_constant: f64, ion_size: f64): Result {
+    if (_km_is_i32(charge) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_validate_ionic_strength_and_a(ionic_str, a_constant);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    if (_km_is_non_negative(b_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(ion_size) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var sqrt_i: f64 = f64_sqrt(ionic_str);
+    var z: f64 = f64_from(charge);
+    var num: f64 = (((-a_constant) * z) * z) * sqrt_i;
+    var den: f64 = 1.0 + ((b_constant * ion_size) * sqrt_i);
+    var log_gamma: f64 = num / den;
+    var gamma: f64 = ganita_f64_pow(10.0, log_gamma);
+    return Ok(gamma);
+}
+
+# The Davies equation log₁₀ γ = −A·z²·(√I/(1 + √I) − 0.3·I) (valid for I < 0.5 M; no ion size): γ of an ion of
+# charge z (a word) at ionic strength I (mol/L), with A in (L/mol)^½ (KM_DH_A_WATER_25C for water at 25 °C).
+# Ok(γ), or Err(KM_ERR_INVALID_INPUT) if z is outside the i32 range, I is negative or not finite, or A is not
+# finite. Mirrors `solution::davies_activity`.
+#must_use
+fn davies_activity(charge, ionic_str: f64, a_constant: f64): Result {
+    if (_km_is_i32(charge) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_validate_ionic_strength_and_a(ionic_str, a_constant);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var sqrt_i: f64 = f64_sqrt(ionic_str);
+    var z: f64 = f64_from(charge);
+    var bracket: f64 = (sqrt_i / (1.0 + sqrt_i)) - (0.3 * ionic_str);
+    var log_gamma: f64 = (((-a_constant) * z) * z) * bracket;
+    var gamma: f64 = ganita_f64_pow(10.0, log_gamma);
+    return Ok(gamma);
+}
+
+# ── conductivity ────────────────────────────────────────────────────────────────────
+
+# Kohlrausch's law Λ_m = Λ°_m − K·√c: the molar conductivity (S·cm²/mol) at concentration c (mol/L), from the
+# limiting molar conductivity at infinite dilution Λ°_m (S·cm²/mol) and the Kohlrausch constant K
+# (S·cm²·L^½/mol^(3/2)). Ok(Λ_m); Err(KM_ERR_INVALID_CONCENTRATION) if c is negative or not finite;
+# Err(KM_ERR_INVALID_INPUT) if Λ°_m or K is not finite. Mirrors `solution::kohlrausch_molar_conductivity`.
+#must_use
+fn kohlrausch_molar_conductivity(lambda_zero: f64, k_kohlrausch: f64, concentration: f64): Result {
+    if (_km_is_non_negative(concentration) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    if (_km_is_finite(lambda_zero) != 1 || _km_is_finite(k_kohlrausch) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var sq: f64 = f64_sqrt(concentration);
+    var lm: f64 = lambda_zero - (k_kohlrausch * sq);
+    return Ok(lm);
+}
+
+# Kohlrausch's law of independent ion migration Λ°_m = ν₊·λ°₊ + ν₋·λ°₋ in S·cm²/mol, from the cation's and
+# anion's limiting ionic conductivities λ° (S·cm²/mol, e.g. KM_LAMBDA_NA_PLUS) and stoichiometric numbers ν.
+# Non-finite input propagates to the result. Mirrors `solution::limiting_molar_conductivity`.
+#must_use
+fn limiting_molar_conductivity(cation_conductivity: f64, cation_stoich: f64, anion_conductivity: f64,
+    anion_stoich: f64): f64 {
+    var l: f64 = (cation_stoich * cation_conductivity) + (anion_stoich * anion_conductivity);
+    return l;
+}
+
+# The solution conductivity κ = Λ_m × c / 1000 in S/cm, from the molar conductivity Λ_m (S·cm²/mol) and the
+# concentration c (mol/L). Non-finite input propagates to the result. Mirrors `solution::solution_conductivity`.
+#must_use
+fn solution_conductivity(molar_conductivity: f64, concentration: f64): f64 {
+    var kappa: f64 = (molar_conductivity * concentration) / 1000.0;
+    return kappa;
+}
+
+# --- electrochemistry_data.cyr ---
+
+# kimiya — electrochemistry data: the standard reduction potentials
+#
+# GENERATED by scripts/oracle from kimiya 1.2.0 (rust-old/), hisab 1.4.0. Do not edit.
+# Regenerate: cargo run --release --locked --manifest-path scripts/oracle/Cargo.toml
+#
+# STANDARD_POTENTIALS rows are in Rust's order (by E°, most negative first); a handle
+# (src/electrochemistry.cyr) is row + 1, and 0 is None. f64 cells are the oracle's values as
+# round-trip decimals; tests/golden/electrochemistry.tsv pins every cell (the
+# `electrochemistry::STANDARD_POTENTIALS[]` rows). FARADAY and ELEMENTARY_CHARGE are
+# src/constants.cyr's KM_FARADAY and KM_ELEMENTARY_CHARGE.
+
+# A standard reduction half-reaction with its electrode potential.
+#
+# Rust's `HalfReaction` is no Cyrius struct: a row is a handle, its fields the accessors
+# half_reaction_<field>(h) of src/electrochemistry.cyr:
+# - equation: The reduction half-reaction equation (e.g., "Cu²⁺ + 2e⁻ → Cu").
+# - couple: Species being reduced (e.g., "Cu2+/Cu").
+# - electrons: Number of electrons transferred.
+# - standard_potential: Standard reduction potential E° (V vs SHE).
+
+# Built-in standard reduction potentials (V vs SHE at 25°C).
+#
+# Sorted by E° from most negative (strongest reductant) to most positive
+# (strongest oxidant). Values largely follow the CRC Handbook of Chemistry
+# and Physics, "Electrochemical Series" table (a few entries carry older
+# textbook values).
+# Look entries up by couple with [`lookup_half_reaction`] rather than by
+# position.
+#
+# Notes on rows, from the Rust literal:
+# - row 1, K+/K: standard_potential: CRC Handbook, Electrochemical Series
+# - row 12, V2+/V: standard_potential: CRC Handbook, Electrochemical Series
+# Rust: kimiya::electrochemistry::STANDARD_POTENTIALS (its length).
+const KM_STANDARD_POTENTIALS_COUNT = 49;
+
+# The reduction half-reaction equation (e.g., "Cu²⁺ + 2e⁻ → Cu").
+# Indexed by STANDARD_POTENTIALS row; mirrors `HalfReaction::equation`.
+# Offset of row i's C string in _KM_STANDARD_POTENTIALS_EQUATION_BYTES.
+var _KM_STANDARD_POTENTIALS_EQUATION_OFF: u16[49] = {
+    0,  # Li⁺ + e⁻ → Li
+    20,  # K⁺ + e⁻ → K
+    38,  # Ba²⁺ + 2e⁻ → Ba
+    61,  # Ca²⁺ + 2e⁻ → Ca
+    84,  # Na⁺ + e⁻ → Na
+    104,  # Mg²⁺ + 2e⁻ → Mg
+    127,  # Sc³⁺ + 3e⁻ → Sc
+    150,  # Be²⁺ + 2e⁻ → Be
+    173,  # Al³⁺ + 3e⁻ → Al
+    196,  # Ti²⁺ + 2e⁻ → Ti
+    219,  # Ti³⁺ + 3e⁻ → Ti
+    242,  # Mn²⁺ + 2e⁻ → Mn
+    265,  # V²⁺ + 2e⁻ → V
+    286,  # Zn²⁺ + 2e⁻ → Zn
+    309,  # Cr³⁺ + 3e⁻ → Cr
+    332,  # Fe²⁺ + 2e⁻ → Fe
+    355,  # Cd²⁺ + 2e⁻ → Cd
+    378,  # Co²⁺ + 2e⁻ → Co
+    401,  # Ni²⁺ + 2e⁻ → Ni
+    424,  # V³⁺ + e⁻ → V²⁺
+    449,  # Sn²⁺ + 2e⁻ → Sn
+    472,  # Pb²⁺ + 2e⁻ → Pb
+    495,  # Fe³⁺ + 3e⁻ → Fe
+    518,  # 2H⁺ + 2e⁻ → H₂
+    541,  # Cu²⁺ + e⁻ → Cu⁺
+    566,  # Sn⁴⁺ + 2e⁻ → Sn²⁺
+    595,  # VO²⁺ + 2H⁺ + e⁻ → V³⁺ + H₂O
+    637,  # Cu²⁺ + 2e⁻ → Cu
+    660,  # O₂ + 2H₂O + 4e⁻ → 4OH⁻
+    693,  # Cu⁺ + e⁻ → Cu
+    713,  # I₂ + 2e⁻ → 2I⁻
+    736,  # Fe³⁺ + e⁻ → Fe²⁺
+    763,  # Hg₂²⁺ + 2e⁻ → 2Hg
+    790,  # Ag⁺ + e⁻ → Ag
+    810,  # Hg²⁺ + 2e⁻ → Hg
+    833,  # NO₃⁻ + 10H⁺ + 8e⁻ → NH₄⁺ + 3H₂O
+    881,  # ClO⁻ + H₂O + 2e⁻ → Cl⁻ + 2OH⁻
+    923,  # NO₃⁻ + 4H⁺ + 3e⁻ → NO + 2H₂O
+    964,  # Br₂ + 2e⁻ → 2Br⁻
+    989,  # O₂ + 4H⁺ + 4e⁻ → 2H₂O
+    1021,  # Cr₂O₇²⁻ + 14H⁺ + 6e⁻ → 2Cr³⁺ + 7H₂O
+    1075,  # Cl₂ + 2e⁻ → 2Cl⁻
+    1100,  # PbO₂ + 4H⁺ + 2e⁻ → Pb²⁺ + 2H₂O
+    1144,  # Au³⁺ + 3e⁻ → Au
+    1167,  # MnO₄⁻ + 8H⁺ + 5e⁻ → Mn²⁺ + 4H₂O
+    1214,  # Ce⁴⁺ + e⁻ → Ce³⁺
+    1242,  # H₂O₂ + 2H⁺ + 2e⁻ → 2H₂O
+    1278,  # S₂O₈²⁻ + 2e⁻ → 2SO₄²⁻
+    1316,  # F₂ + 2e⁻ → 2F⁻
+};
+
+# Every string, NUL-terminated, in row order (UTF-8 bytes).
+var _KM_STANDARD_POTENTIALS_EQUATION_BYTES: u8[1339] = {
+    76, 105, 226, 129, 186, 32, 43, 32, 101, 226, 129, 187, 32, 226, 134, 146, 32, 76, 105, 0,  # Li⁺ + e⁻ → Li
+    75, 226, 129, 186, 32, 43, 32, 101, 226, 129, 187, 32, 226, 134, 146, 32, 75, 0,  # K⁺ + e⁻ → K
+    66, 97, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Ba²⁺ + 2e⁻ → Ba
+    226, 134, 146, 32, 66, 97, 0,
+    67, 97, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Ca²⁺ + 2e⁻ → Ca
+    226, 134, 146, 32, 67, 97, 0,
+    78, 97, 226, 129, 186, 32, 43, 32, 101, 226, 129, 187, 32, 226, 134, 146, 32, 78, 97, 0,  # Na⁺ + e⁻ → Na
+    77, 103, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Mg²⁺ + 2e⁻ → Mg
+    226, 134, 146, 32, 77, 103, 0,
+    83, 99, 194, 179, 226, 129, 186, 32, 43, 32, 51, 101, 226, 129, 187, 32,  # Sc³⁺ + 3e⁻ → Sc
+    226, 134, 146, 32, 83, 99, 0,
+    66, 101, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Be²⁺ + 2e⁻ → Be
+    226, 134, 146, 32, 66, 101, 0,
+    65, 108, 194, 179, 226, 129, 186, 32, 43, 32, 51, 101, 226, 129, 187, 32,  # Al³⁺ + 3e⁻ → Al
+    226, 134, 146, 32, 65, 108, 0,
+    84, 105, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Ti²⁺ + 2e⁻ → Ti
+    226, 134, 146, 32, 84, 105, 0,
+    84, 105, 194, 179, 226, 129, 186, 32, 43, 32, 51, 101, 226, 129, 187, 32,  # Ti³⁺ + 3e⁻ → Ti
+    226, 134, 146, 32, 84, 105, 0,
+    77, 110, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Mn²⁺ + 2e⁻ → Mn
+    226, 134, 146, 32, 77, 110, 0,
+    86, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32, 226, 134, 146, 32, 86, 0,  # V²⁺ + 2e⁻ → V
+    90, 110, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Zn²⁺ + 2e⁻ → Zn
+    226, 134, 146, 32, 90, 110, 0,
+    67, 114, 194, 179, 226, 129, 186, 32, 43, 32, 51, 101, 226, 129, 187, 32,  # Cr³⁺ + 3e⁻ → Cr
+    226, 134, 146, 32, 67, 114, 0,
+    70, 101, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Fe²⁺ + 2e⁻ → Fe
+    226, 134, 146, 32, 70, 101, 0,
+    67, 100, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Cd²⁺ + 2e⁻ → Cd
+    226, 134, 146, 32, 67, 100, 0,
+    67, 111, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Co²⁺ + 2e⁻ → Co
+    226, 134, 146, 32, 67, 111, 0,
+    78, 105, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Ni²⁺ + 2e⁻ → Ni
+    226, 134, 146, 32, 78, 105, 0,
+    86, 194, 179, 226, 129, 186, 32, 43, 32, 101, 226, 129, 187, 32, 226, 134,  # V³⁺ + e⁻ → V²⁺
+    146, 32, 86, 194, 178, 226, 129, 186, 0,
+    83, 110, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Sn²⁺ + 2e⁻ → Sn
+    226, 134, 146, 32, 83, 110, 0,
+    80, 98, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Pb²⁺ + 2e⁻ → Pb
+    226, 134, 146, 32, 80, 98, 0,
+    70, 101, 194, 179, 226, 129, 186, 32, 43, 32, 51, 101, 226, 129, 187, 32,  # Fe³⁺ + 3e⁻ → Fe
+    226, 134, 146, 32, 70, 101, 0,
+    50, 72, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32, 226, 134,  # 2H⁺ + 2e⁻ → H₂
+    146, 32, 72, 226, 130, 130, 0,
+    67, 117, 194, 178, 226, 129, 186, 32, 43, 32, 101, 226, 129, 187, 32, 226,  # Cu²⁺ + e⁻ → Cu⁺
+    134, 146, 32, 67, 117, 226, 129, 186, 0,
+    83, 110, 226, 129, 180, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187,  # Sn⁴⁺ + 2e⁻ → Sn²⁺
+    32, 226, 134, 146, 32, 83, 110, 194, 178, 226, 129, 186, 0,
+    86, 79, 194, 178, 226, 129, 186, 32, 43, 32, 50, 72, 226, 129, 186, 32,  # VO²⁺ + 2H⁺ + e⁻ → V³⁺ + H₂O
+    43, 32, 101, 226, 129, 187, 32, 226, 134, 146, 32, 86, 194, 179, 226, 129,
+    186, 32, 43, 32, 72, 226, 130, 130, 79, 0,
+    67, 117, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Cu²⁺ + 2e⁻ → Cu
+    226, 134, 146, 32, 67, 117, 0,
+    79, 226, 130, 130, 32, 43, 32, 50, 72, 226, 130, 130, 79, 32, 43, 32,  # O₂ + 2H₂O + 4e⁻ → 4OH⁻
+    52, 101, 226, 129, 187, 32, 226, 134, 146, 32, 52, 79, 72, 226, 129, 187,
+    0,
+    67, 117, 226, 129, 186, 32, 43, 32, 101, 226, 129, 187, 32, 226, 134, 146, 32, 67, 117, 0,  # Cu⁺ + e⁻ → Cu
+    73, 226, 130, 130, 32, 43, 32, 50, 101, 226, 129, 187, 32, 226, 134, 146,  # I₂ + 2e⁻ → 2I⁻
+    32, 50, 73, 226, 129, 187, 0,
+    70, 101, 194, 179, 226, 129, 186, 32, 43, 32, 101, 226, 129, 187, 32, 226,  # Fe³⁺ + e⁻ → Fe²⁺
+    134, 146, 32, 70, 101, 194, 178, 226, 129, 186, 0,
+    72, 103, 226, 130, 130, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226,  # Hg₂²⁺ + 2e⁻ → 2Hg
+    129, 187, 32, 226, 134, 146, 32, 50, 72, 103, 0,
+    65, 103, 226, 129, 186, 32, 43, 32, 101, 226, 129, 187, 32, 226, 134, 146, 32, 65, 103, 0,  # Ag⁺ + e⁻ → Ag
+    72, 103, 194, 178, 226, 129, 186, 32, 43, 32, 50, 101, 226, 129, 187, 32,  # Hg²⁺ + 2e⁻ → Hg
+    226, 134, 146, 32, 72, 103, 0,
+    78, 79, 226, 130, 131, 226, 129, 187, 32, 43, 32, 49, 48, 72, 226, 129,  # NO₃⁻ + 10H⁺ + 8e⁻ → NH₄⁺ + 3H₂O
+    186, 32, 43, 32, 56, 101, 226, 129, 187, 32, 226, 134, 146, 32, 78, 72,
+    226, 130, 132, 226, 129, 186, 32, 43, 32, 51, 72, 226, 130, 130, 79, 0,
+    67, 108, 79, 226, 129, 187, 32, 43, 32, 72, 226, 130, 130, 79, 32, 43,  # ClO⁻ + H₂O + 2e⁻ → Cl⁻ + 2OH⁻
+    32, 50, 101, 226, 129, 187, 32, 226, 134, 146, 32, 67, 108, 226, 129, 187,
+    32, 43, 32, 50, 79, 72, 226, 129, 187, 0,
+    78, 79, 226, 130, 131, 226, 129, 187, 32, 43, 32, 52, 72, 226, 129, 186,  # NO₃⁻ + 4H⁺ + 3e⁻ → NO + 2H₂O
+    32, 43, 32, 51, 101, 226, 129, 187, 32, 226, 134, 146, 32, 78, 79, 32,
+    43, 32, 50, 72, 226, 130, 130, 79, 0,
+    66, 114, 226, 130, 130, 32, 43, 32, 50, 101, 226, 129, 187, 32, 226, 134,  # Br₂ + 2e⁻ → 2Br⁻
+    146, 32, 50, 66, 114, 226, 129, 187, 0,
+    79, 226, 130, 130, 32, 43, 32, 52, 72, 226, 129, 186, 32, 43, 32, 52,  # O₂ + 4H⁺ + 4e⁻ → 2H₂O
+    101, 226, 129, 187, 32, 226, 134, 146, 32, 50, 72, 226, 130, 130, 79, 0,
+    67, 114, 226, 130, 130, 79, 226, 130, 135, 194, 178, 226, 129, 187, 32, 43,  # Cr₂O₇²⁻ + 14H⁺ + 6e⁻ → 2Cr³⁺ + 7H₂O
+    32, 49, 52, 72, 226, 129, 186, 32, 43, 32, 54, 101, 226, 129, 187, 32,
+    226, 134, 146, 32, 50, 67, 114, 194, 179, 226, 129, 186, 32, 43, 32, 55,
+    72, 226, 130, 130, 79, 0,
+    67, 108, 226, 130, 130, 32, 43, 32, 50, 101, 226, 129, 187, 32, 226, 134,  # Cl₂ + 2e⁻ → 2Cl⁻
+    146, 32, 50, 67, 108, 226, 129, 187, 0,
+    80, 98, 79, 226, 130, 130, 32, 43, 32, 52, 72, 226, 129, 186, 32, 43,  # PbO₂ + 4H⁺ + 2e⁻ → Pb²⁺ + 2H₂O
+    32, 50, 101, 226, 129, 187, 32, 226, 134, 146, 32, 80, 98, 194, 178, 226,
+    129, 186, 32, 43, 32, 50, 72, 226, 130, 130, 79, 0,
+    65, 117, 194, 179, 226, 129, 186, 32, 43, 32, 51, 101, 226, 129, 187, 32,  # Au³⁺ + 3e⁻ → Au
+    226, 134, 146, 32, 65, 117, 0,
+    77, 110, 79, 226, 130, 132, 226, 129, 187, 32, 43, 32, 56, 72, 226, 129,  # MnO₄⁻ + 8H⁺ + 5e⁻ → Mn²⁺ + 4H₂O
+    186, 32, 43, 32, 53, 101, 226, 129, 187, 32, 226, 134, 146, 32, 77, 110,
+    194, 178, 226, 129, 186, 32, 43, 32, 52, 72, 226, 130, 130, 79, 0,
+    67, 101, 226, 129, 180, 226, 129, 186, 32, 43, 32, 101, 226, 129, 187, 32,  # Ce⁴⁺ + e⁻ → Ce³⁺
+    226, 134, 146, 32, 67, 101, 194, 179, 226, 129, 186, 0,
+    72, 226, 130, 130, 79, 226, 130, 130, 32, 43, 32, 50, 72, 226, 129, 186,  # H₂O₂ + 2H⁺ + 2e⁻ → 2H₂O
+    32, 43, 32, 50, 101, 226, 129, 187, 32, 226, 134, 146, 32, 50, 72, 226,
+    130, 130, 79, 0,
+    83, 226, 130, 130, 79, 226, 130, 136, 194, 178, 226, 129, 187, 32, 43, 32,  # S₂O₈²⁻ + 2e⁻ → 2SO₄²⁻
+    50, 101, 226, 129, 187, 32, 226, 134, 146, 32, 50, 83, 79, 226, 130, 132,
+    194, 178, 226, 129, 187, 0,
+    70, 226, 130, 130, 32, 43, 32, 50, 101, 226, 129, 187, 32, 226, 134, 146,  # F₂ + 2e⁻ → 2F⁻
+    32, 50, 70, 226, 129, 187, 0,
+};
+
+# Species being reduced (e.g., "Cu2+/Cu").
+# Indexed by STANDARD_POTENTIALS row; mirrors `HalfReaction::couple`.
+# Offset of row i's C string in _KM_STANDARD_POTENTIALS_COUPLE_BYTES.
+var _KM_STANDARD_POTENTIALS_COUPLE_OFF: u16[49] = {
+    0,  # Li+/Li
+    7,  # K+/K
+    12,  # Ba2+/Ba
+    20,  # Ca2+/Ca
+    28,  # Na+/Na
+    35,  # Mg2+/Mg
+    43,  # Sc3+/Sc
+    51,  # Be2+/Be
+    59,  # Al3+/Al
+    67,  # Ti2+/Ti
+    75,  # Ti3+/Ti
+    83,  # Mn2+/Mn
+    91,  # V2+/V
+    97,  # Zn2+/Zn
+    105,  # Cr3+/Cr
+    113,  # Fe2+/Fe
+    121,  # Cd2+/Cd
+    129,  # Co2+/Co
+    137,  # Ni2+/Ni
+    145,  # V3+/V2+
+    153,  # Sn2+/Sn
+    161,  # Pb2+/Pb
+    169,  # Fe3+/Fe
+    177,  # H+/H2
+    183,  # Cu2+/Cu+
+    192,  # Sn4+/Sn2+
+    202,  # VO2+/V3+
+    211,  # Cu2+/Cu
+    219,  # O2/OH-
+    226,  # Cu+/Cu
+    233,  # I2/I-
+    239,  # Fe3+/Fe2+
+    249,  # Hg22+/Hg
+    258,  # Ag+/Ag
+    265,  # Hg2+/Hg
+    273,  # NO3-/NH4+
+    283,  # ClO-/Cl-
+    292,  # NO3-/NO
+    300,  # Br2/Br-
+    308,  # O2/H2O
+    315,  # Cr2O72-/Cr3+
+    328,  # Cl2/Cl-
+    336,  # PbO2/Pb2+
+    346,  # Au3+/Au
+    354,  # MnO4-/Mn2+
+    365,  # Ce4+/Ce3+
+    375,  # H2O2/H2O
+    384,  # S2O82-/SO42-
+    397,  # F2/F-
+};
+
+# Every string, NUL-terminated, in row order (ASCII).
+var _KM_STANDARD_POTENTIALS_COUPLE_BYTES: u8[403] = {
+    76, 105, 43, 47, 76, 105, 0,  # Li+/Li
+    75, 43, 47, 75, 0,  # K+/K
+    66, 97, 50, 43, 47, 66, 97, 0,  # Ba2+/Ba
+    67, 97, 50, 43, 47, 67, 97, 0,  # Ca2+/Ca
+    78, 97, 43, 47, 78, 97, 0,  # Na+/Na
+    77, 103, 50, 43, 47, 77, 103, 0,  # Mg2+/Mg
+    83, 99, 51, 43, 47, 83, 99, 0,  # Sc3+/Sc
+    66, 101, 50, 43, 47, 66, 101, 0,  # Be2+/Be
+    65, 108, 51, 43, 47, 65, 108, 0,  # Al3+/Al
+    84, 105, 50, 43, 47, 84, 105, 0,  # Ti2+/Ti
+    84, 105, 51, 43, 47, 84, 105, 0,  # Ti3+/Ti
+    77, 110, 50, 43, 47, 77, 110, 0,  # Mn2+/Mn
+    86, 50, 43, 47, 86, 0,  # V2+/V
+    90, 110, 50, 43, 47, 90, 110, 0,  # Zn2+/Zn
+    67, 114, 51, 43, 47, 67, 114, 0,  # Cr3+/Cr
+    70, 101, 50, 43, 47, 70, 101, 0,  # Fe2+/Fe
+    67, 100, 50, 43, 47, 67, 100, 0,  # Cd2+/Cd
+    67, 111, 50, 43, 47, 67, 111, 0,  # Co2+/Co
+    78, 105, 50, 43, 47, 78, 105, 0,  # Ni2+/Ni
+    86, 51, 43, 47, 86, 50, 43, 0,  # V3+/V2+
+    83, 110, 50, 43, 47, 83, 110, 0,  # Sn2+/Sn
+    80, 98, 50, 43, 47, 80, 98, 0,  # Pb2+/Pb
+    70, 101, 51, 43, 47, 70, 101, 0,  # Fe3+/Fe
+    72, 43, 47, 72, 50, 0,  # H+/H2
+    67, 117, 50, 43, 47, 67, 117, 43, 0,  # Cu2+/Cu+
+    83, 110, 52, 43, 47, 83, 110, 50, 43, 0,  # Sn4+/Sn2+
+    86, 79, 50, 43, 47, 86, 51, 43, 0,  # VO2+/V3+
+    67, 117, 50, 43, 47, 67, 117, 0,  # Cu2+/Cu
+    79, 50, 47, 79, 72, 45, 0,  # O2/OH-
+    67, 117, 43, 47, 67, 117, 0,  # Cu+/Cu
+    73, 50, 47, 73, 45, 0,  # I2/I-
+    70, 101, 51, 43, 47, 70, 101, 50, 43, 0,  # Fe3+/Fe2+
+    72, 103, 50, 50, 43, 47, 72, 103, 0,  # Hg22+/Hg
+    65, 103, 43, 47, 65, 103, 0,  # Ag+/Ag
+    72, 103, 50, 43, 47, 72, 103, 0,  # Hg2+/Hg
+    78, 79, 51, 45, 47, 78, 72, 52, 43, 0,  # NO3-/NH4+
+    67, 108, 79, 45, 47, 67, 108, 45, 0,  # ClO-/Cl-
+    78, 79, 51, 45, 47, 78, 79, 0,  # NO3-/NO
+    66, 114, 50, 47, 66, 114, 45, 0,  # Br2/Br-
+    79, 50, 47, 72, 50, 79, 0,  # O2/H2O
+    67, 114, 50, 79, 55, 50, 45, 47, 67, 114, 51, 43, 0,  # Cr2O72-/Cr3+
+    67, 108, 50, 47, 67, 108, 45, 0,  # Cl2/Cl-
+    80, 98, 79, 50, 47, 80, 98, 50, 43, 0,  # PbO2/Pb2+
+    65, 117, 51, 43, 47, 65, 117, 0,  # Au3+/Au
+    77, 110, 79, 52, 45, 47, 77, 110, 50, 43, 0,  # MnO4-/Mn2+
+    67, 101, 52, 43, 47, 67, 101, 51, 43, 0,  # Ce4+/Ce3+
+    72, 50, 79, 50, 47, 72, 50, 79, 0,  # H2O2/H2O
+    83, 50, 79, 56, 50, 45, 47, 83, 79, 52, 50, 45, 0,  # S2O82-/SO42-
+    70, 50, 47, 70, 45, 0,  # F2/F-
+};
+
+# Number of electrons transferred.
+# Indexed by STANDARD_POTENTIALS row; mirrors `HalfReaction::electrons` (a u8).
+var KM_STANDARD_POTENTIALS_ELECTRONS: u8[49] = {
+    1,  # Li+/Li
+    1,  # K+/K
+    2,  # Ba2+/Ba
+    2,  # Ca2+/Ca
+    1,  # Na+/Na
+    2,  # Mg2+/Mg
+    3,  # Sc3+/Sc
+    2,  # Be2+/Be
+    3,  # Al3+/Al
+    2,  # Ti2+/Ti
+    3,  # Ti3+/Ti
+    2,  # Mn2+/Mn
+    2,  # V2+/V
+    2,  # Zn2+/Zn
+    3,  # Cr3+/Cr
+    2,  # Fe2+/Fe
+    2,  # Cd2+/Cd
+    2,  # Co2+/Co
+    2,  # Ni2+/Ni
+    1,  # V3+/V2+
+    2,  # Sn2+/Sn
+    2,  # Pb2+/Pb
+    3,  # Fe3+/Fe
+    2,  # H+/H2
+    1,  # Cu2+/Cu+
+    2,  # Sn4+/Sn2+
+    1,  # VO2+/V3+
+    2,  # Cu2+/Cu
+    4,  # O2/OH-
+    1,  # Cu+/Cu
+    2,  # I2/I-
+    1,  # Fe3+/Fe2+
+    2,  # Hg22+/Hg
+    1,  # Ag+/Ag
+    2,  # Hg2+/Hg
+    8,  # NO3-/NH4+
+    2,  # ClO-/Cl-
+    3,  # NO3-/NO
+    2,  # Br2/Br-
+    4,  # O2/H2O
+    6,  # Cr2O72-/Cr3+
+    2,  # Cl2/Cl-
+    2,  # PbO2/Pb2+
+    3,  # Au3+/Au
+    5,  # MnO4-/Mn2+
+    1,  # Ce4+/Ce3+
+    2,  # H2O2/H2O
+    2,  # S2O82-/SO42-
+    2,  # F2/F-
+};
+
+# Standard reduction potential E° (V vs SHE).
+# Indexed by STANDARD_POTENTIALS row; mirrors `HalfReaction::standard_potential`.
+var KM_STANDARD_POTENTIALS_STANDARD_POTENTIAL: f64[49] = {
+    -3.04,  # Li+/Li
+    -2.931,  # K+/K
+    -2.912,  # Ba2+/Ba
+    -2.868,  # Ca2+/Ca
+    -2.71,  # Na+/Na
+    -2.372,  # Mg2+/Mg
+    -2.077,  # Sc3+/Sc
+    -1.847,  # Be2+/Be
+    -1.662,  # Al3+/Al
+    -1.63,  # Ti2+/Ti
+    -1.37,  # Ti3+/Ti
+    -1.185,  # Mn2+/Mn
+    -1.175,  # V2+/V
+    -0.762,  # Zn2+/Zn
+    -0.744,  # Cr3+/Cr
+    -0.447,  # Fe2+/Fe
+    -0.403,  # Cd2+/Cd
+    -0.28,  # Co2+/Co
+    -0.257,  # Ni2+/Ni
+    -0.255,  # V3+/V2+
+    -0.136,  # Sn2+/Sn
+    -0.126,  # Pb2+/Pb
+    -0.037,  # Fe3+/Fe
+    0.0,  # H+/H2
+    0.153,  # Cu2+/Cu+
+    0.154,  # Sn4+/Sn2+
+    0.337,  # VO2+/V3+
+    0.342,  # Cu2+/Cu
+    0.401,  # O2/OH-
+    0.521,  # Cu+/Cu
+    0.536,  # I2/I-
+    0.771,  # Fe3+/Fe2+
+    0.797,  # Hg22+/Hg
+    0.7996,  # Ag+/Ag
+    0.851,  # Hg2+/Hg
+    0.875,  # NO3-/NH4+
+    0.89,  # ClO-/Cl-
+    0.957,  # NO3-/NO
+    1.066,  # Br2/Br-
+    1.229,  # O2/H2O
+    1.33,  # Cr2O72-/Cr3+
+    1.358,  # Cl2/Cl-
+    1.455,  # PbO2/Pb2+
+    1.498,  # Au3+/Au
+    1.507,  # MnO4-/Mn2+
+    1.72,  # Ce4+/Ce3+
+    1.776,  # H2O2/H2O
+    2.01,  # S2O82-/SO42-
+    2.866,  # F2/F-
+};
+
+# --- electrochemistry.cyr ---
+
+# electrochemistry.cyr — electrode potentials, the Nernst equation and Faraday's laws (port of
+# rust-old/src/electrochemistry.rs).
+#
+# Standard electrode potentials are for reduction half-reactions at 25 °C, 1 atm and 1 M, against the standard
+# hydrogen electrode (SHE). Potentials are in volts, charges in coulombs, masses in grams. The data — the 49
+# STANDARD_POTENTIALS rows — is src/electrochemistry_data.cyr (generated); FARADAY and ELEMENTARY_CHARGE are
+# src/constants.cyr's KM_FARADAY and KM_ELEMENTARY_CHARGE. Fallible functions return a value-form Result whose
+# Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs. Every expression keeps Rust's operation order,
+# so everything but the Nernst equation is + − × ÷ and bit-identical (class B); the Nernst functions are class
+# C through one ln (docs/development/port-parity.md §7).
+#
+# - Rows are reached by handle (port plan §6.4): STANDARD_POTENTIALS row + 1, 0 for None. HalfReaction's
+#   fields are half_reaction_equation(h) / half_reaction_couple(h) ("" for an invalid handle),
+#   half_reaction_electrons(h) (0: no row has 0) and half_reaction_standard_potential(h) (NaN).
+# - Rust's `n_electrons: u8` is a word here: one outside 0 ..= 255 is Err(KM_ERR_INVALID_INPUT) at the position
+#   of Rust's `== 0` check (one test, n < 1 || n > 255), never wrapped mod 256.
+# - The Nernst equation's ln is the correctly rounded _km_ln (ADR 0005, amendment M3a): E° − (RT/nF)·ln Q
+#   cancels where E° ≈ (RT/nF)·ln Q, and there one ulp of the log moves E by many.
+
+include "lib/string.cyr"
+
+# The STANDARD_POTENTIALS row of handle h (h − 1), or -1 if h is no handle.
+#must_use
+fn _km_half_reaction_row(h): i64 {
+    if (h >= 1 && h <= KM_STANDARD_POTENTIALS_COUNT) { return h - 1; }
+    return 0 - 1;
+}
+
+# 1 if the word n is a valid electron count: a Rust u8 (0 ..= 255) that is not 0.
+#must_use
+fn _km_is_electron_count(n): i64 {
+    if (n < 1 || n > 255) { return 0; }
+    return 1;
+}
+
+# ── standard electrode potentials ───────────────────────────────────────────────────
+
+# The half-reaction whose couple is the C string `couple`, exactly and case-sensitively ("Cu2+/Cu"), as a
+# handle (its STANDARD_POTENTIALS row + 1); 0 when none matches (or `couple` is 0). The first match in table
+# order, as Rust's linear `find` (the couples are unique). Mirrors `electrochemistry::lookup_half_reaction`.
+#must_use
+fn lookup_half_reaction(couple): i64 {
+    if (couple == 0) { return 0; }
+    var c0 = load8(couple);
+    if (c0 == 0) { return 0; }
+    var n = strlen(couple);
+    var row = 0;
+    while (row < KM_STANDARD_POTENTIALS_COUNT) {
+        var p = &_KM_STANDARD_POTENTIALS_COUPLE_BYTES + _KM_STANDARD_POTENTIALS_COUPLE_OFF[row];
+        # The first byte decides most rows; memeq stops at p's NUL, which differs from couple's byte.
+        if (load8(p) == c0) {
+            if (memeq(p, couple, n) == 1 && load8(p + n) == 0) { return row + 1; }
+        }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The reduction half-reaction equation of STANDARD_POTENTIALS handle h ("Cu²⁺ + 2e⁻ → Cu") as a C string of
+# UTF-8 bytes in the baked table; "" for an invalid handle. Mirrors `HalfReaction::equation`.
+#must_use
+fn half_reaction_equation(h): i64 {
+    var row = _km_half_reaction_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_STANDARD_POTENTIALS_EQUATION_BYTES + _KM_STANDARD_POTENTIALS_EQUATION_OFF[row];
+}
+
+# The couple (the species reduced) of STANDARD_POTENTIALS handle h ("Cu2+/Cu"); "" for an invalid handle.
+# Mirrors `HalfReaction::couple`.
+#must_use
+fn half_reaction_couple(h): i64 {
+    var row = _km_half_reaction_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_STANDARD_POTENTIALS_COUPLE_BYTES + _KM_STANDARD_POTENTIALS_COUPLE_OFF[row];
+}
+
+# The number of electrons transferred in STANDARD_POTENTIALS handle h (1 ..= 5); 0 for an invalid handle, which
+# no row has. Mirrors `HalfReaction::electrons`.
+#must_use
+fn half_reaction_electrons(h): i64 {
+    var row = _km_half_reaction_row(h);
+    if (row < 0) { return 0; }
+    return KM_STANDARD_POTENTIALS_ELECTRONS[row];
+}
+
+# The standard reduction potential E° of STANDARD_POTENTIALS handle h, in V vs SHE; NaN for an invalid handle.
+# Mirrors `HalfReaction::standard_potential`.
+#must_use
+fn half_reaction_standard_potential(h): f64 {
+    var row = _km_half_reaction_row(h);
+    if (row < 0) { return _km_nan(); }
+    var e: f64 = KM_STANDARD_POTENTIALS_STANDARD_POTENTIAL[row];
+    return e;
+}
+
+# ── the Nernst equation ─────────────────────────────────────────────────────────────
+
+# The Nernst equation E = E° − (RT/nF)·ln Q: the electrode potential in V under non-standard conditions, from
+# the standard potential E° (V), the electron count n (a Rust u8, as a word), T in K and the reaction quotient
+# Q (product over reactant activities). Ok(E); Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite;
+# Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, Q is not positive and finite, or E° is not finite
+# (in that order). ln Q is correctly rounded (_km_ln, ADR 0005 amendment M3a). Mirrors
+# `electrochemistry::nernst_potential`.
+#must_use
+fn nernst_potential(standard_potential: f64, n_electrons, temperature_k: f64, reaction_quotient: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(reaction_quotient) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(standard_potential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var r: f64 = KM_GAS_CONSTANT;
+    var f: f64 = KM_FARADAY;
+    var n: f64 = f64_from(n_electrons);
+    var factor: f64 = (r * temperature_k) / (n * f);
+    var l: f64 = _km_ln(reaction_quotient);
+    var e: f64 = standard_potential - (factor * l);
+    return Ok(e);
+}
+
+# The Nernst equation at 25 °C, E = E° − (0.05916/n)·log₁₀ Q: nernst_potential at T = 298.15 K, so the
+# 0.05916 V factor is not rounded. Ok(E), or Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, Q is not
+# positive and finite, or E° is not finite. Mirrors `electrochemistry::nernst_potential_25c`.
+#must_use
+fn nernst_potential_25c(standard_potential: f64, n_electrons, reaction_quotient: f64): Result {
+    return nernst_potential(standard_potential, n_electrons, 298.15, reaction_quotient);
+}
+
+# ── cell potentials ─────────────────────────────────────────────────────────────────
+
+# The standard cell potential E°_cell = E°_cathode − E°_anode, both standard reduction potentials in V; returns
+# V. Non-finite input propagates to the result. Mirrors `electrochemistry::standard_cell_potential`.
+#must_use
+fn standard_cell_potential(e_cathode: f64, e_anode: f64): f64 {
+    var e: f64 = e_cathode - e_anode;
+    return e;
+}
+
+# The standard cell potential E°_cell in V from two couples (C strings, as lookup_half_reaction takes them):
+# the cathode's couple is reduced (gains electrons), the anode's oxidised. Ok(E°_cell), or
+# Err(KM_ERR_INVALID_REACTION) if a couple is not in STANDARD_POTENTIALS (the cathode's checked first). Mirrors
+# `electrochemistry::cell_potential_from_couples`.
+#must_use
+fn cell_potential_from_couples(cathode_couple, anode_couple): Result {
+    var hc = lookup_half_reaction(cathode_couple);
+    if (hc == 0) { return Err(KM_ERR_INVALID_REACTION); }
+    var ha = lookup_half_reaction(anode_couple);
+    if (ha == 0) { return Err(KM_ERR_INVALID_REACTION); }
+    var ec: f64 = half_reaction_standard_potential(hc);
+    var ea: f64 = half_reaction_standard_potential(ha);
+    var e: f64 = standard_cell_potential(ec, ea);
+    return Ok(e);
+}
+
+# 1 if a galvanic cell of potential E°_cell (V) is spontaneous, E°_cell > 0; NaN is not. Mirrors
+# `electrochemistry::is_spontaneous_cell`.
+#must_use
+fn is_spontaneous_cell(e_cell: f64): i64 {
+    if (e_cell > 0.0) { return 1; }
+    return 0;
+}
+
+# The Gibbs free energy of an electrochemical cell, ΔG = −nFE, in J per mole of reaction, from the electrons
+# transferred per reaction n (a word) and the cell potential E (V). Ok(ΔG), or Err(KM_ERR_INVALID_INPUT) if n is
+# 0 or outside 0 ..= 255 or E is not finite. Mirrors `electrochemistry::cell_gibbs_energy`.
+#must_use
+fn cell_gibbs_energy(n_electrons, cell_potential: f64): Result {
+    if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(cell_potential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var f: f64 = KM_FARADAY;
+    var n: f64 = f64_from(n_electrons);
+    var g: f64 = ((-n) * f) * cell_potential;
+    return Ok(g);
+}
+
+# ── Faraday's laws ──────────────────────────────────────────────────────────────────
+
+# Faraday's first law m = (Q × M)/(n × F): the mass deposited in g (negative for a negative charge, i.e.
+# dissolution), from the charge passed Q (C), the molar mass M (g/mol) and the electrons per ion n (a word).
+# Ok(m), or Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, M is not positive and finite, or Q is not
+# finite. Mirrors `electrochemistry::faraday_mass_deposited`.
+#must_use
+fn faraday_mass_deposited(charge_c: f64, molar_mass_g: f64, n_electrons): Result {
+    if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(molar_mass_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(charge_c) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var f: f64 = KM_FARADAY;
+    var n: f64 = f64_from(n_electrons);
+    var m: f64 = (charge_c * molar_mass_g) / (n * f);
+    return Ok(m);
+}
+
+# The charge needed to deposit a mass, Q = (m × n × F)/M, in C, from the mass m (g), the molar mass M (g/mol) and
+# the electrons per ion n (a word). Ok(Q), or Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, M is not
+# positive and finite, or m is not finite. Mirrors `electrochemistry::faraday_charge_required`.
+#must_use
+fn faraday_charge_required(mass_g: f64, molar_mass_g: f64, n_electrons): Result {
+    if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(molar_mass_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(mass_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var f: f64 = KM_FARADAY;
+    var n: f64 = f64_from(n_electrons);
+    var q: f64 = ((mass_g * n) * f) / molar_mass_g;
+    return Ok(q);
+}
+
+# Faraday's second law: the same charge deposits masses in the ratio of the equivalent weights M/n. The mass of
+# substance B in g deposited while mass_a_g grams of A are, from the molar masses (g/mol) and electron counts
+# (words) of A and B. Ok(m_B), or Err(KM_ERR_INVALID_INPUT) if an electron count is 0 or outside 0 ..= 255, either
+# molar mass is not positive and finite (A's checked first), or mass_a_g is not finite. Mirrors
+# `electrochemistry::faraday_mass_ratio`.
+#must_use
+fn faraday_mass_ratio(mass_a_g: f64, molar_mass_a: f64, n_electrons_a, molar_mass_b: f64, n_electrons_b): Result {
+    if (_km_is_electron_count(n_electrons_a) != 1 || _km_is_electron_count(n_electrons_b) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (_km_is_positive(molar_mass_a) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(molar_mass_b) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(mass_a_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var na: f64 = f64_from(n_electrons_a);
+    var nb: f64 = f64_from(n_electrons_b);
+    var equiv_a: f64 = molar_mass_a / na;
+    var equiv_b: f64 = molar_mass_b / nb;
+    var m: f64 = (mass_a_g * equiv_b) / equiv_a;
+    return Ok(m);
+}
+
+# ── utility ─────────────────────────────────────────────────────────────────────────
+
+# Charge Q (C) to moles of electrons, n_e = Q / F. Non-finite input propagates to the result. Mirrors
+# `electrochemistry::charge_to_moles_electrons`.
+#must_use
+fn charge_to_moles_electrons(charge_c: f64): f64 {
+    var f: f64 = KM_FARADAY;
+    var n: f64 = charge_c / f;
+    return n;
+}
+
+# Moles of electrons to charge (C), Q = n_e × F. Non-finite input propagates to the result. Mirrors
+# `electrochemistry::moles_electrons_to_charge`.
+#must_use
+fn moles_electrons_to_charge(moles: f64): f64 {
+    var f: f64 = KM_FARADAY;
+    var q: f64 = moles * f;
+    return q;
+}
+
+# --- kinetics.cyr ---
+
+# kinetics.cyr — chemical kinetics: rate constants, integrated rate laws, half-lives, the steady-state and
+# pre-equilibrium approximations, Michaelis–Menten enzyme kinetics, collision theory and transition-state
+# (Eyring) theory (port of rust-old/src/kinetics.rs).
+#
+# Units: concentrations in mol/L, time in s, energies in J/mol, temperatures in K. Rate constants carry the
+# units of their reaction order n, (mol/L)^(1−n)·s⁻¹: zero order mol·L⁻¹·s⁻¹, first order s⁻¹, second order
+# L·mol⁻¹·s⁻¹. Any consistent time unit may be used instead of seconds, except in the Eyring functions, whose
+# prefactor k_B·T/h is in s⁻¹. The constants KM_GAS_CONSTANT, KM_BOLTZMANN (Rust's kinetics::BOLTZMANN) and
+# KM_PLANCK are src/constants.cyr's (generated). Fallible functions return a value-form Result whose Err payload
+# is a KM_ERR_* code, and reject NaN and ±∞ inputs where Rust does. Every expression keeps Rust's operation
+# order, so the arithmetic functions are bit-identical (class B); the exp, exp_m1 and pow functions are class C
+# (docs/development/port-parity.md §8).
+#
+# - exp is f64_exp, exp_m1 _km_expm1 (src/mathx.cyr, Rust libm's fdlibm expm1) and powf ganita_f64_pow, each
+#   within 1 ulp. Where an exp or pow result is subnormal and a prefactor scales it back into the normal range
+#   (A·e^x with x below −708, [A]₀^(n−1) in the nth-order denominator), one ulp of it is a large relative change,
+#   so those rows can differ from the oracle by far more than an ulp: the six class-C functions are measured, not
+#   gated, until the primitives are correctly rounded (docs/development/port-parity.md §8).
+# - Rust's std::f64::consts::LN_2 and its private FIRST_ORDER_TOLERANCE (10⁻¹²) are typed formula constants
+#   inline (port plan §6.4): LN_2 by its bits, 0x3FE62E42FEFA39EF, as src/mathx.cyr writes ln 2's high part. Both
+#   are pinned by golden rows (half_life_first_order(1) is LN_2 exactly; orders at 1 ± 10⁻¹² and the ulps
+#   either side) and by tests/kinetics.tcyr.
+# - lineweaver_burk's (slope, intercept) tuple becomes the caller's buffer of two f64 (16 bytes,
+#   `var lb[16];`), as peng_robinson_z_roots's Vec: Ok(2), the count written, with the slope at out and the
+#   intercept at out + 8; on Err the buffer is untouched.
+
+include "lib/math.cyr"
+include "lib/ganita.cyr"
+
+# Arrhenius rate constant k = A·exp(−Ea/(R·T)), from the pre-exponential factor A (in the units of the
+# returned rate constant), the activation energy Ea in J/mol and T in K. Ok(k) in the units of A;
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite; Err(KM_ERR_INVALID_INPUT) if A or Ea is not
+# finite. exp may overflow (Ok(+∞), or Ok(NaN) for A = 0) or underflow to 0, as in Rust. Mirrors
+# `kinetics::arrhenius_rate`.
+#must_use
+fn arrhenius_rate(pre_exponential: f64, activation_energy_j: f64, temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(pre_exponential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(activation_energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var nea: f64 = -activation_energy_j;
+    var x: f64 = nea / (KM_GAS_CONSTANT * temperature_k);
+    var e: f64 = f64_exp(x);
+    var k: f64 = pre_exponential * e;
+    return Ok(k);
+}
+
+# Half-life of a first-order reaction t½ = ln 2 / k in s, from the rate constant k in s⁻¹. Ok(t½), or
+# Err(KM_ERR_INVALID_INPUT) if k is not positive and finite. Mirrors `kinetics::half_life_first_order`.
+#must_use
+fn half_life_first_order(rate_constant: f64): Result {
+    if (_km_is_positive(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var ln2: f64 = 0x3FE62E42FEFA39EF;     # std::f64::consts::LN_2
+    var t: f64 = ln2 / rate_constant;
+    return Ok(t);
+}
+
+# The concentration remaining after first-order decay, [A] = [A]₀·exp(−k·t) in mol/L, from [A]₀ in mol/L, k in
+# s⁻¹ and t in s. Inputs are not validated: non-finite input propagates to the result. Mirrors
+# `kinetics::first_order_concentration`.
+#must_use
+fn first_order_concentration(initial: f64, rate_constant: f64, time: f64): f64 {
+    var nk: f64 = -rate_constant;
+    var x: f64 = nk * time;
+    var e: f64 = f64_exp(x);
+    var c: f64 = initial * e;
+    return c;
+}
+
+# The concentration remaining after second-order decay, 1/[A] = 1/[A]₀ + k·t, in mol/L (in (0, [A]₀]), from
+# [A]₀ in mol/L, k in L·mol⁻¹·s⁻¹ and t in s. Ok([A]); Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ is not positive
+# and finite; Err(KM_ERR_INVALID_INPUT) if k or t is negative or not finite (k·t ≤ −1/[A]₀ would give an infinite
+# or negative concentration). Mirrors `kinetics::second_order_concentration`.
+#must_use
+fn second_order_concentration(initial: f64, rate_constant: f64, time: f64): Result {
+    if (_km_is_positive(initial) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    if (_km_is_non_negative(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(time) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var inv: f64 = (1.0 / initial) + (rate_constant * time);
+    var c: f64 = 1.0 / inv;
+    return Ok(c);
+}
+
+# The zero-order concentration [A] = [A]₀ − k·t in mol/L, from [A]₀ in mol/L, k in mol·L⁻¹·s⁻¹ and t in s, or
+# +0.0 if that would be negative (the reaction is complete). Inputs are not validated: NaN propagates (Rust's
+# `if remaining < 0.0 { 0.0 } else { remaining }`, not f64::max, which would turn NaN into 0.0), and −0.0
+# stays −0.0. Mirrors `kinetics::zero_order_concentration`.
+#must_use
+fn zero_order_concentration(initial: f64, rate_constant: f64, time: f64): f64 {
+    var remaining: f64 = initial - (rate_constant * time);
+    if (remaining < 0.0) { return 0.0; }
+    return remaining;
+}
+
+# The zero-order half-life t½ = [A]₀/(2k) in s, from [A]₀ in mol/L and k in mol·L⁻¹·s⁻¹. Ok(t½);
+# Err(KM_ERR_INVALID_INPUT) if k is not positive and finite; Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ is not
+# positive and finite (k checked first). Mirrors `kinetics::zero_order_half_life`.
+#must_use
+fn zero_order_half_life(initial: f64, rate_constant: f64): Result {
+    if (_km_is_positive(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(initial) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var t: f64 = initial / (2.0 * rate_constant);
+    return Ok(t);
+}
+
+# The general nth-order half-life t½ = (2^(n−1) − 1) / ((n − 1)·k·[A]₀^(n−1)) in s, for any finite order n ≠ 1,
+# integer or fractional (n = 0 gives [A]₀/(2k), n = 2 gives 1/(k·[A]₀)); for n = 1 use half_life_first_order.
+# 2^(n−1) − 1 is expm1((n − 1)·ln 2), so orders close to 1 keep full precision. From [A]₀ in mol/L, k in
+# (mol/L)^(1−n)·s⁻¹ and n. Ok(t½); Err(KM_ERR_INVALID_INPUT) if n is not finite or |n − 1| ≤ 10⁻¹² (Rust's private
+# FIRST_ORDER_TOLERANCE), or k is not positive and finite; Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ is not
+# positive and finite; Err(KM_ERR_COMPUTATION_ERROR) if t½ is not positive and finite (extreme orders overflow or
+# underflow). Mirrors `kinetics::nth_order_half_life`.
+#must_use
+fn nth_order_half_life(initial: f64, rate_constant: f64, order: f64): Result {
+    var tol: f64 = 0.000000000001;          # FIRST_ORDER_TOLERANCE = 1e-12
+    var n_minus_1: f64 = order - 1.0;
+    var ad1: f64 = f64_abs(n_minus_1);
+    if (_km_is_finite(order) != 1 || ad1 <= tol) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(initial) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var ln2: f64 = 0x3FE62E42FEFA39EF;     # std::f64::consts::LN_2
+    var numerator: f64 = _km_expm1(n_minus_1 * ln2);
+    var p: f64 = ganita_f64_pow(initial, n_minus_1);
+    var t_half: f64 = numerator / ((n_minus_1 * rate_constant) * p);
+    if (_km_is_positive(t_half) == 1) { return Ok(t_half); }
+    return Err(KM_ERR_COMPUTATION_ERROR);
+}
+
+# ── the steady-state and pre-equilibrium approximations ─────────────────────────────
+
+# The steady-state concentration of the intermediate B in A →(k₁) B →(k₂) C: d[B]/dt = 0 gives
+# [B]_ss = k₁·[A]/k₂ in mol/L, valid only when the intermediate is consumed much faster than it is formed
+# (k₂ ≫ k₁). From the first-order rate constants k₁, k₂ in s⁻¹ and [A] in mol/L. Ok([B]_ss);
+# Err(KM_ERR_INVALID_INPUT) if k₂ is not positive and finite or k₁ is negative or not finite;
+# Err(KM_ERR_INVALID_CONCENTRATION) if [A] is negative or not finite. Mirrors
+# `kinetics::steady_state_intermediate`.
+#must_use
+fn steady_state_intermediate(k1: f64, concentration_a: f64, k2: f64): Result {
+    if (_km_is_positive(k2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(k1) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(concentration_a) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var b: f64 = (k1 * concentration_a) / k2;
+    return Ok(b);
+}
+
+# The rate of the rate-limiting step, rate = k_slow·[X] in mol·L⁻¹·s⁻¹, from k_slow in s⁻¹ and the
+# concentration in mol/L. For A →(k₁) B →(k₂) C: if k₂ ≫ k₁ the first step is rate-determining (pass k₁ and
+# [A]); if k₂ ≪ k₁, B accumulates and the second step is (pass k₂ and the actual [B]). Inputs are not
+# validated: non-finite input propagates to the result. Mirrors `kinetics::steady_state_rate`.
+#must_use
+fn steady_state_rate(k_slow: f64, concentration: f64): f64 {
+    var r: f64 = k_slow * concentration;
+    return r;
+}
+
+# The pre-equilibrium approximation for A ⇌(K_eq) B →(k₂) C, K_eq = k₁/k₋₁: rate = k₂·(k₁/k₋₁)·[A] in
+# mol·L⁻¹·s⁻¹, from the fast equilibrium's k₁ (`k_forward`) and k₋₁ (`k_reverse`, same units), k₂ (`k_slow`,
+# s⁻¹) and [A] in mol/L. Ok(rate); Err(KM_ERR_INVALID_INPUT) if k₋₁ is not positive and finite or k₁ or k₂ is
+# negative or not finite; Err(KM_ERR_INVALID_CONCENTRATION) if [A] is negative or not finite. Mirrors
+# `kinetics::pre_equilibrium_rate`.
+#must_use
+fn pre_equilibrium_rate(k_forward: f64, k_reverse: f64, k_slow: f64, concentration_a: f64): Result {
+    if (_km_is_positive(k_reverse) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(k_forward) != 1 || _km_is_non_negative(k_slow) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(concentration_a) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var rate: f64 = (k_slow * (k_forward / k_reverse)) * concentration_a;
+    return Ok(rate);
+}
+
+# ── Michaelis–Menten enzyme kinetics ────────────────────────────────────────────────
+
+# The Michaelis–Menten rate v = Vmax·[S]/(Km + [S]), from the maximum rate Vmax in mol·L⁻¹·s⁻¹, the Michaelis
+# constant Km (the substrate concentration at half Vmax) in mol/L and the substrate concentration [S] in mol/L.
+# Ok(v) in the units of Vmax; Err(KM_ERR_INVALID_INPUT) if Vmax or Km is not positive and finite (Vmax checked
+# first); Err(KM_ERR_INVALID_CONCENTRATION) if [S] is negative or not finite. Mirrors
+# `kinetics::michaelis_menten`.
+#must_use
+fn michaelis_menten(v_max: f64, km: f64, substrate: f64): Result {
+    if (_km_is_positive(v_max) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(km) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(substrate) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var v: f64 = (v_max * substrate) / (km + substrate);
+    return Ok(v);
+}
+
+# The Lineweaver–Burk linearisation 1/v = (Km/Vmax)·(1/[S]) + 1/Vmax: the plot's slope Km/Vmax (s) and intercept
+# 1/Vmax (L·s/mol), from Vmax in mol·L⁻¹·s⁻¹ and Km in mol/L. `out` is the caller's buffer of two f64 (16 bytes,
+# `var lb[16];`): Ok(2), the count written, with the slope at out and the intercept at out + 8; or
+# Err(KM_ERR_INVALID_INPUT) if Vmax or Km is not positive and finite (Vmax checked first), and the buffer is
+# untouched. Mirrors `kinetics::lineweaver_burk`, whose (slope, intercept) tuple the buffer replaces.
+#must_use
+fn lineweaver_burk(v_max: f64, km: f64, out): Result {
+    if (_km_is_positive(v_max) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(km) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var slope: f64 = km / v_max;
+    var intercept: f64 = 1.0 / v_max;
+    store64(out, slope);
+    store64(out + 8, intercept);
+    return Ok(2);
+}
+
+# ── collision theory ────────────────────────────────────────────────────────────────
+
+# The collision-theory rate constant k = Z·p·exp(−Ea/(R·T)), from the collision frequency factor Z (in the units
+# of the returned rate constant, e.g. L·mol⁻¹·s⁻¹ for a bimolecular reaction), the steric factor p (the
+# probability of a correct orientation, 0 < p ≤ 1), Ea in J/mol and T in K. Ok(k) in the units of Z;
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite; Err(KM_ERR_INVALID_INPUT) if p is outside
+# (0, 1] (NaN included: the check is Rust's positive form), Z is not positive and finite, or Ea is not finite.
+# Mirrors `kinetics::collision_theory_rate`.
+#must_use
+fn collision_theory_rate(collision_frequency: f64, steric_factor: f64, activation_energy_j: f64,
+    temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    var steric_ok = 0;
+    if (steric_factor > 0.0 && steric_factor <= 1.0) { steric_ok = 1; }
+    if (steric_ok != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(collision_frequency) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(activation_energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var nea: f64 = -activation_energy_j;
+    var x: f64 = nea / (KM_GAS_CONSTANT * temperature_k);
+    var e: f64 = f64_exp(x);
+    var k: f64 = (collision_frequency * steric_factor) * e;
+    return Ok(k);
+}
+
+# ── transition-state theory (the Eyring equation) ───────────────────────────────────
+
+# The Eyring equation k = (k_B·T/h)·exp(−ΔG‡/(R·T)) in s⁻¹ (transmission coefficient κ = 1), from the Gibbs
+# energy of activation ΔG‡ in J/mol and T in K. Ok(k); Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and
+# finite; Err(KM_ERR_INVALID_INPUT) if ΔG‡ is not finite. Mirrors `kinetics::eyring_rate`.
+#must_use
+fn eyring_rate(delta_g_activation_j: f64, temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(delta_g_activation_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var prefactor: f64 = (KM_BOLTZMANN * temperature_k) / KM_PLANCK;
+    var ndg: f64 = -delta_g_activation_j;
+    var x: f64 = ndg / (KM_GAS_CONSTANT * temperature_k);
+    var e: f64 = f64_exp(x);
+    var k: f64 = prefactor * e;
+    return Ok(k);
+}
+
+# The Eyring equation from the enthalpy and entropy of activation, k = (k_B·T/h)·exp(ΔS‡/R)·exp(−ΔH‡/(R·T)) in
+# s⁻¹ (κ = 1), from ΔH‡ in J/mol, ΔS‡ in J/(mol·K) and T in K. Ok(k); Err(KM_ERR_INVALID_TEMPERATURE) if T is not
+# positive and finite; Err(KM_ERR_INVALID_INPUT) if ΔH‡ or ΔS‡ is not finite (ΔH‡ checked first). The two exps
+# are separate factors, as in Rust: one can overflow while the other underflows (Ok(NaN) for ∞·0). Mirrors
+# `kinetics::eyring_rate_from_activation`.
+#must_use
+fn eyring_rate_from_activation(delta_h_activation_j: f64, delta_s_activation_j_per_k: f64,
+    temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(delta_h_activation_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(delta_s_activation_j_per_k) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var prefactor: f64 = (KM_BOLTZMANN * temperature_k) / KM_PLANCK;
+    var xs: f64 = delta_s_activation_j_per_k / KM_GAS_CONSTANT;
+    var es: f64 = f64_exp(xs);
+    var ndh: f64 = -delta_h_activation_j;
+    var xh: f64 = ndh / (KM_GAS_CONSTANT * temperature_k);
+    var eh: f64 = f64_exp(xh);
+    var k: f64 = (prefactor * es) * eh;
+    return Ok(k);
 }

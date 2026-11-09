@@ -35,6 +35,10 @@ include "src/phase_data.cyr"
 include "src/phase.cyr"
 include "src/gas_data.cyr"
 include "src/gas.cyr"
+include "src/solution.cyr"
+include "src/electrochemistry_data.cyr"
+include "src/electrochemistry.cyr"
+include "src/kinetics.cyr"
 
 alloc_init();
 
@@ -45,9 +49,9 @@ include "tests/parity_core.cyr"
 # the function, 0 when the function is pending (not ported), or -1 when the inputs are
 # unusable (a defect, counted as a failure). Add a function the moment it's ported.
 
-# `const` rows (input `s:<module>::<NAME>`). The physical constants and
-# thermo::WATER_SPECIFIC_HEAT are src/constants.cyr's KM_ consts; the module data constants are
-# generated with their module's data (M2a: src/phase_data.cyr, src/gas_data.cyr; M3–M4 later) and
+# `const` rows (input `s:<module>::<NAME>`). The physical constants, thermo::WATER_SPECIFIC_HEAT and
+# the solution constants (M3a) are src/constants.cyr's KM_ consts; the module data constants are
+# generated with their module's data (M2a: src/phase_data.cyr, src/gas_data.cyr; M4 later) and
 # are pending until then. Any other name is a defect.
 fn _par_constants(fp, fl): i64 {
     if (_par_eq(fp, fl, "const") != 1 || _par_in_n != 1) { return 0 - 1; }
@@ -69,6 +73,16 @@ fn _par_constants(fp, fl): i64 {
     elif (_par_eq(np, nl, "spectroscopy::RYDBERG") == 1) { x = KM_RYDBERG; }
     elif (_par_eq(np, nl, "spectroscopy::RYDBERG_EV") == 1) { x = KM_RYDBERG_EV; }
     elif (_par_eq(np, nl, "thermo::WATER_SPECIFIC_HEAT") == 1) { x = KM_WATER_SPECIFIC_HEAT; }
+    elif (_par_eq(np, nl, "solution::KW_WATER_25C") == 1) { x = KM_KW_WATER_25C; }
+    elif (_par_eq(np, nl, "solution::DH_A_WATER_25C") == 1) { x = KM_DH_A_WATER_25C; }
+    elif (_par_eq(np, nl, "solution::DH_B_WATER_25C") == 1) { x = KM_DH_B_WATER_25C; }
+    elif (_par_eq(np, nl, "solution::LAMBDA_H_PLUS") == 1) { x = KM_LAMBDA_H_PLUS; }
+    elif (_par_eq(np, nl, "solution::LAMBDA_OH_MINUS") == 1) { x = KM_LAMBDA_OH_MINUS; }
+    elif (_par_eq(np, nl, "solution::LAMBDA_NA_PLUS") == 1) { x = KM_LAMBDA_NA_PLUS; }
+    elif (_par_eq(np, nl, "solution::LAMBDA_K_PLUS") == 1) { x = KM_LAMBDA_K_PLUS; }
+    elif (_par_eq(np, nl, "solution::LAMBDA_CL_MINUS") == 1) { x = KM_LAMBDA_CL_MINUS; }
+    elif (_par_eq(np, nl, "solution::LAMBDA_NO3_MINUS") == 1) { x = KM_LAMBDA_NO3_MINUS; }
+    elif (_par_eq(np, nl, "solution::LAMBDA_SO4_2MINUS") == 1) { x = KM_LAMBDA_SO4_2MINUS; }
     elif (_par_eq(np, nl, "gas::STP_TEMPERATURE") == 1) { x = KM_STP_TEMPERATURE; }
     elif (_par_eq(np, nl, "gas::STP_PRESSURE") == 1) { x = KM_STP_PRESSURE; }
     elif (_par_eq(np, nl, "phase::KB_WATER") == 1) { x = KM_KB_WATER; }
@@ -84,20 +98,10 @@ fn _par_constants(fp, fl): i64 {
     return 1;
 }
 
-# The module data constants: 0 (pending) for each, -1 for a name that is no kimiya constant.
+# The module data constants of later milestones: 0 (pending) for each, -1 for a name that is no kimiya
+# constant.
 #must_use
 fn _par_constant_pending(np, nl): i64 {
-    # M3: solution
-    if (_par_eq(np, nl, "solution::KW_WATER_25C") == 1) { return 0; }
-    if (_par_eq(np, nl, "solution::DH_A_WATER_25C") == 1) { return 0; }
-    if (_par_eq(np, nl, "solution::DH_B_WATER_25C") == 1) { return 0; }
-    if (_par_eq(np, nl, "solution::LAMBDA_H_PLUS") == 1) { return 0; }
-    if (_par_eq(np, nl, "solution::LAMBDA_OH_MINUS") == 1) { return 0; }
-    if (_par_eq(np, nl, "solution::LAMBDA_NA_PLUS") == 1) { return 0; }
-    if (_par_eq(np, nl, "solution::LAMBDA_K_PLUS") == 1) { return 0; }
-    if (_par_eq(np, nl, "solution::LAMBDA_CL_MINUS") == 1) { return 0; }
-    if (_par_eq(np, nl, "solution::LAMBDA_NO3_MINUS") == 1) { return 0; }
-    if (_par_eq(np, nl, "solution::LAMBDA_SO4_2MINUS") == 1) { return 0; }
     # M4: inorganic
     if (_par_eq(np, nl, "inorganic::MADELUNG_NACL") == 1) { return 0; }
     if (_par_eq(np, nl, "inorganic::MADELUNG_CSCL") == 1) { return 0; }
@@ -743,11 +747,295 @@ fn _par_gas(fp, fl): i64 {
     return 0;
 }
 
+# The ion list at input token k (`v:n`, then n pairs `f:c i:z`) as n 16-byte records (the concentration's f64
+# bits, the charge as an i64 word), the layout src/solution.cyr's ionic_strength takes; its count is
+# _par_in(k). 0 for an empty list.
+fn _par_in_ions(k): i64 {
+    var n = _par_in(k);
+    if (n <= 0) { return 0; }
+    var buf = alloc(n * 16);
+    var j = 0;
+    while (j < n) {
+        store64(buf + j * 16, _par_in(k + 1 + 2 * j));
+        store64(buf + j * 16 + 8, _par_in(k + 2 + 2 * j));
+        j = j + 1;
+    }
+    return buf;
+}
+
+# `solution` rows: src/solution.cyr. The activity models' first input is the charge (`i:z`).
+fn _par_solution(fp, fl): i64 {
+    if (_par_eq(fp, fl, "solution::ionic_strength") == 1) {
+        var r: f64 = ionic_strength(_par_in_ions(0), _par_in(0));
+        _par_got_f(r);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "solution::debye_huckel_limiting") == 1) {
+        var ii: f64 = _par_in(1);
+        var a: f64 = _par_in(2);
+        var t, v = debye_huckel_limiting(_par_in(0), ii, a);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "solution::davies_activity") == 1) {
+        var ii: f64 = _par_in(1);
+        var a: f64 = _par_in(2);
+        var t, v = davies_activity(_par_in(0), ii, a);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "solution::debye_huckel_extended") == 1) {
+        var ii: f64 = _par_in(1);
+        var a: f64 = _par_in(2);
+        var b: f64 = _par_in(3);
+        var sz: f64 = _par_in(4);
+        var t, v = debye_huckel_extended(_par_in(0), ii, a, b, sz);
+        _par_got_res(t, v);
+        return 1;
+    }
+    var x: f64 = _par_in(0);
+    if (_par_eq(fp, fl, "solution::ph_from_h_concentration") == 1) {
+        var t, v = ph_from_h_concentration(x);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "solution::poh_from_oh_concentration") == 1) {
+        var t, v = poh_from_oh_concentration(x);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "solution::ph_from_poh") == 1) { var r: f64 = ph_from_poh(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "solution::h_concentration_from_ph") == 1) {
+        var r: f64 = h_concentration_from_ph(x);
+        _par_got_f(r);
+        return 1;
+    }
+    var y: f64 = _par_in(1);
+    if (_par_eq(fp, fl, "solution::molarity") == 1) { var t, v = molarity(x, y); _par_got_res(t, v); return 1; }
+    if (_par_eq(fp, fl, "solution::molality") == 1) { var t, v = molality(x, y); _par_got_res(t, v); return 1; }
+    if (_par_eq(fp, fl, "solution::weak_acid_ph") == 1) { var t, v = weak_acid_ph(x, y); _par_got_res(t, v); return 1; }
+    if (_par_eq(fp, fl, "solution::weak_base_ph") == 1) { var t, v = weak_base_ph(x, y); _par_got_res(t, v); return 1; }
+    if (_par_eq(fp, fl, "solution::solution_conductivity") == 1) {
+        var r: f64 = solution_conductivity(x, y);
+        _par_got_f(r);
+        return 1;
+    }
+    var z: f64 = _par_in(2);
+    if (_par_eq(fp, fl, "solution::dilution") == 1) { var t, v = dilution(x, y, z); _par_got_res(t, v); return 1; }
+    if (_par_eq(fp, fl, "solution::henderson_hasselbalch") == 1) {
+        var t, v = henderson_hasselbalch(x, y, z);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "solution::kohlrausch_molar_conductivity") == 1) {
+        var t, v = kohlrausch_molar_conductivity(x, y, z);
+        _par_got_res(t, v);
+        return 1;
+    }
+    var w: f64 = _par_in(3);
+    if (_par_eq(fp, fl, "solution::limiting_molar_conductivity") == 1) {
+        var r: f64 = limiting_molar_conductivity(x, y, z, w);
+        _par_got_f(r);
+        return 1;
+    }
+    return 0;
+}
+
+# Appends a HalfReaction's four fields (equation, couple, electrons, E°), in declaration order.
+fn _par_got_half_reaction(h) {
+    var eq = half_reaction_equation(h);
+    _par_got_text(eq, strlen(eq));
+    var cp = half_reaction_couple(h);
+    _par_got_text(cp, strlen(cp));
+    _par_got_i(half_reaction_electrons(h));
+    var e0: f64 = half_reaction_standard_potential(h);
+    _par_got_f(e0);
+}
+
+# Input token k as a C string, "" for an empty `s:` token; 0 only for a malformed one.
+fn _par_in_text(k): i64 {
+    var p = _par_in_cstr(k);
+    if (p == 0 && load64(_par_in_l + k * 8) == 0) { return ""; }
+    return p;
+}
+
+# `electrochemistry` rows: src/electrochemistry.cyr and the generated src/electrochemistry_data.cyr. An electron
+# count is an `i:` token (Rust's u8), passed as the word.
+fn _par_electrochemistry(fp, fl): i64 {
+    if (_par_eq(fp, fl, "electrochemistry::STANDARD_POTENTIALS") == 1) {
+        _par_got_seq(KM_STANDARD_POTENTIALS_COUNT);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "electrochemistry::STANDARD_POTENTIALS[]") == 1) {
+        _par_got_half_reaction(_par_in(0) + 1);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "electrochemistry::lookup_half_reaction") == 1) {
+        var name = _par_in_text(0);
+        if (name == 0) { return 0 - 1; }
+        var h = lookup_half_reaction(name);
+        if (h == 0) { _par_got_none(); } else { _par_got_half_reaction(h); }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "electrochemistry::cell_potential_from_couples") == 1) {
+        var c = _par_in_text(0);
+        var a = _par_in_text(1);
+        if (c == 0 || a == 0) { return 0 - 1; }
+        var t, v = cell_potential_from_couples(c, a);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "electrochemistry::cell_gibbs_energy") == 1) {
+        var e: f64 = _par_in(1);
+        var t, v = cell_gibbs_energy(_par_in(0), e);
+        _par_got_res(t, v);
+        return 1;
+    }
+    var x: f64 = _par_in(0);
+    if (_par_eq(fp, fl, "electrochemistry::is_spontaneous_cell") == 1) { _par_got_i(is_spontaneous_cell(x)); return 1; }
+    if (_par_eq(fp, fl, "electrochemistry::charge_to_moles_electrons") == 1) {
+        var r: f64 = charge_to_moles_electrons(x);
+        _par_got_f(r);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "electrochemistry::moles_electrons_to_charge") == 1) {
+        var r: f64 = moles_electrons_to_charge(x);
+        _par_got_f(r);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "electrochemistry::nernst_potential_25c") == 1) {
+        var q: f64 = _par_in(2);
+        var t, v = nernst_potential_25c(x, _par_in(1), q);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "electrochemistry::nernst_potential") == 1) {
+        var tk: f64 = _par_in(2);
+        var q: f64 = _par_in(3);
+        var t, v = nernst_potential(x, _par_in(1), tk, q);
+        _par_got_res(t, v);
+        return 1;
+    }
+    var y: f64 = _par_in(1);
+    if (_par_eq(fp, fl, "electrochemistry::standard_cell_potential") == 1) {
+        var r: f64 = standard_cell_potential(x, y);
+        _par_got_f(r);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "electrochemistry::faraday_mass_deposited") == 1) {
+        var t, v = faraday_mass_deposited(x, y, _par_in(2));
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "electrochemistry::faraday_charge_required") == 1) {
+        var t, v = faraday_charge_required(x, y, _par_in(2));
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "electrochemistry::faraday_mass_ratio") == 1) {
+        var mb: f64 = _par_in(3);
+        var t, v = faraday_mass_ratio(x, y, _par_in(2), mb, _par_in(4));
+        _par_got_res(t, v);
+        return 1;
+    }
+    return 0;
+}
+
+# `kinetics` rows: src/kinetics.cyr. Every input is an f64. lineweaver_burk's Ok output is the slope and the
+# intercept the port writes to the caller's buffer (the Rust tuple, port plan §6.4); its count must be 2.
+fn _par_kinetics(fp, fl): i64 {
+    var x: f64 = _par_in(0);
+    if (_par_eq(fp, fl, "kinetics::half_life_first_order") == 1) {
+        var t, v = half_life_first_order(x);
+        _par_got_res(t, v);
+        return 1;
+    }
+    var y: f64 = _par_in(1);
+    if (_par_eq(fp, fl, "kinetics::steady_state_rate") == 1) {
+        var r: f64 = steady_state_rate(x, y);
+        _par_got_f(r);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "kinetics::zero_order_half_life") == 1) {
+        var t, v = zero_order_half_life(x, y);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "kinetics::eyring_rate") == 1) {
+        var t, v = eyring_rate(x, y);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "kinetics::lineweaver_burk") == 1) {
+        var lb[16];
+        var t, v = lineweaver_burk(x, y, &lb);
+        if (is_ok(t) != 1) { _par_got_err(v); return 1; }
+        if (v != 2) { return 0 - 1; }
+        _par_got_f(load64(&lb));
+        _par_got_f(load64(&lb + 8));
+        return 1;
+    }
+    var z: f64 = _par_in(2);
+    if (_par_eq(fp, fl, "kinetics::arrhenius_rate") == 1) {
+        var t, v = arrhenius_rate(x, y, z);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "kinetics::first_order_concentration") == 1) {
+        var r: f64 = first_order_concentration(x, y, z);
+        _par_got_f(r);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "kinetics::second_order_concentration") == 1) {
+        var t, v = second_order_concentration(x, y, z);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "kinetics::zero_order_concentration") == 1) {
+        var r: f64 = zero_order_concentration(x, y, z);
+        _par_got_f(r);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "kinetics::nth_order_half_life") == 1) {
+        var t, v = nth_order_half_life(x, y, z);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "kinetics::steady_state_intermediate") == 1) {
+        var t, v = steady_state_intermediate(x, y, z);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "kinetics::michaelis_menten") == 1) {
+        var t, v = michaelis_menten(x, y, z);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "kinetics::eyring_rate_from_activation") == 1) {
+        var t, v = eyring_rate_from_activation(x, y, z);
+        _par_got_res(t, v);
+        return 1;
+    }
+    var w: f64 = _par_in(3);
+    if (_par_eq(fp, fl, "kinetics::collision_theory_rate") == 1) {
+        var t, v = collision_theory_rate(x, y, z, w);
+        _par_got_res(t, v);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "kinetics::pre_equilibrium_rate") == 1) {
+        var t, v = pre_equilibrium_rate(x, y, z, w);
+        _par_got_res(t, v);
+        return 1;
+    }
+    return 0;
+}
+
 # Routes a row to its module's dispatcher. 0 (pending) for a module with none yet.
 fn _par_dispatch(mp, ml, fp, fl): i64 {
     _par_got_n = 0;
     _par_mapped = 0;
     if (_par_eq(mp, ml, "constants") == 1) { return _par_constants(fp, fl); }
+    if (_par_eq(mp, ml, "electrochemistry") == 1) { return _par_electrochemistry(fp, fl); }
     if (_par_eq(mp, ml, "element") == 1) { return _par_element(fp, fl); }
     if (_par_eq(mp, ml, "math") == 1) { return _par_math(fp, fl); }
     if (_par_eq(mp, ml, "molecule") == 1) { return _par_molecule(fp, fl); }
@@ -756,6 +1044,8 @@ fn _par_dispatch(mp, ml, fp, fl): i64 {
     if (_par_eq(mp, ml, "thermochem") == 1) { return _par_thermochem(fp, fl); }
     if (_par_eq(mp, ml, "phase") == 1) { return _par_phase(fp, fl); }
     if (_par_eq(mp, ml, "gas") == 1) { return _par_gas(fp, fl); }
+    if (_par_eq(mp, ml, "solution") == 1) { return _par_solution(fp, fl); }
+    if (_par_eq(mp, ml, "kinetics") == 1) { return _par_kinetics(fp, fl); }
     return 0;
 }
 
@@ -765,7 +1055,10 @@ fn _par_dispatch(mp, ml, fp, fl): i64 {
 # - the stdlib functions the M1 helpers replace, to show where their semantics differ;
 # - (M2a, ADR 0005) the correctly rounded _km_cos / _km_acos / _km_ln / _km_pow_2_5 the
 #   Peng–Robinson and Redlich–Kwong functions use: they differ from glibc exactly where glibc is
-#   not correctly rounded (validate.py's 1-ulp rows for cos, acos, ln and powf(·, 2.5)).
+#   not correctly rounded (validate.py's 1-ulp rows for cos, acos, ln and powf(·, 2.5));
+# - (M3a, ADR 0005 amendment) _km_log10_ln, glibc's log10 composition over _km_ln, which
+#   henderson_hasselbalch uses: it differs from glibc only where glibc's log at the reduced
+#   argument is not correctly rounded.
 fn _par_shadows(mp, ml, fp, fl, cls) {
     if (_par_eq(mp, ml, "math") != 1) { return 0; }
     var x: f64 = _par_in(0);
@@ -791,6 +1084,13 @@ fn _par_shadows(mp, ml, fp, fl, cls) {
         var r: f64 = _km_ln(x);
         _par_got_f(r);
         _par_shadow_record("f64::ln ~ _km_ln", cls);
+    }
+    if (_par_eq(fp, fl, "f64::log10") == 1) {
+        _par_got_n = 0;
+        var r: f64 = _km_log10_ln(x);
+        _par_got_f(r);
+        _par_shadow_record("f64::log10 ~ _km_log10_ln", cls);
+        return 0;
     }
     if (_par_eq(fp, fl, "f64::powf") == 1 && _par_in(1) == 0x4004000000000000) {
         _par_got_n = 0;
@@ -885,6 +1185,27 @@ fn _par_c_bound(fp, fl): i64 {
     if (_par_eq(fp, fl, "gas::redlich_kwong_pressure") == 1) { return 2; }      # S 0, c 0
     # M2b (port-parity.md §6): the one class-C thermochem function, measured the same way first.
     if (_par_eq(fp, fl, "thermochem::vant_hoff_k") == 1) { return 6; }         # S 2 (exp), c 1
+    # M3a (port-parity.md §7), measured the same way first. solution: one log10 (_km_log10) or one 10^x each;
+    # henderson_hasselbalch's log10 is glibc's composition over the correctly rounded _km_ln (ADR 0005, amendment
+    # M3a), and no golden call reaches an argument where glibc's log is not correctly rounded.
+    if (_par_eq(fp, fl, "solution::ph_from_h_concentration") == 1) { return 4; }    # S 1 (log10), c 1
+    if (_par_eq(fp, fl, "solution::poh_from_oh_concentration") == 1) { return 4; }  # S 1 (log10), c 1
+    if (_par_eq(fp, fl, "solution::henderson_hasselbalch") == 1) { return 2; }      # S 0, c 0
+    if (_par_eq(fp, fl, "solution::h_concentration_from_ph") == 1) { return 4; }    # S 1 (pow10), c 1
+    if (_par_eq(fp, fl, "solution::weak_acid_ph") == 1) { return 4; }               # S 1 (log10), c 1
+    if (_par_eq(fp, fl, "solution::weak_base_ph") == 1) { return 4; }               # S 1 (log10), c 1
+    if (_par_eq(fp, fl, "solution::debye_huckel_limiting") == 1) { return 4; }      # S 1 (pow10), c 1
+    if (_par_eq(fp, fl, "solution::debye_huckel_extended") == 1) { return 4; }      # S 1 (pow10), c 1
+    if (_par_eq(fp, fl, "solution::davies_activity") == 1) { return 4; }            # S 1 (pow10), c 1
+    # electrochemistry: the Nernst functions' one ln is the correctly rounded _km_ln (ADR 0005, amendment M3a), and
+    # no golden call reaches an argument where glibc's log is not correctly rounded.
+    if (_par_eq(fp, fl, "electrochemistry::nernst_potential") == 1) { return 2; }       # S 0, c 0
+    if (_par_eq(fp, fl, "electrochemistry::nernst_potential_25c") == 1) { return 2; }   # S 0, c 0
+    # M3b (port-parity.md §8): kinetics' six class-C functions (arrhenius_rate, first_order_concentration,
+    # nth_order_half_life, collision_theory_rate, eyring_rate, eyring_rate_from_activation) have no bound. A subnormal
+    # exp or pow result scaled into the normal range by a prefactor puts S at 10¹⁴ … 4.5 × 10¹⁸ (K far past 64), so
+    # their rows stay measured, unbounded, until correctly rounded primitives are compared against the oracle's
+    # formula (ADR 0006, after M3b). The rule forbids a wider K or a thinner grid.
     return 0 - 1;
 }
 

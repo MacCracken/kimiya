@@ -22,6 +22,10 @@ include "src/phase_data.cyr"
 include "src/phase.cyr"
 include "src/gas_data.cyr"
 include "src/gas.cyr"
+include "src/solution.cyr"
+include "src/electrochemistry_data.cyr"
+include "src/electrochemistry.cyr"
+include "src/kinetics.cyr"
 
 # A sink the timed loops write to, so their results are used.
 var _bench_sink = 0;
@@ -35,6 +39,10 @@ var _bench_co2 = 0;     # "CO2(g)"
 var _bench_products = 0;    # [("CO2(g)", 1), ("H2O(l)", 2)]: 2 species records
 var _bench_reactants = 0;   # [("CH4(g)", 1), ("O2(g)", 2)]
 var _bench_flame = 0;       # [("CO2(g)", 1), ("H2O(g)", 2), ("N2(g)", 7.52)]
+var _bench_g = 0;           # M3a: 5 f64 input slots, filled by main()
+var _bench_cu = 0;          # "Cu2+/Cu"
+var _bench_n = 0;           # 2 electrons (Rust's black_box(2) u8)
+var _bench_k = 0;           # M3b: 8 f64 input slots, filled by main()
 
 # element/lookup_by_symbol: `lookup_by_symbol(black_box("Fe"))`, a linear scan to row 26.
 fn bench_lookup_by_symbol(per_batch, batches) {
@@ -285,6 +293,144 @@ fn bench_adiabatic_flame_ch4_air(per_batch, batches) {
     bench_report(b);
 }
 
+# solution/ph_from_h: `ph_from_h_concentration(black_box(1e-4)).unwrap()`: one guard, one log10 (_km_log10).
+fn bench_ph_from_h(per_batch, batches) {
+    var h: f64 = load64(_bench_g);
+    var b = bench_new("solution/ph_from_h");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = ph_from_h_concentration(h);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# solution/weak_acid_ph: `weak_acid_ph(black_box(1.8e-5), black_box(0.1)).unwrap()`: two guards, the
+# charge-balance Newton (4 updates on this input), one log10.
+fn bench_weak_acid_ph(per_batch, batches) {
+    var ka: f64 = load64(_bench_g + 8);
+    var c: f64 = load64(_bench_g + 16);
+    var b = bench_new("solution/weak_acid_ph");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = weak_acid_ph(ka, c);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# electrochemistry/lookup_half_reaction: `lookup_half_reaction(black_box("Cu2+/Cu"))`, a linear scan to row 27.
+fn bench_lookup_half_reaction(per_batch, batches) {
+    var b = bench_new("electrochemistry/lookup_half_reaction");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) { _bench_sink = lookup_half_reaction(_bench_cu); i = i + 1; }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# electrochemistry/nernst_potential: `nernst_potential(black_box(0.342), black_box(2), black_box(298.15),
+# black_box(0.1)).unwrap()`: four guards, one ln (the correctly rounded _km_ln, ADR 0005 amendment M3a).
+fn bench_nernst_potential(per_batch, batches) {
+    var e0: f64 = load64(_bench_g + 24);
+    var tk: f64 = load64(_bench_g + 32);
+    var q: f64 = load64(_bench_g + 16);
+    var b = bench_new("electrochemistry/nernst_potential");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = nernst_potential(e0, _bench_n, tk, q);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# kinetics/arrhenius_rate: `arrhenius_rate(black_box(1e13), black_box(50_000.0), black_box(300.0)).unwrap()`.
+fn bench_arrhenius_rate(per_batch, batches) {
+    var a: f64 = load64(_bench_k);
+    var ea: f64 = load64(_bench_k + 8);
+    var tk: f64 = load64(_bench_k + 16);
+    var b = bench_new("kinetics/arrhenius_rate");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = arrhenius_rate(a, ea, tk);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# kinetics/eyring_rate: `eyring_rate(black_box(80_000.0), black_box(298.0)).unwrap()`.
+fn bench_eyring_rate(per_batch, batches) {
+    var dg: f64 = load64(_bench_k + 24);
+    var tk: f64 = load64(_bench_k + 32);
+    var b = bench_new("kinetics/eyring_rate");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = eyring_rate(dg, tk);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# kinetics/michaelis_menten: `michaelis_menten(black_box(100.0), black_box(5.0), black_box(10.0)).unwrap()`.
+fn bench_michaelis_menten(per_batch, batches) {
+    var vmax: f64 = load64(_bench_k + 40);
+    var km: f64 = load64(_bench_k + 48);
+    var sub: f64 = load64(_bench_k + 56);
+    var b = bench_new("kinetics/michaelis_menten");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = michaelis_menten(vmax, km, sub);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
 # A species list of up to three records (formula, coefficient), on the heap.
 #must_use
 fn _bench_species(f1, c1: f64, f2, c2: f64, f3, c3: f64): i64 {
@@ -339,6 +485,34 @@ fn main(): i64 {
     bench_enthalpy_change_cp(100000, 20);
     bench_shomate_cp(1000000, 20);
     bench_adiabatic_flame_ch4_air(10000, 20);
+    _bench_g = alloc(5 * 8);
+    var ins2: f64[5];
+    ins2[0] = 0.0001;
+    ins2[1] = 0.000018;
+    ins2[2] = 0.1;
+    ins2[3] = 0.342;
+    ins2[4] = 298.15;
+    memcpy(_bench_g, &ins2, 5 * 8);
+    _bench_cu = "Cu2+/Cu";
+    _bench_n = 2;
+    bench_ph_from_h(1000000, 20);
+    bench_weak_acid_ph(1000000, 20);
+    bench_lookup_half_reaction(1000000, 20);
+    bench_nernst_potential(100000, 20);
+    _bench_k = alloc(8 * 8);
+    var ins3: f64[8];
+    ins3[0] = 10000000000000.0;
+    ins3[1] = 50000.0;
+    ins3[2] = 300.0;
+    ins3[3] = 80000.0;
+    ins3[4] = 298.0;
+    ins3[5] = 100.0;
+    ins3[6] = 5.0;
+    ins3[7] = 10.0;
+    memcpy(_bench_k, &ins3, 8 * 8);
+    bench_arrhenius_rate(1000000, 20);
+    bench_eyring_rate(1000000, 20);
+    bench_michaelis_menten(1000000, 20);
     return 0;
 }
 

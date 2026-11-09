@@ -4,13 +4,14 @@
 //! one (`complete` proves it against `rust-old/src`), and `tests/golden/constants.tsv` pins
 //! every bit (`m_constants.rs`).
 //! - **Physical constants** (`Home::Constants`) are generated here, into `src/constants.cyr`,
-//!   which comes first in `[lib]` because 14 modules reach across for them. So is
-//!   `thermo::WATER_SPECIFIC_HEAT` (M2a): `thermo` has no data file of its own, and
-//!   `constants.cyr` precedes it in `[lib]`.
+//!   which comes first in `[lib]` because 14 modules reach across for them. So are
+//!   `thermo::WATER_SPECIFIC_HEAT` (M2a) and the ten `solution::` constants (M3a: K_w, the
+//!   Debye–Hückel A and B, the seven Λ°): neither module has a data file of its own, and
+//!   `constants.cyr` precedes both in `[lib]`.
 //! - **Module data** stays with its module and is generated with that module's data at its
 //!   milestone: `Home::Data` names the generated file (M2a: K_b/K_f into `src/phase_data.cyr`,
-//!   STP into `src/gas_data.cyr`); `Home::Module` is a later milestone (Madelung, Born exponents,
-//!   Λ°, Debye–Hückel, K_w), whose golden rows are *pending* in the harness until then.
+//!   STP into `src/gas_data.cyr`); `Home::Module` is a later milestone (M4: Madelung, Born
+//!   exponents), whose golden rows are *pending* in the harness until then.
 //!
 //! Values come from the oracle's API; the comments are the Rust doc comments, which carry
 //! the citations (CODATA 2018, SI 2019, AME2020, …). The struct-valued consts (`gas::PR_*`)
@@ -60,7 +61,6 @@ macro_rules! constants {
 const PHYS: Home = Home::Constants;
 const PHASE: Home = Home::Data("phase_data");
 const GAS: Home = Home::Data("gas_data");
-const M3: Home = Home::Module("M3");
 const M4: Home = Home::Module("M4");
 
 /// Every public scalar `f64` const of kimiya 1.2.0: modules in file-name order, then
@@ -96,16 +96,16 @@ const ALL: &[Constant] = constants!(
     phase::KF_CYCLOHEXANE => PHASE,
     phase::KF_CAMPHOR => PHASE,
     potential::COULOMB_CONSTANT => PHYS,
-    solution::KW_WATER_25C => M3,
-    solution::DH_A_WATER_25C => M3,
-    solution::DH_B_WATER_25C => M3,
-    solution::LAMBDA_H_PLUS => M3,
-    solution::LAMBDA_OH_MINUS => M3,
-    solution::LAMBDA_NA_PLUS => M3,
-    solution::LAMBDA_K_PLUS => M3,
-    solution::LAMBDA_CL_MINUS => M3,
-    solution::LAMBDA_NO3_MINUS => M3,
-    solution::LAMBDA_SO4_2MINUS => M3,
+    solution::KW_WATER_25C => PHYS,
+    solution::DH_A_WATER_25C => PHYS,
+    solution::DH_B_WATER_25C => PHYS,
+    solution::LAMBDA_H_PLUS => PHYS,
+    solution::LAMBDA_OH_MINUS => PHYS,
+    solution::LAMBDA_NA_PLUS => PHYS,
+    solution::LAMBDA_K_PLUS => PHYS,
+    solution::LAMBDA_CL_MINUS => PHYS,
+    solution::LAMBDA_NO3_MINUS => PHYS,
+    solution::LAMBDA_SO4_2MINUS => PHYS,
     spectroscopy::PLANCK => PHYS,
     spectroscopy::SPEED_OF_LIGHT => PHYS,
     spectroscopy::RYDBERG => PHYS,
@@ -179,9 +179,10 @@ pub fn emit(root: &Path, provenance: &str) -> Result<String, String> {
              positionally: the Cyrius lexer has no exponent notation, and decimal literals are\n\
              correctly rounded (6.6.10+). tests/golden/constants.tsv pins every bit.",
             "Module data constants are generated with their module's data, not here: K_b/K_f in\n\
-             src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung, Born exponents, Λ°,\n\
-             Debye–Hückel and K_w at M3–M4. The exception is thermo::WATER_SPECIFIC_HEAT (M2a), at\n\
-             the end: thermo has no data file, and this file precedes it in [lib].",
+             src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung and Born exponents at M4.\n\
+             The exceptions are the solution constants (M3a: K_w, Debye–Hückel A / B, Λ°) and\n\
+             thermo::WATER_SPECIFIC_HEAT (M2a): neither module has a data file, and this file\n\
+             precedes both in [lib].",
         ],
     );
     out.push_str(&consts(root, Home::Constants)?);

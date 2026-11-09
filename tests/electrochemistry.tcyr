@@ -1,0 +1,512 @@
+# electrochemistry.tcyr — the tests of rust-old/src/electrochemistry.rs, ported one for one (each test_group is the
+# Rust test's name; all 35), plus Cyrius-only tests of the handles, out-of-u8 electron counts and the Nernst
+# equation's correctly rounded ln. `lookup_half_reaction(..).unwrap()` is a non-zero handle, read with the
+# half_reaction_* accessors; the tests that iterate STANDARD_POTENTIALS loop over handles 1 ..= KM_STANDARD_
+# POTENTIALS_COUNT (`windows(2)` is handles h and h + 1). No Rust test needed adapting beyond that. The golden
+# corpus separately checks every function over its grid (tests/parity.tcyr).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/electrochemistry_data.cyr"
+include "src/electrochemistry.cyr"
+
+alloc_init();
+
+# 1 if |a − b| < eps.
+#must_use
+fn near(a: f64, b: f64, eps: f64): i64 {
+    var d: f64 = f64_abs(a - b);
+    if (d < eps) { return 1; }
+    return 0;
+}
+
+# 1 if the Result (t, v) is Err(code).
+#must_use
+fn is_err_code(t, v, code): i64 {
+    if (is_err_result(t) == 1 && v == code) { return 1; }
+    return 0;
+}
+
+# f64::EPSILON.
+#must_use
+fn eps64(): f64 {
+    var e: f64 = 0.0000000000000002220446049250313;
+    return e;
+}
+
+# The handle of a couple that must be in the table.
+#must_use
+fn hr(couple): i64 {
+    var h = lookup_half_reaction(couple);
+    assert(h != 0, "lookup_half_reaction");
+    return h;
+}
+
+# ── constants ───────────────────────────────────────────────────────────────────────
+
+fn _t_faraday_constant_value() {
+    test_group("faraday_constant_value");
+    # F = N_A × e exactly in the 2019 SI (the old 96 485.332 12 was off by 3.4e-11 relative).
+    var na: f64 = KM_AVOGADRO;
+    var e: f64 = KM_ELEMENTARY_CHARGE;
+    var f: f64 = KM_FARADAY;
+    var computed: f64 = na * e;
+    var rel: f64 = f64_abs(computed - f) / f;
+    assert(rel < 0.000000000001, "F should equal N_A × e");
+}
+
+# ── half-reaction lookup ────────────────────────────────────────────────────────────
+
+fn _t_lookup_copper() {
+    test_group("lookup_copper");
+    var h = hr("Cu2+/Cu");
+    assert_eq(half_reaction_electrons(h), 2, "Cu2+ + 2e-");
+    var e: f64 = half_reaction_standard_potential(h);
+    assert(near(e, 0.342, 0.001) == 1, "E° = 0.342 V");
+}
+
+fn _t_lookup_hydrogen() {
+    test_group("lookup_hydrogen");
+    var e: f64 = half_reaction_standard_potential(hr("H+/H2"));
+    var a: f64 = f64_abs(e);
+    assert(a < eps64(), "SHE: 0 V");
+}
+
+fn _t_lookup_nonexistent() {
+    test_group("lookup_nonexistent");
+    assert_eq(lookup_half_reaction("Xx/Xx"), 0, "Xx/Xx: none");
+}
+
+fn _t_potentials_sorted_ascending() {
+    test_group("potentials_sorted_ascending");
+    var h = 1;
+    while (h < KM_STANDARD_POTENTIALS_COUNT) {
+        var a: f64 = half_reaction_standard_potential(h);
+        var b: f64 = half_reaction_standard_potential(h + 1);
+        assert(a <= b, "listed in ascending E°");
+        h = h + 1;
+    }
+}
+
+fn _t_couples_are_unique() {
+    test_group("couples_are_unique");
+    # lookup_half_reaction finds the first match, so duplicates would make lookups depend on table order.
+    var i = 1;
+    while (i <= KM_STANDARD_POTENTIALS_COUNT) {
+        var j = i + 1;
+        while (j <= KM_STANDARD_POTENTIALS_COUNT) {
+            assert(streq(half_reaction_couple(i), half_reaction_couple(j)) == 0, "duplicate couple");
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+fn _t_potassium_and_vanadium_match_crc() {
+    test_group("potassium_and_vanadium_match_crc");
+    # CRC Handbook, Electrochemical Series: K⁺/K −2.931 V, V²⁺/V −1.175 V
+    var k: f64 = half_reaction_standard_potential(hr("K+/K"));
+    assert(near(k, -2.931, 0.000000000001) == 1, "K+/K");
+    var v: f64 = half_reaction_standard_potential(hr("V2+/V"));
+    assert(near(v, -1.175, 0.000000000001) == 1, "V2+/V");
+}
+
+fn _t_potentials_count() {
+    test_group("potentials_count");
+    assert(KM_STANDARD_POTENTIALS_COUNT >= 49, "should have 49+ half-reactions");
+}
+
+# ── the Nernst equation ─────────────────────────────────────────────────────────────
+
+fn _t_nernst_at_standard_conditions() {
+    test_group("nernst_at_standard_conditions");
+    var t, v = nernst_potential(0.342, 2, 298.15, 1.0);
+    var e: f64 = v;
+    assert(is_ok(t) == 1 && near(e, 0.342, 0.0000000001) == 1, "Q = 1 gives E = E°");
+}
+
+fn _t_nernst_q_greater_than_1() {
+    test_group("nernst_q_greater_than_1");
+    var t, v = nernst_potential(0.342, 2, 298.15, 100.0);
+    var e: f64 = v;
+    assert(is_ok(t) == 1 && e < 0.342, "Q > 1 reduces E below E°");
+}
+
+fn _t_nernst_q_less_than_1() {
+    test_group("nernst_q_less_than_1");
+    var t, v = nernst_potential(0.342, 2, 298.15, 0.01);
+    var e: f64 = v;
+    assert(is_ok(t) == 1 && e > 0.342, "Q < 1 raises E above E°");
+}
+
+fn _t_nernst_25c_shorthand() {
+    test_group("nernst_25c_shorthand");
+    var t1, v1 = nernst_potential(0.342, 2, 298.15, 0.1);
+    var t2, v2 = nernst_potential_25c(0.342, 2, 0.1);
+    var full: f64 = v1;
+    var short: f64 = v2;
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && near(full, short, 0.0000000001) == 1, "25 °C shorthand");
+}
+
+fn _t_nernst_zero_electrons_is_error() {
+    test_group("nernst_zero_electrons_is_error");
+    var t, v = nernst_potential(0.342, 0, 298.15, 1.0);
+    assert_eq(is_err_result(t), 1, "n = 0");
+}
+
+fn _t_nernst_zero_q_is_error() {
+    test_group("nernst_zero_q_is_error");
+    var t, v = nernst_potential(0.342, 2, 298.15, 0.0);
+    assert_eq(is_err_result(t), 1, "Q = 0");
+}
+
+fn _t_nernst_zero_temp_is_error() {
+    test_group("nernst_zero_temp_is_error");
+    var t, v = nernst_potential(0.342, 2, 0.0, 1.0);
+    assert_eq(is_err_result(t), 1, "T = 0");
+}
+
+# ── cell potentials ─────────────────────────────────────────────────────────────────
+
+fn _t_daniell_cell() {
+    test_group("daniell_cell");
+    # Cu²⁺/Cu (cathode, +0.342) vs Zn²⁺/Zn (anode, −0.762)
+    var e: f64 = standard_cell_potential(0.342, -0.762);
+    assert(near(e, 1.104, 0.001) == 1, "Daniell cell ~1.10 V");
+}
+
+fn _t_daniell_cell_from_couples() {
+    test_group("daniell_cell_from_couples");
+    var t, v = cell_potential_from_couples("Cu2+/Cu", "Zn2+/Zn");
+    var e: f64 = v;
+    assert(is_ok(t) == 1 && near(e, 1.104, 0.001) == 1, "Daniell cell from couples");
+}
+
+fn _t_unknown_couple_is_error() {
+    test_group("unknown_couple_is_error");
+    var t, v = cell_potential_from_couples("Xx/Xx", "Zn2+/Zn");
+    assert_eq(is_err_result(t), 1, "unknown cathode");
+}
+
+fn _t_spontaneous_cell_positive() {
+    test_group("spontaneous_cell_positive");
+    assert_eq(is_spontaneous_cell(1.1), 1, "1.1 V");
+    assert_eq(is_spontaneous_cell(-0.5), 0, "-0.5 V");
+    assert_eq(is_spontaneous_cell(0.0), 0, "0 V");
+}
+
+# ── Gibbs energy ────────────────────────────────────────────────────────────────────
+
+fn _t_cell_gibbs_daniell() {
+    test_group("cell_gibbs_daniell");
+    # ΔG = −nFE = −2 × 96485 × 1.104 ≈ −213,038 J/mol
+    var t, v = cell_gibbs_energy(2, 1.104);
+    var dg: f64 = v;
+    assert(is_ok(t) == 1 && dg < 0.0, "spontaneous cell: negative ΔG");
+    assert(near(dg, -213039.61332826852, 0.00000001) == 1, "ΔG ≈ -213 kJ/mol");
+}
+
+fn _t_cell_gibbs_zero_electrons_is_error() {
+    test_group("cell_gibbs_zero_electrons_is_error");
+    var t, v = cell_gibbs_energy(0, 1.0);
+    assert_eq(is_err_result(t), 1, "n = 0");
+}
+
+# ── Faraday's laws ──────────────────────────────────────────────────────────────────
+
+fn _t_faraday_copper_deposition() {
+    test_group("faraday_copper_deposition");
+    # 1 Faraday of charge deposits M/n = 63.546/2 = 31.773 g of Cu
+    var t, v = faraday_mass_deposited(KM_FARADAY, 63.546, 2);
+    var m: f64 = v;
+    assert(is_ok(t) == 1 && near(m, 31.773, 0.000000000001) == 1, "1 F deposits 31.773 g Cu");
+}
+
+fn _t_faraday_charge_roundtrip() {
+    test_group("faraday_charge_roundtrip");
+    var mass: f64 = 10.0;   # 10 g Cu
+    var t1, v1 = faraday_charge_required(mass, 63.546, 2);
+    var q: f64 = v1;
+    var t2, v2 = faraday_mass_deposited(q, 63.546, 2);
+    var back: f64 = v2;
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && near(back, mass, 0.000000000001) == 1, "round trip");
+}
+
+fn _t_faraday_zero_electrons_is_error() {
+    test_group("faraday_zero_electrons_is_error");
+    var t1, v1 = faraday_mass_deposited(1000.0, 63.546, 0);
+    assert_eq(is_err_result(t1), 1, "mass deposited, n = 0");
+    var t2, v2 = faraday_charge_required(10.0, 63.546, 0);
+    assert_eq(is_err_result(t2), 1, "charge required, n = 0");
+}
+
+fn _t_faraday_second_law() {
+    test_group("faraday_second_law");
+    # Cu: M = 63.546, n = 2 (equiv 31.773); Ag: M = 107.868, n = 1: 31.773 g Cu ↔ 107.868 g Ag
+    var t, v = faraday_mass_ratio(31.773, 63.546, 2, 107.868, 1);
+    var m: f64 = v;
+    assert(is_ok(t) == 1 && near(m, 107.868, 0.000000000001) == 1, "107.868 g Ag");
+}
+
+# ── utility ─────────────────────────────────────────────────────────────────────────
+
+fn _t_charge_moles_roundtrip() {
+    test_group("charge_moles_roundtrip");
+    var moles: f64 = 2.5;
+    var q: f64 = moles_electrons_to_charge(moles);
+    var back: f64 = charge_to_moles_electrons(q);
+    assert(near(back, moles, 0.0000000001) == 1, "round trip");
+}
+
+fn _t_one_faraday_is_one_mole() {
+    test_group("one_faraday_is_one_mole");
+    var moles: f64 = charge_to_moles_electrons(KM_FARADAY);
+    assert(near(moles, 1.0, 0.0000000001) == 1, "1 F = 1 mol e-");
+}
+
+# ── audit-driven tests ──────────────────────────────────────────────────────────────
+
+fn _t_nernst_25c_quantitative() {
+    test_group("nernst_25c_quantitative");
+    # For Cu²⁺/Cu, n = 2, Q = 0.01: E = 0.342 − (0.025693/2) × ln(0.01) ≈ 0.4012
+    var t, v = nernst_potential_25c(0.342, 2, 0.01);
+    var e: f64 = v;
+    assert(is_ok(t) == 1 && near(e, 0.401159349683692, 0.00000000000001) == 1, "Cu2+/Cu at Q = 0.01");
+}
+
+fn _t_nernst_negative_q_is_error() {
+    test_group("nernst_negative_q_is_error");
+    var t, v = nernst_potential(0.342, 2, 298.15, -1.0);
+    assert_eq(is_err_result(t), 1, "Q < 0");
+}
+
+fn _t_faraday_negative_charge_gives_negative_mass() {
+    test_group("faraday_negative_charge_gives_negative_mass");
+    # Negative charge = reverse electrolysis (dissolution). The result is negative.
+    var f: f64 = KM_FARADAY;
+    var nf: f64 = -f;
+    var t, v = faraday_mass_deposited(nf, 63.546, 2);
+    var m: f64 = v;
+    assert(is_ok(t) == 1 && m < 0.0, "negative mass");
+}
+
+fn _t_faraday_mass_ratio_zero_molar_mass_b_is_error() {
+    test_group("faraday_mass_ratio_zero_molar_mass_b_is_error");
+    var t, v = faraday_mass_ratio(10.0, 63.546, 2, 0.0, 1);
+    assert_eq(is_err_result(t), 1, "M_B = 0");
+}
+
+fn _t_faraday_mass_deposited_validates_molar_mass() {
+    test_group("faraday_mass_deposited_validates_molar_mass");
+    # Siblings already rejected these; mass_deposited returned Ok(0), Ok(negative) and Ok(NaN).
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var t1, v1 = faraday_mass_deposited(KM_FARADAY, 0.0, 2);
+    assert_eq(is_err_result(t1), 1, "M = 0");
+    var t2, v2 = faraday_mass_deposited(KM_FARADAY, -63.546, 2);
+    assert_eq(is_err_result(t2), 1, "M < 0");
+    var t3, v3 = faraday_mass_deposited(KM_FARADAY, nan, 2);
+    assert_eq(is_err_result(t3), 1, "M NaN");
+    var t4, v4 = faraday_mass_deposited(KM_FARADAY, inf, 2);
+    assert_eq(is_err_result(t4), 1, "M inf");
+}
+
+fn _t_non_finite_inputs_are_rejected() {
+    test_group("non_finite_inputs_are_rejected");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var t1, v1 = nernst_potential(0.342, 2, nan, 1.0);
+    assert_eq(is_err_result(t1), 1, "Nernst T NaN");
+    var t2, v2 = nernst_potential(0.342, 2, inf, 1.0);
+    assert_eq(is_err_result(t2), 1, "Nernst T inf");
+    var t3, v3 = nernst_potential(0.342, 2, 298.15, nan);
+    assert_eq(is_err_result(t3), 1, "Nernst Q NaN");
+    var t4, v4 = nernst_potential(0.342, 2, 298.15, inf);
+    assert_eq(is_err_result(t4), 1, "Nernst Q inf");
+    var t5, v5 = nernst_potential(nan, 2, 298.15, 1.0);
+    assert_eq(is_err_result(t5), 1, "Nernst E° NaN");
+    var t6, v6 = nernst_potential_25c(0.342, 2, nan);
+    assert_eq(is_err_result(t6), 1, "Nernst 25 °C Q NaN");
+    var t7, v7 = cell_gibbs_energy(2, nan);
+    assert_eq(is_err_result(t7), 1, "ΔG E NaN");
+    var t8, v8 = cell_gibbs_energy(2, inf);
+    assert_eq(is_err_result(t8), 1, "ΔG E inf");
+    var t9, v9 = faraday_mass_deposited(nan, 63.546, 2);
+    assert_eq(is_err_result(t9), 1, "mass deposited Q NaN");
+    var t10, v10 = faraday_charge_required(nan, 63.546, 2);
+    assert_eq(is_err_result(t10), 1, "charge required m NaN");
+    var t11, v11 = faraday_charge_required(10.0, nan, 2);
+    assert_eq(is_err_result(t11), 1, "charge required M NaN");
+    var t12, v12 = faraday_mass_ratio(nan, 63.546, 2, 107.868, 1);
+    assert_eq(is_err_result(t12), 1, "ratio m_A NaN");
+    var t13, v13 = faraday_mass_ratio(10.0, nan, 2, 107.868, 1);
+    assert_eq(is_err_result(t13), 1, "ratio M_A NaN");
+    var t14, v14 = faraday_mass_ratio(10.0, 63.546, 2, inf, 1);
+    assert_eq(is_err_result(t14), 1, "ratio M_B inf");
+}
+
+fn _t_all_half_reactions_have_nonzero_electrons() {
+    test_group("all_half_reactions_have_nonzero_electrons");
+    var h = 1;
+    while (h <= KM_STANDARD_POTENTIALS_COUNT) {
+        assert(half_reaction_electrons(h) > 0, "zero electrons");
+        h = h + 1;
+    }
+}
+
+fn _t_cell_gibbs_sign_matches_spontaneity() {
+    test_group("cell_gibbs_sign_matches_spontaneity");
+    var t1, v1 = cell_gibbs_energy(2, 1.1);   # E > 0 → ΔG < 0
+    var pos: f64 = v1;
+    assert(is_ok(t1) == 1 && pos < 0.0, "spontaneous: ΔG < 0");
+    var t2, v2 = cell_gibbs_energy(2, -0.5);  # E < 0 → ΔG > 0
+    var neg: f64 = v2;
+    assert(is_ok(t2) == 1 && neg > 0.0, "non-spontaneous: ΔG > 0");
+}
+
+# ── Cyrius-only ─────────────────────────────────────────────────────────────────────
+
+# Handles (port plan §6.4): row + 1, 0 for none; an invalid handle reads "" / "" / 0 / NaN, never out of bounds. A
+# null couple or "" is none; the match is exact and case-sensitive; the equations are UTF-8 bytes.
+fn _t_cyrius_handles() {
+    test_group("cyrius_handles");
+    assert_eq(lookup_half_reaction(0), 0, "null couple");
+    assert_eq(lookup_half_reaction(""), 0, "empty couple");
+    assert_eq(lookup_half_reaction("cu2+/cu"), 0, "case-sensitive");
+    assert_eq(lookup_half_reaction("Cu2+/Cu "), 0, "exact");
+    assert_eq(lookup_half_reaction("Cu2+"), 0, "a prefix is no couple");
+    assert_eq(lookup_half_reaction("Li+/Li"), 1, "the first row");
+    assert_eq(lookup_half_reaction("F2/F-"), KM_STANDARD_POTENTIALS_COUNT, "the last row");
+    var bad: i64[3];
+    bad[0] = 0;
+    bad[1] = 0 - 1;
+    bad[2] = KM_STANDARD_POTENTIALS_COUNT + 1;
+    var k = 0;
+    while (k < 3) {
+        var h = bad[k];
+        assert(streq(half_reaction_equation(h), "") == 1, "invalid handle: equation \"\"");
+        assert(streq(half_reaction_couple(h), "") == 1, "invalid handle: couple \"\"");
+        assert_eq(half_reaction_electrons(h), 0, "invalid handle: electrons 0");
+        var e: f64 = half_reaction_standard_potential(h);
+        assert_eq(ulp_is_nan(e), 1, "invalid handle: E° NaN");
+        k = k + 1;
+    }
+    var cu = hr("Cu2+/Cu");
+    assert(streq(half_reaction_equation(cu), "Cu²⁺ + 2e⁻ → Cu") == 1, "the UTF-8 equation");
+    assert_eq(strlen(half_reaction_equation(cu)), 22, "22 bytes: ², ⁺, ⁻ and → are multi-byte");
+    assert(streq(half_reaction_couple(cu), "Cu2+/Cu") == 1, "the couple");
+    var t, v = cell_potential_from_couples("Cu2+/Cu", "Xx/Xx");
+    assert(is_err_code(t, v, KM_ERR_INVALID_REACTION) == 1, "unknown anode: InvalidReaction");
+    var t2, v2 = cell_potential_from_couples(0, "Zn2+/Zn");
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_REACTION) == 1, "null cathode: InvalidReaction");
+}
+
+# Rust's u8 electron count is a word: outside 0 ..= 255 is Err(InvalidInput) at the position of Rust's `== 0`
+# check, never wrapped (256 is not 0, 257 not 1). 255 is a valid count.
+fn _t_cyrius_u8_electrons() {
+    test_group("cyrius_u8_electrons");
+    var bad: i64[4];
+    bad[0] = 256;
+    bad[1] = 257;
+    bad[2] = 0 - 1;
+    bad[3] = 4294967298;
+    var k = 0;
+    while (k < 4) {
+        var n = bad[k];
+        var t1, v1 = nernst_potential(0.342, n, 298.15, 0.1);
+        assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "Nernst");
+        var t2, v2 = nernst_potential(0.342, n, 0.0, 0.1);
+        assert(is_err_code(t2, v2, KM_ERR_INVALID_TEMPERATURE) == 1, "Nernst: T is checked before n");
+        var t3, v3 = nernst_potential_25c(0.342, n, 0.1);
+        assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT) == 1, "Nernst 25 °C");
+        var t4, v4 = cell_gibbs_energy(n, 1.1);
+        assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "ΔG");
+        var t5, v5 = faraday_mass_deposited(1000.0, 63.546, n);
+        assert(is_err_code(t5, v5, KM_ERR_INVALID_INPUT) == 1, "mass deposited");
+        var t6, v6 = faraday_charge_required(10.0, 63.546, n);
+        assert(is_err_code(t6, v6, KM_ERR_INVALID_INPUT) == 1, "charge required");
+        var t7, v7 = faraday_mass_ratio(10.0, 63.546, n, 107.868, 1);
+        assert(is_err_code(t7, v7, KM_ERR_INVALID_INPUT) == 1, "ratio, n_A");
+        var t8, v8 = faraday_mass_ratio(10.0, 63.546, 2, 107.868, n);
+        assert(is_err_code(t8, v8, KM_ERR_INVALID_INPUT) == 1, "ratio, n_B");
+        k = k + 1;
+    }
+    var t9, v9 = cell_gibbs_energy(255, 1.0);
+    var g: f64 = v9;
+    var f: f64 = KM_FARADAY;
+    var want: f64 = (-255.0 * f) * 1.0;
+    assert(is_ok(t9) == 1 && g == want, "n = 255 is valid");
+    var nan: f64 = _km_nan();
+    var t10, v10 = faraday_mass_deposited(nan, nan, 256);
+    assert(is_err_code(t10, v10, KM_ERR_INVALID_INPUT) == 1, "n is checked first");
+}
+
+# The Nernst equation's ln is the correctly rounded _km_ln (ADR 0005, amendment M3a): E° − (RT/nF)·ln Q cancels
+# where E° ≈ (RT/nF)·ln Q. On this golden near-cancellation row the oracle's E is exactly 0; with the aarch64
+# f64_ln polyfill the same expression is 2⁶² ulp away (port-parity.md §7). The 25 °C variant is T = 298.15.
+fn _t_cyrius_nernst_ln() {
+    test_group("cyrius_nernst_ln");
+    var t, v = nernst_potential(0.029130260074714004, 2, 493.35359500187104, 3.936873243672229);
+    assert(is_ok(t) == 1 && _km_bits(v) == 0, "E = +0.0, the oracle's");
+    var r: f64 = KM_GAS_CONSTANT;
+    var f: f64 = KM_FARADAY;
+    var q: f64 = 0.1;
+    var factor: f64 = (r * 298.15) / (2.0 * f);
+    var l: f64 = _km_ln(q);
+    var want: f64 = 0.342 - (factor * l);
+    var t2, v2 = nernst_potential_25c(0.342, 2, q);
+    assert(is_ok(t2) == 1 && _km_bits(v2) == _km_bits(want), "E° − (RT/nF)·ln Q, in Rust's order");
+    var t3, v3 = nernst_potential(0.342, 2, 298.15, 1.0);
+    var e3: f64 = v3;
+    assert(is_ok(t3) == 1 && e3 == 0.342, "ln 1 = 0 exactly: E = E°");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_faraday_constant_value();
+    _t_lookup_copper();
+    _t_lookup_hydrogen();
+    _t_lookup_nonexistent();
+    _t_potentials_sorted_ascending();
+    _t_couples_are_unique();
+    _t_potassium_and_vanadium_match_crc();
+    _t_potentials_count();
+    _t_nernst_at_standard_conditions();
+    _t_nernst_q_greater_than_1();
+    _t_nernst_q_less_than_1();
+    _t_nernst_25c_shorthand();
+    _t_nernst_zero_electrons_is_error();
+    _t_nernst_zero_q_is_error();
+    _t_nernst_zero_temp_is_error();
+    _t_daniell_cell();
+    _t_daniell_cell_from_couples();
+    _t_unknown_couple_is_error();
+    _t_spontaneous_cell_positive();
+    _t_cell_gibbs_daniell();
+    _t_cell_gibbs_zero_electrons_is_error();
+    _t_faraday_copper_deposition();
+    _t_faraday_charge_roundtrip();
+    _t_faraday_zero_electrons_is_error();
+    _t_faraday_second_law();
+    _t_charge_moles_roundtrip();
+    _t_one_faraday_is_one_mole();
+    _t_nernst_25c_quantitative();
+    _t_nernst_negative_q_is_error();
+    _t_faraday_negative_charge_gives_negative_mass();
+    _t_faraday_mass_ratio_zero_molar_mass_b_is_error();
+    _t_faraday_mass_deposited_validates_molar_mass();
+    _t_non_finite_inputs_are_rejected();
+    _t_all_half_reactions_have_nonzero_electrons();
+    _t_cell_gibbs_sign_matches_spontaneity();
+    _t_cyrius_handles();
+    _t_cyrius_u8_electrons();
+    _t_cyrius_nernst_ln();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

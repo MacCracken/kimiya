@@ -91,6 +91,64 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     `thermochem/vant_hoff_k`, `thermochem/enthalpy_change_cp`, `thermochem/shomate_cp`,
     `thermochem/adiabatic_flame_ch4_air`
   - generator: `Module::row_noted` (a bracketed note suffix), `cyr::string_column` splits blob lines past 120 columns
+- **M3a solution, electrochemistry** (port plan §4, §6.4; M3b, kinetics, follows):
+  - **solution** — `molarity`, `molality`, `dilution`, `ph_from_h_concentration`, `poh_from_oh_concentration`,
+    `ph_from_poh`, `henderson_hasselbalch`, `h_concentration_from_ph`, `weak_acid_ph` / `weak_base_ph` (Rust's
+    charge-balance Newton transcribed as the private `_km_charge_balance_root` / `_km_checked_root`: the root is
+    bit-identical), `ionic_strength(ions, n)` over 16-byte (concentration, charge) records, `debye_huckel_limiting`,
+    `debye_huckel_extended`, `davies_activity`, `kohlrausch_molar_conductivity`, `limiting_molar_conductivity`,
+    `solution_conductivity`; its ten constants (`KM_KW_WATER_25C`, `KM_DH_A_WATER_25C`, `KM_DH_B_WATER_25C`, the seven
+    `KM_LAMBDA_*`) generated into `src/constants.cyr`
+  - **electrochemistry** — generated `src/electrochemistry_data.cyr` (the 49 `STANDARD_POTENTIALS` rows: a UTF-8
+    equation blob, the couple blob, electrons, E°; `KM_STANDARD_POTENTIALS_COUNT`; the literal's CRC Handbook notes);
+    `lookup_half_reaction` (a handle, 0 for none) with `half_reaction_equation` / `_couple` / `_electrons` /
+    `_standard_potential`; `nernst_potential`, `nernst_potential_25c`, `standard_cell_potential`,
+    `cell_potential_from_couples`, `is_spontaneous_cell`, `cell_gibbs_energy`, `faraday_mass_deposited`,
+    `faraday_charge_required`, `faraday_mass_ratio`, `charge_to_moles_electrons`, `moles_electrons_to_charge`
+  - Rust's integer types kept as words and never wrapped: an i32 charge outside its range is
+    `Err(KM_ERR_INVALID_INPUT)` (NaN from `ionic_strength`), a u8 electron count outside 0 ..= 255 is
+    `Err(KM_ERR_INVALID_INPUT)` where Rust checks `n == 0`
+  - **mathx** — `_km_log10_ln`, glibc 2.44's log10 composition (Sun's e_log10.c) over the correctly rounded `_km_ln`,
+    for `henderson_hasselbalch`; the Nernst functions use `_km_ln`. Both cancel by construction near pH 0 / E ≈ 0
+    (S ≈ 10¹⁸ with the stdlib primitives); a correctly rounded log10 was tried and failed the near-cancellation rows,
+    because glibc's log10 is not correctly rounded on 0.3–29 % of arguments
+    ([ADR 0005, amendment M3a](docs/adr/0005-correctly-rounded-primitives-for-ill-conditioned-functions.md))
+  - golden modules `solution` (28,566 rows) and `electrochemistry` (18,574), and the 10 solution `constants` rows:
+    111,103 ok, 0 failed, 0 measured, 10 pending on x86_64 ELF, x86_64 PE and aarch64; every class-B row 0 ulp;
+    class C K = 2–4 by the rule ([`port-parity.md`](docs/development/port-parity.md) §7), Henderson–Hasselbalch and
+    Nernst 0 ulp on every row, the near-cancellation rows included; each weak acid / base row's note names the
+    Newton's exit and update count (at most 7), and `validate.py` recomputes all 47,140 rows and the paths and checks
+    that `CHARGE_BALANCE_REL_TOL` is pinned from both sides (the 50-iteration cap is unobservable);
+    `probe_tables.py` compiles the 197 new table cells and 10 new constants
+  - 84 Rust tests ported (`tests/solution.tcyr` 49, `tests/electrochemistry.tcyr` 35, none skipped) plus 8 Cyrius-only
+    groups (ion records, out-of-i32 charges, the private Newton and its tolerance, the log10 composition, the
+    constants, handles, out-of-u8 electron counts, the Nernst ln): 1,529 assertions; surface parity 187/187; benches
+    `solution/ph_from_h`, `solution/weak_acid_ph`, `electrochemistry/lookup_half_reaction`,
+    `electrochemistry/nernst_potential`
+  - generator: `cyr::string_column_utf8` (a UTF-8 blob; the ASCII tables are unchanged)
+- **M3b kinetics** (port plan §4, §6.4; M3 is complete):
+  - **kinetics** — `arrhenius_rate`, `half_life_first_order`, `first_order_concentration`,
+    `second_order_concentration`, `zero_order_concentration`, `zero_order_half_life`, `nth_order_half_life`,
+    `steady_state_intermediate`, `steady_state_rate`, `pre_equilibrium_rate`, `michaelis_menten`, `lineweaver_burk`,
+    `collision_theory_rate`, `eyring_rate`, `eyring_rate_from_activation`, in Rust's check and operation order, on
+    `f64_exp`, `_km_expm1` and `ganita_f64_pow`; `KM_BOLTZMANN` and `KM_PLANCK` are the generated constants; Rust's
+    `LN_2` and private 10⁻¹² first-order tolerance are typed inline and pinned by the corpus
+  - `lineweaver_burk(v_max, km, out)` writes the (slope, intercept) tuple to the caller's two-f64 buffer and returns
+    `Ok(2)`, as `peng_robinson_z_roots` does its roots; on `Err` the buffer is untouched
+  - golden module `kinetics` (30,146 rows, T from the smallest subnormal to DBL_MAX, wide signed energies, orders
+    around 1 and out to ±300, and on purpose the rows where a subnormal exp or pow result is scaled into the normal
+    range): 119,044 ok, 0 failed, 22,205 measured, 10 pending on x86_64 ELF, x86_64 PE and aarch64; every class-B row
+    0 ulp; `validate.py` recomputes all 30,146 rows and checks that LN_2 and the tolerance are pinned
+  - **the six class-C kinetics functions are measured, not gated**: a subnormal exp or pow result times a prefactor
+    puts the rule's S at 10¹⁴ … 4.4 × 10¹⁸ (2–4 without those rows). Under the user's decision of 2026-11-09 —
+    functional parity with correctly rounded primitives, never glibc's rounding errors — no glibc-matching primitive
+    is built; their bound waits for ADR 0006 ([`port-parity.md`](docs/development/port-parity.md) §8). On two exact
+    half-way rows ((3·2⁻²¹⁵)⁵, (9·2⁻⁴³⁰)^2.5) ganita's pow is correctly rounded and glibc's is not
+  - `validate.py --sensitivity` lists, for each function past K = 64, the rows that put it there and S without them
+  - 47 Rust tests ported (`tests/kinetics.tcyr`; `lineweaver_burk_basic` and `non_finite_inputs_are_rejected` adapted
+    for the buffer) plus 4 Cyrius-only groups (the buffer, the inline constants and the tolerance's boundary orders,
+    the check order, signed zeros and NaN): 138 assertions; surface parity 203/203; benches `kinetics/arrhenius_rate`,
+    `kinetics/eyring_rate`, `kinetics/michaelis_menten`
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -127,6 +185,12 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   `thermochem/vant_hoff_k` 9.51 → 58.9 ns, `thermochem/enthalpy_change_cp` 24.00 → 166 ns, `thermochem/shomate_cp`
   2.34 → 14.5 ns, `thermochem/adiabatic_flame_ch4_air` 301.48 ns → 3.24 µs (6.2–10.7×; two optimizations were
   tried and not kept, [`docs/benchmarks-rust-v-cyrius.md`](docs/benchmarks-rust-v-cyrius.md))
+- M3a solution / electrochemistry, first measurement (Rust 1.2.0 → Cyrius): `solution/ph_from_h` 9.73 → 66.2 ns,
+  `solution/weak_acid_ph` 34.85 → 182 ns, `electrochemistry/lookup_half_reaction` 57.06 → 116 ns (2.0–6.8×);
+  `electrochemistry/nernst_potential` 6.42 ns → 1.94 µs (302×): the correctly rounded `_km_ln` (1.90 µs, against 23 ns
+  for `f64_ln`) that its cancellation needs (ADR 0005 amendment M3a)
+- M3b kinetics, first measurement (Rust 1.2.0 → Cyrius): `kinetics/arrhenius_rate` 6.78 → 49.4 ns (7.3×),
+  `kinetics/eyring_rate` 6.73 → 42.4 ns (6.3×), `kinetics/michaelis_menten` 2.92 → 16.5 ns (5.7×)
 
 ## [1.2.0] - 2026-11-08
 

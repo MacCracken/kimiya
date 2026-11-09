@@ -1,0 +1,244 @@
+# electrochemistry.cyr — electrode potentials, the Nernst equation and Faraday's laws (port of
+# rust-old/src/electrochemistry.rs).
+#
+# Standard electrode potentials are for reduction half-reactions at 25 °C, 1 atm and 1 M, against the standard
+# hydrogen electrode (SHE). Potentials are in volts, charges in coulombs, masses in grams. The data — the 49
+# STANDARD_POTENTIALS rows — is src/electrochemistry_data.cyr (generated); FARADAY and ELEMENTARY_CHARGE are
+# src/constants.cyr's KM_FARADAY and KM_ELEMENTARY_CHARGE. Fallible functions return a value-form Result whose
+# Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs. Every expression keeps Rust's operation order,
+# so everything but the Nernst equation is + − × ÷ and bit-identical (class B); the Nernst functions are class
+# C through one ln (docs/development/port-parity.md §7).
+#
+# - Rows are reached by handle (port plan §6.4): STANDARD_POTENTIALS row + 1, 0 for None. HalfReaction's
+#   fields are half_reaction_equation(h) / half_reaction_couple(h) ("" for an invalid handle),
+#   half_reaction_electrons(h) (0: no row has 0) and half_reaction_standard_potential(h) (NaN).
+# - Rust's `n_electrons: u8` is a word here: one outside 0 ..= 255 is Err(KM_ERR_INVALID_INPUT) at the position
+#   of Rust's `== 0` check (one test, n < 1 || n > 255), never wrapped mod 256.
+# - The Nernst equation's ln is the correctly rounded _km_ln (ADR 0005, amendment M3a): E° − (RT/nF)·ln Q
+#   cancels where E° ≈ (RT/nF)·ln Q, and there one ulp of the log moves E by many.
+
+include "lib/string.cyr"
+
+# The STANDARD_POTENTIALS row of handle h (h − 1), or -1 if h is no handle.
+#must_use
+fn _km_half_reaction_row(h): i64 {
+    if (h >= 1 && h <= KM_STANDARD_POTENTIALS_COUNT) { return h - 1; }
+    return 0 - 1;
+}
+
+# 1 if the word n is a valid electron count: a Rust u8 (0 ..= 255) that is not 0.
+#must_use
+fn _km_is_electron_count(n): i64 {
+    if (n < 1 || n > 255) { return 0; }
+    return 1;
+}
+
+# ── standard electrode potentials ───────────────────────────────────────────────────
+
+# The half-reaction whose couple is the C string `couple`, exactly and case-sensitively ("Cu2+/Cu"), as a
+# handle (its STANDARD_POTENTIALS row + 1); 0 when none matches (or `couple` is 0). The first match in table
+# order, as Rust's linear `find` (the couples are unique). Mirrors `electrochemistry::lookup_half_reaction`.
+#must_use
+fn lookup_half_reaction(couple): i64 {
+    if (couple == 0) { return 0; }
+    var c0 = load8(couple);
+    if (c0 == 0) { return 0; }
+    var n = strlen(couple);
+    var row = 0;
+    while (row < KM_STANDARD_POTENTIALS_COUNT) {
+        var p = &_KM_STANDARD_POTENTIALS_COUPLE_BYTES + _KM_STANDARD_POTENTIALS_COUPLE_OFF[row];
+        # The first byte decides most rows; memeq stops at p's NUL, which differs from couple's byte.
+        if (load8(p) == c0) {
+            if (memeq(p, couple, n) == 1 && load8(p + n) == 0) { return row + 1; }
+        }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The reduction half-reaction equation of STANDARD_POTENTIALS handle h ("Cu²⁺ + 2e⁻ → Cu") as a C string of
+# UTF-8 bytes in the baked table; "" for an invalid handle. Mirrors `HalfReaction::equation`.
+#must_use
+fn half_reaction_equation(h): i64 {
+    var row = _km_half_reaction_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_STANDARD_POTENTIALS_EQUATION_BYTES + _KM_STANDARD_POTENTIALS_EQUATION_OFF[row];
+}
+
+# The couple (the species reduced) of STANDARD_POTENTIALS handle h ("Cu2+/Cu"); "" for an invalid handle.
+# Mirrors `HalfReaction::couple`.
+#must_use
+fn half_reaction_couple(h): i64 {
+    var row = _km_half_reaction_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_STANDARD_POTENTIALS_COUPLE_BYTES + _KM_STANDARD_POTENTIALS_COUPLE_OFF[row];
+}
+
+# The number of electrons transferred in STANDARD_POTENTIALS handle h (1 ..= 5); 0 for an invalid handle, which
+# no row has. Mirrors `HalfReaction::electrons`.
+#must_use
+fn half_reaction_electrons(h): i64 {
+    var row = _km_half_reaction_row(h);
+    if (row < 0) { return 0; }
+    return KM_STANDARD_POTENTIALS_ELECTRONS[row];
+}
+
+# The standard reduction potential E° of STANDARD_POTENTIALS handle h, in V vs SHE; NaN for an invalid handle.
+# Mirrors `HalfReaction::standard_potential`.
+#must_use
+fn half_reaction_standard_potential(h): f64 {
+    var row = _km_half_reaction_row(h);
+    if (row < 0) { return _km_nan(); }
+    var e: f64 = KM_STANDARD_POTENTIALS_STANDARD_POTENTIAL[row];
+    return e;
+}
+
+# ── the Nernst equation ─────────────────────────────────────────────────────────────
+
+# The Nernst equation E = E° − (RT/nF)·ln Q: the electrode potential in V under non-standard conditions, from
+# the standard potential E° (V), the electron count n (a Rust u8, as a word), T in K and the reaction quotient
+# Q (product over reactant activities). Ok(E); Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite;
+# Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, Q is not positive and finite, or E° is not finite
+# (in that order). ln Q is correctly rounded (_km_ln, ADR 0005 amendment M3a). Mirrors
+# `electrochemistry::nernst_potential`.
+#must_use
+fn nernst_potential(standard_potential: f64, n_electrons, temperature_k: f64, reaction_quotient: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(reaction_quotient) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(standard_potential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var r: f64 = KM_GAS_CONSTANT;
+    var f: f64 = KM_FARADAY;
+    var n: f64 = f64_from(n_electrons);
+    var factor: f64 = (r * temperature_k) / (n * f);
+    var l: f64 = _km_ln(reaction_quotient);
+    var e: f64 = standard_potential - (factor * l);
+    return Ok(e);
+}
+
+# The Nernst equation at 25 °C, E = E° − (0.05916/n)·log₁₀ Q: nernst_potential at T = 298.15 K, so the
+# 0.05916 V factor is not rounded. Ok(E), or Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, Q is not
+# positive and finite, or E° is not finite. Mirrors `electrochemistry::nernst_potential_25c`.
+#must_use
+fn nernst_potential_25c(standard_potential: f64, n_electrons, reaction_quotient: f64): Result {
+    return nernst_potential(standard_potential, n_electrons, 298.15, reaction_quotient);
+}
+
+# ── cell potentials ─────────────────────────────────────────────────────────────────
+
+# The standard cell potential E°_cell = E°_cathode − E°_anode, both standard reduction potentials in V; returns
+# V. Non-finite input propagates to the result. Mirrors `electrochemistry::standard_cell_potential`.
+#must_use
+fn standard_cell_potential(e_cathode: f64, e_anode: f64): f64 {
+    var e: f64 = e_cathode - e_anode;
+    return e;
+}
+
+# The standard cell potential E°_cell in V from two couples (C strings, as lookup_half_reaction takes them):
+# the cathode's couple is reduced (gains electrons), the anode's oxidised. Ok(E°_cell), or
+# Err(KM_ERR_INVALID_REACTION) if a couple is not in STANDARD_POTENTIALS (the cathode's checked first). Mirrors
+# `electrochemistry::cell_potential_from_couples`.
+#must_use
+fn cell_potential_from_couples(cathode_couple, anode_couple): Result {
+    var hc = lookup_half_reaction(cathode_couple);
+    if (hc == 0) { return Err(KM_ERR_INVALID_REACTION); }
+    var ha = lookup_half_reaction(anode_couple);
+    if (ha == 0) { return Err(KM_ERR_INVALID_REACTION); }
+    var ec: f64 = half_reaction_standard_potential(hc);
+    var ea: f64 = half_reaction_standard_potential(ha);
+    var e: f64 = standard_cell_potential(ec, ea);
+    return Ok(e);
+}
+
+# 1 if a galvanic cell of potential E°_cell (V) is spontaneous, E°_cell > 0; NaN is not. Mirrors
+# `electrochemistry::is_spontaneous_cell`.
+#must_use
+fn is_spontaneous_cell(e_cell: f64): i64 {
+    if (e_cell > 0.0) { return 1; }
+    return 0;
+}
+
+# The Gibbs free energy of an electrochemical cell, ΔG = −nFE, in J per mole of reaction, from the electrons
+# transferred per reaction n (a word) and the cell potential E (V). Ok(ΔG), or Err(KM_ERR_INVALID_INPUT) if n is
+# 0 or outside 0 ..= 255 or E is not finite. Mirrors `electrochemistry::cell_gibbs_energy`.
+#must_use
+fn cell_gibbs_energy(n_electrons, cell_potential: f64): Result {
+    if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(cell_potential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var f: f64 = KM_FARADAY;
+    var n: f64 = f64_from(n_electrons);
+    var g: f64 = ((-n) * f) * cell_potential;
+    return Ok(g);
+}
+
+# ── Faraday's laws ──────────────────────────────────────────────────────────────────
+
+# Faraday's first law m = (Q × M)/(n × F): the mass deposited in g (negative for a negative charge, i.e.
+# dissolution), from the charge passed Q (C), the molar mass M (g/mol) and the electrons per ion n (a word).
+# Ok(m), or Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, M is not positive and finite, or Q is not
+# finite. Mirrors `electrochemistry::faraday_mass_deposited`.
+#must_use
+fn faraday_mass_deposited(charge_c: f64, molar_mass_g: f64, n_electrons): Result {
+    if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(molar_mass_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(charge_c) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var f: f64 = KM_FARADAY;
+    var n: f64 = f64_from(n_electrons);
+    var m: f64 = (charge_c * molar_mass_g) / (n * f);
+    return Ok(m);
+}
+
+# The charge needed to deposit a mass, Q = (m × n × F)/M, in C, from the mass m (g), the molar mass M (g/mol) and
+# the electrons per ion n (a word). Ok(Q), or Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, M is not
+# positive and finite, or m is not finite. Mirrors `electrochemistry::faraday_charge_required`.
+#must_use
+fn faraday_charge_required(mass_g: f64, molar_mass_g: f64, n_electrons): Result {
+    if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(molar_mass_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(mass_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var f: f64 = KM_FARADAY;
+    var n: f64 = f64_from(n_electrons);
+    var q: f64 = ((mass_g * n) * f) / molar_mass_g;
+    return Ok(q);
+}
+
+# Faraday's second law: the same charge deposits masses in the ratio of the equivalent weights M/n. The mass of
+# substance B in g deposited while mass_a_g grams of A are, from the molar masses (g/mol) and electron counts
+# (words) of A and B. Ok(m_B), or Err(KM_ERR_INVALID_INPUT) if an electron count is 0 or outside 0 ..= 255, either
+# molar mass is not positive and finite (A's checked first), or mass_a_g is not finite. Mirrors
+# `electrochemistry::faraday_mass_ratio`.
+#must_use
+fn faraday_mass_ratio(mass_a_g: f64, molar_mass_a: f64, n_electrons_a, molar_mass_b: f64, n_electrons_b): Result {
+    if (_km_is_electron_count(n_electrons_a) != 1 || _km_is_electron_count(n_electrons_b) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (_km_is_positive(molar_mass_a) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(molar_mass_b) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(mass_a_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var na: f64 = f64_from(n_electrons_a);
+    var nb: f64 = f64_from(n_electrons_b);
+    var equiv_a: f64 = molar_mass_a / na;
+    var equiv_b: f64 = molar_mass_b / nb;
+    var m: f64 = (mass_a_g * equiv_b) / equiv_a;
+    return Ok(m);
+}
+
+# ── utility ─────────────────────────────────────────────────────────────────────────
+
+# Charge Q (C) to moles of electrons, n_e = Q / F. Non-finite input propagates to the result. Mirrors
+# `electrochemistry::charge_to_moles_electrons`.
+#must_use
+fn charge_to_moles_electrons(charge_c: f64): f64 {
+    var f: f64 = KM_FARADAY;
+    var n: f64 = charge_c / f;
+    return n;
+}
+
+# Moles of electrons to charge (C), Q = n_e × F. Non-finite input propagates to the result. Mirrors
+# `electrochemistry::moles_electrons_to_charge`.
+#must_use
+fn moles_electrons_to_charge(moles: f64): f64 {
+    var f: f64 = KM_FARADAY;
+    var q: f64 = moles * f;
+    return q;
+}

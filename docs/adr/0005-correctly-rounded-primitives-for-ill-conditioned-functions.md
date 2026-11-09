@@ -74,3 +74,72 @@ golden rows keep class C; the bounds are gated like every other.
   ifunc variants (port plan §0).
 - **Transcribing Rust libm's fdlibm acos/cos/log/pow**: those are not the oracle's either (ganita's acos,
   similar, differs from glibc on 28 % of the corpus rows).
+
+## Amendment (M3a, 2026-11-09)
+
+**Two more ill-conditioned functions, and log10 is composed, not correctly rounded.** M3a ported `solution` and
+`electrochemistry`. Two of their class-C functions cancel by construction, and the golden grids include
+near-cancellation rows on purpose (port-parity.md §7):
+- `solution::henderson_hasselbalch`, pH = pKa + log10([A⁻]/[HA]), cancels where pKa ≈ −log10(ratio) (pH ≈ 0);
+- `electrochemistry::nernst_potential` / `nernst_potential_25c`, E = E° − (RT/nF)·ln Q, cancel where
+  E° ≈ (RT/nF)·ln Q (E ≈ 0).
+
+Measured by the rule (`validate.py --sensitivity`, every result of the stdlib-like primitive nudged ±1 ulp), before
+any remedy:
+
+| Function | Primitive | S before | Where |
+|---|---|---|---|
+| `henderson_hasselbalch` | `_km_log10` (fdlibm, within 1 ulp of glibc) | 4.4 × 10¹⁸ | a pH of a few ulp of the log either side of 0 moves to the next representable value off zero: the ulp line from +0 |
+| `nernst_potential` | `f64_ln` | 8.8 × 10¹⁸ | the same, for E ≈ 0 |
+| `nernst_potential_25c` | `f64_ln` | 8.7 × 10¹⁸ | the same, at 298.15 K |
+
+The replay agreed: with `f64_ln`, aarch64 (the polyfill) has 6 Nernst rows up to 4.3 × 10¹⁸ ulp from the oracle; x86_64
+(x87 `fyl2x`) happened to match glibc on every golden argument.
+
+**Nernst: the decision above, unchanged.** The Nernst functions call the correctly rounded `_km_ln`. No golden `ln`
+argument of theirs is one where glibc's log is not correctly rounded, so **S = 0, c = 0, K = 2**, and all 2,536 value
+rows are 0 ulp on x86_64 ELF, x86_64 PE and aarch64.
+
+**henderson_hasselbalch: a correctly rounded log10 was tried, and fails the grid.** `_km_log10_cr` (`_km_ln` in
+double-double times 1/ln 10 in double-double, one rounding) put 6 near-cancellation rows up to 4.4 × 10¹⁸ ulp from the
+oracle: at base/acid = 0.8068…/2.6858… glibc's log10 is not correctly rounded (`…69da`, correctly rounded `…69db`), and
+a pH that should be the oracle's +0.0 became −1.1 × 10⁻¹⁶. Unlike acos, cos and ln (0.04–0.16 % of arguments), glibc
+2.44's log10 is often not correctly rounded: on 22 of 8,000 binade-uniform arguments (0.3 %), 149 of 8,000 between
+2⁻⁸⁰ and 2⁸⁰ (1.9 %), 2,340 of 8,000 in [½, 1) (29 %: for x in [½, 2) it is ivln10·log x, rounded twice) and 69 of the
+1,497 positive finite golden arguments (4.6 %). A correctly rounded log10 cannot meet the rule on a grid with
+near-cancellation rows, and the rule forbids a wider K or a thinner grid.
+
+glibc's log10 is small enough to reproduce exactly. It is Sun's `sysdeps/ieee754/dbl-64/e_log10.c` composition over
+glibc's own log: x = 2ᵏ·x′ (x′ in [1, 2) for k ≥ 0, [½, 1) for k < 0), y = k (+1 when k < 0), and
+log10(x) = (y·log10_2lo + ivln10·log x′) + y·log10_2hi, with no FMA contraction. Recomputed in Python with glibc's log,
+that formula gives glibc's log10 bit for bit on 500,000 seeded arguments and every golden one. So the port's log10 for
+`henderson_hasselbalch` is **`_km_log10_ln`**, that composition over the correctly rounded `_km_ln` (`src/mathx.cyr`;
++ − × ÷ and `_km_ln` only, so the same bits on every target). It returns glibc's bits wherever glibc's log at x′ is
+correctly rounded. S counts only the calls where it is not: on the golden grid there are none, so **S = 0, c = 0,
+K = 2**, and all 831 value rows are 0 ulp on every target.
+
+Verification of `_km_log10_ln` (a scratch probe, not the golden grid): 1,787 golden arguments (the 1,296 `math` log10
+rows and the henderson ratios) plus 23,710 seeded ones (xorshift64 over every binade, [½, 1), and 2⁻⁸⁰ … 2⁸⁰): the same
+bits on x86_64 ELF, x86_64 PE and aarch64 (apart from the sign of the NaN for a negative argument, which the parity
+rules don't compare); it differs from glibc on 13 seeded arguments, and on each of those glibc's log at x′ is not
+correctly rounded (the 70-digit reference decides), which is exactly the set the construction predicts. The `math`
+corpus shadow line `f64::log10 ~ _km_log10_ln` is 0 ulp on all 1,296 rows, the 48 where glibc is not correctly rounded
+included.
+
+`_km_log10` (fdlibm) stays wherever S is small: `ph_from_h_concentration`, `poh_from_oh_concentration`, `weak_acid_ph`
+and `weak_base_ph` have S = 1 (K = 4), and `ph_from_h` is a benched path. One primitive does not serve both well:
+`_km_log10_ln` costs 1.85 µs a call (its `_km_ln`), `_km_log10` 59 ns.
+
+**Consequences.**
+- **Positive** — the Henderson–Hasselbalch and Nernst values are bit-identical to the oracle on all 3,367 golden value
+  rows, the near-cancellation ones included, on all three targets.
+- **Negative** — `_km_log10_ln` is not correctly rounded: it carries glibc's log10 error (up to about 1.5 ulp), by
+  design, because the oracle has it. This is the first port primitive that reproduces glibc's composition rather than
+  the mathematical value, and it depends on glibc 2.44's e_log10.c being the Sun formula (`validate.py` checks every
+  golden argument; re-measure on any glibc change). The correctly rounded `_km_ln` is slow: `nernst_potential` is
+  1.94 µs against Rust's 6.42 ns (about 45 ns with `f64_ln`); a two-phase (Ziv) correctly rounded log, fast path first,
+  would recover most of it and is a possible follow-up.
+- **Neutral** — as before, a consumer's input can be both ill-conditioned and an argument where glibc's log is not
+  correctly rounded; there the port is many ulp from the oracle (but no further from the true value).
+
+The status stays **Accepted**.

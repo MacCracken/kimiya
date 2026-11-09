@@ -1,0 +1,730 @@
+# solution.tcyr — the tests of rust-old/src/solution.rs, ported one for one (each test_group is the Rust test's
+# name; all 49), plus Cyrius-only tests of the ion-record convention, out-of-i32 charges, the private
+# charge-balance Newton (its exits and Rust's relative-step tolerance, pinned on the helper) and henderson_
+# hasselbalch's log10. No Rust test needed adapting beyond the literals: a value Rust writes with an exponent
+# (1e-7, 1.8e-5, 1e300) is written positionally here, or as its bit pattern, since the Cyrius lexer has no
+# exponent notation; `assert_close(a, e, tol)` is `close(a, e, tol)`. The golden corpus separately checks every
+# function over its grid (tests/parity.tcyr).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/solution.cyr"
+
+alloc_init();
+
+# 1 if |actual − expected| ≤ tol (Rust's assert_close).
+#must_use
+fn close(actual: f64, expected: f64, tol: f64): i64 {
+    var d: f64 = f64_abs(actual - expected);
+    if (d <= tol) { return 1; }
+    return 0;
+}
+
+# 1 if the Result (t, v) is Err(code).
+#must_use
+fn is_err_code(t, v, code): i64 {
+    if (is_err_result(t) == 1 && v == code) { return 1; }
+    return 0;
+}
+
+# f64::EPSILON.
+#must_use
+fn eps64(): f64 {
+    var e: f64 = 0.0000000000000002220446049250313;
+    return e;
+}
+
+# 1e-12, the Rust tests' usual tolerance.
+#must_use
+fn tol12(): f64 {
+    var t: f64 = 0.000000000001;
+    return t;
+}
+
+# An ion list of two (concentration, charge) records.
+#must_use
+fn ions2(c1: f64, z1, c2: f64, z2): i64 {
+    var b = alloc(32);
+    store64(b, c1);
+    store64(b + 8, z1);
+    store64(b + 16, c2);
+    store64(b + 24, z2);
+    return b;
+}
+
+# The Ok payload of a Result as an f64 (the caller asserts is_ok).
+#must_use
+fn okf(t, v): f64 {
+    var x: f64 = v;
+    return x;
+}
+
+# ── pH ──────────────────────────────────────────────────────────────────────────────
+
+fn _t_pure_water_ph() {
+    test_group("pure_water_ph");
+    var t, v = ph_from_h_concentration(0.0000001);
+    var ph: f64 = v;
+    assert(is_ok(t) == 1 && close(ph, 7.0, tol12()) == 1, "pure water pH");
+}
+
+fn _t_strong_acid_ph() {
+    test_group("strong_acid_ph");
+    var t, v = ph_from_h_concentration(0.1);
+    var ph: f64 = v;
+    assert(is_ok(t) == 1 && close(ph, 1.0, tol12()) == 1, "0.1 M strong acid pH");
+}
+
+fn _t_ph_poh_sum_14() {
+    test_group("ph_poh_sum_14");
+    var ph: f64 = 3.0;
+    var poh: f64 = 14.0 - ph;
+    var back: f64 = ph_from_poh(poh);
+    var d: f64 = f64_abs(back - ph);
+    assert(d < eps64(), "pH + pOH = 14");
+}
+
+fn _t_ph_h_roundtrip() {
+    test_group("ph_h_roundtrip");
+    var ph: f64 = 4.5;
+    var h: f64 = h_concentration_from_ph(ph);
+    var t, v = ph_from_h_concentration(h);
+    var back: f64 = v;
+    assert(is_ok(t) == 1 && close(back, ph, tol12()) == 1, "pH round trip");
+}
+
+fn _t_molarity_basic() {
+    test_group("molarity_basic");
+    var t, v = molarity(0.5, 0.25);
+    var m: f64 = v;
+    var d: f64 = f64_abs(m - 2.0);
+    assert(is_ok(t) == 1 && d < eps64(), "0.5 mol in 0.25 L = 2M");
+}
+
+fn _t_dilution_basic() {
+    test_group("dilution_basic");
+    var t, v = dilution(1.0, 0.1, 0.5);
+    var m2: f64 = v;
+    assert(is_ok(t) == 1 && close(m2, 0.2, 0.000000000000001) == 1, "dilution");
+}
+
+fn _t_henderson_hasselbalch_equal_ratio() {
+    test_group("henderson_hasselbalch_equal_ratio");
+    var t, v = henderson_hasselbalch(4.75, 0.1, 0.1);
+    var ph: f64 = v;
+    assert(is_ok(t) == 1 && close(ph, 4.75, 0.000000000000001) == 1, "equal ratio");
+}
+
+fn _t_henderson_hasselbalch_more_base() {
+    test_group("henderson_hasselbalch_more_base");
+    var t, v = henderson_hasselbalch(4.75, 1.0, 0.1);
+    var ph: f64 = v;
+    assert(is_ok(t) == 1 && close(ph, 5.75, tol12()) == 1, "10:1 base:acid");
+}
+
+fn _t_zero_volume_molarity_is_error() {
+    test_group("zero_volume_molarity_is_error");
+    var t, v = molarity(1.0, 0.0);
+    assert_eq(is_err_result(t), 1, "V = 0");
+}
+
+fn _t_zero_concentration_ph_is_error() {
+    test_group("zero_concentration_ph_is_error");
+    var t, v = ph_from_h_concentration(0.0);
+    assert_eq(is_err_result(t), 1, "[H+] = 0");
+}
+
+fn _t_negative_concentration_ph_is_error() {
+    test_group("negative_concentration_ph_is_error");
+    var t, v = ph_from_h_concentration(-1.0);
+    assert_eq(is_err_result(t), 1, "[H+] < 0");
+}
+
+fn _t_molality_zero_solvent_is_error() {
+    test_group("molality_zero_solvent_is_error");
+    var t, v = molality(1.0, 0.0);
+    assert_eq(is_err_result(t), 1, "solvent 0 kg");
+}
+
+fn _t_dilution_zero_volume_is_error() {
+    test_group("dilution_zero_volume_is_error");
+    var t, v = dilution(1.0, 0.1, 0.0);
+    assert_eq(is_err_result(t), 1, "V2 = 0");
+}
+
+fn _t_henderson_hasselbalch_zero_acid_is_error() {
+    test_group("henderson_hasselbalch_zero_acid_is_error");
+    var t, v = henderson_hasselbalch(4.75, 0.1, 0.0);
+    assert_eq(is_err_result(t), 1, "[HA] = 0");
+}
+
+fn _t_henderson_hasselbalch_zero_base_is_error() {
+    test_group("henderson_hasselbalch_zero_base_is_error");
+    var t, v = henderson_hasselbalch(4.75, 0.0, 0.1);
+    assert_eq(is_err_result(t), 1, "[A-] = 0");
+}
+
+fn _t_poh_zero_concentration_is_error() {
+    test_group("poh_zero_concentration_is_error");
+    var t, v = poh_from_oh_concentration(0.0);
+    assert_eq(is_err_result(t), 1, "[OH-] = 0");
+}
+
+fn _t_h_concentration_from_ph_roundtrip_strong_acid() {
+    test_group("h_concentration_from_ph_roundtrip_strong_acid");
+    var h: f64 = h_concentration_from_ph(0.0);   # pH 0 → [H⁺] = 1.0 M
+    var d: f64 = f64_abs(h - 1.0);
+    assert(d < eps64(), "pH 0");
+}
+
+fn _t_non_finite_inputs_are_rejected() {
+    test_group("non_finite_inputs_are_rejected");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var t1, v1 = molarity(1.0, nan);
+    assert_eq(is_err_result(t1), 1, "molarity V NaN");
+    var t2, v2 = molarity(1.0, inf);
+    assert_eq(is_err_result(t2), 1, "molarity V inf");
+    var t3, v3 = molarity(nan, 1.0);
+    assert_eq(is_err_result(t3), 1, "molarity n NaN");
+    var t4, v4 = molality(1.0, nan);
+    assert_eq(is_err_result(t4), 1, "molality kg NaN");
+    var t5, v5 = molality(inf, 1.0);
+    assert_eq(is_err_result(t5), 1, "molality n inf");
+    var t6, v6 = dilution(1.0, 0.1, nan);
+    assert_eq(is_err_result(t6), 1, "dilution V2 NaN");
+    var t7, v7 = dilution(nan, 0.1, 1.0);
+    assert_eq(is_err_result(t7), 1, "dilution M1 NaN");
+    var t8, v8 = dilution(1.0, inf, 1.0);
+    assert_eq(is_err_result(t8), 1, "dilution V1 inf");
+    var t9, v9 = ph_from_h_concentration(nan);
+    assert_eq(is_err_result(t9), 1, "pH NaN");
+    var t10, v10 = ph_from_h_concentration(inf);
+    assert_eq(is_err_result(t10), 1, "pH inf");
+    var t11, v11 = poh_from_oh_concentration(nan);
+    assert_eq(is_err_result(t11), 1, "pOH NaN");
+    var t12, v12 = henderson_hasselbalch(nan, 0.1, 0.1);
+    assert_eq(is_err_result(t12), 1, "HH pKa NaN");
+    var t13, v13 = henderson_hasselbalch(4.75, nan, 0.1);
+    assert_eq(is_err_result(t13), 1, "HH base NaN");
+    var t14, v14 = henderson_hasselbalch(4.75, 0.1, inf);
+    assert_eq(is_err_result(t14), 1, "HH acid inf");
+    var t15, v15 = kohlrausch_molar_conductivity(126.4, 10.0, nan);
+    assert_eq(is_err_result(t15), 1, "Kohlrausch c NaN");
+    var t16, v16 = kohlrausch_molar_conductivity(nan, 10.0, 0.1);
+    assert_eq(is_err_result(t16), 1, "Kohlrausch Λ° NaN");
+    var t17, v17 = kohlrausch_molar_conductivity(126.4, inf, 0.1);
+    assert_eq(is_err_result(t17), 1, "Kohlrausch K inf");
+}
+
+# ── weak acids and bases (reference values: the cubic's root by 400-step bisection in 50-digit decimal) ──
+
+# Asserts weak_acid_ph(ka, c) (base = 0) or weak_base_ph(ka, c) (base = 1) is Ok and within 1e-12 of want.
+fn weak_close(base, ka: f64, c: f64, want: f64, name) {
+    var t = 0;
+    var v = 0;
+    if (base == 1) {
+        var tb, vb = weak_base_ph(ka, c);
+        t = tb;
+        v = vb;
+    } else {
+        var ta, va = weak_acid_ph(ka, c);
+        t = ta;
+        v = va;
+    }
+    var ph: f64 = v;
+    assert(is_ok(t) == 1 && close(ph, want, tol12()) == 1, name);
+    return 0;
+}
+
+fn _t_acetic_acid_ph() {
+    test_group("acetic_acid_ph");
+    weak_close(0, 0.000018, 0.1, 2.8752770603192665, "0.1 M acetic acid");
+}
+
+fn _t_hf_weak_acid_ph() {
+    test_group("hf_weak_acid_ph");
+    weak_close(0, 0.00068, 0.1, 2.101646894217442, "0.1 M HF");
+}
+
+fn _t_weak_acid_dilute() {
+    test_group("weak_acid_dilute");
+    weak_close(0, 0.000018, 0.00001, 5.145294329911299, "1e-5 M acetic acid");
+}
+
+fn _t_weak_acid_very_dilute_stays_acidic() {
+    test_group("weak_acid_very_dilute_stays_acidic");
+    var t, v = weak_acid_ph(0.000018, 0.00000001);
+    var ph: f64 = v;
+    assert(is_ok(t) == 1 && ph < 7.0, "an acid can never be basic");
+    weak_close(0, 0.000018, 0.00000001, 6.978420204421044, "1e-8 M acetic acid");
+}
+
+fn _t_weak_acid_tiny_ka_times_c_converges() {
+    test_group("weak_acid_tiny_ka_times_c_converges");
+    weak_close(0, 0.0000005, 0.000002, 6.103103512160274, "Ka 5e-7, C 2e-6");
+}
+
+fn _t_weak_acid_very_weak() {
+    test_group("weak_acid_very_weak");
+    weak_close(0, 0.000000000001, 0.01, 6.849485769896728, "Ka 1e-12, C 0.01");
+    weak_close(0, 0.00000000000000000001, 1.0, 6.999999782852868, "Ka 1e-20, C 1");
+    var tiny: f64 = 0.000000000000000000000000000001;
+    weak_close(0, tiny, tiny, 7.0, "negligible acid → neutral water");
+}
+
+fn _t_weak_acid_large_ka_approaches_strong() {
+    test_group("weak_acid_large_ka_approaches_strong");
+    weak_close(0, 1.0, 0.1, 1.0380667011667924, "Ka 1, C 0.1");
+    weak_close(0, 1000.0, 0.1, 1.000043422934786, "Ka 1e3, C 0.1");
+    weak_close(0, 10000000000.0, 0.001, 2.999999995657099, "Ka 1e10, C 1e-3");
+}
+
+fn _t_weak_acid_zero_ka_is_error() {
+    test_group("weak_acid_zero_ka_is_error");
+    var t, v = weak_acid_ph(0.0, 0.1);
+    assert_eq(is_err_result(t), 1, "Ka = 0");
+}
+
+fn _t_weak_acid_zero_concentration_is_error() {
+    test_group("weak_acid_zero_concentration_is_error");
+    var t, v = weak_acid_ph(0.000018, 0.0);
+    assert_eq(is_err_result(t), 1, "C = 0");
+}
+
+fn _t_weak_acid_base_non_finite_is_error() {
+    test_group("weak_acid_base_non_finite_is_error");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var ks: f64[4];
+    var cs: f64[4];
+    ks[0] = nan;
+    cs[0] = 0.1;
+    ks[1] = 0.000018;
+    cs[1] = nan;
+    ks[2] = inf;
+    cs[2] = 0.1;
+    ks[3] = 0.000018;
+    cs[3] = inf;
+    var k = 0;
+    while (k < 4) {
+        var ka: f64 = ks[k];
+        var c: f64 = cs[k];
+        var ta, va = weak_acid_ph(ka, c);
+        assert_eq(is_err_result(ta), 1, "acid");
+        var tb, vb = weak_base_ph(ka, c);
+        assert_eq(is_err_result(tb), 1, "base");
+        k = k + 1;
+    }
+}
+
+fn _t_weak_acid_overflow_is_error_not_garbage() {
+    test_group("weak_acid_overflow_is_error_not_garbage");
+    var big: f64 = 0x7E37E43C8800759C;   # 1e300
+    var t, v = weak_acid_ph(big, big);
+    assert(is_err_code(t, v, KM_ERR_COMPUTATION_ERROR) == 1, "Ka·C overflows: ComputationError");
+}
+
+fn _t_ammonia_weak_base_ph() {
+    test_group("ammonia_weak_base_ph");
+    weak_close(1, 0.000018, 0.1, 11.124722939680733, "0.1 M ammonia");
+}
+
+fn _t_weak_base_very_dilute_stays_basic() {
+    test_group("weak_base_very_dilute_stays_basic");
+    var t, v = weak_base_ph(0.000018, 0.00000001);
+    var ph: f64 = v;
+    assert(is_ok(t) == 1 && ph > 7.0, "a base can never be acidic");
+    weak_close(1, 0.000018, 0.00000001, 7.021579795578956, "1e-8 M base");
+}
+
+fn _t_weak_base_tiny_kb_times_c_converges() {
+    test_group("weak_base_tiny_kb_times_c_converges");
+    weak_close(1, 0.0000005, 0.000002, 7.896896487839726, "Kb 5e-7, C 2e-6");
+}
+
+fn _t_weak_base_zero_kb_is_error() {
+    test_group("weak_base_zero_kb_is_error");
+    var t, v = weak_base_ph(0.0, 0.1);
+    assert_eq(is_err_result(t), 1, "Kb = 0");
+}
+
+fn _t_weak_acid_base_symmetry() {
+    test_group("weak_acid_base_symmetry");
+    var ks: f64[4];
+    var cs: f64[4];
+    ks[0] = 0.000018;
+    cs[0] = 0.1;
+    ks[1] = 0.000018;
+    cs[1] = 0.00000001;
+    ks[2] = 1.0;
+    cs[2] = 0.1;
+    ks[3] = 0.000000000001;
+    cs[3] = 0.01;
+    var k = 0;
+    while (k < 4) {
+        var ka: f64 = ks[k];
+        var c: f64 = cs[k];
+        var ta, va = weak_acid_ph(ka, c);
+        var tb, vb = weak_base_ph(ka, c);
+        var a: f64 = va;
+        var b: f64 = vb;
+        var sum: f64 = a + b;
+        assert(is_ok(ta) == 1 && is_ok(tb) == 1 && close(sum, 14.0, tol12()) == 1, "acid + base pH = 14");
+        k = k + 1;
+    }
+}
+
+# ── activity coefficients ───────────────────────────────────────────────────────────
+
+fn _t_ionic_strength_nacl() {
+    test_group("ionic_strength_nacl");
+    var i: f64 = ionic_strength(ions2(0.1, 1, 0.1, 0 - 1), 2);
+    var d: f64 = f64_abs(i - 0.1);
+    assert(d < eps64(), "0.1 M NaCl: I = 0.1");
+}
+
+fn _t_ionic_strength_cacl2() {
+    test_group("ionic_strength_cacl2");
+    var i: f64 = ionic_strength(ions2(0.1, 2, 0.2, 0 - 1), 2);
+    var d: f64 = f64_abs(i - 0.3);
+    assert(d < eps64(), "0.1 M CaCl2: I = 0.3");
+}
+
+fn _t_large_charges_do_not_overflow() {
+    test_group("large_charges_do_not_overflow");
+    var i32_min = 0 - 2147483648;
+    var i: f64 = ionic_strength(ions2(1.0, 50000, 1.0, i32_min), 2);
+    var zmin: f64 = f64_from(i32_min);
+    var sq: f64 = _km_powi(zmin, 2);
+    var expected: f64 = 0.5 * (2500000000.0 + sq);
+    var tol: f64 = expected * 0.000000000000001;
+    assert(close(i, expected, tol) == 1, "ionic strength");
+    # γ underflows to 0 for absurd charges, but nothing panics.
+    var t1, v1 = debye_huckel_limiting(2147483647, 0.01, 0.509);
+    assert(is_ok(t1) == 1 && okf(t1, v1) == 0.0, "limiting, i32::MAX");
+    var t2, v2 = debye_huckel_extended(i32_min, 0.01, 0.509, 0.328, 3.0);
+    assert(is_ok(t2) == 1 && okf(t2, v2) == 0.0, "extended, i32::MIN");
+    var t3, v3 = davies_activity(50000, 0.01, 0.509);
+    assert(is_ok(t3) == 1 && okf(t3, v3) == 0.0, "Davies, 50 000");
+}
+
+fn _t_debye_huckel_limiting_monovalent() {
+    test_group("debye_huckel_limiting_monovalent");
+    var t, v = debye_huckel_limiting(1, 0.01, KM_DH_A_WATER_25C);
+    var g: f64 = v;
+    assert(is_ok(t) == 1 && close(g, 0.8894058875558917, tol12()) == 1, "γ(z=1, I=0.01)");
+}
+
+fn _t_debye_huckel_limiting_divalent() {
+    test_group("debye_huckel_limiting_divalent");
+    var t, v = debye_huckel_limiting(2, 0.01, KM_DH_A_WATER_25C);
+    var g: f64 = v;
+    assert(is_ok(t) == 1 && close(g, 0.6257487633544406, tol12()) == 1, "γ(z=2, I=0.01)");
+}
+
+fn _t_debye_huckel_zero_ionic_strength() {
+    test_group("debye_huckel_zero_ionic_strength");
+    var t, v = debye_huckel_limiting(1, 0.0, KM_DH_A_WATER_25C);
+    var g: f64 = v;
+    var d: f64 = f64_abs(g - 1.0);
+    assert(is_ok(t) == 1 && d < eps64(), "I = 0: γ = 1");
+}
+
+fn _t_extended_dh_larger_than_limiting() {
+    test_group("extended_dh_larger_than_limiting");
+    var tl, vl = debye_huckel_limiting(1, 0.05, KM_DH_A_WATER_25C);
+    var te, ve = debye_huckel_extended(1, 0.05, KM_DH_A_WATER_25C, KM_DH_B_WATER_25C, 3.0);
+    var lim: f64 = vl;
+    var ext: f64 = ve;
+    assert(is_ok(tl) == 1 && is_ok(te) == 1 && ext > lim, "extended DH should give larger γ");
+    assert(close(ext, 0.80669717443588, tol12()) == 1, "extended DH");
+}
+
+fn _t_extended_dh_rejects_bad_parameters() {
+    test_group("extended_dh_rejects_bad_parameters");
+    var a: f64 = KM_DH_A_WATER_25C;
+    var b: f64 = KM_DH_B_WATER_25C;
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var singular_size: f64 = -1.0 / (b * 0.1);   # 1 + B·å·√I = 0 for å = −1/(0.328·0.1)
+    var t1, v1 = debye_huckel_extended(1, 0.01, a, b, singular_size);
+    assert_eq(is_err_result(t1), 1, "singular size");
+    var t2, v2 = debye_huckel_extended(1, 0.01, a, b, -3.0);
+    assert_eq(is_err_result(t2), 1, "negative size");
+    var t3, v3 = debye_huckel_extended(1, 0.01, a, b, nan);
+    assert_eq(is_err_result(t3), 1, "NaN size");
+    var t4, v4 = debye_huckel_extended(1, 0.01, a, b, inf);
+    assert_eq(is_err_result(t4), 1, "inf size");
+    var t5, v5 = debye_huckel_extended(1, 0.01, a, nan, 3.0);
+    assert_eq(is_err_result(t5), 1, "NaN B");
+    var nb: f64 = -b;
+    var t6, v6 = debye_huckel_extended(1, 0.01, a, nb, 3.0);
+    assert_eq(is_err_result(t6), 1, "negative B");
+    var t7, v7 = debye_huckel_extended(1, 0.01, nan, b, 3.0);
+    assert_eq(is_err_result(t7), 1, "NaN A");
+    # å = 0 reduces to the limiting law
+    var te, ve = debye_huckel_extended(1, 0.01, a, b, 0.0);
+    var tl, vl = debye_huckel_limiting(1, 0.01, a);
+    var ext: f64 = ve;
+    var lim: f64 = vl;
+    assert(is_ok(te) == 1 && is_ok(tl) == 1 && close(ext, lim, 0.000000000000001) == 1, "å = 0");
+}
+
+fn _t_davies_value() {
+    test_group("davies_value");
+    var t, v = davies_activity(1, 0.1, KM_DH_A_WATER_25C);
+    var g: f64 = v;
+    assert(is_ok(t) == 1 && close(g, 0.7815939439468334, tol12()) == 1, "Davies z=1 I=0.1");
+}
+
+fn _t_negative_ionic_strength_is_error() {
+    test_group("negative_ionic_strength_is_error");
+    var t1, v1 = debye_huckel_limiting(1, -0.1, 0.509);
+    assert_eq(is_err_result(t1), 1, "limiting");
+    var t2, v2 = debye_huckel_extended(1, -0.1, 0.509, 0.328, 3.0);
+    assert_eq(is_err_result(t2), 1, "extended");
+    var t3, v3 = davies_activity(1, -0.1, 0.509);
+    assert_eq(is_err_result(t3), 1, "Davies");
+}
+
+fn _t_non_finite_ionic_strength_or_a_is_error() {
+    test_group("non_finite_ionic_strength_or_a_is_error");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var ivals: f64[2];
+    ivals[0] = nan;
+    ivals[1] = inf;
+    var k = 0;
+    while (k < 2) {
+        var i: f64 = ivals[k];
+        var t1, v1 = debye_huckel_limiting(1, i, 0.509);
+        assert_eq(is_err_result(t1), 1, "limiting I");
+        var t2, v2 = debye_huckel_extended(1, i, 0.509, 0.328, 3.0);
+        assert_eq(is_err_result(t2), 1, "extended I");
+        var t3, v3 = davies_activity(1, i, 0.509);
+        assert_eq(is_err_result(t3), 1, "Davies I");
+        k = k + 1;
+    }
+    var t4, v4 = debye_huckel_limiting(1, 0.01, nan);
+    assert_eq(is_err_result(t4), 1, "limiting A NaN");
+    var t5, v5 = davies_activity(1, 0.01, inf);
+    assert_eq(is_err_result(t5), 1, "Davies A inf");
+}
+
+# ── conductivity ────────────────────────────────────────────────────────────────────
+
+fn _t_limiting_molar_conductivity_nacl() {
+    test_group("limiting_molar_conductivity_nacl");
+    var l: f64 = limiting_molar_conductivity(KM_LAMBDA_NA_PLUS, 1.0, KM_LAMBDA_CL_MINUS, 1.0);
+    assert(close(l, 126.4, tol12()) == 1, "Λ°(NaCl)");
+}
+
+fn _t_limiting_molar_conductivity_hcl() {
+    test_group("limiting_molar_conductivity_hcl");
+    var l: f64 = limiting_molar_conductivity(KM_LAMBDA_H_PLUS, 1.0, KM_LAMBDA_CL_MINUS, 1.0);
+    assert(close(l, 426.1, tol12()) == 1, "Λ°(HCl)");
+}
+
+fn _t_kohlrausch_decreases_with_concentration() {
+    test_group("kohlrausch_decreases_with_concentration");
+    var t1, v1 = kohlrausch_molar_conductivity(126.4, 10.0, 0.01);
+    var t2, v2 = kohlrausch_molar_conductivity(126.4, 10.0, 0.1);
+    var lm1: f64 = v1;
+    var lm2: f64 = v2;
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && lm2 < lm1, "higher c should give lower Λ_m");
+    assert(close(lm1, 125.4, tol12()) == 1, "Λ_m at 0.01 M");
+}
+
+fn _t_solution_conductivity_basic() {
+    test_group("solution_conductivity_basic");
+    var kappa: f64 = solution_conductivity(126.4, 0.1);
+    assert(close(kappa, 0.01264, 0.000000000000001) == 1, "κ");
+}
+
+# ── Cyrius-only ─────────────────────────────────────────────────────────────────────
+
+# ionic_strength's records: n 16-byte (f64 bits, i64 charge) records. No ions is Rust's 0.5 × −0.0 = −0.0; no
+# list (n < 0, or a null pointer with n > 0) and a charge outside the i32 range are NaN (no error channel); a
+# null pointer with n = 0 is the empty list.
+fn _t_cyrius_ion_records() {
+    test_group("cyrius_ion_records");
+    var e: f64 = ionic_strength(0, 0);
+    assert_eq(_km_bits(e), 0x8000000000000000, "no ions: -0.0");
+    var p = ions2(0.1, 1, 0.1, 0 - 1);
+    var e2: f64 = ionic_strength(p, 0);
+    assert_eq(_km_bits(e2), 0x8000000000000000, "n = 0 reads nothing");
+    var n1: f64 = ionic_strength(p, 0 - 1);
+    assert_eq(ulp_is_nan(n1), 1, "n < 0: NaN");
+    var n2: f64 = ionic_strength(0, 2);
+    assert_eq(ulp_is_nan(n2), 1, "null pointer with n > 0: NaN");
+    var n3: f64 = ionic_strength(ions2(0.1, 2147483648, 0.1, 1), 2);
+    assert_eq(ulp_is_nan(n3), 1, "charge 2^31: NaN, not wrapped");
+    var n4: f64 = ionic_strength(ions2(0.1, 1, 0.1, 0 - 2147483649), 2);
+    assert_eq(ulp_is_nan(n4), 1, "charge -2^31 - 1: NaN");
+    var ok: f64 = ionic_strength(ions2(0.1, 2147483647, 0.1, 0 - 2147483648), 2);
+    assert(ulp_is_nan(ok) == 0 && ok > 0.0, "i32::MAX and i32::MIN are charges");
+}
+
+# The activity models take Rust's i32 charge as a word: outside the i32 range is Err(InvalidInput), checked
+# before anything else (a valid charge with a bad I gives the same code, after it).
+fn _t_cyrius_i32_charges() {
+    test_group("cyrius_i32_charges");
+    var big = 2147483648;
+    var small = 0 - 2147483649;
+    var t1, v1 = debye_huckel_limiting(big, 0.01, 0.509);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "limiting 2^31");
+    var t2, v2 = debye_huckel_extended(small, 0.01, 0.509, 0.328, 3.0);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "extended -2^31 - 1");
+    var t3, v3 = davies_activity(big, 0.01, 0.509);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT) == 1, "Davies 2^31");
+    var t4, v4 = davies_activity(4294967297, 0.01, 0.509);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "2^32 + 1 is not charge 1");
+    var t5, v5 = debye_huckel_limiting(2147483647, 0.0, 0.509);
+    var g: f64 = v5;
+    assert(is_ok(t5) == 1 && g == 1.0, "i32::MAX at I = 0: γ = 1");
+}
+
+# The private charge-balance Newton (Rust's charge_balance_root / checked_root), transcribed. Its exits: f(x) ≤ 0
+# at the starting bound (water dominates: the root is √Kw), the relative step, and a non-finite step (Ka·C
+# overflows) → ComputationError. Rust's CHARGE_BALANCE_REL_TOL = 1e-12 is pinned from both sides by two golden
+# decade rows whose roots differ by one ulp with 2e-12 (Ka 1e-16, C 1e7) and with 0.5e-12 (Ka 1e-13, C 1e11).
+# CHARGE_BALANCE_MAX_ITER = 50 can't be reached by any input: Newton from the bound converges in at most 7
+# updates (port-parity.md §7), so the cap is transcribed but unobservable, as the flame solver's (ADR 0003).
+fn _t_cyrius_charge_balance_root() {
+    test_group("cyrius_charge_balance_root");
+    var tiny: f64 = 0.0000000000000000000000000000000000000001;   # 1e-40
+    var t1, v1 = _km_charge_balance_root(tiny, tiny);
+    assert(is_ok(t1) == 1 && _km_bits(v1) == 0x3E7AD7F29ABCAF48, "f(x0) <= 0: the root is sqrt(Kw) = 1e-7");
+    var t2, v2 = _km_charge_balance_root(0.000018, 0.1);
+    assert(is_ok(t2) == 1 && _km_bits(v2) == 0x3F55D5A090C34EBA, "acetic acid: 4 updates, relative step");
+    var big: f64 = 0x7E37E43C8800759C;   # 1e300
+    var t3, v3 = _km_charge_balance_root(big, big);
+    assert(is_err_code(t3, v3, KM_ERR_COMPUTATION_ERROR) == 1, "non-finite step: ComputationError");
+    var t4, v4 = _km_charge_balance_root(0.0000000000000001, 10000000.0);
+    assert(is_ok(t4) == 1 && _km_bits(v4) == 0x3F00945BC363B0FF, "tol 1e-12, not 2e-12 (...b100)");
+    var t5, v5 = _km_charge_balance_root(0.0000000000001, 100000000000.0);
+    assert(is_ok(t5) == 1 && _km_bits(v5) == 0x3FB999999999999A, "tol 1e-12, not 0.5e-12 (...999)");
+    # checked_root accepts only a positive, finite x.
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var z: f64 = -0.0;
+    var t6, v6 = _km_checked_root(0.0);
+    assert(is_err_code(t6, v6, KM_ERR_COMPUTATION_ERROR) == 1, "checked_root(0)");
+    var t7, v7 = _km_checked_root(z);
+    assert(is_err_code(t7, v7, KM_ERR_COMPUTATION_ERROR) == 1, "checked_root(-0)");
+    var t8, v8 = _km_checked_root(nan);
+    assert(is_err_code(t8, v8, KM_ERR_COMPUTATION_ERROR) == 1, "checked_root(NaN)");
+    var t9, v9 = _km_checked_root(inf);
+    assert(is_err_code(t9, v9, KM_ERR_COMPUTATION_ERROR) == 1, "checked_root(inf)");
+    var t10, v10 = _km_checked_root(-0.000001);
+    assert(is_err_code(t10, v10, KM_ERR_COMPUTATION_ERROR) == 1, "checked_root(-1e-6)");
+    var t11, v11 = _km_checked_root(0.0000001);
+    assert(is_ok(t11) == 1 && okf(t11, v11) == 0.0000001, "checked_root(1e-7)");
+}
+
+# henderson_hasselbalch's log10 is _km_log10_ln, glibc's e_log10.c composition over the correctly rounded _km_ln
+# (ADR 0005, amendment M3a). On the golden near-cancellation row with base/acid = 0.8068…/2.6858… glibc's
+# log10 is not correctly rounded (…69da, correctly rounded …69db): the oracle's pH is exactly 0, which this
+# reproduces; a correctly rounded log10 would give −1.1e-16, 2⁶² ulp away.
+fn _t_cyrius_henderson_log10() {
+    test_group("cyrius_henderson_log10");
+    var t, v = henderson_hasselbalch(0.5222965678797735, 0.8068231517516123, 2.6858077314049895);
+    assert(is_ok(t) == 1 && _km_bits(v) == 0, "pKa + log10(ratio) = +0.0, the oracle's");
+    var r: f64 = 0.8068231517516123 / 2.6858077314049895;
+    var l: f64 = _km_log10_ln(r);
+    assert_eq(_km_bits(l), 0xBFE0B6A74ABB69DA, "glibc's log10 bits");
+    var one: f64 = _km_log10_ln(1.0);
+    assert_eq(_km_bits(one), 0, "log10(1) = +0");
+    var k: f64 = _km_log10_ln(1000.0);
+    assert(k == 3.0, "log10(1000) = 3");
+    var dmin: f64 = 0.0;
+    store64(&dmin, 1);                   # the smallest subnormal, 5e-324
+    var sub: f64 = _km_log10_ln(dmin);
+    var subw: f64 = 0.0;
+    store64(&subw, 0xC07434E6420F4374);  # glibc's log10(5e-324)
+    assert_bits_eq(sub, subw, "the smallest subnormal");
+    var zero: f64 = _km_log10_ln(0.0);
+    assert(ulp_is_inf(zero) == 1 && zero < 0.0, "log10(0) = -inf");
+    var neg: f64 = _km_log10_ln(-1.0);
+    assert_eq(ulp_is_nan(neg), 1, "log10(-1) = NaN");
+}
+
+# The generated constants (src/constants.cyr) hold the oracle's bits; KW is written positionally.
+fn _t_cyrius_constants() {
+    test_group("cyrius_constants");
+    var kw: f64 = KM_KW_WATER_25C;
+    assert_eq(_km_bits(kw), 0x3D06849B86A12B9B, "KW = 1e-14");
+    var a: f64 = KM_DH_A_WATER_25C;
+    var b: f64 = KM_DH_B_WATER_25C;
+    assert(a == 0.509 && b == 0.328, "Debye–Hückel A, B");
+    var so4: f64 = KM_LAMBDA_SO4_2MINUS;
+    var oh: f64 = KM_LAMBDA_OH_MINUS;
+    assert(so4 == 160.0 && oh == 198.0, "λ°");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_pure_water_ph();
+    _t_strong_acid_ph();
+    _t_ph_poh_sum_14();
+    _t_ph_h_roundtrip();
+    _t_molarity_basic();
+    _t_dilution_basic();
+    _t_henderson_hasselbalch_equal_ratio();
+    _t_henderson_hasselbalch_more_base();
+    _t_zero_volume_molarity_is_error();
+    _t_zero_concentration_ph_is_error();
+    _t_negative_concentration_ph_is_error();
+    _t_molality_zero_solvent_is_error();
+    _t_dilution_zero_volume_is_error();
+    _t_henderson_hasselbalch_zero_acid_is_error();
+    _t_henderson_hasselbalch_zero_base_is_error();
+    _t_poh_zero_concentration_is_error();
+    _t_h_concentration_from_ph_roundtrip_strong_acid();
+    _t_non_finite_inputs_are_rejected();
+    _t_acetic_acid_ph();
+    _t_hf_weak_acid_ph();
+    _t_weak_acid_dilute();
+    _t_weak_acid_very_dilute_stays_acidic();
+    _t_weak_acid_tiny_ka_times_c_converges();
+    _t_weak_acid_very_weak();
+    _t_weak_acid_large_ka_approaches_strong();
+    _t_weak_acid_zero_ka_is_error();
+    _t_weak_acid_zero_concentration_is_error();
+    _t_weak_acid_base_non_finite_is_error();
+    _t_weak_acid_overflow_is_error_not_garbage();
+    _t_ammonia_weak_base_ph();
+    _t_weak_base_very_dilute_stays_basic();
+    _t_weak_base_tiny_kb_times_c_converges();
+    _t_weak_base_zero_kb_is_error();
+    _t_weak_acid_base_symmetry();
+    _t_ionic_strength_nacl();
+    _t_ionic_strength_cacl2();
+    _t_large_charges_do_not_overflow();
+    _t_debye_huckel_limiting_monovalent();
+    _t_debye_huckel_limiting_divalent();
+    _t_debye_huckel_zero_ionic_strength();
+    _t_extended_dh_larger_than_limiting();
+    _t_extended_dh_rejects_bad_parameters();
+    _t_davies_value();
+    _t_negative_ionic_strength_is_error();
+    _t_non_finite_ionic_strength_or_a_is_error();
+    _t_limiting_molar_conductivity_nacl();
+    _t_limiting_molar_conductivity_hcl();
+    _t_kohlrausch_decreases_with_concentration();
+    _t_solution_conductivity_basic();
+    _t_cyrius_ion_records();
+    _t_cyrius_i32_charges();
+    _t_cyrius_charge_balance_root();
+    _t_cyrius_henderson_log10();
+    _t_cyrius_constants();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

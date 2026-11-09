@@ -308,7 +308,7 @@ fn _km_expm1(xa: f64): f64 {
     return y2;
 }
 
-# ── correctly rounded acos, cos, ln and x^2.5 (M2a, ADR 0005) ─────────────────────────
+# ── correctly rounded acos, cos, ln and x^2.5 (M2a), log10 over ln (M3a): ADR 0005 ───
 #
 # The Peng–Robinson cubic (gas.cyr) is ill-conditioned near a double root and at the critical
 # point, its fugacity coefficient goes as exp(ln φ) with |ln φ| up to hundreds at extreme states,
@@ -615,6 +615,60 @@ fn _km_ln(xa: f64): f64 {
     var ah, al = _km_dd_add(kh, ke, kl, kt);
     var rh, rl = _km_dd_add(ah, al, lh, ll);
     return rh;
+}
+
+# log10(x) as glibc 2.44 composes it over its log (sysdeps/ieee754/dbl-64/e_log10.c, Sun's, M3a): x = 2ᵏ·x′
+# with x′ in [1, 2) for k ≥ 0 and [½, 1) for k < 0, y = k (+ 1 when k < 0), and
+# log10(x) = (y·log10_2lo + ivln10·ln x′) + y·log10_2hi, with ln x′ the correctly rounded _km_ln. glibc's log10
+# is that formula over glibc's log (bit-identical on 500,000 seeded arguments, every golden one included), and
+# is not correctly rounded (about 0.25 % of arguments are 1 ulp off), so a correctly rounded log10 would
+# differ from the oracle exactly there; this one differs only where glibc's log at x′ is not correctly rounded
+# (ADR 0005, amendment M3a). + − × ÷ and _km_ln only: the same bits on every target. log10(±0) = −∞,
+# log10(+∞) = +∞, NaN for NaN and x < 0. For henderson_hasselbalch, whose pKa + log10(ratio) cancels near pH 0;
+# elsewhere _km_log10 (fdlibm, faster) is within K. Mirrors `f64::log10`.
+#must_use
+fn _km_log10_ln(xa: f64): f64 {
+    var x: f64 = xa;
+    var ivln10: f64 = 0x3FDBCB7B1526E50E;
+    var log10_2hi: f64 = 0x3FD34413509F6000;
+    var log10_2lo: f64 = 0x3D59FEF311F12B36;
+    var ui = _km_bits(x);
+    var hx = (ui >> 32) & 0xFFFFFFFF;
+    var k = 0;
+    if (hx < 0x00100000 || (hx >> 31) != 0) {
+        if ((ui << 1) == 0) {
+            var m1: f64 = -1.0;
+            var ninf: f64 = m1 / 0.0;      # log10(±0) = −∞
+            return ninf;
+        }
+        if ((hx >> 31) != 0) {
+            var nan: f64 = (x - x) / 0.0;   # log10(negative) = NaN
+            return nan;
+        }
+        k = 0 - 54;                         # subnormal: scale by 2⁵⁴
+        var p54: f64 = 0x4350000000000000;
+        x = x * p54;
+        ui = _km_bits(x);
+        hx = (ui >> 32) & 0xFFFFFFFF;
+    }
+    if (hx >= 0x7FF00000) {
+        var same: f64 = x + x;              # +∞ and NaN
+        return same;
+    }
+    k = k + ((hx >> 20) - 1023);
+    var i = 0;
+    if (k < 0) { i = 1; }
+    hx = (hx & 0x000FFFFF) | ((0x3FF - i) << 20);
+    var y: f64 = f64_from(k + i);
+    var xb = (hx << 32) | (ui & 0xFFFFFFFF);
+    var xr: f64 = xb;
+    var l: f64 = _km_ln(xr);
+    var lo: f64 = y * log10_2lo;
+    var t: f64 = ivln10 * l;
+    var z: f64 = lo + t;
+    var hi: f64 = y * log10_2hi;
+    var r: f64 = z + hi;
+    return r;
 }
 
 # x^2.5 = x²·√x, correctly rounded for x from 2⁻³⁸⁷ to overflow at 2⁴⁰⁹·⁶: x² is exact as a

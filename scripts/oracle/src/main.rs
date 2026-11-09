@@ -19,21 +19,26 @@
 //! the start of their milestone, with the golden grid from the port plan §4: `constants` and
 //! `math` (M0); `element` and `molecule`, with `src/element_data.cyr` (M1); `reaction`, `thermo`,
 //! `phase` and `gas`, with `src/phase_data.cyr` and `src/gas_data.cyr` (M2a); `thermochem`, with
-//! `src/thermochem_data.cyr` (M2b); …
+//! `src/thermochem_data.cyr` (M2b); `solution` and `electrochemistry`, with `src/electrochemistry_data.cyr` (M3a);
+//! `kinetics` (M3b); …
 
 mod cyr;
 mod glibc;
 mod grids;
 mod m_constants;
+mod m_electrochemistry;
 mod m_element;
 mod m_gas;
+mod m_kinetics;
 mod m_math;
 mod m_molecule;
 mod m_phase;
 mod m_reaction;
+mod m_solution;
 mod m_thermo;
 mod m_thermochem;
 mod t_constants;
+mod t_electrochemistry;
 mod t_element;
 mod t_gas;
 mod t_phase;
@@ -49,12 +54,15 @@ use std::process::ExitCode;
 fn golden_modules() -> Vec<tsv::Module> {
     vec![
         m_constants::emit(),
+        m_electrochemistry::emit(),
         m_element::emit(),
         m_gas::emit(),
+        m_kinetics::emit(),
         m_math::emit(),
         m_molecule::emit(),
         m_phase::emit(),
         m_reaction::emit(),
+        m_solution::emit(),
         m_thermo::emit(),
         m_thermochem::emit(),
     ]
@@ -78,8 +86,10 @@ fn cyrius_outputs(root: &Path, prov: &str) -> Result<Vec<Output>, String> {
     let phase_src = read(&root.join("rust-old/src/phase.rs"))?;
     let gas_src = read(&root.join("rust-old/src/gas.rs"))?;
     let thermochem_src = read(&root.join("rust-old/src/thermochem.rs"))?;
+    let electrochemistry_src = read(&root.join("rust-old/src/electrochemistry.rs"))?;
     let files = [
         ("src/constants.cyr", t_constants::emit(root, prov)?),
+        ("src/electrochemistry_data.cyr", t_electrochemistry::emit(&electrochemistry_src, prov)?),
         ("src/element_data.cyr", t_element::emit(&element_src, prov)?),
         ("src/gas_data.cyr", t_gas::emit(root, &gas_src, prov)?),
         ("src/phase_data.cyr", t_phase::emit(root, &phase_src, prov)?),

@@ -37,6 +37,9 @@ MODULES = {
     "thermochem": {"prefix": "", "structs": {"Shomate"}},
     "phase": {"prefix": "", "structs": {"AntoineCoeffs"}},
     "gas": {"prefix": "", "structs": {"PengRobinsonParams"}},
+    "solution": {"prefix": "", "structs": set()},
+    "electrochemistry": {"prefix": "", "structs": set()},
+    "kinetics": {"prefix": "", "structs": set()},
 }
 
 # Rust structs that became handles (port plan §6.4: `Option<&'static T>` → a handle, 0 for None):
@@ -46,6 +49,7 @@ STRUCT_ACCESSORS = {
     "ElementProperties": "element_properties_",  # handle = property row + 1 (1–32)
     "Atom": "atom_",                          # entry k of a KmMolecule: `m.atom_<field>(k)`
     "ThermochemData": "thermochem_data_",     # handle = THERMOCHEM_DATA row + 1 (1–76)
+    "HalfReaction": "half_reaction_",         # handle = STANDARD_POTENTIALS row + 1 (1–49)
 }
 
 # Rust item -> why it has no direct Cyrius name (it is still checked to exist in Rust).
@@ -76,11 +80,15 @@ EXCEPTIONS = {
                                        "src/thermochem_data.cyr (KM_SHOMATE_COUNT rows), read through handles "
                                        "(row + 1): lookup_shomate, lookup_shomate_at, shomate_data_formula, "
                                        "shomate_data_coeffs (port plan §6.4)",
+    "electrochemistry::static STANDARD_POTENTIALS": "the generated columns KM_STANDARD_POTENTIALS_ELECTRONS / "
+                                                    "_STANDARD_POTENTIAL and the UTF-8 equation and couple blobs in "
+                                                    "src/electrochemistry_data.cyr (KM_STANDARD_POTENTIALS_COUNT "
+                                                    "rows), read through handles (row + 1): lookup_half_reaction and "
+                                                    "the half_reaction_* accessors (port plan §6.4)",
 }
 
 # Later milestones (port plan §2.1): counted, not checked.
 PENDING_MODULES = {
-    "solution": "M3", "electrochemistry": "M3", "kinetics": "M3",
     "stoichiometry": "M4", "organic": "M4", "inorganic": "M4", "potential": "M4", "nuclear": "M4",
     "spectroscopy": "M4",
     "reaction_dynamics": "M5", "network": "M5", "fitting": "M5", "sensitivity": "M5",

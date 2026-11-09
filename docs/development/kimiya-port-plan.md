@@ -302,7 +302,7 @@ Every std f64 method in `src/` (non-test), 1.2.0:
 | `powf` (10) | `ganita_f64_pow` | class C; note ganita's `pow(-1, huge)` defect (tanmatra ADR 0007) — kimiya's bases are positive |
 | `cos` (4), `sin` (1), `acos` (1), `atan2` (2) | `f64_cos`, `f64_sin`, `ganita_f64_acos`, `ganita_f64_atan2` | class C (PR trig roots, dihedral) |
 | `cbrt` (2) | `ganita_f64_cbrt` (correctly rounded) | exact vs a correctly rounded glibc cbrt — confirm in step 8 |
-| `log10` (4), `exp_m1` (3) | **local** `_km_log10`, `_km_expm1` | class C, or transcribe if K > 64 |
+| `log10` (4), `exp_m1` (3) | **local** `_km_log10`, `_km_expm1`; `henderson_hasselbalch` (cancels near pH 0) calls `_km_log10_ln`, glibc's e_log10.c composition over the correctly rounded `_km_ln` (M3a, ADR 0005 amendment) | class C, or transcribe if K > 64 |
 | `round` (4) | **local** `_km_round_half_away` (`f64_round` ties to even) | exact |
 | `powi` (1) | repeated multiply in Rust's order | class B |
 | `max` (13), `min` (7), `clamp`, `signum`, `total_cmp` | builtins / local helpers with Rust's NaN semantics (probe) | exact |
@@ -459,6 +459,71 @@ Decided in M2b (2026-11-09; thermochem):
   products' segments (the bump allocator can't free, and the function is called in loops); a longer list resolves
   the rest again per evaluation (same values; golden rows with 40 products).
 
+Decided in M3a (2026-11-09; solution, electrochemistry):
+- **Constants** — the ten `solution::` constants (K_w, Debye–Hückel A and B, the seven Λ°) are generated into
+  `src/constants.cyr` with their Rust doc comments, as M2a's `KM_WATER_SPECIFIC_HEAT` (solution has no data file, and
+  constants.cyr precedes it); `KM_KW_WATER_25C` is written positionally (`0.00000000000001`). 35 of the 45 `constants`
+  rows are compared; the 10 inorganic ones wait for M4.
+- **Generated module data** — `STANDARD_POTENTIALS` in `src/electrochemistry_data.cyr` (`t_electrochemistry.rs`): the
+  equation as the first **UTF-8** string blob (`cyr::string_column_utf8`, the bytes copied exactly: "Cu²⁺ + 2e⁻ → Cu" is
+  22 bytes, and `strlen` counts bytes, as Rust's `&str` length does), the couple as an ASCII blob, `electrons` a `u8`
+  column, `standard_potential` an f64 column, `KM_STANDARD_POTENTIALS_COUNT`; `HalfReaction`'s and the table's doc
+  comments and the literal's two trailing "CRC Handbook, Electrochemical Series" notes travel into the comment block.
+  `FARADAY` / `ELEMENTARY_CHARGE` stay `src/constants.cyr`'s.
+- **Handles** — `lookup_half_reaction(couple)` → STANDARD_POTENTIALS row + 1, 0 for none (a null pointer is none);
+  `HalfReaction`'s fields are named after the struct, as M1's `element_<field>(h)`: `half_reaction_equation(h)` and
+  `half_reaction_couple(h)` (`""` for an invalid handle), `half_reaction_electrons(h)` (0: no row has 0) and
+  `half_reaction_standard_potential(h)` (NaN). `cell_potential_from_couples` → `Err(KM_ERR_INVALID_REACTION)` for an
+  unknown couple, the cathode's first.
+- **Out-of-type integers** (as M2a's `phase_rule`, never wrapped) — Rust's `charge: i32` is a word: outside the i32 range
+  the activity models return `Err(KM_ERR_INVALID_INPUT)`, checked first (Rust's type would reject it at compile time),
+  and `ionic_strength` returns NaN (it has no error channel). Rust's `n_electrons: u8` is a word: outside 0 ..= 255 is
+  `Err(KM_ERR_INVALID_INPUT)` at the position of Rust's `== 0` check, one test `n < 1 || n > 255` (so the temperature
+  check still comes first in `nernst_potential`).
+- **Ion records** — `ionic_strength(ions, n)`: Rust's `&[(f64, i32)]` is a pointer to n 16-byte records (the
+  concentration's f64 bits, then the charge as an i64 word) and n, as M2b's species lists; Rust's `.sum()` folds from
+  −0.0 (no ions: 0.5 × −0.0 = −0.0); a negative n or a null pointer with n > 0 is NaN.
+- **The charge-balance Newton** — Rust's private `charge_balance_root` / `checked_root` / `validate_ionic_strength_and_a`
+  are `_km_charge_balance_root` / `_km_checked_root` / `_km_validate_ionic_strength_and_a`, operation for operation
+  (`_km_min` for `.min`, the step tested against the updated x). The private `CHARGE_BALANCE_REL_TOL` (10⁻¹²) and
+  `CHARGE_BALANCE_MAX_ITER` (50) are typed formula constants inline: the tolerance is pinned from both sides by golden rows
+  and by `tests/solution.tcyr` on the helper; the cap is unobservable (no input needs more than 7 updates), as the flame
+  solver's limits (ADR 0003 amendment). The root is + − × ÷ and √, bit-identical; `weak_acid_ph` / `weak_base_ph` are
+  class C through their one log10.
+- **Math** — log10 is `_km_log10` (fdlibm) except in `henderson_hasselbalch`, which calls `_km_log10_ln`; the Nernst
+  functions' ln is the correctly rounded `_km_ln`; 10^x is `ganita_f64_pow(10, x)` as the Antoine equation's. A
+  correctly rounded log10 was tried first and failed the near-cancellation rows: glibc's log10 is not correctly rounded
+  on 0.3–29 % of arguments (ADR 0005 amendment M3a, port-parity.md §7). `solution.cyr` includes `lib/ganita.cyr`,
+  `electrochemistry.cyr` `lib/string.cyr`.
+
+Decided in M3b (2026-11-09; kinetics):
+- **Parity is functional (the user, 2026-11-09).** The port must give the oracle's results, errors and branches, with
+  the best accuracy available, and never reproduce glibc's rounding errors: no primitive is chosen or built because it
+  matches glibc's bits. A class-C function whose K would pass 64 keeps its rows *measured* (replayed unbounded, not
+  gated) and its grid unchanged, until a later step (ADR 0006) makes the primitives correctly rounded and compares such
+  rows against the oracle's formula evaluated with correctly rounded results. M3a's `henderson_hasselbalch` /
+  `_km_log10_ln` and ADR 0005 are left for that step.
+- **Math** — exp is `f64_exp`, exp_m1 `_km_expm1`, powf `ganita_f64_pow`; `kinetics.cyr` includes `lib/math.cyr` and
+  `lib/ganita.cyr`. All six class-C functions (`arrhenius_rate`, `first_order_concentration`, `nth_order_half_life`,
+  `collision_theory_rate`, `eyring_rate`, `eyring_rate_from_activation`) are measured: a subnormal exp or pow result
+  scaled into the normal range by a prefactor puts S at 10¹⁴ … 4.4 × 10¹⁸ (port-parity.md §8). The nine class-B functions
+  are gated, 0 ulp.
+- **Typed constants** — Rust's `std::f64::consts::LN_2` and private `FIRST_ORDER_TOLERANCE` (10⁻¹²) are typed inline, LN_2
+  by its bits (`0x3FE62E42FEFA39EF`, as `src/mathx.cyr` writes ln 2's high part); `KM_GAS_CONSTANT`, `KM_BOLTZMANN`
+  (Rust's `kinetics::BOLTZMANN`) and `KM_PLANCK` stay `src/constants.cyr`'s. Both typed constants are pinned by golden rows
+  (`half_life_first_order(1)` is LN_2 exactly; the orders 1 ± 10⁻¹² and the ulps either side) and `validate.py`'s pinning
+  check; `tests/kinetics.tcyr` pins the four boundary orders.
+- **Tuple returns** — `lineweaver_burk`'s `Result<(f64, f64)>` follows `peng_robinson_z_roots`: `lineweaver_burk(v_max, km,
+  out)` writes the slope (Km/Vmax) at `out` and the intercept (1/Vmax) at `out + 8` of the caller's two-f64 buffer
+  (`var lb[16];`) and returns `Ok(2)`, the count written; Rust's errors are unchanged, and on `Err` the buffer is untouched.
+  The golden row's output is the tuple's two floats (`f:slope f:intercept`, the format's tuple rule). As for the PR roots,
+  `out` is the caller's contract: a null pointer is not checked.
+- **Rust's semantics kept** — `zero_order_concentration` is `if remaining < 0.0 { 0.0 } else { remaining }` (NaN
+  propagates, −0.0 stays −0.0); `collision_theory_rate`'s steric check is Rust's positive form `p > 0 && p <= 1` (NaN
+  fails); `nth_order_half_life` checks `!is_finite(n) || |n − 1| <= 10⁻¹²`, then k, then [A]₀, and returns
+  `Err(KM_ERR_COMPUTATION_ERROR)` unless t½ is positive and finite; 0·∞ inside a rate law (`arrhenius_rate(0, −1, 10⁻³⁰⁰)`,
+  `eyring_rate_from_activation` with one exp overflowing and the other underflowing) is `Ok(NaN)`, as in Rust.
+
 Language traps already probed on 6.7.18 by tanmatra (its plan §0, §5): no exponent literals;
 `(0 - x)` on an f64 is wrong; a hex literal in a `const` is an integer; `f64_round` ties to
 even; `+?` aborts the process; `cyrius test` must be warning-free.
@@ -472,7 +537,8 @@ even; `+?` aborts the process; `cyrius test` must be warning-free.
 | M0 Initialize | ✅ done 2026-11-09 | constants 45 + math 18,647 (2.0 MB): 13,340 ok, 0 failed, 5,351 pending (M1 helpers, module-data constants), 1 accepted (ADR 0004) — identical on x86_64 ELF, x86_64 PE, aarch64 | — | scaffold only | Oracle frozen at tag `1.2.0`; scaffold + repairs; hisab 3.4.1; generator + `constants.cyr` (14 `KM_`) + harness; K = 2 ulp for the math primitives ([`port-parity.md`](port-parity.md)); ADRs 0001–0004 |
 | M1 Foundation | ✅ done 2026-11-09 | element 975 + molecule 2,472 + constants 14 (of 45) + math 18,647 (now 0 pending): 22,107 ok, 0 failed, 31 pending (module-data constants), 1 accepted (ADR 0004) — identical on x86_64 ELF, x86_64 PE, aarch64; `molecular_weight` 0 ulp; log10 K = 2 (max 1), exp_m1 K = 2 (max 0) | 38 Rust tests ported (error 2, validate 3, element 22, molecule 11; molecule's `serde_roundtrip` doesn't port), plus 4 Cyrius-only groups: 179 assertions | 3 (`lookup_by_symbol` 1.5× Rust, `lookup_by_number` 5.4×, `molecular_weight_glucose` 7.4×; [benchmarks](../benchmarks-rust-v-cyrius.md)) | `error`, `mathx`, `validate`, generated `element_data` + `element`, `molecule`; `[lib]` + `dist/kimiya.cyr`; surface parity 55/55; settled points in §6.4 |
 | M2 Thermochemistry & gases | ✅ **done 2026-11-09** (M2a: reaction, thermo, phase, gas; M2b: thermochem) | reaction 1,188 + thermo 1,107 + thermochem 9,487 + phase 3,276 + gas 19,717 + math 26,147 (7,500 new in M2a) + constants 25 of 45: 63,953 ok, 0 failed, 0 measured, 20 pending (M3–M4 constants), 441 accepted (ADR 0004 + 440 ADR 0002 #4 mapped Antoine rows) — identical on x86_64 ELF, x86_64 PE, aarch64; class B all 0 ulp (the flame temperature too: 1,682 Newton + 154 bisection rows); class C K = 2–10 by the rule (ADR 0005; vant_hoff_k 6) | 152 Rust tests ported (reaction 10, thermo 10, thermochem 62, phase 31, gas 39; none skipped; 4 thermochem tests assert J/mol for ADR 0002 #1, `antoine_pole_and_non_finite_give_nan` asserts Err for #4), plus 12 Cyrius-only groups: 729 assertions | 9 (M2a: `gibbs_free_energy` 9.7× Rust, `heat_transfer` 5.4×, `ideal_gas_pressure` 7.7×, `peng_robinson_z_n2_1mpa` 4.4×; M2b: `reaction_enthalpy_ch4` 6.5×, `vant_hoff_k` 6.2×, `enthalpy_change_cp` 6.9×, `shomate_cp` 6.2×, `adiabatic_flame_ch4_air` 10.7×) | generated `thermochem_data`, `phase_data`, `gas_data`; ADR 0005 (correctly rounded acos/cos/ln/x^2.5); ADR 0003 amendment (flame solver transcribed); ADR 0002 #1 (J/mol); surface parity 140/140; settled points in §6.4 |
-| M3 Solutions & electrochemistry | ☐ | | | | |
+| M3 Solutions & electrochemistry | ✅ **ported 2026-11-09** (M3a: solution, electrochemistry; M3b: kinetics); six kinetics class-C functions measured until M3c | solution 28,566 + electrochemistry 18,574 + kinetics 30,146 + constants 35 of 45: 119,044 ok, 0 failed, 22,205 measured (M3b's six class-C kinetics functions, K past 64 through subnormal exp / pow results: left for ADR 0006 by the user's decision, §6.4), 10 pending (the M4 inorganic constants), 441 accepted — identical on x86_64 ELF, x86_64 PE, aarch64; class B all 0 ulp; M3a class C K = 2–4 (Henderson–Hasselbalch and Nernst S ≈ 10¹⁸ before the remedy, 0 after, all 0 ulp); the weak acid / base root bit-exact (11,740 f ≤ 0, 6,356 relative-step, 74 non-finite exits; ≤ 7 updates); kinetics S 10¹⁴ … 4.4 × 10¹⁸ (2–4 without the subnormal rows) | 131 Rust tests ported (solution 49, electrochemistry 35, kinetics 47; 2 kinetics tests adapted for the Lineweaver–Burk buffer), plus 12 Cyrius-only groups: 1,667 assertions | 7 (M3a: `ph_from_h` 6.8× Rust, `weak_acid_ph` 5.2×, `lookup_half_reaction` 2.0×, `nernst_potential` 302× — the correctly rounded `_km_ln`; M3b: `arrhenius_rate` 7.3×, `eyring_rate` 6.3×, `michaelis_menten` 5.7×) | generated `electrochemistry_data` (the first UTF-8 blob) and 10 more constants; ADR 0005 amendment M3a (`_km_log10_ln`, `_km_ln` for Nernst); the functional-parity decision (§6.4, ADR 0006 to come); surface parity 203/203; settled points in §6.4 |
+| M3c Correct rounding (ADR 0006) | ☐ next | | | | The user's decision (2026-11-09): functional parity, best accuracy. Correctly rounded primitives everywhere (fast path + exact fallback); class-C golden rows compared against the oracle's formula with correctly rounded results (exact ties: rational arithmetic / MPFR); gates M3b's six measured functions; replaces `_km_log10_ln` and ADR 0005's glibc-relative S |
 | M4 Structure, nuclear & spectroscopy | ☐ | | | | |
 | M5 Numerics | ☐ | | | | ADR 0003 decides the hisab gaps |
 | M7 Release 2.0.0 | ☐ | | | | |

@@ -4,7 +4,7 @@
 # It includes dist/kimiya.cyr (written by `cyrius distlib --all`; `cyrius distlib --check` proves it
 # current), not src/, so the bundle compiles warning-free as one unit and its modules work
 # together. The reference tests are tests/{error,validate,element,molecule,reaction,thermo,thermochem,
-# phase,gas}.tcyr; the golden corpus is tests/parity.tcyr.
+# phase,gas,solution,electrochemistry,kinetics}.tcyr; the golden corpus is tests/parity.tcyr.
 
 include "dist/kimiya.cyr"
 
@@ -61,6 +61,32 @@ fn main() {
     var tz, vz = peng_robinson_z(KM_PR_NITROGEN, 300.0, 1000000.0);
     var z: f64 = vz;
     assert(is_ok(tz) == 1 && z > 0.996 && z < 0.997, "gas");
+    var tw, vw = weak_acid_ph(0.000018, 0.1);
+    var ph: f64 = vw;
+    assert(is_ok(tw) == 1 && ph > 2.875 && ph < 2.876, "solution (the charge-balance Newton)");
+    var th2, vh2 = henderson_hasselbalch(4.75, 1.0, 0.1);
+    var ph2: f64 = vh2;
+    var kw: f64 = KM_KW_WATER_25C;
+    assert(is_ok(th2) == 1 && ph2 == 5.75 && kw < 0.0000000000001, "solution (log10 over _km_ln; KW)");
+    var he = lookup_half_reaction("Cu2+/Cu");
+    var e0: f64 = half_reaction_standard_potential(he);
+    assert(e0 == 0.342 && half_reaction_electrons(he) == 2, "electrochemistry_data");
+    var tn, vn = nernst_potential_25c(0.342, 2, 0.01);
+    var en: f64 = vn;
+    assert(is_ok(tn) == 1 && en > 0.4011 && en < 0.4012, "electrochemistry (Nernst, _km_ln)");
+    var tcell, vcell = cell_potential_from_couples("Cu2+/Cu", "Zn2+/Zn");
+    var ecell: f64 = vcell;
+    assert(is_ok(tcell) == 1 && ecell > 1.103 && ecell < 1.105, "electrochemistry (Daniell cell)");
+    var tk, vk = arrhenius_rate(10000000000000.0, 100000.0, 300.0);
+    var kr: f64 = vk;
+    assert(is_ok(tk) == 1 && kr > 0.0000387965 && kr < 0.0000387966, "kinetics (Arrhenius, exp)");
+    var tn2, vn2 = nth_order_half_life(2.0, 0.1, 3.0);
+    var th3: f64 = vn2;
+    assert(is_ok(tn2) == 1 && th3 > 3.7499999 && th3 < 3.7500001, "kinetics (nth order: exp_m1, pow)");
+    var lb[16];
+    var tl, vl = lineweaver_burk(100.0, 5.0, &lb);
+    var slope: f64 = load64(&lb);
+    assert(is_ok(tl) == 1 && vl == 2 && slope == 0.05, "kinetics (Lineweaver–Burk buffer)");
     return assert_summary();
 }
 

@@ -190,12 +190,35 @@ pub fn string_column(
     doc: &str,
     strings: &[&str],
 ) -> Result<String, String> {
+    blob_column(bytes_name, off_name, doc, strings, false)
+}
+
+/// As [`string_column`], for UTF-8 text (M3a: the half-reaction equations, "Cu²⁺ + 2e⁻ → Cu"): the blob
+/// holds each string's UTF-8 bytes exactly, so `strlen` counts bytes and a C-string compare is a byte
+/// compare, as Rust's `&str ==` is. No NUL inside a string.
+pub fn string_column_utf8(
+    bytes_name: &str,
+    off_name: &str,
+    doc: &str,
+    strings: &[&str],
+) -> Result<String, String> {
+    blob_column(bytes_name, off_name, doc, strings, true)
+}
+
+fn blob_column(
+    bytes_name: &str,
+    off_name: &str,
+    doc: &str,
+    strings: &[&str],
+    utf8: bool,
+) -> Result<String, String> {
     let mut offsets = Vec::new();
     let mut lines = Vec::new();
     let mut at = 0usize;
     for s in strings {
-        if !s.is_ascii() || s.contains('\0') {
-            return Err(format!("{bytes_name}: {s:?} is not NUL-free ASCII"));
+        if (!utf8 && !s.is_ascii()) || s.contains('\0') {
+            let what = if utf8 { "NUL-free" } else { "NUL-free ASCII" };
+            return Err(format!("{bytes_name}: {s:?} is not {what}"));
         }
         offsets.push(u16::try_from(at).map_err(|_| format!("{off_name}: offset {at} > u16"))?);
         let codes: Vec<String> = s.bytes().chain([0]).map(|b| b.to_string()).collect();
@@ -219,10 +242,11 @@ pub fn string_column(
         &Elem::U16(offsets),
         &labels,
     )?;
+    let enc = if utf8 { "UTF-8 bytes" } else { "ASCII" };
     let _ = writeln!(
         out,
         "{}\nvar {bytes_name}: u8[{at}] = {{",
-        comment_line("Every string, NUL-terminated, in row order (ASCII).")
+        comment_line(&format!("Every string, NUL-terminated, in row order ({enc}).")),
     );
     for l in lines {
         out.push_str(&l);

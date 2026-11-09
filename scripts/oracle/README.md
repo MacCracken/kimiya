@@ -47,15 +47,18 @@ python3 -I scripts/oracle/probe_tables.py .                                     
 
 | Module | Milestone | Golden rows | Golden emitter | Generated Cyrius |
 |---|---|---|---|---|
-| `constants` | M0 | 45 | `src/m_constants.rs` | `src/constants.cyr` (`src/t_constants.rs`): the 14 physical constants. The other 31 rows (K_b/K_f, Madelung, Born exponents, Λ°, Debye–Hückel, K_w, STP, c_water) are generated with their module's data at M2–M4 |
+| `constants` | M0 | 45 | `src/m_constants.rs` | `src/constants.cyr` (`src/t_constants.rs`): the 14 physical constants, `thermo::WATER_SPECIFIC_HEAT` (M2a) and the ten `solution::` constants (M3a: K_w, Debye–Hückel A / B, Λ°). K_b/K_f and STP are generated with their module's data (M2a); the 10 Madelung and Born rows wait for M4 |
+| `electrochemistry` | M3a | 18,574 | `src/m_electrochemistry.rs`: the table and `lookup_half_reaction` (every couple, case / space variants, every prefix, the equations, `""`) (A); the cell potentials over all 49 × 49 couple pairs, ΔG, Faraday's laws over every decade of charge and mass, the electron counts 0 … 6, 127, 128, 254, 255, the edges (B); `nernst_potential` / `_25c` (C) over the edges, T and Q decades, every couple's E° and n, a seeded sweep and **near-cancellation rows** (E° = (RT/nF)·ln Q to a few ulp, E ≈ 0 of both signs) | `src/electrochemistry_data.cyr` (`src/t_electrochemistry.rs`): the 49 `STANDARD_POTENTIALS` rows (a **UTF-8** equation blob, the couple blob, electrons `u8`, E° f64), `KM_STANDARD_POTENTIALS_COUNT`, `HalfReaction`'s docs and the literal's two CRC Handbook notes |
 | `element` | M1 | 975 | `src/m_element.rs`: `lookup_by_number` and `lookup_properties` over every u8 (0..=255), `lookup_by_symbol` over every symbol, its lower- and upper-case forms, every name, and `""`, `"Xx"`, `"FE"`, `"Fe "`, `" Fe"`, a 300-byte string | `src/element_data.cyr` (`src/t_element.rs`): `enum KmElementCategory`, the 118 `ELEMENTS` rows (atomic number, symbol and name blobs, mass, electronegativity flag + value, category) and the 32 `ELEMENT_PROPERTIES` rows (oxidation states flattened over an `i8` table) |
 | `math` | M0 step 8 (M2a: +7,500) | 26,147 | `src/m_math.rs`; M2a added dense cos / acos / ln / powf(·, 2.5) sweeps over the Peng–Robinson and Redlich–Kwong argument ranges | — |
 | `molecule` | M1 | 2,472 | `src/m_molecule.rs`: the four presets, the cases the 1.2 tests pin, 600 seeded compositions (1–8 atoms, counts 0..=200, repeats, invalid Z 0/119/255, u32::MAX counts); `new`, `molecular_weight` (B), `formula`, `total_atoms` on each | — |
 | `reaction` | M2a | 1,188 | `src/m_reaction.rs`: `gibbs_free_energy` (B) and `equilibrium_constant` (C) over each argument's edges, ΔG from target exponents across exp's underflow/overflow ends, the Rust tests' values, seeded sweeps; `is_spontaneous` (A) | — |
+| `solution` | M3a | 28,566 | `src/m_solution.rs`: molarity, molality, dilution, ionic strength (`v:n` + `f:c i:z` pairs), Kohlrausch, conductivity (B); pH / pOH over every decade, h from pH across 10^x's ends, the activity models over every charge −4 … 4, ±50 000, i32::MIN / MAX (C); `henderson_hasselbalch` (C) with **near-cancellation rows** (pKa = −log₁₀(base/acid) to a few ulp, pH ≈ 0 of both signs); `weak_acid_ph` / `weak_base_ph` (C) over the Ka (Kb) × C grid of every decade 10⁻⁴⁰ … 10⁴⁰ × 10⁻⁴⁰ … 10²⁰, seeded pairs, the overflow cases, **each row's note naming the Newton's exit** (`[root: relative step, 4 updates]`) | `src/constants.cyr` gains the ten solution constants (solution has no data file) |
 | `thermo` | M2a | 1,107 | `src/m_thermo.rs`: all class B — `heat_transfer`, `hess_law` and `enthalpy_from_formation` (slices as `v:n` + values; −0.0 sums, ∞ − ∞, cancellation, seeded slices), `specific_heat_from_calorimetry` (the 1e-12 threshold ± 1 ulp) | `src/constants.cyr` gains `KM_WATER_SPECIFIC_HEAT` (thermo has no data file) |
 | `phase` | M2a | 3,276 | `src/m_phase.rs`: Raoult, Henry, colligative, osmotic (B); Clausius–Clapeyron (C); Antoine mmHg / Pa (C) for every set at and one ulp past each range end, 0.5/1/10 °C outside, a 5 °C ladder, seeded points, the pole ± 1 ulp, specials, custom sets (non-finite fields, inverted range, pole inside the range, overflow), and the unit set's class-A rows that pin `PA_PER_MMHG`; `lookup_antoine`, `phase_rule` (all pairs of 13 u32 probes), `ANTOINE_DATA` / `ANTOINE_DATA[]` (A) | `src/phase_data.cyr` (`src/t_phase.rs`): `struct KmAntoineCoeffs`, the 8 sets (name blob + A, B, C, t_min_c, t_max_c columns), `_KM_PA_PER_MMHG` (through the API, see below), `KM_KB_*` / `KM_KF_*` |
 | `thermochem` | M2b | 9,487 | `src/m_thermochem.rs`: the tables and lookups (A); `Shomate::cp` / `enthalpy_antiderivative` per segment incl. range ends, extrapolation, T = 0 / ±∞ / NaN, `enthalpy_change_cp` within and across segments (B); `reaction_enthalpy` / `_gibbs_energy` (B, **J/mol: the oracle's kJ/mol × 1000.0, computed by the generator**, ADR 0002 #1, said in the row note) and `reaction_entropy` over seeded species lists (`v:n` + `s:formula f:coeff` pairs); `vant_hoff_k` (C); `adiabatic_flame_temperature` (B) over fuels, equivalence ratios, oxidisers, T₀, 10⁻²⁰⁰…10³⁰⁰ scalings and every Err path, **each Ok row's note naming the solver that answered** (`[newton, k steps]`, `[bisection after newton: …, k halvings]`) | `src/thermochem_data.cyr` (`src/t_thermochem.rs`): `struct KmShomate`, the 76 `THERMOCHEM_DATA` rows (formula and name blobs, ΔH_f°, ΔG_f°, S°), the 34 `SHOMATE_DATA` segments (formula blob, a … t_max), `KM_THERMOCHEM_COUNT`, `KM_SHOMATE_COUNT`, and the literals' `//` comments |
 | `gas` | M2a | 19,717 | `src/m_gas.rs`: ideal gas, van der Waals, Dalton, density, `peng_robinson_pressure` (B); `peng_robinson_z`, `_z_roots` (`v:n` + roots), `fugacity_coefficient_pr`, `fugacity_pr` over each preset × 26 temperatures × 29 pressures (one- and three-root regions, the critical point ± 10⁻⁶, 90–200 MPa), seeded states, validation edges and overflow, and `redlich_kwong_pressure` (C); the `PR_*` presets and `joule_thomson_ideal` (A) | `src/gas_data.cyr` (`src/t_gas.rs`): `struct KmPengRobinsonParams`, `KM_STP_*`, the 5 `KM_PR_*` presets as top-level struct values |
+| `kinetics` | M3b | 30,146 | `src/m_kinetics.rs`: `half_life_first_order` (every decade of k; k = 1 is LN_2 exactly), the second- and zero-order laws, `zero_order_half_life`, steady state, pre-equilibrium, Michaelis–Menten and `lineweaver_burk` (output `f:slope f:intercept`, the tuple's fields) (B), each argument over the edges and every Err path; `arrhenius_rate`, `first_order_concentration`, `collision_theory_rate`, `eyring_rate`, `eyring_rate_from_activation` (C) over T from the smallest subnormal to DBL_MAX, wide signed energies, the exponent on targets across exp's range, and **on purpose the rows where a subnormal exp result is scaled into the normal range** (A, [A]₀, Z·p up to DBL_MAX; Eyring at low T; one Eyring factor subnormal, the other huge), exp overflow (A·∞, 0·∞ → NaN); `nth_order_half_life` (C) on a fine order grid around 1 (the 10⁻¹² tolerance and the ulps either side), orders to ±300, [A]₀ and k over many decades, **[A]₀^(n−1) subnormal with a finite half-life**, and exact powers at the subnormal grid's half-way points | — (kinetics' constants are `src/constants.cyr`'s) |
 
 ## glibc, not the `libm` crate
 
@@ -186,6 +189,16 @@ Two kinds of golden row carry a bracketed suffix in their note (`Module::row_not
   gives the oracle's bits, or the oracle's error, on every row. `validate.py` recomputes the path independently and
   checks the note. The generator prints the tally (1,682 Newton, 154 bisection, 101 Err).
 
+### The weak acid / base Newton's path (M3a)
+
+`solution::weak_acid_ph` / `weak_base_ph` rows that reach the iteration carry its exit in their note:
+`[root: f(x) <= 0, k updates]`, `[root: relative step, k updates]`, `[root: non-finite step, k updates]`,
+`[root: 50 iterations]`, with `, checked_root rejected` if the accepted x was not positive and finite.
+`m_solution::root_replica` transcribes Rust's private `charge_balance_root` and `checked_root`, and generation fails
+unless it gives the oracle's pH bits, or its error, on every row. `validate.py` recomputes the path independently and
+checks the note. The generator prints the tally (11,740 `f(x) <= 0`, 6,356 relative step, 74 non-finite step, no
+exhaustion or rejection; at most 7 updates).
+
 ### Emission rules
 
 Probed on Cyrius 6.7.18 (by tanmatra; re-proven here by `probe_tables.py`), and enforced by
@@ -203,10 +216,13 @@ the generator:
 - **String columns are a NUL-separated `u8` blob plus a `u16` offset column** (`cyr::string_column`):
   an array initializer can't hold a string literal. `&_KM_X_BYTES + _KM_X_OFF[i]` is row i's C string;
   one blob line per row, its bytes then the text as the label (a row past 120 columns, M2b's longest names, is
-  split into lines of 16 bytes with the label on the first). ASCII and NUL-free, or a generator error.
-- **Comments inside a table literal** (M2a's methanol source, M2b's sections and Shomate sources / caveats) travel
-  into the table's comment block, keyed by row and word-wrapped; `t_thermochem` cross-checks each literal's row
-  keys against the API's rows, in order.
+  split into lines of 16 bytes with the label on the first). ASCII and NUL-free, or a generator error — except a
+  column written with `cyr::string_column_utf8` (M3a: the half-reaction equations), whose blob holds each string's UTF-8
+  bytes exactly (NUL-free), so `strlen` counts bytes and a C-string compare is Rust's `&str ==`.
+- **Comments inside a table literal** (M2a's methanol source, M2b's sections and Shomate sources / caveats, M3a's two
+  trailing "CRC Handbook" notes, keyed by row and field) travel into the table's comment block, keyed by row and
+  word-wrapped; `t_thermochem` and `t_electrochemistry` cross-check each literal's row keys against the API's rows, in
+  order.
 - **`Option<f64>` cells are a `bool` presence column plus the value** (0.0 for `None`), since a
   compile-time f64 can't be NaN; the accessor returns the value-form `Option`.
 - **Per-cell `//` notes in the Rust literal** (the IUPAC conventional and CIAAW 2024 atomic weights)
@@ -225,6 +241,7 @@ A bundle is concatenated into its consumers, so every generated global is prefix
 | `ELEMENT_PROPERTIES[k].field` (M1) | `KM_ELEMENT_PROPERTIES_<FIELD>[k]`; oxidation states `..._OXIDATION_STATE_START` / `_COUNT` over `..._OXIDATION_STATES`; `KM_ELEMENT_PROPERTIES_COUNT` |
 | `THERMOCHEM_DATA[k].field` (M2b) | `KM_THERMOCHEM_<FIELD>[k]`; formula and name `_KM_THERMOCHEM_{FORMULA,NAME}_{BYTES,OFF}`; `KM_THERMOCHEM_COUNT` |
 | `SHOMATE_DATA[k]` (M2b) | `KM_SHOMATE_<FIELD>[k]` (A … T_MAX); formula `_KM_SHOMATE_FORMULA_{BYTES,OFF}`; `KM_SHOMATE_COUNT`; `Shomate` is `struct KmShomate` |
+| `STANDARD_POTENTIALS[k].field` (M3a) | `KM_STANDARD_POTENTIALS_ELECTRONS[k]`, `KM_STANDARD_POTENTIALS_STANDARD_POTENTIAL[k]`; equation and couple `_KM_STANDARD_POTENTIALS_{EQUATION,COUPLE}_{BYTES,OFF}`; `KM_STANDARD_POTENTIALS_COUNT`; `HalfReaction` has no struct: its fields are `half_reaction_<field>(h)` |
 
 Each constant's comment block ends with `# Rust: kimiya::<module>::<NAME>`, which
 `validate.py` and `probe_tables.py` read to tie it to its golden row.
@@ -237,7 +254,9 @@ offsets, each property and oxidation state, and each category checked against th
 golden variant names), and from M2a every `phase_data.cyr` / `gas_data.cyr` value (65 cells: each Antoine
 name and coefficient, `KM_ANTOINE_COUNT`, `_KM_PA_PER_MMHG`, each preset field read through its struct; and
 their 10 constants), and from M2b every `thermochem_data.cyr` cell (654: each THERMOCHEM_DATA formula, name and
-f64 field, each SHOMATE_DATA formula and the seven columns, both counts). It reads the arrays directly, not through `src/element.cyr`, so it tests the
+f64 field, each SHOMATE_DATA formula and the seven columns, both counts), and from M3a every `electrochemistry_data.cyr`
+cell (197: each STANDARD_POTENTIALS equation — its UTF-8 bytes — couple, electron count and E°, the count) and the ten
+solution constants. It reads the arrays directly, not through `src/element.cyr`, so it tests the
 data while the harness tests the accessors. It builds in `build/oracle-probe/` with the project's
 manifest, then compares each value bit for bit with the golden rows. It fails on any mismatch, any
 compiler warning, a generated constant with no golden row, and a table it doesn't probe. A mass, an
@@ -305,12 +324,30 @@ needs only Python 3, with no packages (run it with `-I`).
   (10⁻³, 10⁻⁶, the 40 J/(mol·K) guess) must change some golden row's bits when perturbed. `THERMOCHEM_DATA` and
   `SHOMATE_DATA` are parsed from the Rust literals, and the generated `src/thermochem_data.cyr` columns, string
   blobs and `struct KmShomate` are checked against them.
-- **`--sensitivity`** (M2a; M2b adds `vant_hoff_k`): `python3 -I scripts/oracle/validate.py . --sensitivity` re-evaluates every class-C
-  row of the M2a functions with one primitive result nudged one ulp up and down, one call at a time, and prints
-  each function's S, c and K = 2·S·c + 2 — the port-parity rule's measurement
-  (`docs/development/port-parity.md` §5). Following ADR 0005, only calls whose result can differ between port
-  and oracle are nudged: exp and 10^x results, and the acos / cos / ln / x^2.5 results where glibc is not
-  correctly rounded (the port's are; the 60-digit references decide).
+- **solution, electrochemistry** (M3a): every row recomputed from Rust 1.2.0's code transcribed in Python — the guards in
+  Rust's order, Rust's `.sum()` from −0.0 for `ionic_strength`, the weak acid / base Newton (`charge_balance_root`,
+  `checked_root`) with its exit path checked against each row's note, and `CHARGE_BALANCE_REL_TOL` (10⁻¹²) required to
+  change some golden row's bits when halved and when doubled (the 50-iteration cap is reported as unobservable: no row
+  enters more than 7 iterations); `henderson_hasselbalch`'s log10 as glibc's e_log10.c composition over log, checked to
+  be glibc's log10 bit for bit on every golden argument; `STANDARD_POTENTIALS` parsed from the `electrochemistry.rs`
+  literal, and the generated `src/electrochemistry_data.cyr` (the UTF-8 equation blob, the couple blob, electrons, E°,
+  the two CRC notes) checked against it.
+- **kinetics** (M3b): every row recomputed from Rust 1.2.0's code transcribed in Python (glibc's exp, expm1 and pow via
+  Python's `math`), the guards in Rust's order, `lineweaver_burk`'s tuple as two floats; LN_2 (± 1 ulp) and
+  `FIRST_ORDER_TOLERANCE` (× ½, × 2) must each change some golden row (± 1 ulp of the tolerance is reported as
+  unobservable: near 1 ± 10⁻¹², |n − 1| moves in steps of 2⁻⁵² or 2⁻⁵³).
+- **`--sensitivity`** (M2a; M2b adds `vant_hoff_k`; M3a the solution and Nernst functions; M3b the kinetics functions):
+  `python3 -I scripts/oracle/validate.py . --sensitivity` re-evaluates every class-C row with one primitive result
+  nudged one ulp up and down, one call at a time, and prints each function's S, c and K = 2·S·c + 2 — the port-parity
+  rule's measurement (`docs/development/port-parity.md` §5–§7). Following ADR 0005, only calls whose result can differ
+  between port and oracle are nudged: exp, 10^x and (M3a) `_km_log10` results, and the acos / cos / ln / x^2.5 results
+  where glibc is not correctly rounded (the port's are; the 60-digit references decide). For the functions the M3a
+  remedy changed (`henderson_hasselbalch`, `nernst_potential`, `nernst_potential_25c`) it also prints S "before": every
+  result of the stdlib-like primitive the remedy replaced (`_km_log10`, `f64_ln`) nudged — about 10¹⁸ for each. Every
+  kinetics exp, exp_m1 and pow result is nudged (stdlib-like counterparts). For each function whose K passes 64 (M3b: the
+  six class-C kinetics functions, left measured until ADR 0006) it also lists the rows whose own S puts it there, how
+  many of them nudge a subnormal primitive result, the worst three, and S over the remaining rows and over the rows with
+  no subnormal primitive result (port-parity.md §8).
 
 Every function in every `.tsv` must have a rule in `validate.py`: a new one fails until it gets one. Extend it
 as modules arrive. A check that recomputes a row independently is worth more than one that re-reads the

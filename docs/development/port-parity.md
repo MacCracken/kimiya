@@ -239,11 +239,184 @@ Newton tolerance 10⁻³ × ½ or × 2 changes 98 / 104 of the 1,836 Ok rows, th
 Summary, every target: **9 modules, 0 failing; 63,953 ok, 0 failed, 0 measured, 20 pending (the M3–M4
 module-data constants), 441 accepted (ADR 0004's row and the 440 ADR 0002 #4 mapped Antoine rows).**
 
+## 7. M3a: solution, electrochemistry (2026-11-09)
+
+Golden rows: `solution` 28,566, `electrochemistry` 18,574 (`m_solution.rs`, `m_electrochemistry.rs`), and 10 more
+`constants` rows (K_w, the Debye–Hückel A and B, the seven Λ°, now in `src/constants.cyr`): 35 of 45, the other 10 (the
+inorganic Madelung and Born constants) pending until M4. Every class-A and class-B row is **0 ulp on all three
+targets**. `validate.py` recomputes all 47,140 rows from Rust's code transcribed in Python (the potentials parsed from
+the `electrochemistry.rs` literal; the weak acid / base Newton with its exit path) and finds the corpus's bits on every
+one, and `probe_tables.py` compiles the 197 `electrochemistry_data.cyr` cells (the UTF-8 equations byte for byte) and
+the 10 new constants.
+
+| Function | Rows | Class | Result, all three targets |
+|---|---|---|---|
+| `molarity`, `molality`, `dilution`, `ph_from_poh` | 191, 191, 208, 176 | B | 0 ulp |
+| `ionic_strength` (`v:n` + `f:c i:z` pairs; the empty list's −0.0, i32::MIN / MAX charges) | 320 | B | 0 ulp |
+| `kohlrausch_molar_conductivity`, `limiting_molar_conductivity`, `solution_conductivity` | 258, 270, 186 | B | 0 ulp |
+| `STANDARD_POTENTIALS` / `[]` (49 rows: equation, couple, electrons, E°) | 1 + 49 | A | all bit-identical |
+| `lookup_half_reaction` (every couple, case / space variants, every prefix, the equations, `""`) | 529 | A | all equal |
+| `standard_cell_potential`, `cell_potential_from_couples` (all 49 × 49 ordered pairs, unknown couples) | 2,509, 2,408 | B | 0 ulp |
+| `is_spontaneous_cell` | 74 | A | all equal |
+| `cell_gibbs_energy`, `faraday_mass_deposited`, `faraday_charge_required`, `faraday_mass_ratio` | 339, 3,975, 2,168, 2,199 | B | 0 ulp |
+| `charge_to_moles_electrons`, `moles_electrons_to_charge` | 853 each | B | 0 ulp |
+
+### Setting the class-C bounds
+
+Every class-C row was replayed unbounded (*measured*) first; then `validate.py --sensitivity` measured S, the rule set
+K = 2·S·c + 2, and the rows were gated. Three functions cancel by construction, and the grids include
+**near-cancellation rows on purpose** (pKa = −log₁₀(base/acid), E° = (RT/nF)·ln Q, each to within a few ulp and placed
+without a transcendental): `henderson_hasselbalch` 398 of its 831 value rows (90 exactly zero, 152 positive, 156
+negative), `nernst_potential` 401 of 1,430 (81, 150, 170), `nernst_potential_25c` 201 of 1,106 (41, 80, 80). With the
+stdlib-like primitive their K was far past 64, so ADR 0005's remedy applies (its **amendment M3a**):
+
+| Function | S before (primitive) | Primitive in the port | S | c | K_F | x86_64 ELF, PE and aarch64 |
+|---|---|---|---|---|---|---|
+| `solution::ph_from_h_concentration` | 1 | `_km_log10` (fdlibm) | 1 | 1 | **4** | 0: 2,836 · 1: 2 |
+| `solution::poh_from_oh_concentration` | 1 | `_km_log10` | 1 | 1 | **4** | 0: 2,836 · 1: 2 |
+| `solution::henderson_hasselbalch` | 4.4 × 10¹⁸ (`_km_log10`) | `_km_log10_ln`: glibc's log10 composition over `_km_ln` | 0 | 0 | **2** | 0: 831 |
+| `solution::h_concentration_from_ph` | 1 | ganita pow(10, ·) | 1 | 1 | **4** | 0: 392 · 1: 47 |
+| `solution::weak_acid_ph` | 1 | the Newton root (bit-exact), `_km_log10` | 1 | 1 | **4** | 0: 8,865 · 1: 183 |
+| `solution::weak_base_ph` | 1 | the Newton root, `_km_log10`, 14 − pOH | 1 | 1 | **4** | 0: 9,009 · 1: 39 |
+| `solution::debye_huckel_limiting` | 1 | ganita pow(10, ·) | 1 | 1 | **4** | 0: 453 · 1: 35 |
+| `solution::debye_huckel_extended` | 1 | ganita pow(10, ·) | 1 | 1 | **4** | 0: 475 · 1: 30 |
+| `solution::davies_activity` | 1 | ganita pow(10, ·) | 1 | 1 | **4** | 0: 460 · 1: 28 |
+| `electrochemistry::nernst_potential` | 8.8 × 10¹⁸ (`f64_ln`) | `_km_ln` (correctly rounded, M2a) | 0 | 0 | **2** | 0: 1,430 |
+| `electrochemistry::nernst_potential_25c` | 8.7 × 10¹⁸ (`f64_ln`) | `_km_ln` | 0 | 0 | **2** | 0: 1,106 |
+
+(Histograms count float outputs; Err rows have none. "S before" nudges every result of the primitive the remedy
+replaced; S nudges only the calls whose result can differ between port and oracle, ADR 0005: every `_km_log10` and
+pow(10, ·) result, and the `_km_ln` results where glibc's log is not correctly rounded — none on these grids.)
+
+- **The Nernst and Henderson–Hasselbalch values are bit-identical to the oracle on every target**, the
+  near-cancellation rows included. Before the remedy the replay showed the problem: Nernst through `f64_ln` was 0 ulp
+  on x86_64 (x87) but had 6 rows up to 4.3 × 10¹⁸ ulp off on aarch64 (the polyfill).
+- **A correctly rounded log10 was tried for `henderson_hasselbalch` first** (`_km_log10_cr`, double-double over
+  `_km_ln`): 6 near-cancellation rows ended up to 4.4 × 10¹⁸ ulp off, because glibc's log10 is not correctly rounded at
+  base/acid = 0.8068…/2.6858… — and is not on 0.3–29 % of arguments, depending on the range (29 % in [½, 1)). glibc's
+  log10 is Sun's e_log10.c composition over glibc's log (bit-identical on 500,000 seeded arguments and every golden one),
+  so the port composes it the same way over the correctly rounded `_km_ln`: `_km_log10_ln` matches glibc except where
+  glibc's log at the reduced argument is not correctly rounded (13 of 23,710 seeded arguments, none golden; identical
+  bits on all three targets). The `math` shadow line `f64::log10 ~ _km_log10_ln` is 0 ulp on all 1,296 rows.
+- **`_km_log10` stays** on the four S = 1 functions (and the benched `ph_from_h`): `_km_log10_ln` costs 1.85 µs a
+  call, `_km_log10` 59 ns.
+- The weak-acid / base and activity rows differ from glibc only through `_km_log10` and ganita's pow (1 ulp at most),
+  the same on every target (both are + − × ÷ transcriptions); the Newton root itself is + − × ÷ and √.
+
+### The weak acid / base Newton
+
+Rust's private `charge_balance_root` / `checked_root` are transcribed operation for operation
+(`_km_charge_balance_root` / `_km_checked_root`). The generator rebuilds the loop (`root_replica`), must reproduce the
+oracle's pH bits or error on every row, and writes each row's exit into its note; `validate.py` recomputes the path
+independently and checks the note. Over the 18,222 weak acid and base rows (Ka × C every decade 10⁻⁴⁰ … 10⁴⁰ ×
+10⁻⁴⁰ … 10²⁰, seeded pairs over that box and over Ka 10⁻¹⁴ … 10, C 10⁻¹² … 10, the overflow cases, the edges and the
+Rust tests' cases):
+
+| Exit | Rows |
+|---|---|
+| `f(x) ≤ 0` (the iterates met the root; 9,327 of them at the starting bound, 0 updates) | 11,740 |
+| relative step `step ≤ 10⁻¹²·x` | 6,356 |
+| non-finite step (K·C or x³ overflows) → `ComputationError` | 74 |
+| 50 iterations without acceptance | 0 |
+| `checked_root` rejection | 0 |
+| guard `Err` before the iteration (Ka or C not positive and finite) | 52 |
+
+Updates per row: 0: 9,327 · 1: 3,432 · 2: 2,264 · 3: 1,547 · 4: 824 · 5: 483 · 6: 247 · 7: 46 — **at most 7 updates,
+7 iterations entered**, as Rust's comment says. The private constants are typed inline: `CHARGE_BALANCE_REL_TOL`
+(10⁻¹²) × ½ changes 11 of the 18,096 Ok rows and × 2 changes 8 (the seeded sweep over the realistic box was added so
+that the corpus pins the tolerance from above too: before it, × 2 changed none; the change is one ulp, from accepting
+one step earlier); `tests/solution.tcyr` pins it from both sides on the private helper with two of those decade rows.
+**`CHARGE_BALANCE_MAX_ITER` (50) is not observable**: no row enters more than 7 iterations, so any cap ≥ 7 gives the
+same corpus (a cap of 6 changes 88 rows); it is transcribed, as the flame solver's limits are (ADR 0003 amendment).
+No golden row reaches `checked_root`'s rejection either (the start is a positive bound and the iterates decrease onto
+the positive root); `tests/solution.tcyr` checks the helper directly.
+
+Summary, every target: **11 modules, 0 failing; 111,103 ok, 0 failed, 0 measured, 10 pending (the M4 inorganic
+constants), 441 accepted (ADR 0004's row and the 440 ADR 0002 #4 mapped Antoine rows).**
+
+## 8. M3b: kinetics (2026-11-09)
+
+Golden rows: `kinetics` 30,146 (`m_kinetics.rs`). Every class-B row is **0 ulp on all three targets**. `validate.py`
+recomputes all 30,146 rows from Rust's code transcribed in Python (glibc's exp, expm1 and pow through Python's `math`)
+and finds the corpus's bits on every one.
+
+| Function | Rows | Class | Result, all three targets |
+|---|---|---|---|
+| `half_life_first_order` (every decade of k from the smallest subnormal to DBL_MAX; k = 1 is LN_2 exactly) | 1,491 | B | 0 ulp |
+| `second_order_concentration`, `zero_order_concentration` (NaN propagates, −0.0 kept), `zero_order_half_life` | 987, 502, 262 | B | 0 ulp |
+| `steady_state_intermediate`, `steady_state_rate`, `pre_equilibrium_rate`, `michaelis_menten` | 264, 190, 283, 370 | B | 0 ulp |
+| `lineweaver_burk` (output `f:slope f:intercept`, the port's caller buffer, port plan §6.4) | 244 | B | 0 ulp |
+
+**Typed constants pinned.** Rust's `std::f64::consts::LN_2` and private `FIRST_ORDER_TOLERANCE` (10⁻¹²) are typed inline
+in `src/kinetics.cyr` (port plan §6.4), and `validate.py` requires each to change golden rows when perturbed: LN_2 ± 1 ulp
+changes 1,355 / 1,327 of the 1,491 `half_life_first_order` rows and 2,511 / 3,239 of the 7,822 `nth_order_half_life` rows;
+the tolerance × ½ / × 2 changes 20 / 26 rows (the orders 1 ± 10⁻¹² and the ulps either side). The tolerance ± 1 ulp changes
+none: near 1 ± 10⁻¹², |n − 1| is a multiple of 2⁻⁵² (above 1) or 2⁻⁵³ (below), so only a change across a multiple can
+show; `tests/kinetics.tcyr` pins the four boundary orders (1 + 4503·2⁻⁵² rejected, 4504·2⁻⁵² accepted; 1 − 9007·2⁻⁵³ /
+9008·2⁻⁵³).
+
+### The class-C functions: measured, not gated
+
+The six class-C functions take exp (`f64_exp`), exp_m1 (`_km_expm1`) and powf (`ganita_f64_pow`), as briefed. Their rows
+were replayed unbounded (*measured*), then `validate.py --sensitivity` measured S by the rule (every exp, exp_m1 and pow
+result nudged ±1 ulp, one call at a time). The grids include **on purpose the rows where an exp or pow result is subnormal
+and a prefactor scales it back into the normal range**: A·e^x with x between −745.2 and −708 and A up to DBL_MAX,
+[A]₀·e^(−kt), Z·p·e^x, Eyring at low T, either Eyring factor subnormal and the other one huge, and [A]₀^(n−1) in the
+nth-order denominator. There one ulp of the subnormal is a large relative change (all of it at 2⁻¹⁰⁷⁴), and S goes far
+past the rule's limit:
+
+| Function | Float rows | S (c) | K by the rule | Rows past K = 64 (with a subnormal exp / pow result) | S without those (no subnormal result, no flip) |
+|---|---|---|---|---|---|
+| `arrhenius_rate` | 9,232 | 4.4 × 10¹⁸ (1) | 8.8 × 10¹⁸ | 858 (858) | 2 (K 6, 8,128 rows) |
+| `first_order_concentration` | 2,529 | 4.4 × 10¹⁸ (1) | 8.8 × 10¹⁸ | 855 (855) | 2 (K 6, 1,378 rows) |
+| `nth_order_half_life` | 4,605 of 7,822 | 4.5 × 10¹⁵ (2), 10 branch flips | 1.8 × 10¹⁶ | 384 (382; 10 flips) | 4 (K 18, 7,294 rows) |
+| `collision_theory_rate` | 2,228 | 4.4 × 10¹⁸ (1) | 8.8 × 10¹⁸ | 391 (391) | 2 (K 6, 1,669 rows) |
+| `eyring_rate` | 1,556 | 1.0 × 10¹⁴ (1) | 2.1 × 10¹⁴ | 334 (334) | 2 (K 6, 1,183 rows) |
+| `eyring_rate_from_activation` | 2,055 | ∞ (2): 5·10⁻³²⁴ nudged to 0 turns ∞·0 into NaN | ∞ | 676 (676) | 3 (K 14, 1,213 rows) |
+
+(Worst rows: `arrhenius_rate(DBL_MAX, 6195.3555…, 1)` — e^−745.13 = 2⁻¹⁰⁷⁴ times DBL_MAX; `eyring_rate(30976777.65…,
+5000)`; `nth_order_half_life(1.409…e−132, 7.381…e268, 3.451…)`, whose [A]₀^(n−1) ≈ 10⁻³²³. `validate.py --sensitivity`
+lists them under "functions past K = 64". "Rows past K = 64" are those whose own S puts 2·S·c + 2 past 64; the 2 of
+`nth_order_half_life`'s flips without a subnormal result are pow(DBL_MAX, 1) and pow(1, 1)·DBL_MAX at the overflow edge,
+exact on both sides.)
+
+**Decision (the user, 2026-11-09): functional parity, correctly rounded primitives.** The port's goal is the oracle's
+results, errors and branches, with the best accuracy available — never glibc's rounding errors. So no primitive is built
+to reproduce glibc's bits, and **these six functions stay measured, not gated**: the rule forbids a wider K and a thinner
+grid, and their bound waits for a later step (ADR 0006) that makes the primitives correctly rounded and compares such rows
+against the oracle's formula evaluated with correctly rounded results. The other kinetics functions are gated as usual.
+Measured histograms (float outputs; Err rows have none):
+
+| Function | x86_64 ELF and PE | aarch64 |
+|---|---|---|
+| `arrhenius_rate` | 0: 9,218 · 1: 13 · 2: 1 | 0: 8,922 · 1: 274 · 2: 34 · 3–16: 2 (max 5) |
+| `first_order_concentration` | 0: 2,525 · 1: 2 · 2: 1 · 3–16: 1 (max 7) | 0: 2,429 · 1: 80 · 2: 11 · 3–16: 7 · >16: 2 (max 39) |
+| `nth_order_half_life` | 0: 4,221 · 1: 308 · 2: 67 · 3–16: 7 · >16: 2 (max 4.9 × 10¹³) | = x86_64 |
+| `collision_theory_rate` | 0: 2,223 · 1: 4 · 2: 1 | 0: 2,137 · 1: 75 · 2: 14 · 3–16: 1 · >16: 1 (max 23) |
+| `eyring_rate` | 0: 1,551 · 1: 3 · 2: 1 · 3–16: 1 (max 5) | 0: 1,484 · 1: 59 · 2: 10 · 3–16: 3 (max 11) |
+| `eyring_rate_from_activation` | 0: 2,006 · 1: 41 · 2: 6 · 3–16: 2 (max 4) | 0: 1,877 · 1: 136 · 2: 36 · 3–16: 6 (max 4) |
+
+- The large distances are the subnormal rows: x87's exp (x86_64) is close to correctly rounded on subnormal results, the
+  aarch64 polyfill rounds twice (`y·2^(k+1000)` then `× 2⁻¹⁰⁰⁰`), so aarch64 has more of them. `ganita_f64_pow` and
+  `_km_expm1` are + − × ÷ transcriptions, so `nth_order_half_life` is the same on every target.
+- **The two `nth_order_half_life` rows past 10¹³ ulp are exact half-way cases, and there the port is right and the oracle
+  is not.** (3·2⁻²¹⁵)⁵ and (9·2⁻⁴³⁰)^2.5 are exactly 121.5·2⁻¹⁰⁷⁴: glibc 2.44's pow returns 121·2⁻¹⁰⁷⁴, ganita's the
+  correctly rounded (ties-to-even) 122·2⁻¹⁰⁷⁴, and the half-life divides by it. (2⁻¹⁰⁷⁵ from pow(2, −1075), also a tie,
+  rounds to 0 on both sides: Err.) A 60-digit decimal reference misjudges exact ties (it rounds pow(0.5, 1075) up to
+  2⁻¹⁰⁷⁴); ADR 0006's reference needs exact rational arithmetic there.
+- glibc 2.44's exp is correctly rounded on all 6,801 golden calls with x < −708 (2,118 distinct arguments) and on all but
+  2 of 200,000 seeded arguments between −745.2 and −708.39; its pow on all 1,845 golden calls with a result under 2⁻¹⁰²¹.
+  Recorded for ADR 0006; under the decision above it decides nothing.
+
+Summary, every target: **12 modules, 0 failing; 119,044 ok, 0 failed, 22,205 measured (the six kinetics class-C
+functions), 10 pending (the M4 inorganic constants), 441 accepted (ADR 0004's row and the 440 ADR 0002 #4 mapped Antoine
+rows).**
+
 ## How to reproduce
 
 ```sh
 cargo run --release --locked --manifest-path scripts/oracle/Cargo.toml -- --check
-python3 -I scripts/oracle/validate.py . --sensitivity   # S, c and K of the class-C functions (§5, §6)
+python3 -I scripts/oracle/validate.py . --sensitivity   # S, c and K of the class-C functions (§5–§8)
 cyrius test tests/parity.tcyr                  # x86_64 ELF
 cyrius test --win tests/parity.tcyr            # x86_64 PE, needs wine
 cyrius test --aarch64 tests/parity.tcyr        # aarch64, needs qemu-aarch64

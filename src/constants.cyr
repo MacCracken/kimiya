@@ -8,9 +8,10 @@
 # correctly rounded (6.6.10+). tests/golden/constants.tsv pins every bit.
 #
 # Module data constants are generated with their module's data, not here: K_b/K_f in
-# src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung, Born exponents, Λ°,
-# Debye–Hückel and K_w at M3–M4. The exception is thermo::WATER_SPECIFIC_HEAT (M2a), at
-# the end: thermo has no data file, and this file precedes it in [lib].
+# src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung and Born exponents at M4.
+# The exceptions are the solution constants (M3a: K_w, Debye–Hückel A / B, Λ°) and
+# thermo::WATER_SPECIFIC_HEAT (M2a): neither module has a data file, and this file
+# precedes both in [lib].
 
 # Faraday constant (C/mol) — charge of one mole of electrons.
 #
@@ -58,6 +59,50 @@ const KM_HYDROGEN_ATOM_MASS_U = 1.007825031898;
 # Coulomb constant k_e = 1/(4πε₀) (N·m²/C²), CODATA 2018.
 # Rust: kimiya::potential::COULOMB_CONSTANT
 const KM_COULOMB_CONSTANT = 8987551792.3;
+
+# Ion product of water at 25 °C: Kw = \[H⁺\]·\[OH⁻\] = 1.0 × 10⁻¹⁴ (mol/L)².
+#
+# This is the conventional value (pKw = 14) that [`ph_from_poh`] also
+# assumes; the measured value at 25 °C is 1.008 × 10⁻¹⁴ (pKw = 13.995).
+# Rust: kimiya::solution::KW_WATER_25C
+const KM_KW_WATER_25C = 0.00000000000001;
+
+# Debye-Huckel A parameter for water at 25°C, in (L/mol)^½.
+# Rust: kimiya::solution::DH_A_WATER_25C
+const KM_DH_A_WATER_25C = 0.509;
+
+# Debye-Huckel B parameter for water at 25°C, in Å⁻¹·(mol/L)^−½.
+# Rust: kimiya::solution::DH_B_WATER_25C
+const KM_DH_B_WATER_25C = 0.328;
+
+# Limiting ionic conductivity λ° of H⁺ at 25°C (S·cm²/mol).
+# Rust: kimiya::solution::LAMBDA_H_PLUS
+const KM_LAMBDA_H_PLUS = 349.8;
+
+# Limiting ionic conductivity λ° of OH⁻ at 25°C (S·cm²/mol).
+# Rust: kimiya::solution::LAMBDA_OH_MINUS
+const KM_LAMBDA_OH_MINUS = 198.0;
+
+# Limiting ionic conductivity λ° of Na⁺ at 25°C (S·cm²/mol).
+# Rust: kimiya::solution::LAMBDA_NA_PLUS
+const KM_LAMBDA_NA_PLUS = 50.1;
+
+# Limiting ionic conductivity λ° of K⁺ at 25°C (S·cm²/mol).
+# Rust: kimiya::solution::LAMBDA_K_PLUS
+const KM_LAMBDA_K_PLUS = 73.5;
+
+# Limiting ionic conductivity λ° of Cl⁻ at 25°C (S·cm²/mol).
+# Rust: kimiya::solution::LAMBDA_CL_MINUS
+const KM_LAMBDA_CL_MINUS = 76.3;
+
+# Limiting ionic conductivity λ° of NO₃⁻ at 25°C (S·cm²/mol).
+# Rust: kimiya::solution::LAMBDA_NO3_MINUS
+const KM_LAMBDA_NO3_MINUS = 71.4;
+
+# Limiting ionic conductivity λ° of SO₄²⁻ at 25°C (S·cm²/mol), per mole of
+# SO₄²⁻ ions (i.e. 2 × λ°(½SO₄²⁻) = 2 × 80.0).
+# Rust: kimiya::solution::LAMBDA_SO4_2MINUS
+const KM_LAMBDA_SO4_2MINUS = 160.0;
 
 # Planck's constant h (J·s), exact (SI 2019).
 # Rust: kimiya::spectroscopy::PLANCK

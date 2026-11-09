@@ -90,3 +90,44 @@ into straight-line code; Cyrius makes each a call and returns the `Result` as a 
 widest gap because it multiplies the per-call cost: its 3 µs are about six balance evaluations (3 products × up to
 3 segments × 2 antiderivatives each) and three derivative evaluations. The port keeps Rust's resolved-segments table
 on the stack (32 products), since the bump allocator can't free and the function runs in loops.
+
+## M3a solution, electrochemistry (2026-11-09)
+
+| Bench | Body | Rust | Cyrius | Cyrius / Rust |
+|---|---|---|---|---|
+| `solution/ph_from_h` | `ph_from_h_concentration(1e-4)`: one guard, one log10 (`_km_log10`, fdlibm) | 9.73 ns | 66.2 ns | 6.8× |
+| `solution/weak_acid_ph` | `weak_acid_ph(1.8e-5, 0.1)`: two guards, the charge-balance Newton (4 updates on this input), one log10 | 34.85 ns | 182 ns | 5.2× |
+| `electrochemistry/lookup_half_reaction` | `lookup_half_reaction("Cu2+/Cu")`: a linear scan to row 27 | 57.06 ns | 116 ns | 2.0× |
+| `electrochemistry/nernst_potential` | `nernst_potential(0.342, 2, 298.15, 0.1)`: four guards, one ln — the correctly rounded `_km_ln` | 6.42 ns | 1.94 µs | 302× |
+
+All four bodies are bit-identical to Rust (golden rows: `solution` 28,566, `electrochemistry` 18,574; the Nernst rows 0 ulp
+on every target, the pH rows within K = 4).
+
+**The price of the correctly rounded ln.** `nernst_potential` cancels where E° ≈ (RT/nF)·ln Q (S ≈ 9 × 10¹⁸ with the
+stdlib ln, port-parity.md §7), so it calls `_km_ln` (ADR 0005, amendment M3a), the double-double atanh series: measured
+alone, `_km_ln(0.1)` takes 1.90 µs against 23 ns for `f64_ln`, so the Nernst body would be about 45–60 ns (7–9× Rust)
+with the stdlib ln, and is 1.94 µs with the correctly rounded one. `henderson_hasselbalch` (not benched in Rust) pays the
+same through `_km_log10_ln` (1.85 µs against 59 ns for `_km_log10`); the four S = 1 log10 functions keep the fast
+`_km_log10`. A two-phase (Ziv) correctly rounded log — a fast evaluation with a rounding test, the double-double series
+only when the test fails — would recover most of the cost; it is a possible follow-up, not in M3a.
+
+**Reading the gap.** As before, Rust inlines each body; Cyrius makes the guard, primitive and `Result` calls. The lookup is
+the closest, because both sides scan the same couple strings (the port tests the first byte before `memeq`, as the
+thermochem and element lookups do). `ph_from_h`'s 66 ns are mostly `_km_log10` (59 ns measured alone).
+
+## M3b kinetics (2026-11-09)
+
+| Bench | Body | Rust | Cyrius | Cyrius / Rust |
+|---|---|---|---|---|
+| `kinetics/arrhenius_rate` | `arrhenius_rate(1e13, 50000, 300)`: three guards, −Ea/(RT), one exp (`f64_exp`), A·e | 6.78 ns | 49.4 ns | 7.3× |
+| `kinetics/eyring_rate` | `eyring_rate(80000, 298)`: two guards, k_B·T/h, one exp, a multiply | 6.73 ns | 42.4 ns | 6.3× |
+| `kinetics/michaelis_menten` | `michaelis_menten(100, 5, 10)`: three guards, Vmax·[S]/(Km + [S]) | 2.92 ns | 16.5 ns | 5.7× |
+
+`michaelis_menten` is class B and bit-identical to Rust (0 ulp on all 370 golden rows). `arrhenius_rate` and
+`eyring_rate` are class C and measured, not yet gated (port-parity.md §8: a subnormal exp result scaled by a prefactor
+puts their S past the rule's limit; ADR 0006 will set their comparison); on these benched inputs the exp results are
+normal, and both bodies return Rust's bits on x86_64 and aarch64.
+
+**Reading the gap.** As before, Rust inlines each body into a few instructions; Cyrius makes the guard calls and returns
+the `Result` as a pair. The exp is `f64_exp` (x87 on x86_64); `michaelis_menten`'s three guards and arithmetic take
+16.5 ns, so the exp and its call are most of the rest of the Arrhenius and Eyring bodies.

@@ -1,0 +1,261 @@
+# kinetics.cyr — chemical kinetics: rate constants, integrated rate laws, half-lives, the steady-state and
+# pre-equilibrium approximations, Michaelis–Menten enzyme kinetics, collision theory and transition-state
+# (Eyring) theory (port of rust-old/src/kinetics.rs).
+#
+# Units: concentrations in mol/L, time in s, energies in J/mol, temperatures in K. Rate constants carry the
+# units of their reaction order n, (mol/L)^(1−n)·s⁻¹: zero order mol·L⁻¹·s⁻¹, first order s⁻¹, second order
+# L·mol⁻¹·s⁻¹. Any consistent time unit may be used instead of seconds, except in the Eyring functions, whose
+# prefactor k_B·T/h is in s⁻¹. The constants KM_GAS_CONSTANT, KM_BOLTZMANN (Rust's kinetics::BOLTZMANN) and
+# KM_PLANCK are src/constants.cyr's (generated). Fallible functions return a value-form Result whose Err payload
+# is a KM_ERR_* code, and reject NaN and ±∞ inputs where Rust does. Every expression keeps Rust's operation
+# order, so the arithmetic functions are bit-identical (class B); the exp, exp_m1 and pow functions are class C
+# (docs/development/port-parity.md §8).
+#
+# - exp is f64_exp, exp_m1 _km_expm1 (src/mathx.cyr, Rust libm's fdlibm expm1) and powf ganita_f64_pow, each
+#   within 1 ulp. Where an exp or pow result is subnormal and a prefactor scales it back into the normal range
+#   (A·e^x with x below −708, [A]₀^(n−1) in the nth-order denominator), one ulp of it is a large relative change,
+#   so those rows can differ from the oracle by far more than an ulp: the six class-C functions are measured, not
+#   gated, until the primitives are correctly rounded (docs/development/port-parity.md §8).
+# - Rust's std::f64::consts::LN_2 and its private FIRST_ORDER_TOLERANCE (10⁻¹²) are typed formula constants
+#   inline (port plan §6.4): LN_2 by its bits, 0x3FE62E42FEFA39EF, as src/mathx.cyr writes ln 2's high part. Both
+#   are pinned by golden rows (half_life_first_order(1) is LN_2 exactly; orders at 1 ± 10⁻¹² and the ulps
+#   either side) and by tests/kinetics.tcyr.
+# - lineweaver_burk's (slope, intercept) tuple becomes the caller's buffer of two f64 (16 bytes,
+#   `var lb[16];`), as peng_robinson_z_roots's Vec: Ok(2), the count written, with the slope at out and the
+#   intercept at out + 8; on Err the buffer is untouched.
+
+include "lib/math.cyr"
+include "lib/ganita.cyr"
+
+# Arrhenius rate constant k = A·exp(−Ea/(R·T)), from the pre-exponential factor A (in the units of the
+# returned rate constant), the activation energy Ea in J/mol and T in K. Ok(k) in the units of A;
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite; Err(KM_ERR_INVALID_INPUT) if A or Ea is not
+# finite. exp may overflow (Ok(+∞), or Ok(NaN) for A = 0) or underflow to 0, as in Rust. Mirrors
+# `kinetics::arrhenius_rate`.
+#must_use
+fn arrhenius_rate(pre_exponential: f64, activation_energy_j: f64, temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(pre_exponential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(activation_energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var nea: f64 = -activation_energy_j;
+    var x: f64 = nea / (KM_GAS_CONSTANT * temperature_k);
+    var e: f64 = f64_exp(x);
+    var k: f64 = pre_exponential * e;
+    return Ok(k);
+}
+
+# Half-life of a first-order reaction t½ = ln 2 / k in s, from the rate constant k in s⁻¹. Ok(t½), or
+# Err(KM_ERR_INVALID_INPUT) if k is not positive and finite. Mirrors `kinetics::half_life_first_order`.
+#must_use
+fn half_life_first_order(rate_constant: f64): Result {
+    if (_km_is_positive(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var ln2: f64 = 0x3FE62E42FEFA39EF;     # std::f64::consts::LN_2
+    var t: f64 = ln2 / rate_constant;
+    return Ok(t);
+}
+
+# The concentration remaining after first-order decay, [A] = [A]₀·exp(−k·t) in mol/L, from [A]₀ in mol/L, k in
+# s⁻¹ and t in s. Inputs are not validated: non-finite input propagates to the result. Mirrors
+# `kinetics::first_order_concentration`.
+#must_use
+fn first_order_concentration(initial: f64, rate_constant: f64, time: f64): f64 {
+    var nk: f64 = -rate_constant;
+    var x: f64 = nk * time;
+    var e: f64 = f64_exp(x);
+    var c: f64 = initial * e;
+    return c;
+}
+
+# The concentration remaining after second-order decay, 1/[A] = 1/[A]₀ + k·t, in mol/L (in (0, [A]₀]), from
+# [A]₀ in mol/L, k in L·mol⁻¹·s⁻¹ and t in s. Ok([A]); Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ is not positive
+# and finite; Err(KM_ERR_INVALID_INPUT) if k or t is negative or not finite (k·t ≤ −1/[A]₀ would give an infinite
+# or negative concentration). Mirrors `kinetics::second_order_concentration`.
+#must_use
+fn second_order_concentration(initial: f64, rate_constant: f64, time: f64): Result {
+    if (_km_is_positive(initial) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    if (_km_is_non_negative(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(time) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var inv: f64 = (1.0 / initial) + (rate_constant * time);
+    var c: f64 = 1.0 / inv;
+    return Ok(c);
+}
+
+# The zero-order concentration [A] = [A]₀ − k·t in mol/L, from [A]₀ in mol/L, k in mol·L⁻¹·s⁻¹ and t in s, or
+# +0.0 if that would be negative (the reaction is complete). Inputs are not validated: NaN propagates (Rust's
+# `if remaining < 0.0 { 0.0 } else { remaining }`, not f64::max, which would turn NaN into 0.0), and −0.0
+# stays −0.0. Mirrors `kinetics::zero_order_concentration`.
+#must_use
+fn zero_order_concentration(initial: f64, rate_constant: f64, time: f64): f64 {
+    var remaining: f64 = initial - (rate_constant * time);
+    if (remaining < 0.0) { return 0.0; }
+    return remaining;
+}
+
+# The zero-order half-life t½ = [A]₀/(2k) in s, from [A]₀ in mol/L and k in mol·L⁻¹·s⁻¹. Ok(t½);
+# Err(KM_ERR_INVALID_INPUT) if k is not positive and finite; Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ is not
+# positive and finite (k checked first). Mirrors `kinetics::zero_order_half_life`.
+#must_use
+fn zero_order_half_life(initial: f64, rate_constant: f64): Result {
+    if (_km_is_positive(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(initial) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var t: f64 = initial / (2.0 * rate_constant);
+    return Ok(t);
+}
+
+# The general nth-order half-life t½ = (2^(n−1) − 1) / ((n − 1)·k·[A]₀^(n−1)) in s, for any finite order n ≠ 1,
+# integer or fractional (n = 0 gives [A]₀/(2k), n = 2 gives 1/(k·[A]₀)); for n = 1 use half_life_first_order.
+# 2^(n−1) − 1 is expm1((n − 1)·ln 2), so orders close to 1 keep full precision. From [A]₀ in mol/L, k in
+# (mol/L)^(1−n)·s⁻¹ and n. Ok(t½); Err(KM_ERR_INVALID_INPUT) if n is not finite or |n − 1| ≤ 10⁻¹² (Rust's private
+# FIRST_ORDER_TOLERANCE), or k is not positive and finite; Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ is not
+# positive and finite; Err(KM_ERR_COMPUTATION_ERROR) if t½ is not positive and finite (extreme orders overflow or
+# underflow). Mirrors `kinetics::nth_order_half_life`.
+#must_use
+fn nth_order_half_life(initial: f64, rate_constant: f64, order: f64): Result {
+    var tol: f64 = 0.000000000001;          # FIRST_ORDER_TOLERANCE = 1e-12
+    var n_minus_1: f64 = order - 1.0;
+    var ad1: f64 = f64_abs(n_minus_1);
+    if (_km_is_finite(order) != 1 || ad1 <= tol) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(initial) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var ln2: f64 = 0x3FE62E42FEFA39EF;     # std::f64::consts::LN_2
+    var numerator: f64 = _km_expm1(n_minus_1 * ln2);
+    var p: f64 = ganita_f64_pow(initial, n_minus_1);
+    var t_half: f64 = numerator / ((n_minus_1 * rate_constant) * p);
+    if (_km_is_positive(t_half) == 1) { return Ok(t_half); }
+    return Err(KM_ERR_COMPUTATION_ERROR);
+}
+
+# ── the steady-state and pre-equilibrium approximations ─────────────────────────────
+
+# The steady-state concentration of the intermediate B in A →(k₁) B →(k₂) C: d[B]/dt = 0 gives
+# [B]_ss = k₁·[A]/k₂ in mol/L, valid only when the intermediate is consumed much faster than it is formed
+# (k₂ ≫ k₁). From the first-order rate constants k₁, k₂ in s⁻¹ and [A] in mol/L. Ok([B]_ss);
+# Err(KM_ERR_INVALID_INPUT) if k₂ is not positive and finite or k₁ is negative or not finite;
+# Err(KM_ERR_INVALID_CONCENTRATION) if [A] is negative or not finite. Mirrors
+# `kinetics::steady_state_intermediate`.
+#must_use
+fn steady_state_intermediate(k1: f64, concentration_a: f64, k2: f64): Result {
+    if (_km_is_positive(k2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(k1) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(concentration_a) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var b: f64 = (k1 * concentration_a) / k2;
+    return Ok(b);
+}
+
+# The rate of the rate-limiting step, rate = k_slow·[X] in mol·L⁻¹·s⁻¹, from k_slow in s⁻¹ and the
+# concentration in mol/L. For A →(k₁) B →(k₂) C: if k₂ ≫ k₁ the first step is rate-determining (pass k₁ and
+# [A]); if k₂ ≪ k₁, B accumulates and the second step is (pass k₂ and the actual [B]). Inputs are not
+# validated: non-finite input propagates to the result. Mirrors `kinetics::steady_state_rate`.
+#must_use
+fn steady_state_rate(k_slow: f64, concentration: f64): f64 {
+    var r: f64 = k_slow * concentration;
+    return r;
+}
+
+# The pre-equilibrium approximation for A ⇌(K_eq) B →(k₂) C, K_eq = k₁/k₋₁: rate = k₂·(k₁/k₋₁)·[A] in
+# mol·L⁻¹·s⁻¹, from the fast equilibrium's k₁ (`k_forward`) and k₋₁ (`k_reverse`, same units), k₂ (`k_slow`,
+# s⁻¹) and [A] in mol/L. Ok(rate); Err(KM_ERR_INVALID_INPUT) if k₋₁ is not positive and finite or k₁ or k₂ is
+# negative or not finite; Err(KM_ERR_INVALID_CONCENTRATION) if [A] is negative or not finite. Mirrors
+# `kinetics::pre_equilibrium_rate`.
+#must_use
+fn pre_equilibrium_rate(k_forward: f64, k_reverse: f64, k_slow: f64, concentration_a: f64): Result {
+    if (_km_is_positive(k_reverse) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(k_forward) != 1 || _km_is_non_negative(k_slow) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(concentration_a) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var rate: f64 = (k_slow * (k_forward / k_reverse)) * concentration_a;
+    return Ok(rate);
+}
+
+# ── Michaelis–Menten enzyme kinetics ────────────────────────────────────────────────
+
+# The Michaelis–Menten rate v = Vmax·[S]/(Km + [S]), from the maximum rate Vmax in mol·L⁻¹·s⁻¹, the Michaelis
+# constant Km (the substrate concentration at half Vmax) in mol/L and the substrate concentration [S] in mol/L.
+# Ok(v) in the units of Vmax; Err(KM_ERR_INVALID_INPUT) if Vmax or Km is not positive and finite (Vmax checked
+# first); Err(KM_ERR_INVALID_CONCENTRATION) if [S] is negative or not finite. Mirrors
+# `kinetics::michaelis_menten`.
+#must_use
+fn michaelis_menten(v_max: f64, km: f64, substrate: f64): Result {
+    if (_km_is_positive(v_max) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(km) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(substrate) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var v: f64 = (v_max * substrate) / (km + substrate);
+    return Ok(v);
+}
+
+# The Lineweaver–Burk linearisation 1/v = (Km/Vmax)·(1/[S]) + 1/Vmax: the plot's slope Km/Vmax (s) and intercept
+# 1/Vmax (L·s/mol), from Vmax in mol·L⁻¹·s⁻¹ and Km in mol/L. `out` is the caller's buffer of two f64 (16 bytes,
+# `var lb[16];`): Ok(2), the count written, with the slope at out and the intercept at out + 8; or
+# Err(KM_ERR_INVALID_INPUT) if Vmax or Km is not positive and finite (Vmax checked first), and the buffer is
+# untouched. Mirrors `kinetics::lineweaver_burk`, whose (slope, intercept) tuple the buffer replaces.
+#must_use
+fn lineweaver_burk(v_max: f64, km: f64, out): Result {
+    if (_km_is_positive(v_max) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(km) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var slope: f64 = km / v_max;
+    var intercept: f64 = 1.0 / v_max;
+    store64(out, slope);
+    store64(out + 8, intercept);
+    return Ok(2);
+}
+
+# ── collision theory ────────────────────────────────────────────────────────────────
+
+# The collision-theory rate constant k = Z·p·exp(−Ea/(R·T)), from the collision frequency factor Z (in the units
+# of the returned rate constant, e.g. L·mol⁻¹·s⁻¹ for a bimolecular reaction), the steric factor p (the
+# probability of a correct orientation, 0 < p ≤ 1), Ea in J/mol and T in K. Ok(k) in the units of Z;
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite; Err(KM_ERR_INVALID_INPUT) if p is outside
+# (0, 1] (NaN included: the check is Rust's positive form), Z is not positive and finite, or Ea is not finite.
+# Mirrors `kinetics::collision_theory_rate`.
+#must_use
+fn collision_theory_rate(collision_frequency: f64, steric_factor: f64, activation_energy_j: f64,
+    temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    var steric_ok = 0;
+    if (steric_factor > 0.0 && steric_factor <= 1.0) { steric_ok = 1; }
+    if (steric_ok != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(collision_frequency) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(activation_energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var nea: f64 = -activation_energy_j;
+    var x: f64 = nea / (KM_GAS_CONSTANT * temperature_k);
+    var e: f64 = f64_exp(x);
+    var k: f64 = (collision_frequency * steric_factor) * e;
+    return Ok(k);
+}
+
+# ── transition-state theory (the Eyring equation) ───────────────────────────────────
+
+# The Eyring equation k = (k_B·T/h)·exp(−ΔG‡/(R·T)) in s⁻¹ (transmission coefficient κ = 1), from the Gibbs
+# energy of activation ΔG‡ in J/mol and T in K. Ok(k); Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and
+# finite; Err(KM_ERR_INVALID_INPUT) if ΔG‡ is not finite. Mirrors `kinetics::eyring_rate`.
+#must_use
+fn eyring_rate(delta_g_activation_j: f64, temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(delta_g_activation_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var prefactor: f64 = (KM_BOLTZMANN * temperature_k) / KM_PLANCK;
+    var ndg: f64 = -delta_g_activation_j;
+    var x: f64 = ndg / (KM_GAS_CONSTANT * temperature_k);
+    var e: f64 = f64_exp(x);
+    var k: f64 = prefactor * e;
+    return Ok(k);
+}
+
+# The Eyring equation from the enthalpy and entropy of activation, k = (k_B·T/h)·exp(ΔS‡/R)·exp(−ΔH‡/(R·T)) in
+# s⁻¹ (κ = 1), from ΔH‡ in J/mol, ΔS‡ in J/(mol·K) and T in K. Ok(k); Err(KM_ERR_INVALID_TEMPERATURE) if T is not
+# positive and finite; Err(KM_ERR_INVALID_INPUT) if ΔH‡ or ΔS‡ is not finite (ΔH‡ checked first). The two exps
+# are separate factors, as in Rust: one can overflow while the other underflows (Ok(NaN) for ∞·0). Mirrors
+# `kinetics::eyring_rate_from_activation`.
+#must_use
+fn eyring_rate_from_activation(delta_h_activation_j: f64, delta_s_activation_j_per_k: f64,
+    temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(delta_h_activation_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(delta_s_activation_j_per_k) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var prefactor: f64 = (KM_BOLTZMANN * temperature_k) / KM_PLANCK;
+    var xs: f64 = delta_s_activation_j_per_k / KM_GAS_CONSTANT;
+    var es: f64 = f64_exp(xs);
+    var ndh: f64 = -delta_h_activation_j;
+    var xh: f64 = ndh / (KM_GAS_CONSTANT * temperature_k);
+    var eh: f64 = f64_exp(xh);
+    var k: f64 = (prefactor * es) * eh;
+    return Ok(k);
+}

@@ -1,10 +1,13 @@
 # kimiya golden corpus: one module per line; tests/parity.tcyr replays each
 constants
+electrochemistry
 element
 gas
+kinetics
 math
 molecule
 phase
 reaction
+solution
 thermo
 thermochem

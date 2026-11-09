@@ -8,7 +8,8 @@ Public API unchanged from 1.1 apart from additions.
 
 Next: **Cyrius port** — plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md)
 (tanmatra template: Rust 1.2.0 frozen in `rust-old/` as the parity oracle, Cyrius ships 2.0.0).
-M0 and M1 are done; M2 is next — live status in [`state.md`](state.md).
+M0–M3 are done (M3b, kinetics, with its six class-C functions measured until ADR 0006: functional parity, correctly
+rounded primitives); M4 (structure, nuclear, spectroscopy) is next — live status in [`state.md`](state.md).
 
 ---
 

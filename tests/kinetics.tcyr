@@ -1,0 +1,745 @@
+# kinetics.tcyr — the tests of rust-old/src/kinetics.rs, ported one for one (each test_group is the Rust test's
+# name; all 47), plus Cyrius-only tests of lineweaver_burk's caller buffer, the inline constants (LN_2's bits, the
+# 10⁻¹² order tolerance), the order of the guards and the signed-zero / NaN results. Adaptations: lineweaver_burk's
+# (slope, intercept) tuple is the caller's buffer of two f64 (port plan §6.4), in lineweaver_burk_basic and
+# non_finite_inputs_are_rejected; a value Rust writes with an exponent (1e13, 3.879…e-5, 1e-300) is written
+# positionally here, or as its bit pattern, since the Cyrius lexer has no exponent notation; Rust's
+# `assert_rel(actual, expected, rel, what)` helper is `relc(actual, expected, rel)`. The golden corpus separately
+# checks every function over its grid (tests/parity.tcyr).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/kinetics.cyr"
+
+alloc_init();
+
+# 1 if |actual/expected − 1| ≤ rel: Rust's assert_rel, ((actual − expected)/expected).abs() <= rel.
+#must_use
+fn relc(actual: f64, expected: f64, rel: f64): i64 {
+    var q: f64 = (actual - expected) / expected;
+    var d: f64 = f64_abs(q);
+    if (d <= rel) { return 1; }
+    return 0;
+}
+
+# 1 if the Result (t, v) is Err(code).
+#must_use
+fn is_err_code(t, v, code): i64 {
+    if (is_err_result(t) == 1 && v == code) { return 1; }
+    return 0;
+}
+
+# f64::EPSILON.
+#must_use
+fn eps64(): f64 {
+    var e: f64 = 0.0000000000000002220446049250313;
+    return e;
+}
+
+# The f64 whose bit pattern is `bits` (store64, so no hex literal is read as an integer).
+#must_use
+fn fbits(bits): f64 {
+    var x: f64 = 0.0;
+    store64(&x, bits);
+    return x;
+}
+
+# The Ok payload of a Result as an f64 (the caller asserts is_ok).
+#must_use
+fn okf(t, v): f64 {
+    var x: f64 = v;
+    return x;
+}
+
+# ── Arrhenius, half-lives, integrated rate laws ─────────────────────────────────────
+
+fn _t_arrhenius_basic() {
+    test_group("arrhenius_basic");
+    # 1e13 · exp(−100000 / (8.314462618 · 300)), 50-digit decimal
+    var t, v = arrhenius_rate(10000000000000.0, 100000.0, 300.0);
+    var k: f64 = v;
+    assert(is_ok(t) == 1 && relc(k, 0.00003879656655666024, 0.000000000001) == 1, "Arrhenius k");
+}
+
+fn _t_arrhenius_higher_temp_faster() {
+    test_group("arrhenius_higher_temp_faster");
+    var t1, v1 = arrhenius_rate(10000000000000.0, 50000.0, 300.0);
+    var t2, v2 = arrhenius_rate(10000000000000.0, 50000.0, 400.0);
+    var k_low: f64 = v1;
+    var k_high: f64 = v2;
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && k_high > k_low, "higher temperature should give faster rate");
+}
+
+fn _t_arrhenius_higher_ea_slower() {
+    test_group("arrhenius_higher_ea_slower");
+    var t1, v1 = arrhenius_rate(10000000000000.0, 30000.0, 300.0);
+    var t2, v2 = arrhenius_rate(10000000000000.0, 100000.0, 300.0);
+    var k_low_ea: f64 = v1;
+    var k_high_ea: f64 = v2;
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && k_low_ea > k_high_ea,
+        "higher activation energy should give slower rate");
+}
+
+fn _t_arrhenius_zero_temp_is_error() {
+    test_group("arrhenius_zero_temp_is_error");
+    var t, v = arrhenius_rate(10000000000000.0, 50000.0, 0.0);
+    assert_eq(is_err_result(t), 1, "T = 0");
+}
+
+fn _t_half_life_basic() {
+    test_group("half_life_basic");
+    var t, v = half_life_first_order(0.1);
+    var th: f64 = v;
+    var d: f64 = f64_abs(th - 6.931);
+    assert(is_ok(t) == 1 && d < 0.01, "t½ for k=0.1 should be ~6.93s");
+}
+
+fn _t_half_life_zero_rate_is_error() {
+    test_group("half_life_zero_rate_is_error");
+    var t, v = half_life_first_order(0.0);
+    assert_eq(is_err_result(t), 1, "k = 0");
+}
+
+fn _t_first_order_at_half_life() {
+    test_group("first_order_at_half_life");
+    var k: f64 = 0.1;
+    var t, v = half_life_first_order(k);
+    var t_half: f64 = v;
+    var remaining: f64 = first_order_concentration(1.0, k, t_half);
+    var d: f64 = f64_abs(remaining - 0.5);
+    assert(is_ok(t) == 1 && d < 0.001, "should be half at t½");
+}
+
+fn _t_second_order_decreases() {
+    test_group("second_order_decreases");
+    var c0: f64 = 1.0;
+    var t, v = second_order_concentration(c0, 0.1, 10.0);
+    var c1: f64 = v;
+    assert(is_ok(t) == 1 && c1 < c0, "concentration should decrease");
+    assert(c1 > 0.0, "concentration should stay positive");
+}
+
+fn _t_second_order_value() {
+    test_group("second_order_value");
+    # 1/(1/1.0 + 0.1·10) = 0.5
+    var t, v = second_order_concentration(1.0, 0.1, 10.0);
+    var c: f64 = v;
+    assert(is_ok(t) == 1 && relc(c, 0.5, 0.000000000000001) == 1, "second order");
+}
+
+fn _t_second_order_zero_initial_is_error() {
+    test_group("second_order_zero_initial_is_error");
+    var t, v = second_order_concentration(0.0, 0.1, 10.0);
+    assert_eq(is_err_result(t), 1, "[A]0 = 0");
+}
+
+fn _t_second_order_rejects_negative_or_nan_k_and_t() {
+    test_group("second_order_rejects_negative_or_nan_k_and_t");
+    # k·t = −1/[A]₀ gave Ok(inf); k·t < −1/[A]₀ gave a negative concentration.
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var t1, v1 = second_order_concentration(1.0, -0.1, 10.0);
+    assert_eq(is_err_result(t1), 1, "k = -0.1");
+    var t2, v2 = second_order_concentration(1.0, -0.2, 10.0);
+    assert_eq(is_err_result(t2), 1, "k = -0.2");
+    var t3, v3 = second_order_concentration(1.0, 0.1, -10.0);
+    assert_eq(is_err_result(t3), 1, "t = -10");
+    var t4, v4 = second_order_concentration(1.0, nan, 10.0);
+    assert_eq(is_err_result(t4), 1, "k NaN");
+    var t5, v5 = second_order_concentration(1.0, 0.1, inf);
+    assert_eq(is_err_result(t5), 1, "t inf");
+    var t6, v6 = second_order_concentration(nan, 0.1, 10.0);
+    assert_eq(is_err_result(t6), 1, "[A]0 NaN");
+}
+
+fn _t_arrhenius_negative_temp_is_error() {
+    test_group("arrhenius_negative_temp_is_error");
+    var t, v = arrhenius_rate(10000000000000.0, 50000.0, -100.0);
+    assert_eq(is_err_result(t), 1, "T = -100");
+}
+
+fn _t_half_life_negative_rate_is_error() {
+    test_group("half_life_negative_rate_is_error");
+    var t, v = half_life_first_order(-0.1);
+    assert_eq(is_err_result(t), 1, "k = -0.1");
+}
+
+fn _t_first_order_at_time_zero() {
+    test_group("first_order_at_time_zero");
+    var remaining: f64 = first_order_concentration(1.0, 0.1, 0.0);
+    var d: f64 = f64_abs(remaining - 1.0);
+    assert(d < eps64(), "nothing decays at t = 0");
+}
+
+fn _t_arrhenius_zero_ea_equals_pre_exponential() {
+    test_group("arrhenius_zero_ea_equals_pre_exponential");
+    # With Ea=0, k = A * exp(0) = A
+    var t, v = arrhenius_rate(10000000000000.0, 0.0, 300.0);
+    var k: f64 = v;
+    assert(is_ok(t) == 1 && k == 10000000000000.0, "zero Ea should give k=A");
+}
+
+# ── Michaelis–Menten ────────────────────────────────────────────────────────────────
+
+fn _t_michaelis_menten_at_km() {
+    test_group("michaelis_menten_at_km");
+    # When [S] = Km, v = Vmax/2
+    var t, v = michaelis_menten(100.0, 5.0, 5.0);
+    var r: f64 = v;
+    var d: f64 = f64_abs(r - 50.0);
+    assert(is_ok(t) == 1 && d < eps64(), "v = Vmax/2 at [S] = Km");
+}
+
+fn _t_michaelis_menten_saturation() {
+    test_group("michaelis_menten_saturation");
+    # At very high [S], v → Vmax
+    var t, v = michaelis_menten(100.0, 5.0, 1000000.0);
+    var r: f64 = v;
+    var d: f64 = f64_abs(r - 100.0);
+    assert(is_ok(t) == 1 && d < 0.01, "v → Vmax");
+}
+
+fn _t_michaelis_menten_zero_substrate() {
+    test_group("michaelis_menten_zero_substrate");
+    var t, v = michaelis_menten(100.0, 5.0, 0.0);
+    var r: f64 = v;
+    var d: f64 = f64_abs(r);
+    assert(is_ok(t) == 1 && d < eps64(), "v = 0 at [S] = 0");
+}
+
+fn _t_michaelis_menten_zero_vmax_is_error() {
+    test_group("michaelis_menten_zero_vmax_is_error");
+    var t, v = michaelis_menten(0.0, 5.0, 1.0);
+    assert_eq(is_err_result(t), 1, "Vmax = 0");
+}
+
+fn _t_michaelis_menten_zero_km_is_error() {
+    test_group("michaelis_menten_zero_km_is_error");
+    var t, v = michaelis_menten(100.0, 0.0, 1.0);
+    assert_eq(is_err_result(t), 1, "Km = 0");
+}
+
+# Adapted: Rust destructures `let (slope, intercept) = lineweaver_burk(100.0, 5.0).unwrap()`; here the pair is the
+# caller's buffer of two f64 (port plan §6.4), and the Ok payload is the count written, 2.
+fn _t_lineweaver_burk_basic() {
+    test_group("lineweaver_burk_basic");
+    var lb[16];
+    var t, v = lineweaver_burk(100.0, 5.0, &lb);
+    var slope: f64 = load64(&lb);
+    var intercept: f64 = load64(&lb + 8);
+    var ds: f64 = f64_abs(slope - 0.05);
+    var di: f64 = f64_abs(intercept - 0.01);
+    assert(is_ok(t) == 1 && v == 2, "Ok(2)");
+    assert(ds < 0.0000000001, "Km/Vmax = 5/100");
+    assert(di < 0.0000000001, "1/Vmax = 1/100");
+}
+
+# ── collision theory ────────────────────────────────────────────────────────────────
+
+fn _t_collision_theory_basic() {
+    test_group("collision_theory_basic");
+    # 1e10 · 0.1 · exp(−50000 / (8.314462618 · 300)), 50-digit decimal
+    var t, v = collision_theory_rate(10000000000.0, 0.1, 50000.0, 300.0);
+    var k: f64 = v;
+    assert(is_ok(t) == 1 && relc(k, 1.9696844050928627, 0.000000000001) == 1, "collision k");
+}
+
+fn _t_collision_theory_steric_reduces_rate() {
+    test_group("collision_theory_steric_reduces_rate");
+    var t1, v1 = collision_theory_rate(10000000000.0, 1.0, 50000.0, 300.0);
+    var t2, v2 = collision_theory_rate(10000000000.0, 0.01, 50000.0, 300.0);
+    var k_full: f64 = v1;
+    var k_steric: f64 = v2;
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && k_steric < k_full, "p < 1 reduces k");
+}
+
+fn _t_collision_theory_zero_steric_is_error() {
+    test_group("collision_theory_zero_steric_is_error");
+    var t, v = collision_theory_rate(10000000000.0, 0.0, 50000.0, 300.0);
+    assert_eq(is_err_result(t), 1, "p = 0");
+}
+
+fn _t_collision_theory_steric_over_one_is_error() {
+    test_group("collision_theory_steric_over_one_is_error");
+    var t, v = collision_theory_rate(10000000000.0, 1.5, 50000.0, 300.0);
+    assert_eq(is_err_result(t), 1, "p = 1.5");
+}
+
+fn _t_collision_theory_rejects_bad_z_and_nan_steric() {
+    test_group("collision_theory_rejects_bad_z_and_nan_steric");
+    var nan: f64 = _km_nan();
+    # A negative Z used to give a negative rate constant.
+    var t1, v1 = collision_theory_rate(-10000000000.0, 0.1, 50000.0, 300.0);
+    assert_eq(is_err_result(t1), 1, "Z < 0");
+    var t2, v2 = collision_theory_rate(0.0, 0.1, 50000.0, 300.0);
+    assert_eq(is_err_result(t2), 1, "Z = 0");
+    var t3, v3 = collision_theory_rate(nan, 0.1, 50000.0, 300.0);
+    assert_eq(is_err_result(t3), 1, "Z NaN");
+    # NaN slipped through `p <= 0 || p > 1`.
+    var t4, v4 = collision_theory_rate(10000000000.0, nan, 50000.0, 300.0);
+    assert_eq(is_err_result(t4), 1, "p NaN");
+    var t5, v5 = collision_theory_rate(10000000000.0, 0.1, nan, 300.0);
+    assert_eq(is_err_result(t5), 1, "Ea NaN");
+    var t6, v6 = collision_theory_rate(10000000000.0, 0.1, 50000.0, nan);
+    assert_eq(is_err_result(t6), 1, "T NaN");
+}
+
+# ── the Eyring equation ─────────────────────────────────────────────────────────────
+
+fn _t_eyring_basic() {
+    test_group("eyring_basic");
+    # k_B·T/h = 6.212437991620e12 s⁻¹ at 298.15 K; × exp(−80000 / (R·298.15)) = 0.059960941088 s⁻¹ (50-digit decimal)
+    var t, v = eyring_rate(80000.0, 298.15);
+    var k: f64 = v;
+    assert(is_ok(t) == 1 && relc(k, 0.05996094108818953, 0.000000000001) == 1, "Eyring k");
+    var t2, v2 = eyring_rate(0.0, 298.15);
+    var prefactor: f64 = v2;
+    assert(is_ok(t2) == 1 && relc(prefactor, 6212437991620.116, 0.000000000001) == 1, "k_B·T/h");
+}
+
+fn _t_eyring_higher_temp_faster() {
+    test_group("eyring_higher_temp_faster");
+    var t1, v1 = eyring_rate(80000.0, 298.0);
+    var t2, v2 = eyring_rate(80000.0, 400.0);
+    var k_low: f64 = v1;
+    var k_high: f64 = v2;
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && k_high > k_low, "higher T is faster");
+}
+
+fn _t_eyring_zero_temp_is_error() {
+    test_group("eyring_zero_temp_is_error");
+    var t, v = eyring_rate(80000.0, 0.0);
+    assert_eq(is_err_result(t), 1, "T = 0");
+}
+
+fn _t_eyring_decomposed_matches_combined() {
+    test_group("eyring_decomposed_matches_combined");
+    var dh: f64 = 80000.0;
+    var ds: f64 = -50.0;
+    var tk: f64 = 298.0;
+    var dg: f64 = dh - (tk * ds);
+    var t1, v1 = eyring_rate(dg, tk);
+    var t2, v2 = eyring_rate_from_activation(dh, ds, tk);
+    var k_combined: f64 = v1;
+    var k_decomposed: f64 = v2;
+    var ad: f64 = f64_abs(k_combined - k_decomposed);
+    var q: f64 = ad / k_combined;
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && q < 0.000000000001, "combined should match decomposed");
+    assert(relc(k_decomposed, 0.00014418303282538396, 0.000000000001) == 1, "Eyring ΔH‡/ΔS‡");
+}
+
+# ── zero order, nth order ───────────────────────────────────────────────────────────
+
+fn _t_zero_order_linear_decrease() {
+    test_group("zero_order_linear_decrease");
+    var c: f64 = zero_order_concentration(1.0, 0.1, 5.0);
+    var d: f64 = f64_abs(c - 0.5);
+    assert(d < eps64(), "1 − 0.1·5");
+}
+
+fn _t_zero_order_floors_at_zero() {
+    test_group("zero_order_floors_at_zero");
+    var c: f64 = zero_order_concentration(1.0, 0.1, 20.0);
+    var d: f64 = f64_abs(c);
+    assert(d < eps64(), "should floor at 0");
+}
+
+fn _t_zero_order_half_life_basic() {
+    test_group("zero_order_half_life_basic");
+    var t, v = zero_order_half_life(1.0, 0.1);
+    var th: f64 = v;
+    var d: f64 = f64_abs(th - 5.0);
+    assert(is_ok(t) == 1 && d < eps64(), "[A]0/(2k)");
+}
+
+fn _t_zero_order_half_life_rejects_bad_initial() {
+    test_group("zero_order_half_life_rejects_bad_initial");
+    var nan: f64 = _km_nan();
+    var t1, v1 = zero_order_half_life(0.0, 0.1);
+    assert_eq(is_err_result(t1), 1, "[A]0 = 0");
+    var t2, v2 = zero_order_half_life(-1.0, 0.1);
+    assert_eq(is_err_result(t2), 1, "[A]0 = -1");
+    var t3, v3 = zero_order_half_life(nan, 0.1);
+    assert_eq(is_err_result(t3), 1, "[A]0 NaN");
+    var t4, v4 = zero_order_half_life(1.0, nan);
+    assert_eq(is_err_result(t4), 1, "k NaN");
+}
+
+fn _t_zero_order_concentration_propagates_nan() {
+    test_group("zero_order_concentration_propagates_nan");
+    # f64::max(NaN, 0.0) silently returned 0.0
+    var nan: f64 = _km_nan();
+    var c1: f64 = zero_order_concentration(nan, 0.1, 1.0);
+    assert_eq(_km_is_nan(c1), 1, "[A]0 NaN");
+    var c2: f64 = zero_order_concentration(1.0, nan, 1.0);
+    assert_eq(_km_is_nan(c2), 1, "k NaN");
+}
+
+fn _t_nth_order_second_order_matches() {
+    test_group("nth_order_second_order_matches");
+    # For n=2: t½ = 1/(k·[A]₀)
+    var t, v = nth_order_half_life(1.0, 0.1, 2.0);
+    var t_nth: f64 = v;
+    var t_direct: f64 = 1.0 / (0.1 * 1.0);
+    var d: f64 = f64_abs(t_nth - t_direct);
+    assert(is_ok(t) == 1 && d < 0.001, "n=2 half-life should be 1/(k[A]0)");
+}
+
+fn _t_nth_order_increases_with_order() {
+    test_group("nth_order_increases_with_order");
+    var t2, v2 = nth_order_half_life(1.0, 0.1, 2.0);
+    var t3, v3 = nth_order_half_life(1.0, 0.1, 3.0);
+    var h2: f64 = v2;
+    var h3: f64 = v3;
+    assert(is_ok(t2) == 1 && is_ok(t3) == 1 && h3 > h2, "higher order should have longer half-life at same [A]0");
+}
+
+fn _t_nth_order_one_or_non_finite_is_error() {
+    test_group("nth_order_one_or_non_finite_is_error");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var ninf: f64 = -inf;
+    var t1, v1 = nth_order_half_life(1.0, 0.1, 1.0);
+    assert_eq(is_err_result(t1), 1, "n = 1");
+    var n2: f64 = 1.0 + 0.0000000000001;
+    var t2, v2 = nth_order_half_life(1.0, 0.1, n2);
+    assert_eq(is_err_result(t2), 1, "n = 1 + 1e-13");
+    var t3, v3 = nth_order_half_life(1.0, 0.1, nan);
+    assert_eq(is_err_result(t3), 1, "n NaN");
+    var t4, v4 = nth_order_half_life(1.0, 0.1, inf);
+    assert_eq(is_err_result(t4), 1, "n inf");
+    var t5, v5 = nth_order_half_life(1.0, 0.1, ninf);
+    assert_eq(is_err_result(t5), 1, "n -inf");
+}
+
+fn _t_nth_order_below_one_is_valid() {
+    test_group("nth_order_below_one_is_valid");
+    # n = 0 reproduces the zero-order half-life [A]₀/(2k)
+    var t0, v0 = nth_order_half_life(1.0, 0.1, 0.0);
+    var tz, vz = zero_order_half_life(1.0, 0.1);
+    var h0: f64 = v0;
+    var hz: f64 = vz;
+    assert(is_ok(t0) == 1 && is_ok(tz) == 1 && relc(h0, hz, 0.000000000000001) == 1, "n = 0");
+    # n = ½: t½ = 2(1 − 1/√2)·√[A]₀ / k
+    var th, vh = nth_order_half_life(1.0, 0.1, 0.5);
+    var hh: f64 = vh;
+    assert(is_ok(th) == 1 && relc(hh, 5.85786437626905, 0.00000000000001) == 1, "n = 1/2");
+}
+
+fn _t_nth_order_third_order_value() {
+    test_group("nth_order_third_order_value");
+    # n = 3: t½ = 3 / (2k[A]₀²) = 3 / (2 · 0.1 · 4) = 3.75
+    var t, v = nth_order_half_life(2.0, 0.1, 3.0);
+    var h: f64 = v;
+    assert(is_ok(t) == 1 && relc(h, 3.75, 0.000000000000001) == 1, "n = 3");
+}
+
+fn _t_nth_order_near_one_approaches_first_order() {
+    test_group("nth_order_near_one_approaches_first_order");
+    # (2^δ − 1)/δ → ln 2; powf(2, δ) − 1 lost ~7 digits at δ = 1e-9.
+    var n: f64 = 1.0 + 0.000000001;
+    var t, v = nth_order_half_life(1.0, 0.1, n);
+    var t1, v1 = half_life_first_order(0.1);
+    var h: f64 = v;
+    var h1: f64 = v1;
+    assert(is_ok(t) == 1 && is_ok(t1) == 1 && relc(h, h1, 0.000000001) == 1, "n → 1");
+}
+
+fn _t_nth_order_overflow_is_error() {
+    test_group("nth_order_overflow_is_error");
+    var c0: f64 = fbits(0x01A56E1FC2F8F359);   # 1e-300
+    var t, v = nth_order_half_life(c0, 0.1, 10.0);
+    assert_eq(is_err_result(t), 1, "[A]0^9 underflows: t½ overflows");
+}
+
+# ── steady state, pre-equilibrium ───────────────────────────────────────────────────
+
+fn _t_steady_state_basic() {
+    test_group("steady_state_basic");
+    # A →(0.1) B →(1.0) C, [A]=1.0 → [B]_ss = 0.1*1.0/1.0 = 0.1
+    var t, v = steady_state_intermediate(0.1, 1.0, 1.0);
+    var b: f64 = v;
+    var d: f64 = f64_abs(b - 0.1);
+    assert(is_ok(t) == 1 && d < eps64(), "[B]ss = 0.1");
+}
+
+fn _t_steady_state_rate_basic() {
+    test_group("steady_state_rate_basic");
+    var rate: f64 = steady_state_rate(0.05, 2.0);
+    var d: f64 = f64_abs(rate - 0.1);
+    assert(d < eps64(), "0.05 · 2");
+}
+
+fn _t_pre_equilibrium_basic() {
+    test_group("pre_equilibrium_basic");
+    # K_eq = k1/k-1 = 10/2 = 5, rate = k2 × 5 × [A] = 0.1 × 5 × 1.0 = 0.5
+    var t, v = pre_equilibrium_rate(10.0, 2.0, 0.1, 1.0);
+    var rate: f64 = v;
+    var d: f64 = f64_abs(rate - 0.5);
+    assert(is_ok(t) == 1 && d < 0.0000000001, "rate = 0.5");
+}
+
+fn _t_pre_equilibrium_zero_kreverse_is_error() {
+    test_group("pre_equilibrium_zero_kreverse_is_error");
+    var t, v = pre_equilibrium_rate(1.0, 0.0, 0.1, 1.0);
+    assert_eq(is_err_result(t), 1, "k_reverse = 0");
+}
+
+# Adapted: the two lineweaver_burk rows pass the caller's buffer (port plan §6.4).
+fn _t_non_finite_inputs_are_rejected() {
+    test_group("non_finite_inputs_are_rejected");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var a: f64 = 10000000000000.0;
+    var t1, v1 = arrhenius_rate(a, 50000.0, nan);
+    assert_eq(is_err_result(t1), 1, "arrhenius T NaN");
+    var t2, v2 = arrhenius_rate(a, 50000.0, inf);
+    assert_eq(is_err_result(t2), 1, "arrhenius T inf");
+    var t3, v3 = arrhenius_rate(nan, 50000.0, 300.0);
+    assert_eq(is_err_result(t3), 1, "arrhenius A NaN");
+    var t4, v4 = arrhenius_rate(a, nan, 300.0);
+    assert_eq(is_err_result(t4), 1, "arrhenius Ea NaN");
+    var t5, v5 = half_life_first_order(nan);
+    assert_eq(is_err_result(t5), 1, "half-life k NaN");
+    var t6, v6 = half_life_first_order(inf);
+    assert_eq(is_err_result(t6), 1, "half-life k inf");
+    var t7, v7 = nth_order_half_life(nan, 0.1, 2.0);
+    assert_eq(is_err_result(t7), 1, "nth [A]0 NaN");
+    var t8, v8 = nth_order_half_life(1.0, nan, 2.0);
+    assert_eq(is_err_result(t8), 1, "nth k NaN");
+    var t9, v9 = steady_state_intermediate(0.1, 1.0, nan);
+    assert_eq(is_err_result(t9), 1, "steady state k2 NaN");
+    var t10, v10 = steady_state_intermediate(nan, 1.0, 1.0);
+    assert_eq(is_err_result(t10), 1, "steady state k1 NaN");
+    var t11, v11 = steady_state_intermediate(0.1, nan, 1.0);
+    assert_eq(is_err_result(t11), 1, "steady state [A] NaN");
+    var t12, v12 = pre_equilibrium_rate(1.0, nan, 0.1, 1.0);
+    assert_eq(is_err_result(t12), 1, "pre-equilibrium k_reverse NaN");
+    var t13, v13 = pre_equilibrium_rate(nan, 2.0, 0.1, 1.0);
+    assert_eq(is_err_result(t13), 1, "pre-equilibrium k_forward NaN");
+    var t14, v14 = pre_equilibrium_rate(1.0, 2.0, nan, 1.0);
+    assert_eq(is_err_result(t14), 1, "pre-equilibrium k_slow NaN");
+    var t15, v15 = pre_equilibrium_rate(1.0, 2.0, 0.1, nan);
+    assert_eq(is_err_result(t15), 1, "pre-equilibrium [A] NaN");
+    var t16, v16 = michaelis_menten(nan, 5.0, 1.0);
+    assert_eq(is_err_result(t16), 1, "MM Vmax NaN");
+    var t17, v17 = michaelis_menten(100.0, nan, 1.0);
+    assert_eq(is_err_result(t17), 1, "MM Km NaN");
+    var t18, v18 = michaelis_menten(100.0, 5.0, nan);
+    assert_eq(is_err_result(t18), 1, "MM [S] NaN");
+    var t19, v19 = michaelis_menten(100.0, 5.0, inf);
+    assert_eq(is_err_result(t19), 1, "MM [S] inf");
+    var lb[16];
+    var t20, v20 = lineweaver_burk(nan, 5.0, &lb);
+    assert_eq(is_err_result(t20), 1, "LB Vmax NaN");
+    var t21, v21 = lineweaver_burk(100.0, inf, &lb);
+    assert_eq(is_err_result(t21), 1, "LB Km inf");
+    var t22, v22 = eyring_rate(80000.0, nan);
+    assert_eq(is_err_result(t22), 1, "Eyring T NaN");
+    var t23, v23 = eyring_rate(nan, 298.15);
+    assert_eq(is_err_result(t23), 1, "Eyring ΔG NaN");
+    var t24, v24 = eyring_rate_from_activation(nan, -50.0, 298.15);
+    assert_eq(is_err_result(t24), 1, "Eyring ΔH NaN");
+    var t25, v25 = eyring_rate_from_activation(80000.0, nan, 298.15);
+    assert_eq(is_err_result(t25), 1, "Eyring ΔS NaN");
+    var t26, v26 = eyring_rate_from_activation(80000.0, -50.0, inf);
+    assert_eq(is_err_result(t26), 1, "Eyring T inf");
+}
+
+# ── Cyrius-only ─────────────────────────────────────────────────────────────────────
+
+# lineweaver_burk's caller buffer (port plan §6.4): Ok(2) writes exactly the two words, slope (Km/Vmax) then
+# intercept (1/Vmax), each one rounding; Err leaves the buffer untouched.
+fn _t_cyrius_lineweaver_burk_buffer() {
+    test_group("cyrius_lineweaver_burk_buffer");
+    var buf: i64[3];
+    buf[0] = 0x5A5A5A5A5A5A5A5A;
+    buf[1] = 0x5A5A5A5A5A5A5A5A;
+    buf[2] = 0x5A5A5A5A5A5A5A5A;
+    var t, v = lineweaver_burk(100.0, 5.0, &buf);
+    assert(is_ok(t) == 1 && v == 2, "Ok(2), the count written");
+    var want_s: f64 = 5.0 / 100.0;
+    var want_i: f64 = 1.0 / 100.0;
+    assert_bits_eq(buf[0], _km_bits(want_s), "slope = Km/Vmax");
+    assert_bits_eq(buf[1], _km_bits(want_i), "intercept = 1/Vmax");
+    assert_eq(buf[2], 0x5A5A5A5A5A5A5A5A, "nothing past the two words");
+    var nan: f64 = _km_nan();
+    var e: i64[2];
+    e[0] = 0x1111111111111111;
+    e[1] = 0x2222222222222222;
+    var t1, v1 = lineweaver_burk(0.0, 5.0, &e);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "Vmax = 0: InvalidInput");
+    var t2, v2 = lineweaver_burk(100.0, nan, &e);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "Km NaN: InvalidInput");
+    assert(e[0] == 0x1111111111111111 && e[1] == 0x2222222222222222, "Err leaves the buffer untouched");
+    # overflow is Rust's: 1/Vmax for the smallest subnormal Vmax is +inf
+    var tiny: f64 = fbits(1);
+    var t3, v3 = lineweaver_burk(tiny, 1.0, &buf);
+    assert(is_ok(t3) == 1 && ulp_is_inf(buf[0]) == 1 && ulp_is_inf(buf[1]) == 1, "Km/Vmax and 1/Vmax overflow");
+}
+
+# Rust's std::f64::consts::LN_2 and private FIRST_ORDER_TOLERANCE are typed inline in src/kinetics.cyr. LN_2 /
+# 1.0 is LN_2's bits; |n − 1| ≤ 1e-12 rejects n, and near 1 ± 1e-12 the doubles are 2⁻⁵² (above) and 2⁻⁵³ (below)
+# apart, so the boundary orders are 1 + 4503·2⁻⁵² (rejected) / 4504·2⁻⁵² (accepted) and 1 − 9007·2⁻⁵³ / 9008·2⁻⁵³.
+fn _t_cyrius_inline_constants() {
+    test_group("cyrius_inline_constants");
+    var t, v = half_life_first_order(1.0);
+    assert(is_ok(t) == 1 && v == 0x3FE62E42FEFA39EF, "LN_2 / 1 = LN_2 (0x3FE62E42FEFA39EF)");
+    var t0, v0 = half_life_first_order(0.5);
+    var h0: f64 = v0;
+    var ln2: f64 = okf(t, v);
+    assert(is_ok(t0) == 1 && h0 == 2.0 * ln2, "LN_2 / 0.5 = 2·LN_2");
+    var hi_in: f64 = fbits(0x3FF0000000001197);
+    var hi_out: f64 = fbits(0x3FF0000000001198);
+    var lo_in: f64 = fbits(0x3FEFFFFFFFFFDCD1);
+    var lo_out: f64 = fbits(0x3FEFFFFFFFFFDCD0);
+    var t1, v1 = nth_order_half_life(1.0, 0.1, hi_in);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "n − 1 = 4503·2^-52 <= 1e-12: rejected");
+    var t2, v2 = nth_order_half_life(1.0, 0.1, hi_out);
+    assert_eq(is_ok(t2), 1, "n − 1 = 4504·2^-52 > 1e-12: accepted");
+    var t3, v3 = nth_order_half_life(1.0, 0.1, lo_in);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT) == 1, "1 − n = 9007·2^-53 <= 1e-12: rejected");
+    var t4, v4 = nth_order_half_life(1.0, 0.1, lo_out);
+    assert_eq(is_ok(t4), 1, "1 − n = 9008·2^-53 > 1e-12: accepted");
+    # Just past the tolerance the half-life is first order's ln 2 / k to about 1e-12 (expm1 keeps the precision).
+    var h2: f64 = v2;
+    var h4: f64 = v4;
+    var t5, v5 = half_life_first_order(0.1);
+    var h1: f64 = v5;
+    assert(relc(h2, h1, 0.00000000001) == 1 && relc(h4, h1, 0.00000000001) == 1, "both ≈ ln 2 / k");
+}
+
+# Rust's check order, error by error: the first failing guard decides the code.
+fn _t_cyrius_check_order() {
+    test_group("cyrius_check_order");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var t1, v1 = arrhenius_rate(nan, nan, 0.0);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_TEMPERATURE) == 1, "arrhenius: T first");
+    var t2, v2 = arrhenius_rate(inf, nan, 300.0);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "arrhenius: then A, Ea");
+    var t3, v3 = collision_theory_rate(nan, nan, nan, 0.0);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_TEMPERATURE) == 1, "collision: T first");
+    var t4, v4 = collision_theory_rate(nan, 1.5, nan, 300.0);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "collision: then p");
+    var t5, v5 = nth_order_half_life(nan, nan, 1.0);
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_INPUT) == 1, "nth: the order first");
+    var t6, v6 = nth_order_half_life(nan, -1.0, 2.0);
+    assert(is_err_code(t6, v6, KM_ERR_INVALID_INPUT) == 1, "nth: then k");
+    var t7, v7 = nth_order_half_life(nan, 0.1, 2.0);
+    assert(is_err_code(t7, v7, KM_ERR_INVALID_CONCENTRATION) == 1, "nth: then [A]0");
+    var c0: f64 = fbits(0x01A56E1FC2F8F359);   # 1e-300
+    var t8, v8 = nth_order_half_life(c0, 0.1, 10.0);
+    assert(is_err_code(t8, v8, KM_ERR_COMPUTATION_ERROR) == 1, "nth: an unrepresentable t½ is ComputationError");
+    var t9, v9 = second_order_concentration(nan, nan, nan);
+    assert(is_err_code(t9, v9, KM_ERR_INVALID_CONCENTRATION) == 1, "second order: [A]0 first");
+    var t10, v10 = second_order_concentration(1.0, nan, -1.0);
+    assert(is_err_code(t10, v10, KM_ERR_INVALID_INPUT) == 1, "second order: then k, t");
+    var t11, v11 = zero_order_half_life(nan, 0.0);
+    assert(is_err_code(t11, v11, KM_ERR_INVALID_INPUT) == 1, "zero-order t½: k first");
+    var t12, v12 = zero_order_half_life(-1.0, 0.1);
+    assert(is_err_code(t12, v12, KM_ERR_INVALID_CONCENTRATION) == 1, "zero-order t½: then [A]0");
+    var t13, v13 = steady_state_intermediate(nan, nan, 0.0);
+    assert(is_err_code(t13, v13, KM_ERR_INVALID_INPUT) == 1, "steady state: k2 first");
+    var t14, v14 = steady_state_intermediate(0.1, -1.0, 1.0);
+    assert(is_err_code(t14, v14, KM_ERR_INVALID_CONCENTRATION) == 1, "steady state: [A] last");
+    var t15, v15 = pre_equilibrium_rate(nan, 0.0, nan, nan);
+    assert(is_err_code(t15, v15, KM_ERR_INVALID_INPUT) == 1, "pre-equilibrium: k_reverse first");
+    var t16, v16 = pre_equilibrium_rate(1.0, 2.0, 0.1, -1.0);
+    assert(is_err_code(t16, v16, KM_ERR_INVALID_CONCENTRATION) == 1, "pre-equilibrium: [A] last");
+    var t17, v17 = michaelis_menten(100.0, 5.0, -1.0);
+    assert(is_err_code(t17, v17, KM_ERR_INVALID_CONCENTRATION) == 1, "MM: [S] is a concentration");
+    var t18, v18 = eyring_rate_from_activation(nan, nan, 0.0);
+    assert(is_err_code(t18, v18, KM_ERR_INVALID_TEMPERATURE) == 1, "Eyring ΔH‡/ΔS‡: T first");
+    var t19, v19 = eyring_rate(nan, 298.15);
+    assert(is_err_code(t19, v19, KM_ERR_INVALID_INPUT) == 1, "Eyring: ΔG‡ InvalidInput");
+}
+
+# Signed zeros and NaN results, as Rust gives them: zero_order_concentration keeps −0.0 and floors only a negative
+# remainder; 0·∞ and ∞·0 inside the rate laws are Ok(NaN), not an error.
+fn _t_cyrius_zeros_and_nan() {
+    test_group("cyrius_zeros_and_nan");
+    var mz: f64 = -0.0;
+    var inf: f64 = 1.0 / 0.0;
+    var c1: f64 = zero_order_concentration(mz, 0.0, 1.0);
+    assert_eq(_km_bits(c1), 0x8000000000000000, "−0 − 0 = −0, kept");
+    var c2: f64 = zero_order_concentration(mz, mz, 1.0);
+    assert_eq(_km_bits(c2), 0, "−0 − (−0) = +0");
+    var c3: f64 = zero_order_concentration(-1.0, 0.0, 0.0);
+    assert_eq(_km_bits(c3), 0, "negative: floored to +0");
+    var c4: f64 = zero_order_concentration(1.0, inf, 0.0);
+    assert_eq(_km_is_nan(c4), 1, "∞·0 = NaN propagates");
+    var tiny: f64 = fbits(0x01A56E1FC2F8F359);   # 1e-300
+    var t1, v1 = arrhenius_rate(0.0, -1.0, tiny);
+    assert(is_ok(t1) == 1 && ulp_is_nan(v1) == 1, "A·exp(+∞) = 0·∞: Ok(NaN)");
+    var t2, v2 = eyring_rate_from_activation(10000000.0, 6000.0, 298.15);
+    assert(is_ok(t2) == 1 && ulp_is_nan(v2) == 1, "exp(ΔS‡/R) = ∞ times exp(−ΔH‡/RT) = 0: Ok(NaN)");
+    var big: f64 = fbits(0x7E37E43C8800759C);   # 1e300
+    var c5: f64 = first_order_concentration(inf, big, big);
+    assert_eq(_km_is_nan(c5), 1, "∞·exp(−∞) = NaN");
+    var t3, v3 = second_order_concentration(fbits(1), 0.0, 1.0);
+    assert(is_ok(t3) == 1 && v3 == 0, "1/[A]0 overflows: 1/∞ = +0");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_arrhenius_basic();
+    _t_arrhenius_higher_temp_faster();
+    _t_arrhenius_higher_ea_slower();
+    _t_arrhenius_zero_temp_is_error();
+    _t_half_life_basic();
+    _t_half_life_zero_rate_is_error();
+    _t_first_order_at_half_life();
+    _t_second_order_decreases();
+    _t_second_order_value();
+    _t_second_order_zero_initial_is_error();
+    _t_second_order_rejects_negative_or_nan_k_and_t();
+    _t_arrhenius_negative_temp_is_error();
+    _t_half_life_negative_rate_is_error();
+    _t_first_order_at_time_zero();
+    _t_arrhenius_zero_ea_equals_pre_exponential();
+    _t_michaelis_menten_at_km();
+    _t_michaelis_menten_saturation();
+    _t_michaelis_menten_zero_substrate();
+    _t_michaelis_menten_zero_vmax_is_error();
+    _t_michaelis_menten_zero_km_is_error();
+    _t_lineweaver_burk_basic();
+    _t_collision_theory_basic();
+    _t_collision_theory_steric_reduces_rate();
+    _t_collision_theory_zero_steric_is_error();
+    _t_collision_theory_steric_over_one_is_error();
+    _t_collision_theory_rejects_bad_z_and_nan_steric();
+    _t_eyring_basic();
+    _t_eyring_higher_temp_faster();
+    _t_eyring_zero_temp_is_error();
+    _t_eyring_decomposed_matches_combined();
+    _t_zero_order_linear_decrease();
+    _t_zero_order_floors_at_zero();
+    _t_zero_order_half_life_basic();
+    _t_zero_order_half_life_rejects_bad_initial();
+    _t_zero_order_concentration_propagates_nan();
+    _t_nth_order_second_order_matches();
+    _t_nth_order_increases_with_order();
+    _t_nth_order_one_or_non_finite_is_error();
+    _t_nth_order_below_one_is_valid();
+    _t_nth_order_third_order_value();
+    _t_nth_order_near_one_approaches_first_order();
+    _t_nth_order_overflow_is_error();
+    _t_steady_state_basic();
+    _t_steady_state_rate_basic();
+    _t_pre_equilibrium_basic();
+    _t_pre_equilibrium_zero_kreverse_is_error();
+    _t_non_finite_inputs_are_rejected();
+    _t_cyrius_lineweaver_burk_buffer();
+    _t_cyrius_inline_constants();
+    _t_cyrius_check_order();
+    _t_cyrius_zeros_and_nan();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

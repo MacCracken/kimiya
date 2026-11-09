@@ -24,6 +24,9 @@ tanmatra's probe_tables.py; extend `checks` as the data modules arrive.
   the formula and name (through the blob offsets) and ΔH_f°, ΔG_f°, S°, against the golden
   `thermochem::THERMOCHEM_DATA[]` rows; for every SHOMATE_DATA segment the formula and the seven
   coefficient / range columns, against the golden `thermochem::SHOMATE_DATA[]` rows.
+- src/electrochemistry_data.cyr (M3a): KM_STANDARD_POTENTIALS_COUNT; for every STANDARD_POTENTIALS row the
+  equation (its UTF-8 bytes through the blob offsets) and couple, the electron count and E°, against the golden
+  `electrochemistry::STANDARD_POTENTIALS[]` rows. src/constants.cyr's checks cover the ten solution constants.
 - src/element_data.cyr (M1): for every row of ELEMENTS, the atomic number, symbol, name,
   atomic mass, electronegativity (presence flag and value) and category, against the golden
   `element::lookup_by_number` row of that Z; for every row of ELEMENT_PROPERTIES, the atomic
@@ -46,6 +49,10 @@ def rows(name):
 
 def unpct(t):
     return re.sub(r"%([0-9A-F]{2})", lambda m: chr(int(m.group(1), 16)), t)
+
+def unpct_utf8(t):
+    """A golden `s:` token's text, its %XX escapes decoded as the UTF-8 bytes they are."""
+    return re.sub(rb"%([0-9A-F]{2})", lambda m: bytes([int(m.group(1), 16)]), t.encode()).decode("utf-8")
 
 def snake(camel):
     return re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", camel).upper()
@@ -247,9 +254,44 @@ if consts_t != {"KM_THERMOCHEM_COUNT", "KM_SHOMATE_COUNT"}:
     fail(f"src/thermochem_data.cyr constants not probed: {sorted(consts_t)}")
 nm2b = len(checks) - nm2b_before
 
+# ── src/electrochemistry_data.cyr (M3a) ─────────────────────────────────────────────
+nm3a_before = len(checks)
+edata = (root / "src/electrochemistry_data.cyr").read_text()
+sp_rows, sp_len = {}, None
+for fn, cls, ins, outs in rows("electrochemistry"):
+    if fn == "electrochemistry::STANDARD_POTENTIALS[]":
+        sp_rows[int(ins[0][2:])] = outs
+    elif fn == "electrochemistry::STANDARD_POTENTIALS":
+        sp_len = int(outs[0][2:])
+spcount = int(re.search(r"^const KM_STANDARD_POTENTIALS_COUNT = (\d+);", edata, re.M).group(1))
+if sp_len != spcount or sorted(sp_rows) != list(range(spcount)):
+    fail(f"golden STANDARD_POTENTIALS has {sp_len} rows ({len(sp_rows)} listed); KM_STANDARD_POTENTIALS_COUNT is {spcount}")
+checks.append(("fmt_int(KM_STANDARD_POTENTIALS_COUNT);", "i", str(sp_len), "KM_STANDARD_POTENTIALS_COUNT"))
+for k in range(spcount):
+    equation, couple, electrons, e0 = sp_rows[k]
+    lab = f"STANDARD_POTENTIALS[{k}]"
+    checks.append((f"p = &_KM_STANDARD_POTENTIALS_EQUATION_BYTES + _KM_STANDARD_POTENTIALS_EQUATION_OFF[{k}]; "
+                   f"print(p, strlen(p));", "s", unpct_utf8(equation[2:]), f"{lab}.equation (UTF-8)"))
+    checks.append((f"p = &_KM_STANDARD_POTENTIALS_COUPLE_BYTES + _KM_STANDARD_POTENTIALS_COUPLE_OFF[{k}]; "
+                   f"print(p, strlen(p));", "s", unpct(couple[2:]), f"{lab}.couple"))
+    checks.append((f"fmt_int(KM_STANDARD_POTENTIALS_ELECTRONS[{k}]);", "i", electrons[2:], f"{lab}.electrons"))
+    checks.append((f"x = KM_STANDARD_POTENTIALS_STANDARD_POTENTIAL[{k}]; fmt_hex(x);", "f", e0[2:],
+                   f"{lab}.standard_potential"))
+covered_e = {"_KM_STANDARD_POTENTIALS_EQUATION_OFF", "_KM_STANDARD_POTENTIALS_EQUATION_BYTES",
+             "_KM_STANDARD_POTENTIALS_COUPLE_OFF", "_KM_STANDARD_POTENTIALS_COUPLE_BYTES",
+             "KM_STANDARD_POTENTIALS_ELECTRONS", "KM_STANDARD_POTENTIALS_STANDARD_POTENTIAL"}
+tables_e = set(re.findall(r"^var (_?KM_[A-Z0-9_]+)", edata, re.M))
+if tables_e != covered_e:
+    fail(f"src/electrochemistry_data.cyr tables not probed: {sorted(tables_e - covered_e)}; probed but gone: {sorted(covered_e - tables_e)}")
+consts_e = set(re.findall(r"^const (_?KM_[A-Z0-9_]+)", edata, re.M))
+if consts_e != {"KM_STANDARD_POTENTIALS_COUNT"}:
+    fail(f"src/electrochemistry_data.cyr constants not probed: {sorted(consts_e)}")
+nm3a = len(checks) - nm3a_before
+
 # ── the probe program ───────────────────────────────────────────────────────────────
 src = ['include "src/constants.cyr"', 'include "src/element_data.cyr"', 'include "src/phase_data.cyr"',
-       'include "src/gas_data.cyr"', 'include "src/thermochem_data.cyr"', "",
+       'include "src/gas_data.cyr"', 'include "src/thermochem_data.cyr"',
+       'include "src/electrochemistry_data.cyr"', "",
        "fn main() {", "    var x: f64 = 0.0;", "    var p = 0;"]
 for k, (stmt, kind, want, label) in enumerate(checks):
     src.append(f"    {stmt} println(\" {k}\");")
@@ -278,7 +320,7 @@ for k, (stmt, kind, want, label) in enumerate(checks):
     if not ok:
         fail(f"{label}: {stmt} -> {g!r}, want {want!r}")
 pending = len(golden) - nconst
-print(f"checked {nconst} constants, {nelem} element_data cells, {nm2a} phase_data / gas_data cells and "
-      f"{nm2b} thermochem_data cells through the Cyrius compiler ({pending} golden constants are module data "
-      f"of later milestones); failures: {fails}")
+print(f"checked {nconst} constants, {nelem} element_data cells, {nm2a} phase_data / gas_data cells, "
+      f"{nm2b} thermochem_data cells and {nm3a} electrochemistry_data cells through the Cyrius compiler ({pending} "
+      f"golden constants are module data of later milestones); failures: {fails}")
 sys.exit(1 if fails else 0)

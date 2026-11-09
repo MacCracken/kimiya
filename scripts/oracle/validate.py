@@ -40,11 +40,20 @@ and no Python packages. Usage, from the repo root:
    transcribed. Each flame row's noted solver path must match the recomputation; each of Rust's typed flame
    constants must change some row when perturbed (the corpus pins it). src/thermochem_data.cyr is checked
    against the literals.
+10. solution.tsv and electrochemistry.tsv (M3a), every row recomputed the same way: the weak acid / base
+   charge-balance Newton transcribed (each row's noted exit path checked; CHARGE_BALANCE_REL_TOL must change some
+   row when halved and when doubled; the 50-iteration cap is reported unobservable), ionic strength with Rust's
+   .sum() from -0.0, henderson_hasselbalch's log10 as glibc's e_log10.c composition over log (checked to be glibc's
+   log10 on every golden argument), STANDARD_POTENTIALS parsed from rust-old/src/electrochemistry.rs, and
+   src/electrochemistry_data.cyr checked against the literal.
+11. kinetics.tsv (M3b), every row recomputed the same way (glibc's exp, expm1 and pow via Python's math;
+   lineweaver_burk's tuple as two floats); Rust's LN_2 and private FIRST_ORDER_TOLERANCE (typed inline in
+   src/kinetics.cyr) must each change some golden row when perturbed.
 Every function in every .tsv must have a rule here: a new one fails until it gets one.
 
     python3 -I scripts/oracle/validate.py . --sensitivity
 
-also measures each M2a / M2b class-C function's sensitivity S (docs/development/port-parity.md, the rule
+also measures each M2a / M2b / M3a class-C function's sensitivity S (docs/development/port-parity.md, the rule
 for kimiya's own class-C functions, as ADR 0005 refines it): every golden row is re-evaluated with
 each primitive result that can differ between the port and the oracle nudged one ulp up and down,
 one call at a time, and S is the largest change of any output, in ulp. Those are the exp and
@@ -52,7 +61,10 @@ pow(10, y) results (stdlib counterparts) and the cos, acos, ln and x^2.5 results
 correctly rounded (the port's are; the 60-digit references decide it per argument). A result that
 is 0, ±∞ or NaN, or acos(±1), is exact on both sides and is not nudged; a nudge that flips Ok/Err
 or the root count is reported as a branch flip. It prints S, c (the most such calls in one row)
-and K = 2·S·c + 2 per function.
+and K = 2·S·c + 2 per function. For the M3a functions whose primitive the remedy changed (henderson_hasselbalch,
+the Nernst functions) it also prints S "before", every result of the replaced stdlib-like primitive nudged. For each
+function whose K passes 64 (M3b: the six class-C kinetics functions, measured until ADR 0006) it lists the rows that
+put it there (how many nudge a subnormal exp / pow result, the worst three) and S over the other rows.
 """
 import math, platform, re, struct, sys
 from decimal import Decimal, localcontext, Overflow, Underflow, InvalidOperation
@@ -633,7 +645,8 @@ def running_platform():
         cpu = "fma" if {"fma", "avx2"} <= flags else "no-fma"
     return f"{lib} {ver} {arch} {cpu}"
 
-LIBM_EXACT = all(recorded_platform(n) == running_platform() for n in ("reaction", "phase", "gas", "thermochem"))
+LIBM_EXACT = all(recorded_platform(n) == running_platform() for n in ("reaction", "phase", "gas", "thermochem", "solution", "electrochemistry",
+                                                                     "kinetics"))
 print(f"M2a class-C recompute: {'bit-exact' if LIBM_EXACT else 'shape only'} (corpus libm "
       f"{recorded_platform('gas')}, running {running_platform()})")
 
@@ -719,7 +732,7 @@ def glibc_not_cr(kind, args, y):
 def may_differ(kind, args, y):
     if not math.isfinite(y) or y == 0: return False
     if kind == "acos" and abs(args[0]) == 1.0: return False
-    if kind in ("exp", "pow10", "pow"): return True
+    if kind in ("exp", "pow10", "pow", "log10", "expm1"): return True   # stdlib-like counterparts (log10: _km_log10, expm1: _km_expm1)
     if kind == "cos" and abs(args[0]) > 8.0: return True
     return glibc_not_cr(kind, args, y)
 
@@ -931,6 +944,7 @@ def out_toks(x):
     """The golden tokens of a Rust result: Err, a root list (`v:n` + floats), an int, or a float."""
     if isinstance(x, Err): return [("E", x.name, None)]
     if isinstance(x, list): return [("v", len(x), None)] + [("f", z, f2b(z)) for z in x]
+    if isinstance(x, tuple): return [("f", z, f2b(z)) for z in x]     # a Rust tuple: its fields in order (M3b)
     if isinstance(x, bool): return [("i", int(x), None)]
     if isinstance(x, int): return [("i", x, None)]
     return [("f", x, f2b(x))]
@@ -1115,6 +1129,241 @@ def shomate_rule(fn):
     return rule
 
 
+# solution.rs (M3a)
+KW = b2f(golden_consts["solution::KW_WATER_25C"])
+def p_log10(x):
+    """log10 as the port's _km_log10 (fdlibm) meets it: a stdlib-like counterpart, so any result may differ."""
+    if math.isnan(x) or x < 0: return _prim(math.nan, "log10", (x,))
+    if x == 0: return _prim(-math.inf, "log10", (x,))
+    return _prim(math.log10(x), "log10", (x,))
+IVLN10, L10_2HI, L10_2LO = b2f(0x3FDBCB7B1526E50E), b2f(0x3FD34413509F6000), b2f(0x3D59FEF311F12B36)
+LOG10_LN = {"calls": 0, "glibc": 0}
+def p_log10_ln(x0):
+    """henderson_hasselbalch's log10 (_km_log10_ln, ADR 0005 amendment M3a): glibc 2.44's e_log10.c composition
+    log10(x) = (y·log10_2lo + ivln10·ln x′) + y·log10_2hi over ln (the port's correctly rounded _km_ln, logged as
+    an "ln" primitive call). Un-nudged, it must be glibc's log10 bit for bit (checked on every call)."""
+    if math.isnan(x0) or x0 < 0: return math.nan
+    if x0 == 0: return -math.inf
+    if math.isinf(x0): return x0
+    x, k, u = x0, 0, f2b(x0)
+    if u >> 52 == 0:
+        x, k = x * 2.0 ** 54, -54
+        u = f2b(x)
+    hx = u >> 32
+    k += (hx >> 20) - 1023
+    i = 1 if k < 0 else 0
+    hx = (hx & 0xFFFFF) | ((0x3FF - i) << 20)
+    y = float(k + i)
+    xr = b2f((hx << 32) | (u & 0xFFFFFFFF))
+    r = (y * L10_2LO + IVLN10 * p_ln(xr)) + y * L10_2HI
+    if NUDGE[0] is None:
+        LOG10_LN["calls"] += 1
+        LOG10_LN["glibc"] += f2b(r) == f2b(math.log10(x0))
+    return r
+def r_molarity(n, v):
+    if not is_positive(v): return Err("InvalidInput")
+    if not is_finite(n): return Err("InvalidInput")
+    return dv(n, v)
+def r_dilution(m1, v1, v2):
+    if not is_positive(v2): return Err("InvalidInput")
+    if not is_finite(m1) or not is_finite(v1): return Err("InvalidInput")
+    return dv(m1 * v1, v2)
+def r_ph_h(h):
+    if not is_positive(h): return Err("InvalidConcentration")
+    return -p_log10(h)
+def r_hh(pka, base, acid, log10=None):
+    if not is_positive(acid) or not is_positive(base): return Err("InvalidConcentration")
+    if not is_finite(pka): return Err("InvalidInput")
+    return pka + (log10 or p_log10_ln)(dv(base, acid))
+ROOT_PATH = [None]
+def r_root(k, c, tol=1e-12, max_iter=50):
+    """Rust's private charge_balance_root and checked_root, transcribed; ROOT_PATH[0] is the note's path."""
+    def checked(x, path):
+        ok = is_positive(x)
+        ROOT_PATH[0] = path + ("" if ok else ", checked_root rejected")
+        return x if ok else Err("ComputationError")
+    kc_kw = k * c + KW
+    weak_b = math.sqrt(kc_kw)
+    strong = 0.5 * (c + math.sqrt(c * c + 4.0 * KW))
+    x = r_min(weak_b, strong)
+    for it in range(max_iter):
+        fx = x * x * (x + k) - k * (c * x + KW) - KW * x
+        if fx <= 0.0: return checked(x, f"root: f(x) <= 0, {it} updates")
+        dfx = x * (3.0 * x + 2.0 * k) - kc_kw
+        step = dv(fx, dfx)
+        if not math.isfinite(step):
+            ROOT_PATH[0] = f"root: non-finite step, {it} updates"
+            return Err("ComputationError")
+        x -= step
+        if step <= tol * x: return checked(x, f"root: relative step, {it + 1} updates")
+    ROOT_PATH[0] = f"root: {max_iter} iterations"
+    return Err("ComputationError")
+def r_weak(k, c, base, tol=1e-12, max_iter=50):
+    ROOT_PATH[0] = None
+    if not is_positive(k): return Err("InvalidInput")
+    if not is_positive(c): return Err("InvalidConcentration")
+    x = r_root(k, c, tol, max_iter)
+    if isinstance(x, Err): return x
+    p = -p_log10(x)
+    return 14.0 - p if base else p
+def r_ionic(ins):
+    n = ins[0][1]
+    acc = -0.0                 # Rust's f64 Sum folds from -0.0
+    for j in range(n):
+        c, z = ins[1 + 2 * j][1], float(ins[2 + 2 * j][1])
+        acc += c * z * z
+    return 0.5 * acc
+def r_ia(i_, a):
+    if not is_non_negative(i_): return Err("InvalidInput")
+    if not is_finite(a): return Err("InvalidInput")
+    return None
+def r_dh_lim(z, i_, a):
+    e = r_ia(i_, a)
+    if e: return e
+    z = float(z)
+    return p_pow(10.0, -a * z * z * math.sqrt(i_))
+def r_dh_ext(z, i_, a, b, size):
+    e = r_ia(i_, a)
+    if e: return e
+    if not is_non_negative(b) or not is_non_negative(size): return Err("InvalidInput")
+    sq, z = math.sqrt(i_), float(z)
+    return p_pow(10.0, dv(-a * z * z * sq, 1.0 + b * size * sq))
+def r_davies(z, i_, a):
+    e = r_ia(i_, a)
+    if e: return e
+    sq, z = math.sqrt(i_), float(z)
+    return p_pow(10.0, -a * z * z * (dv(sq, 1.0 + sq) - 0.3 * i_))
+def r_kohlrausch(l0, k, c):
+    if not is_non_negative(c): return Err("InvalidConcentration")
+    if not is_finite(l0) or not is_finite(k): return Err("InvalidInput")
+    return l0 - k * math.sqrt(c)
+def weak_rule(base):
+    return lambda a: r_weak(*fl(a), base)
+
+# electrochemistry.rs (M3a)
+ecsrc = (root / "rust-old/src/electrochemistry.rs").read_text()
+_ec_body = ecsrc[ecsrc.index("pub static STANDARD_POTENTIALS:"):]
+_ec_body = _ec_body[:_ec_body.index("\n];")]
+SP = [(eq, cp, int(n), float(e)) for eq, cp, n, e in re.findall(
+    r'HalfReaction \{\s*equation: "([^"]*)",\s*couple: "([^"]*)",\s*electrons: (\d+),\s*'
+    r'standard_potential: (-?[0-9.]+),(?:\s*//[^\n]*)?\s*\}', _ec_body)]
+check(len(SP) == 49, f"electrochemistry.rs: STANDARD_POTENTIALS parsed as {len(SP)} rows")
+FARADAY = b2f(golden_consts["electrochemistry::FARADAY"])
+def sp_lookup(couple):
+    return next((r for r in SP if r[1] == couple), None)
+def sp_toks(r):
+    return [("s", r[0], None), ("s", r[1], None), ("i", r[2], None), ("f", r[3], f2b(r[3]))]
+def r_nernst(e0, n, t, q):
+    if not is_positive(t): return Err("InvalidTemperature")
+    if n == 0: return Err("InvalidInput")
+    if not is_positive(q): return Err("InvalidInput")
+    if not is_finite(e0): return Err("InvalidInput")
+    return e0 - dv(R_GAS * t, float(n) * FARADAY) * p_ln(q)
+def r_cell_couples(c, a):
+    hc = sp_lookup(c)
+    if hc is None: return Err("InvalidReaction")
+    ha = sp_lookup(a)
+    if ha is None: return Err("InvalidReaction")
+    return hc[3] - ha[3]
+def r_cell_gibbs(n, e):
+    if n == 0: return Err("InvalidInput")
+    if not is_finite(e): return Err("InvalidInput")
+    return -float(n) * FARADAY * e
+def r_faraday_mass(q, mm, n):
+    if n == 0: return Err("InvalidInput")
+    if not is_positive(mm): return Err("InvalidInput")
+    if not is_finite(q): return Err("InvalidInput")
+    return dv(q * mm, float(n) * FARADAY)
+def r_faraday_charge(ma, mm, n):
+    if n == 0: return Err("InvalidInput")
+    if not is_positive(mm): return Err("InvalidInput")
+    if not is_finite(ma): return Err("InvalidInput")
+    return dv(ma * float(n) * FARADAY, mm)
+def r_faraday_ratio(ma, mma, na, mmb, nb):
+    if na == 0 or nb == 0: return Err("InvalidInput")
+    if not is_positive(mma): return Err("InvalidInput")
+    if not is_positive(mmb): return Err("InvalidInput")
+    if not is_finite(ma): return Err("InvalidInput")
+    return dv(ma * dv(mmb, float(nb)), dv(mma, float(na)))
+
+# kinetics.rs (M3b)
+LN2 = b2f(0x3FE62E42FEFA39EF)        # std::f64::consts::LN_2, typed inline in src/kinetics.cyr
+BOLTZMANN = b2f(golden_consts["kinetics::BOLTZMANN"])
+PLANCK = b2f(golden_consts["spectroscopy::PLANCK"])
+def p_expm1(x):
+    """exp_m1 as the port's _km_expm1 (fdlibm) meets it: a stdlib-like counterpart, so any result may differ."""
+    if math.isnan(x): return _prim(x, "expm1", (x,))
+    try: return _prim(math.expm1(x), "expm1", (x,))
+    except OverflowError: return _prim(math.inf, "expm1", (x,))
+def r_arrhenius(a, ea, t):
+    if not is_positive(t): return Err("InvalidTemperature")
+    if not is_finite(a): return Err("InvalidInput")
+    if not is_finite(ea): return Err("InvalidInput")
+    return a * p_exp(dv(-ea, R_GAS * t))
+def r_half_first(k, ln2=LN2):
+    if not is_positive(k): return Err("InvalidInput")
+    return dv(ln2, k)
+def r_second(c0, k, t):
+    if not is_positive(c0): return Err("InvalidConcentration")
+    if not is_non_negative(k): return Err("InvalidInput")
+    if not is_non_negative(t): return Err("InvalidInput")
+    return dv(1.0, dv(1.0, c0) + k * t)
+def r_zero(c0, k, t):
+    remaining = c0 - k * t
+    return 0.0 if remaining < 0.0 else remaining
+def r_zero_half(c0, k):
+    if not is_positive(k): return Err("InvalidInput")
+    if not is_positive(c0): return Err("InvalidConcentration")
+    return dv(c0, 2.0 * k)
+def r_nth(c0, k, n, tol=1e-12, ln2=LN2):
+    if not is_finite(n) or abs(n - 1.0) <= tol: return Err("InvalidInput")
+    if not is_positive(k): return Err("InvalidInput")
+    if not is_positive(c0): return Err("InvalidConcentration")
+    nm1 = n - 1.0
+    num = p_expm1(nm1 * ln2)
+    t = dv(num, nm1 * k * p_pow(c0, nm1))
+    return t if is_positive(t) else Err("ComputationError")
+def r_ssi(k1, a, k2):
+    if not is_positive(k2): return Err("InvalidInput")
+    if not is_non_negative(k1): return Err("InvalidInput")
+    if not is_non_negative(a): return Err("InvalidConcentration")
+    return dv(k1 * a, k2)
+def r_pre(kf, kr, ks, a):
+    if not is_positive(kr): return Err("InvalidInput")
+    if not is_non_negative(kf) or not is_non_negative(ks): return Err("InvalidInput")
+    if not is_non_negative(a): return Err("InvalidConcentration")
+    return ks * dv(kf, kr) * a
+def r_mm(v, km, s_):
+    if not is_positive(v): return Err("InvalidInput")
+    if not is_positive(km): return Err("InvalidInput")
+    if not is_non_negative(s_): return Err("InvalidConcentration")
+    return dv(v * s_, km + s_)
+def r_lb(v, km):
+    if not is_positive(v): return Err("InvalidInput")
+    if not is_positive(km): return Err("InvalidInput")
+    return (dv(km, v), dv(1.0, v))
+def r_first(c0, k, t):
+    return c0 * p_exp(-k * t)
+def r_collision(z, p, ea, t):
+    if not is_positive(t): return Err("InvalidTemperature")
+    if not (p > 0.0 and p <= 1.0): return Err("InvalidInput")
+    if not is_positive(z): return Err("InvalidInput")
+    if not is_finite(ea): return Err("InvalidInput")
+    return z * p * p_exp(dv(-ea, R_GAS * t))
+def r_eyring(dg, t):
+    if not is_positive(t): return Err("InvalidTemperature")
+    if not is_finite(dg): return Err("InvalidInput")
+    prefactor = dv(BOLTZMANN * t, PLANCK)
+    return prefactor * p_exp(dv(-dg, R_GAS * t))
+def r_eyring_act(dh, ds, t):
+    if not is_positive(t): return Err("InvalidTemperature")
+    if not is_finite(dh): return Err("InvalidInput")
+    if not is_finite(ds): return Err("InvalidInput")
+    prefactor = dv(BOLTZMANN * t, PLANCK)
+    es = p_exp(dv(ds, R_GAS))
+    return prefactor * es * p_exp(dv(-dh, R_GAS * t))
+
+
 RULES = {
     "reaction::gibbs_free_energy": ("B", lambda a: r_gibbs(*fl(a))),
     "reaction::equilibrium_constant": ("C", lambda a: r_keq(*fl(a))),
@@ -1154,6 +1403,54 @@ RULES = {
     "thermochem::adiabatic_flame_temperature": ("B", flame_rule),
     "Shomate::cp": ("B", shomate_rule("cp")),
     "Shomate::enthalpy_antiderivative": ("B", shomate_rule("h")),
+    "solution::molarity": ("B", lambda a: r_molarity(*fl(a))),
+    "solution::molality": ("B", lambda a: r_molarity(*fl(a))),
+    "solution::dilution": ("B", lambda a: r_dilution(*fl(a))),
+    "solution::ph_from_h_concentration": ("C", lambda a: r_ph_h(*fl(a))),
+    "solution::poh_from_oh_concentration": ("C", lambda a: r_ph_h(*fl(a))),
+    "solution::ph_from_poh": ("B", lambda a: 14.0 - fl(a)[0]),
+    "solution::henderson_hasselbalch": ("C", lambda a: r_hh(*fl(a))),
+    "solution::h_concentration_from_ph": ("C", lambda a: p_pow(10.0, -fl(a)[0])),
+    "solution::weak_acid_ph": ("C", weak_rule(False)),
+    "solution::weak_base_ph": ("C", weak_rule(True)),
+    "solution::ionic_strength": ("B", r_ionic),
+    "solution::debye_huckel_limiting": ("C", lambda a: r_dh_lim(*fl(a))),
+    "solution::debye_huckel_extended": ("C", lambda a: r_dh_ext(*fl(a))),
+    "solution::davies_activity": ("C", lambda a: r_davies(*fl(a))),
+    "solution::kohlrausch_molar_conductivity": ("B", lambda a: r_kohlrausch(*fl(a))),
+    "solution::limiting_molar_conductivity": ("B", lambda a: fl(a)[1] * fl(a)[0] + fl(a)[3] * fl(a)[2]),
+    "solution::solution_conductivity": ("B", lambda a: dv(fl(a)[0] * fl(a)[1], 1000.0)),
+    "electrochemistry::nernst_potential": ("C", lambda a: r_nernst(*fl(a))),
+    "electrochemistry::nernst_potential_25c": ("C", lambda a: r_nernst(fl(a)[0], fl(a)[1], 298.15, fl(a)[2])),
+    "electrochemistry::standard_cell_potential": ("B", lambda a: fl(a)[0] - fl(a)[1]),
+    "electrochemistry::cell_potential_from_couples": ("B", lambda a: r_cell_couples(*fl(a))),
+    "electrochemistry::is_spontaneous_cell": ("A", lambda a: fl(a)[0] > 0.0),
+    "electrochemistry::cell_gibbs_energy": ("B", lambda a: r_cell_gibbs(*fl(a))),
+    "electrochemistry::faraday_mass_deposited": ("B", lambda a: r_faraday_mass(*fl(a))),
+    "electrochemistry::faraday_charge_required": ("B", lambda a: r_faraday_charge(*fl(a))),
+    "electrochemistry::faraday_mass_ratio": ("B", lambda a: r_faraday_ratio(*fl(a))),
+    "electrochemistry::charge_to_moles_electrons": ("B", lambda a: dv(fl(a)[0], FARADAY)),
+    "electrochemistry::moles_electrons_to_charge": ("B", lambda a: fl(a)[0] * FARADAY),
+    "kinetics::arrhenius_rate": ("C", lambda a: r_arrhenius(*fl(a))),
+    "kinetics::half_life_first_order": ("B", lambda a: r_half_first(*fl(a))),
+    "kinetics::first_order_concentration": ("C", lambda a: r_first(*fl(a))),
+    "kinetics::second_order_concentration": ("B", lambda a: r_second(*fl(a))),
+    "kinetics::zero_order_concentration": ("B", lambda a: r_zero(*fl(a))),
+    "kinetics::zero_order_half_life": ("B", lambda a: r_zero_half(*fl(a))),
+    "kinetics::nth_order_half_life": ("C", lambda a: r_nth(*fl(a))),
+    "kinetics::steady_state_intermediate": ("B", lambda a: r_ssi(*fl(a))),
+    "kinetics::steady_state_rate": ("B", lambda a: fl(a)[0] * fl(a)[1]),
+    "kinetics::pre_equilibrium_rate": ("B", lambda a: r_pre(*fl(a))),
+    "kinetics::michaelis_menten": ("B", lambda a: r_mm(*fl(a))),
+    "kinetics::lineweaver_burk": ("B", lambda a: r_lb(*fl(a))),
+    "kinetics::collision_theory_rate": ("C", lambda a: r_collision(*fl(a))),
+    "kinetics::eyring_rate": ("C", lambda a: r_eyring(*fl(a))),
+    "kinetics::eyring_rate_from_activation": ("C", lambda a: r_eyring_act(*fl(a))),
+}
+# S "before" (port-parity.md §7): the function with the stdlib-like primitive the remedy replaced, every result
+# of it nudged — henderson_hasselbalch through _km_log10 (fdlibm), the Nernst functions through f64_ln.
+RULES_BEFORE = {
+    "solution::henderson_hasselbalch": lambda a: r_hh(*fl(a), log10=p_log10),
 }
 TABLE_RULES = {}
 for name, v in PRESETS.items():
@@ -1161,6 +1458,7 @@ for name, v in PRESETS.items():
 TABLE_RULES["phase::ANTOINE_DATA"] = [("v", len(ANTOINE), None)]
 TABLE_RULES["thermochem::THERMOCHEM_DATA"] = [("v", len(TC), None)]
 TABLE_RULES["thermochem::SHOMATE_DATA"] = [("v", len(SH), None)]
+TABLE_RULES["electrochemistry::STANDARD_POTENTIALS"] = [("v", len(SP), None)]
 def tc_toks(row):
     return [("s", row[0], None), ("s", row[1], None)] + [("f", x, f2b(x)) for x in row[2]]
 def sh_toks(c):
@@ -1169,11 +1467,39 @@ def sh_toks(c):
 def antoine_toks(row):
     return [("f", x, f2b(x)) for x in row]
 
+def nudge_s(fn, rule, ins, want, a, md, log):
+    """S over one row: each call in md nudged ±1 ulp in turn; (largest output change in ulp, branch flips, where)."""
+    S, flips, worst = 0, 0, None
+    for k in md:
+        for d in (1, -1):
+            CALLS[0] = 0
+            NUDGE[0] = (k, d)
+            got = out_toks(rule(ins))
+            if not toks_shape(got, want):
+                flips += 1
+                continue
+            for (gk, gv, gb), (wk, wv, wb) in zip(got, want):
+                if gk == "f":
+                    dist = ulp_dist(gb, wb)
+                    if dist > S:
+                        S = dist
+                        worst = f"{fn}{tuple(a)}: {log[k][0]} call {k} nudged {'+' if d > 0 else '-'}1 ulp"
+    NUDGE[0] = None
+    return S, flips, worst
+
+# The functions whose S is also measured with the stdlib-like primitive the M3a remedy replaced (RULES_BEFORE).
+BEFORE_FNS = {"solution::henderson_hasselbalch", "electrochemistry::nernst_potential",
+              "electrochemistry::nernst_potential_25c"}
+sens_before = {}  # fn -> [S, branch flips, worst row, c]
+root_paths = {}   # weak acid / base Newton exits, recomputed
+root_iters = [0, 0]  # the most iterations entered, the most updates
+
 m2a_counts = {}
 shape_only = 0
 sens = {}       # fn -> [S, rows nudged, branch flips, worst row]
+sens_rows = {}  # fn -> [(row S, branch flips, a nudged result is subnormal, inputs)] (M3b: the rows past K = 64)
 flame_paths = {}  # "newton" / "bisection" / "err" -> rows
-for mod in ("reaction", "thermo", "phase", "gas", "thermochem"):
+for mod in ("reaction", "thermo", "phase", "gas", "thermochem", "solution", "electrochemistry", "kinetics"):
     for fn, cls, ins, outs, where in R.get(mod, []):
         m2a_counts[fn] = m2a_counts.get(fn, 0) + 1
         if fn in TABLE_RULES:
@@ -1203,6 +1529,16 @@ for mod in ("reaction", "thermo", "phase", "gas", "thermochem"):
             k = ins[0][1]
             want = [("s", ANTOINE[k][0], None)] + antoine_toks(ANTOINE[k][1]) if 0 <= k < len(ANTOINE) else []
             check(cls == "A" and toks_equal(outs, want), f"{where}: ANTOINE_DATA[{k}]")
+            continue
+        if fn == "electrochemistry::STANDARD_POTENTIALS[]":
+            k = ins[0][1]
+            want = sp_toks(SP[k]) if 0 <= k < len(SP) else []
+            check(cls == "A" and toks_equal(outs, want), f"{where}: STANDARD_POTENTIALS[{k}]")
+            continue
+        if fn == "electrochemistry::lookup_half_reaction":
+            hit = sp_lookup(ins[0][1])            # exact, case-sensitive, first in table order
+            want = [("n", "", None)] if hit is None else sp_toks(hit)
+            check(cls == "A" and toks_equal(outs, want), f"{where}: lookup_half_reaction({ins[0][1]!r})")
             continue
         if fn == "phase::lookup_antoine":
             hit = next((c for n, c in ANTOINE if n == ins[0][1]), None)
@@ -1238,33 +1574,46 @@ for mod in ("reaction", "thermo", "phase", "gas", "thermochem"):
             shape_only += 1
         else:
             check(toks_equal(outs, want), f"{where}: {fn}{tuple(a)} -> {[t[1] for t in outs]}, recomputed {base!r}")
+        if fn in ("solution::weak_acid_ph", "solution::weak_base_ph"):
+            path = ROOT_PATH[0]
+            note = NOTES.get(where, "")
+            noted = note.rsplit(" [", 1)[1][:-1] if note.endswith("]") else None
+            check(noted == path, f"{where}: Newton path noted {noted!r}, recomputed {path!r}")
+            if path is not None:
+                root_paths[path.split(",")[0]] = root_paths.get(path.split(",")[0], 0) + 1
+                ups = int(re.search(r"(\d+) (?:updates|iterations)", path).group(1))
+                root_iters[0] = max(root_iters[0], ups if "relative step" in path else ups + 1)
+                root_iters[1] = max(root_iters[1], ups)
         if SENSITIVITY and cls == "C" and ncalls > 0:
             st = sens.setdefault(fn, [0, 0, 0, None, 0, 0])
             st[1] += 1
             md = [k for k, (kind, args, y) in enumerate(log) if may_differ(kind, args, y)]
             st[4] = max(st[4], len(md))
             st[5] += sum(1 for k in md if log[k][0] in _CR_REF)
-            for k in md:
-                for d in (1, -1):
-                    CALLS[0] = 0
-                    NUDGE[0] = (k, d)
-                    got = out_toks(rule(ins))
-                    if not toks_shape(got, want):
-                        st[2] += 1
-                        continue
-                    for (gk, gv, gb), (wk, wv, wb) in zip(got, want):
-                        if gk == "f":
-                            dist = ulp_dist(gb, wb)
-                            if dist > st[0]:
-                                st[0] = dist
-                                st[3] = f"{fn}{tuple(a)}: {log[k][0]} call {k} nudged {'+' if d > 0 else '-'}1 ulp"
-            NUDGE[0] = None
+            S, flips, worst = nudge_s(fn, rule, ins, want, a, md, log)
+            sub = any(0 < abs(log[k][2]) < 2.0 ** -1022 for k in md)
+            sens_rows.setdefault(fn, []).append((S, flips, sub, tuple(a)))
+            st[2] += flips
+            if S > st[0]: st[0], st[3] = S, worst
+            if fn in BEFORE_FNS:
+                rb = RULES_BEFORE.get(fn, rule)
+                CALLS[0] = 0
+                CALL_LOG.clear()
+                rb(ins)
+                logb = list(CALL_LOG)
+                mdb = [k for k, (kind, args, y) in enumerate(logb) if math.isfinite(y) and y != 0]
+                sb = sens_before.setdefault(fn, [0, 0, None, 0])
+                Sb, fb, wb = nudge_s(fn, rb, ins, want, a, mdb, logb)
+                sb[1] += fb
+                sb[3] = max(sb[3], len(mdb))
+                if Sb > sb[0]: sb[0], sb[2] = Sb, wb
 known = set(RULES) | set(TABLE_RULES) | {"phase::ANTOINE_DATA[]", "phase::lookup_antoine",
     "thermochem::THERMOCHEM_DATA[]", "thermochem::SHOMATE_DATA[]", "thermochem::lookup_thermochem",
-    "thermochem::lookup_shomate", "thermochem::lookup_shomate_at"}
+    "thermochem::lookup_shomate", "thermochem::lookup_shomate_at", "electrochemistry::STANDARD_POTENTIALS[]",
+    "electrochemistry::lookup_half_reaction"}
 for fn in sorted(known):
-    check(fn in m2a_counts, f"M2a/M2b: no golden rows for {fn}")
-print("M2a/M2b rows checked:", sum(m2a_counts.values()), "over", len(m2a_counts), "functions"
+    check(fn in m2a_counts, f"M2/M3: no golden rows for {fn}")
+print("M2/M3 rows checked:", sum(m2a_counts.values()), "over", len(m2a_counts), "functions"
       + (f" ({shape_only} class-C rows by shape only)" if shape_only else ""))
 print(f"thermochem: adiabatic_flame_temperature solver paths (recomputed, and as noted): "
       f"{flame_paths.get('newton', 0)} newton, {flame_paths.get('bisection', 0)} bisection, "
@@ -1287,6 +1636,56 @@ for label, kw in (("FLAME_NEWTON_TOL_J × 0.5", {"ntol": 5e-4}), ("FLAME_NEWTON_
         if isinstance(got, Err) or f2b(got) != outs[0][2]: changed += 1
     print(f"  pinning: with {label}, {changed} of {len(flame_rows)} Ok flame rows change")
     check(changed > 0, f"thermochem: no golden flame row pins {label}")
+
+# The weak acid / base Newton (M3a): its exits as recomputed (and as noted), and Rust's private constants, inline in
+# src/solution.cyr: CHARGE_BALANCE_REL_TOL (1e-12) must change some golden row's bits when perturbed;
+# CHARGE_BALANCE_MAX_ITER (50) is unobservable when every row ends in fewer iterations (any cap at or above the
+# most iterations entered gives the same corpus), which is reported, not failed.
+print(f"solution: weak acid / base Newton exits (recomputed, and as noted): "
+      + ", ".join(f"{root_paths[k]} {k[len('root: '):]}" for k in sorted(root_paths))
+      + f"; at most {root_iters[1]} updates, {root_iters[0]} iterations entered")
+weak_rows = [(fn == "solution::weak_base_ph", ins, outs) for fn, cls, ins, outs, where in R.get("solution", [])
+             if fn in ("solution::weak_acid_ph", "solution::weak_base_ph") and outs[0][0] == "f"]
+for label, kw in (("CHARGE_BALANCE_REL_TOL × 0.5", {"tol": 5e-13}), ("CHARGE_BALANCE_REL_TOL × 2", {"tol": 2e-12}),
+                  (f"CHARGE_BALANCE_MAX_ITER = {root_iters[0]}", {"max_iter": root_iters[0]}),
+                  (f"CHARGE_BALANCE_MAX_ITER = {root_iters[0] - 1}", {"max_iter": root_iters[0] - 1})):
+    changed = 0
+    for base, ins, outs in weak_rows:
+        got = r_weak(ins[0][1], ins[1][1], base, **kw)
+        if isinstance(got, Err) or f2b(got) != outs[0][2]: changed += 1
+    print(f"  pinning: with {label}, {changed} of {len(weak_rows)} Ok weak acid / base rows change")
+    if "REL_TOL" in label:
+        check(changed > 0, f"solution: no golden weak acid / base row pins {label}")
+    elif label.endswith(f"= {root_iters[0]}"):
+        check(changed == 0, f"solution: {label} changes rows: the cap is observable")
+print(f"  CHARGE_BALANCE_MAX_ITER = 50 is not observable on the corpus (no row enters more than {root_iters[0]} "
+      f"iterations); tests/solution.tcyr covers it on the private helper as far as an input can reach")
+check(LOG10_LN["calls"] > 0 and LOG10_LN["glibc"] == LOG10_LN["calls"],
+      f"henderson_hasselbalch: glibc's log10 is the e_log10.c composition over log on {LOG10_LN['glibc']} of "
+      f"{LOG10_LN['calls']} golden arguments")
+print(f"  henderson_hasselbalch: glibc's log10 = (y·log10_2lo + ivln10·log x′) + y·log10_2hi, bit for bit, on all "
+      f"{LOG10_LN['calls']} golden arguments")
+
+# kinetics (M3b): Rust's std::f64::consts::LN_2 and private FIRST_ORDER_TOLERANCE (1e-12) are typed inline in
+# src/kinetics.cyr: each must change some golden row (its bits or Ok/Err) when perturbed, so the corpus pins it.
+kin_rows = {fn: [(ins, outs) for f_, cls, ins, outs, where in R.get("kinetics", []) if f_ == fn]
+            for fn in ("kinetics::half_life_first_order", "kinetics::nth_order_half_life")}
+for label, fn, rule in (
+        ("LN_2 + 1 ulp", "kinetics::half_life_first_order", lambda a: r_half_first(*a, ln2=nextup(LN2))),
+        ("LN_2 − 1 ulp", "kinetics::half_life_first_order", lambda a: r_half_first(*a, ln2=nextdown(LN2))),
+        ("LN_2 + 1 ulp", "kinetics::nth_order_half_life", lambda a: r_nth(*a, ln2=nextup(LN2))),
+        ("LN_2 − 1 ulp", "kinetics::nth_order_half_life", lambda a: r_nth(*a, ln2=nextdown(LN2))),
+        ("FIRST_ORDER_TOLERANCE × 0.5", "kinetics::nth_order_half_life", lambda a: r_nth(*a, tol=5e-13)),
+        ("FIRST_ORDER_TOLERANCE × 2", "kinetics::nth_order_half_life", lambda a: r_nth(*a, tol=2e-12))):
+    rows_ = kin_rows[fn]
+    changed = sum(1 for ins, outs in rows_ if not toks_equal(out_toks(rule(fl(ins))), outs))
+    print(f"  pinning: with {label}, {changed} of {len(rows_)} {fn.split('::')[1]} rows change")
+    check(changed > 0, f"kinetics: no golden {fn} row pins {label}")
+for label, tol in (("+ 1 ulp", nextup(1e-12)), ("− 1 ulp", nextdown(1e-12))):
+    changed = sum(1 for ins, outs in kin_rows["kinetics::nth_order_half_life"]
+                  if not toks_equal(out_toks(r_nth(*fl(ins), tol=tol)), outs))
+    print(f"  FIRST_ORDER_TOLERANCE {label}: {changed} rows change (|n − 1| is a multiple of 2^-52 or 2^-53 near "
+          f"1e-12, so only a change across a multiple can show)")
 
 # The generated data files against the Rust literals.
 for rel in ("src/phase_data.cyr", "src/gas_data.cyr"):
@@ -1346,13 +1745,61 @@ check(sm is not None and re.findall(r"^\s+(\w+): f64;", sm.group(1), re.M) == li
       "thermochem_data.cyr: struct KmShomate is not Shomate's fields in order")
 print("thermochem_data.cyr tables checked against thermochem.rs (76 + 34 rows, 3 string blobs, 10 f64 columns)")
 
+# src/electrochemistry_data.cyr against the Rust literal (M3a).
+etext = (root / "src/electrochemistry_data.cyr").read_text()
+def cyr_col_in(text, rel, name, kind=float):
+    m = re.search(rf"^var {name}: \w+\[(\d+)\] = \{{(.*?)\}};", text, re.M | re.S)
+    check(m is not None, f"{rel}: no {name}")
+    if m is None: return []
+    vals = [kind(x) for line in m.group(2).splitlines()
+            for x in re.findall(r"(-?[0-9.]+),", line.split("#", 1)[0])]
+    check(len(vals) == int(m.group(1)), f"{rel}: {name} declares {m.group(1)}, holds {len(vals)}")
+    return vals
+def cyr_strings_in(text, rel, prefix, enc):
+    raw = bytes(cyr_col_in(text, rel, f"_{prefix}_BYTES", int))
+    offs = cyr_col_in(text, rel, f"_{prefix}_OFF", int)
+    return [raw[o:raw.index(0, o)].decode(enc) for o in offs], raw.count(0) == len(offs)
+rel_e = "src/electrochemistry_data.cyr"
+check(re.search(r"^const KM_STANDARD_POTENTIALS_COUNT = 49;$", etext, re.M), f"{rel_e}: KM_STANDARD_POTENTIALS_COUNT")
+for prefix, enc, k in (("KM_STANDARD_POTENTIALS_EQUATION", "utf-8", 0), ("KM_STANDARD_POTENTIALS_COUPLE", "ascii", 1)):
+    got_s, one_each = cyr_strings_in(etext, rel_e, prefix, enc)
+    check(got_s == [r[k] for r in SP] and one_each, f"{rel_e}: the {prefix} blob is not electrochemistry.rs's strings")
+check(cyr_col_in(etext, rel_e, "KM_STANDARD_POTENTIALS_ELECTRONS", int) == [r[2] for r in SP], f"{rel_e}: electrons")
+check(cyr_col_in(etext, rel_e, "KM_STANDARD_POTENTIALS_STANDARD_POTENTIAL") == [r[3] for r in SP], f"{rel_e}: E°")
+check(len(re.findall(r"CRC Handbook, Electrochemical Series", etext)) == 2 and
+      len(re.findall(r"CRC Handbook, Electrochemical Series", _ec_body)) == 2,
+      f"{rel_e}: the literal's two CRC Handbook notes are not carried over")
+print(f"{rel_e} checked against electrochemistry.rs (49 rows: a UTF-8 equation blob, a couple blob, electrons, E°)")
+
 if SENSITIVITY:
     print("sensitivity (ADR 0005): S = the largest output change, in ulp, from a 1-ulp nudge of one primitive")
     print("result that can differ between port and oracle; c = the most such calls in one row; K = 2·S·c + 2")
     for fn in sorted(sens):
         S, rows, flips, worst, calls, crcalls = sens[fn]
-        print(f"  {fn:34} S = {S:<3} c = {calls}  K = {2 * S * calls + 2:<4} ({rows} rows; {crcalls} calls where "
+        print(f"  {fn:40} S = {S:<3} c = {calls}  K = {2 * S * calls + 2:<4} ({rows} rows; {crcalls} calls where "
               f"glibc is not correctly rounded; {flips} branch flips) worst: {worst}")
+    print("functions past K = 64 (M3b: left measured, not gated): the rows whose own S puts K past 64 (or flips a")
+    print("branch), how many of them nudge a subnormal primitive result, and S over the other rows:")
+    for fn in sorted(sens):
+        S, rows, flips, worst, calls, crcalls = sens[fn]
+        if 2 * S * calls + 2 <= 64 and flips == 0:
+            continue
+        over = [r for r in sens_rows[fn] if 2 * r[0] * calls + 2 > 64 or r[1] > 0]
+        rest = max((r[0] for r in sens_rows[fn] if not (2 * r[0] * calls + 2 > 64 or r[1] > 0)), default=0)
+        nsub = sum(1 for r in over if r[2])
+        normal = [r for r in sens_rows[fn] if not r[2] and r[1] == 0]
+        snorm = max((r[0] for r in normal), default=0)
+        print(f"  {fn:40} {len(over)} rows past K = 64 ({nsub} with a subnormal exp / pow result, "
+              f"{sum(1 for r in over if r[1])} with branch flips); S over the other {rows - len(over)} rows = {rest} "
+              f"(K = {2 * rest * calls + 2}); S over the {len(normal)} rows with no subnormal primitive result and no "
+              f"flip = {snorm} (K = {2 * snorm * calls + 2})")
+        for r in sorted(over, key=lambda r: -r[0])[:3]:
+            print(f"      e.g. {fn}{r[3]}: S = {r[0]}")
+    print("before the M3a remedy (every result of the stdlib-like primitive nudged: _km_log10 for")
+    print("henderson_hasselbalch, f64_ln for the Nernst functions):")
+    for fn in sorted(sens_before):
+        S, flips, worst, calls = sens_before[fn]
+        print(f"  {fn:40} S = {S:<20} c = {calls}  K = {2 * S * calls + 2} ({flips} branch flips) worst: {worst}")
 
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

@@ -1,0 +1,334 @@
+# solution.cyr — solution chemistry: concentration units, pH, weak acid/base equilibria, ionic strength and
+# activity coefficients, and electrolytic conductivity (port of rust-old/src/solution.rs).
+#
+# Concentrations are in mol/L (M) unless stated otherwise. The acid–base functions assume aqueous solution
+# at 25 °C (Kw = KM_KW_WATER_25C, pH + pOH = 14). The constants — KM_KW_WATER_25C, KM_DH_A_WATER_25C,
+# KM_DH_B_WATER_25C and the seven KM_LAMBDA_* — are src/constants.cyr's (generated; solution has no data file
+# of its own). Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and
+# reject NaN and ±∞ inputs. Every expression keeps Rust's operation order, so the arithmetic functions are
+# bit-identical (class B); the log10, 10^x and Newton functions are class C (docs/development/port-parity.md
+# §7).
+#
+# - log10: _km_log10 (src/mathx.cyr, Rust libm's fdlibm log10, within 1 ulp of glibc), except
+#   henderson_hasselbalch, whose pKa + log10(ratio) cancels near pH 0: it calls _km_log10_ln, glibc's own
+#   log10 composition over the correctly rounded _km_ln (ADR 0005, amendment M3a), which gives the oracle's
+#   bits wherever glibc's log is correctly rounded. 10^x is ganita_f64_pow(10, x), as the Antoine
+#   equation's.
+# - weak_acid_ph / weak_base_ph: kimiya's own Newton iteration on the charge-balance cubic, transcribed
+#   operation for operation as _km_charge_balance_root / _km_checked_root. Its iteration cap (Rust's
+#   CHARGE_BALANCE_MAX_ITER = 50) and relative-step tolerance (CHARGE_BALANCE_REL_TOL = 10⁻¹²) are private
+#   Rust consts, so they are typed formula constants inline here (port plan §6.4), pinned by the golden rows
+#   and tests/solution.tcyr. The loop is + − × ÷ and √, so the root is bit-identical to Rust's; the pH is
+#   class C only through its one log10.
+# - Rust's `charge: i32` is a word here: one outside the i32 range is Err(KM_ERR_INVALID_INPUT), checked
+#   first (Rust's type rejects it at compile time), never wrapped.
+# - ionic_strength's `&[(f64, i32)]` is a pointer to n 16-byte records — the concentration's f64 bits, then
+#   the charge as an i64 word — and the count n, as thermochem's species lists. It has no error channel (Rust
+#   returns a bare f64): a negative n, a null pointer with n > 0, or a charge outside the i32 range gives NaN.
+
+include "lib/ganita.cyr"
+
+# 1 if the word z is a Rust i32 (−2³¹ ..= 2³¹ − 1).
+#must_use
+fn _km_is_i32(z): i64 {
+    if (z < (0 - 0x80000000) || z > 0x7FFFFFFF) { return 0; }
+    return 1;
+}
+
+# ── concentration units ─────────────────────────────────────────────────────────────
+
+# Molarity M = moles / volume_liters in mol/L, from the amount of solute (mol) and the solution volume (L).
+# Ok(M), or Err(KM_ERR_INVALID_INPUT) if the volume is not positive and finite or `moles` is not finite.
+# Mirrors `solution::molarity`.
+#must_use
+fn molarity(moles: f64, volume_liters: f64): Result {
+    if (_km_is_positive(volume_liters) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var m: f64 = moles / volume_liters;
+    return Ok(m);
+}
+
+# Molality m = moles / solvent_kg in mol/kg, from the amount of solute (mol) and the solvent mass (kg).
+# Ok(m), or Err(KM_ERR_INVALID_INPUT) if the solvent mass is not positive and finite or `moles` is not
+# finite. Mirrors `solution::molality`.
+#must_use
+fn molality(moles: f64, solvent_kg: f64): Result {
+    if (_km_is_positive(solvent_kg) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var m: f64 = moles / solvent_kg;
+    return Ok(m);
+}
+
+# Dilution M₁V₁ = M₂V₂: the final concentration M₂ = M₁·V₁/V₂ in mol/L, from the initial concentration
+# (mol/L) and the initial and final volumes (any one volume unit). Ok(M₂), or Err(KM_ERR_INVALID_INPUT) if
+# V₂ is not positive and finite or M₁ or V₁ is not finite. Mirrors `solution::dilution`.
+#must_use
+fn dilution(m1: f64, v1: f64, v2: f64): Result {
+    if (_km_is_positive(v2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(m1) != 1 || _km_is_finite(v1) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var m2: f64 = (m1 * v1) / v2;
+    return Ok(m2);
+}
+
+# ── pH ──────────────────────────────────────────────────────────────────────────────
+
+# pH from the hydrogen ion concentration, pH = −log₁₀[H⁺], [H⁺] in mol/L. Ok(pH), or
+# Err(KM_ERR_INVALID_CONCENTRATION) if [H⁺] is not positive and finite. Mirrors
+# `solution::ph_from_h_concentration`.
+#must_use
+fn ph_from_h_concentration(h_molar: f64): Result {
+    if (_km_is_positive(h_molar) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var l: f64 = _km_log10(h_molar);
+    var ph: f64 = -l;
+    return Ok(ph);
+}
+
+# pOH from the hydroxide ion concentration, pOH = −log₁₀[OH⁻], [OH⁻] in mol/L. Ok(pOH), or
+# Err(KM_ERR_INVALID_CONCENTRATION) if [OH⁻] is not positive and finite. Mirrors
+# `solution::poh_from_oh_concentration`.
+#must_use
+fn poh_from_oh_concentration(oh_molar: f64): Result {
+    if (_km_is_positive(oh_molar) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var l: f64 = _km_log10(oh_molar);
+    var poh: f64 = -l;
+    return Ok(poh);
+}
+
+# pH = 14 − pOH (pH + pOH = 14 at 25 °C). Non-finite input propagates to the result. Mirrors
+# `solution::ph_from_poh`.
+#must_use
+fn ph_from_poh(poh: f64): f64 {
+    var ph: f64 = 14.0 - poh;
+    return ph;
+}
+
+# The Henderson–Hasselbalch equation pH = pKa + log₁₀([A⁻]/[HA]), from the acid's pKa = −log₁₀(Ka) and the
+# conjugate base and acid concentrations (mol/L). Ok(pH); Err(KM_ERR_INVALID_CONCENTRATION) if either
+# concentration is not positive and finite (the acid's checked first); Err(KM_ERR_INVALID_INPUT) if pKa is not
+# finite. The log10 is _km_log10_ln (glibc's composition over the correctly rounded ln): pKa + log10(ratio)
+# cancels near pH 0, where one ulp of the log moves the pH by many (ADR 0005, amendment M3a). Mirrors
+# `solution::henderson_hasselbalch`.
+#must_use
+fn henderson_hasselbalch(pka: f64, conjugate_base: f64, acid: f64): Result {
+    if (_km_is_positive(acid) != 1 || _km_is_positive(conjugate_base) != 1) {
+        return Err(KM_ERR_INVALID_CONCENTRATION);
+    }
+    if (_km_is_finite(pka) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var ratio: f64 = conjugate_base / acid;
+    var l: f64 = _km_log10_ln(ratio);
+    var ph: f64 = pka + l;
+    return Ok(ph);
+}
+
+# The H⁺ concentration from pH, [H⁺] = 10^(−pH) in mol/L. Non-finite input propagates to the result. Mirrors
+# `solution::h_concentration_from_ph`.
+#must_use
+fn h_concentration_from_ph(ph: f64): f64 {
+    var x: f64 = -ph;
+    var h: f64 = ganita_f64_pow(10.0, x);
+    return h;
+}
+
+# ── weak acids and bases ────────────────────────────────────────────────────────────
+
+# Accepts a charge-balance root only if it is a usable concentration: Ok(x) if x is positive and finite,
+# else Err(KM_ERR_COMPUTATION_ERROR). Mirrors Rust's private `solution::checked_root`.
+#must_use
+fn _km_checked_root(x: f64): Result {
+    if (_km_is_positive(x) == 1) { return Ok(x); }
+    return Err(KM_ERR_COMPUTATION_ERROR);
+}
+
+# The positive root x of the monoprotic weak-electrolyte charge balance
+# x³ + K·x² − (K·C + Kw)·x − K·Kw = 0, x = [H⁺] for an acid (K = Ka) or [OH⁻] for a base (K = Kb), from
+# x = K·C/(K + x) + Kw/x. Newton from the smaller of the upper bounds √(K·C + Kw) and (C + √(C² + 4·Kw))/2,
+# which decreases monotonically onto the root. Per iteration (at most 50, Rust's CHARGE_BALANCE_MAX_ITER):
+# f(x) ≤ 0 accepts x (the root to within rounding); a non-finite step (only when K·C or x³ overflows) stops;
+# else x −= f/f′, and a step ≤ 10⁻¹²·x (Rust's CHARGE_BALANCE_REL_TOL, the step against the updated x)
+# accepts x. An accepted x goes through _km_checked_root; a stop or 50 iterations without acceptance is
+# Err(KM_ERR_COMPUTATION_ERROR). Mirrors Rust's private `solution::charge_balance_root`, operation for
+# operation.
+#must_use
+fn _km_charge_balance_root(k: f64, c: f64): Result {
+    var kw: f64 = KM_KW_WATER_25C;
+    var tol: f64 = 0.000000000001;          # CHARGE_BALANCE_REL_TOL = 1e-12
+    var kc_kw: f64 = (k * c) + kw;
+    var weak_bound: f64 = f64_sqrt(kc_kw);
+    var disc: f64 = (c * c) + (4.0 * kw);
+    var sq: f64 = f64_sqrt(disc);
+    var strong_bound: f64 = 0.5 * (c + sq);
+    var x: f64 = _km_min(weak_bound, strong_bound);
+    var it = 0;
+    while (it < 50) {                       # CHARGE_BALANCE_MAX_ITER = 50
+        var fx: f64 = (((x * x) * (x + k)) - (k * ((c * x) + kw))) - (kw * x);
+        if (fx <= 0.0) { return _km_checked_root(x); }
+        var dfx: f64 = (x * ((3.0 * x) + (2.0 * k))) - kc_kw;
+        var step: f64 = fx / dfx;
+        if (_km_is_finite(step) != 1) { break; }
+        x = x - step;
+        var lim: f64 = tol * x;
+        if (step <= lim) { return _km_checked_root(x); }
+        it = it + 1;
+    }
+    return Err(KM_ERR_COMPUTATION_ERROR);
+}
+
+# The pH of a monoprotic weak acid solution at 25 °C, from Ka (mol/L) and the analytical acid concentration C
+# (mol/L): the full charge balance [H⁺] = [A⁻] + [OH⁻], water's autoionisation included, solved for [H⁺] by
+# _km_charge_balance_root (dilute solutions approach pH 7 from below; a very large Ka gives the strong-acid
+# limit), then pH = −log₁₀[H⁺]. Ok(pH); Err(KM_ERR_INVALID_INPUT) if Ka is not positive and finite;
+# Err(KM_ERR_INVALID_CONCENTRATION) if C is not; Err(KM_ERR_COMPUTATION_ERROR) if the root can't be
+# represented (e.g. Ka·C overflows). Mirrors `solution::weak_acid_ph`.
+#must_use
+fn weak_acid_ph(ka: f64, concentration: f64): Result {
+    if (_km_is_positive(ka) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(concentration) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var t, v = _km_charge_balance_root(ka, concentration);
+    if (is_ok(t) != 1) { return Err(v); }
+    var h: f64 = v;
+    return ph_from_h_concentration(h);
+}
+
+# The pH of a monoprotic weak base solution at 25 °C, from Kb (mol/L) and the analytical base concentration C
+# (mol/L): weak_acid_ph's mirror, the charge balance [OH⁻] = [BH⁺] + [H⁺] solved for [OH⁻], then
+# pH = 14 − pOH (dilute solutions approach pH 7 from above). Ok(pH); Err(KM_ERR_INVALID_INPUT) if Kb is not
+# positive and finite; Err(KM_ERR_INVALID_CONCENTRATION) if C is not; Err(KM_ERR_COMPUTATION_ERROR) if the root
+# can't be represented (e.g. Kb·C overflows). Mirrors `solution::weak_base_ph`.
+#must_use
+fn weak_base_ph(kb: f64, concentration: f64): Result {
+    if (_km_is_positive(kb) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(concentration) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    var t, v = _km_charge_balance_root(kb, concentration);
+    if (is_ok(t) != 1) { return Err(v); }
+    var oh: f64 = v;
+    var tp, vp = poh_from_oh_concentration(oh);
+    if (is_ok(tp) != 1) { return Err(vp); }
+    var poh: f64 = vp;
+    var ph: f64 = ph_from_poh(poh);
+    return Ok(ph);
+}
+
+# ── ionic strength and activity coefficients ────────────────────────────────────────
+
+# Ionic strength I = ½ Σ cᵢ·zᵢ² in mol/L, over the n (concentration, charge) records at `ions`: each 16 bytes,
+# the concentration's f64 bits (mol/L), then the charge zᵢ as an i64 word. The charge is squared in f64, so any
+# i32 charge is accepted; the terms (c·z)·z are summed in list order from −0.0 (Rust's `.sum()`), so no ions give
+# 0.5 × −0.0 = −0.0. Concentrations are not validated: negative or non-finite ones propagate. NaN if (ions, n)
+# is no list or a charge is outside the i32 range (Rust's type), since there is no error channel. Mirrors
+# `solution::ionic_strength`.
+#must_use
+fn ionic_strength(ions, n): f64 {
+    if (n < 0 || (n > 0 && ions == 0)) { return _km_nan(); }
+    var s: f64 = -0.0;
+    var k = 0;
+    while (k < n) {
+        var c: f64 = load64(ions + k * 16);
+        var zi = load64(ions + k * 16 + 8);
+        if (_km_is_i32(zi) != 1) { return _km_nan(); }
+        var z: f64 = f64_from(zi);
+        var term: f64 = (c * z) * z;
+        s = s + term;
+        k = k + 1;
+    }
+    var i: f64 = 0.5 * s;
+    return i;
+}
+
+# The checks shared by the activity-coefficient models: KM_ERR_INVALID_INPUT if the ionic strength is negative
+# or not finite, or the Debye–Hückel A parameter is not finite; else KM_ERR_NONE. Mirrors Rust's private
+# `solution::validate_ionic_strength_and_a`.
+#must_use
+fn _km_validate_ionic_strength_and_a(ionic_str: f64, a_constant: f64): i64 {
+    if (_km_is_non_negative(ionic_str) != 1) { return KM_ERR_INVALID_INPUT; }
+    if (_km_is_finite(a_constant) != 1) { return KM_ERR_INVALID_INPUT; }
+    return KM_ERR_NONE;
+}
+
+# The Debye–Hückel limiting law log₁₀ γ = −A·z²·√I (valid for I < 0.01 M): the dimensionless activity
+# coefficient γ of an ion of charge z (a Rust i32, as a word) at ionic strength I (mol/L), with the
+# Debye–Hückel A parameter in (L/mol)^½ (KM_DH_A_WATER_25C = 0.509 for water at 25 °C). Ok(γ), or
+# Err(KM_ERR_INVALID_INPUT) if z is outside the i32 range, I is negative or not finite, or A is not finite.
+# Mirrors `solution::debye_huckel_limiting`.
+#must_use
+fn debye_huckel_limiting(charge, ionic_str: f64, a_constant: f64): Result {
+    if (_km_is_i32(charge) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_validate_ionic_strength_and_a(ionic_str, a_constant);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var z: f64 = f64_from(charge);
+    var sqrt_i: f64 = f64_sqrt(ionic_str);
+    var log_gamma: f64 = (((-a_constant) * z) * z) * sqrt_i;
+    var gamma: f64 = ganita_f64_pow(10.0, log_gamma);
+    return Ok(gamma);
+}
+
+# The extended Debye–Hückel equation log₁₀ γ = −A·z²·√I / (1 + B·å·√I) (valid for I < 0.1 M): γ of an ion of
+# charge z (a word) at ionic strength I (mol/L), with A in (L/mol)^½ (KM_DH_A_WATER_25C), B in Å⁻¹·(mol/L)^−½
+# (KM_DH_B_WATER_25C = 0.328 for water at 25 °C) and the effective ion diameter å in Å (typically 3–9). Ok(γ),
+# or Err(KM_ERR_INVALID_INPUT) if z is outside the i32 range, I is negative or not finite, A is not finite, or B
+# or å is negative or not finite (a negative B·å could make 1 + B·å·√I zero). Mirrors
+# `solution::debye_huckel_extended`.
+#must_use
+fn debye_huckel_extended(charge, ionic_str: f64, a_constant: f64, b_constant: f64, ion_size: f64): Result {
+    if (_km_is_i32(charge) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_validate_ionic_strength_and_a(ionic_str, a_constant);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    if (_km_is_non_negative(b_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(ion_size) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var sqrt_i: f64 = f64_sqrt(ionic_str);
+    var z: f64 = f64_from(charge);
+    var num: f64 = (((-a_constant) * z) * z) * sqrt_i;
+    var den: f64 = 1.0 + ((b_constant * ion_size) * sqrt_i);
+    var log_gamma: f64 = num / den;
+    var gamma: f64 = ganita_f64_pow(10.0, log_gamma);
+    return Ok(gamma);
+}
+
+# The Davies equation log₁₀ γ = −A·z²·(√I/(1 + √I) − 0.3·I) (valid for I < 0.5 M; no ion size): γ of an ion of
+# charge z (a word) at ionic strength I (mol/L), with A in (L/mol)^½ (KM_DH_A_WATER_25C for water at 25 °C).
+# Ok(γ), or Err(KM_ERR_INVALID_INPUT) if z is outside the i32 range, I is negative or not finite, or A is not
+# finite. Mirrors `solution::davies_activity`.
+#must_use
+fn davies_activity(charge, ionic_str: f64, a_constant: f64): Result {
+    if (_km_is_i32(charge) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_validate_ionic_strength_and_a(ionic_str, a_constant);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var sqrt_i: f64 = f64_sqrt(ionic_str);
+    var z: f64 = f64_from(charge);
+    var bracket: f64 = (sqrt_i / (1.0 + sqrt_i)) - (0.3 * ionic_str);
+    var log_gamma: f64 = (((-a_constant) * z) * z) * bracket;
+    var gamma: f64 = ganita_f64_pow(10.0, log_gamma);
+    return Ok(gamma);
+}
+
+# ── conductivity ────────────────────────────────────────────────────────────────────
+
+# Kohlrausch's law Λ_m = Λ°_m − K·√c: the molar conductivity (S·cm²/mol) at concentration c (mol/L), from the
+# limiting molar conductivity at infinite dilution Λ°_m (S·cm²/mol) and the Kohlrausch constant K
+# (S·cm²·L^½/mol^(3/2)). Ok(Λ_m); Err(KM_ERR_INVALID_CONCENTRATION) if c is negative or not finite;
+# Err(KM_ERR_INVALID_INPUT) if Λ°_m or K is not finite. Mirrors `solution::kohlrausch_molar_conductivity`.
+#must_use
+fn kohlrausch_molar_conductivity(lambda_zero: f64, k_kohlrausch: f64, concentration: f64): Result {
+    if (_km_is_non_negative(concentration) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    if (_km_is_finite(lambda_zero) != 1 || _km_is_finite(k_kohlrausch) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var sq: f64 = f64_sqrt(concentration);
+    var lm: f64 = lambda_zero - (k_kohlrausch * sq);
+    return Ok(lm);
+}
+
+# Kohlrausch's law of independent ion migration Λ°_m = ν₊·λ°₊ + ν₋·λ°₋ in S·cm²/mol, from the cation's and
+# anion's limiting ionic conductivities λ° (S·cm²/mol, e.g. KM_LAMBDA_NA_PLUS) and stoichiometric numbers ν.
+# Non-finite input propagates to the result. Mirrors `solution::limiting_molar_conductivity`.
+#must_use
+fn limiting_molar_conductivity(cation_conductivity: f64, cation_stoich: f64, anion_conductivity: f64,
+    anion_stoich: f64): f64 {
+    var l: f64 = (cation_stoich * cation_conductivity) + (anion_stoich * anion_conductivity);
+    return l;
+}
+
+# The solution conductivity κ = Λ_m × c / 1000 in S/cm, from the molar conductivity Λ_m (S·cm²/mol) and the
+# concentration c (mol/L). Non-finite input propagates to the result. Mirrors `solution::solution_conductivity`.
+#must_use
+fn solution_conductivity(molar_conductivity: f64, concentration: f64): f64 {
+    var kappa: f64 = (molar_conductivity * concentration) / 1000.0;
+    return kappa;
+}
