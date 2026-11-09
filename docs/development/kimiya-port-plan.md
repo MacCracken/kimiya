@@ -16,7 +16,7 @@
 | Cyrius toolchain | **6.7.18** (installed) | `~/.cyrius/current` |
 | ganita | **1.2.15**, bundled in the 6.7.18 stdlib | `~/.cyrius/versions/6.7.18/lib/ganita.cyr` |
 | hisab | **3.4.1**, Cyrius, pinned to 6.7.18, tag `3.4.1`, bundle `dist/hisab.cyr` | `/home/macro/Repos/hisab` |
-| Oracle's math library | Rust **std** f64 methods → the host **glibc** libm (not the `libm` crate tanmatra used) | §6 |
+| Oracle's math library | Rust **std**: exp, exp2, expm1, ln, log10, pow, sin, cos, acos, atan2 → host **glibc 2.44**; cbrt, floor, trunc, round, powi → Rust's own built-ins. Release build (LLVM turns `2.0.powf` into `exp2`) | [`port-parity.md`](port-parity.md) §3 |
 | Published dependents (crates.io) | jivanu, khanij, kiran, jnana, tara — all Rust, all `^1`; none is in Cyrius | crates.io reverse deps |
 | Target | kimiya **2.0.0**, Cyrius | this document |
 
@@ -352,7 +352,7 @@ even; `+?` aborts the process; `cyrius test` must be warning-free.
 
 | Milestone | Status | Golden rows | Reference tests | Benches | Notes |
 |---|---|---|---|---|---|
-| M0 Initialize | ☐ planned 2026-11-08 | — | — | — | Blocked on step 0: commit + tag 1.2.0 |
+| M0 Initialize | ✅ done 2026-11-09 | constants 45 + math 18,647 (2.0 MB): 13,340 ok, 0 failed, 5,351 pending (M1 helpers, module-data constants), 1 accepted (ADR 0004) — identical on x86_64 ELF, x86_64 PE, aarch64 | — | scaffold only | Oracle frozen at tag `1.2.0`; scaffold + repairs; hisab 3.4.1; generator + `constants.cyr` (14 `KM_`) + harness; K = 2 ulp for the math primitives ([`port-parity.md`](port-parity.md)); ADRs 0001–0004 |
 | M1 Foundation | ☐ | | | | |
 | M2 Thermochemistry & gases | ☐ | | | | |
 | M3 Solutions & electrochemistry | ☐ | | | | |

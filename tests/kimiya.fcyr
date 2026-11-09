@@ -1,0 +1,18 @@
+# kimiya fuzz harness
+
+# Fuzz entry: feeds `len` bytes at `data` to the code under test (scaffold stub).
+fn fuzz_main(data, len) {
+    if (len == 0) { return 0; }
+    return 0;
+}
+
+# Runs fuzz_main once on a fixed input, so the harness also builds and runs as a plain test.
+fn main() {
+    alloc_init();
+    fuzz_main("test", 4);
+    println("fuzz: ok");
+    return 0;
+}
+
+var r = main();
+sys_exit_group(r);

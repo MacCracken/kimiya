@@ -2,6 +2,11 @@
 
 **Kimiya** (كيمياء — Arabic for "alchemy", the root of "chemistry") — chemistry engine for the [AGNOS](https://github.com/MacCracken/agnosticos) ecosystem.
 
+> **Porting to Cyrius.** The Rust crate's last release, **1.2.0** (tag `1.2.0`), is frozen in
+> [`rust-old/`](rust-old/) as the parity oracle; the Cyrius library will ship as **2.0.0**. The
+> Rust documentation below describes 1.2.0. Progress: [`docs/development/state.md`](docs/development/state.md);
+> plan: [`docs/development/kimiya-port-plan.md`](docs/development/kimiya-port-plan.md).
+
 Pure computation: no I/O, no network, no `unsafe`. Every fallible function returns
 `Result<T, KimiyaError>`; NaN, ±∞ and out-of-domain inputs are rejected rather than
 propagated.

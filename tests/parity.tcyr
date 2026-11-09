@@ -1,0 +1,249 @@
+# parity.tcyr — replays the golden corpus (tests/golden/*.tsv) against the port.
+#
+# Port plan §3 step 7, adapted from tanmatra's tests/parity.tcyr. Format and comparison rules:
+# scripts/oracle/README.md. The module list is tests/golden/modules.txt, which the generator
+# writes. The replay machinery is tests/parity_core.cyr; this file holds the dispatchers.
+#
+# Every row of every module is one of:
+# - ok: every output matched within its class;
+# - FAILED: an output differs; the first 10 per module are printed with the row's note and
+#   both bit patterns;
+# - measured: class C, with no bound set yet for its function. The ulp distance is
+#   recorded but not gated. Bounds are set per function before its comparison
+#   (M0 step 8, docs/development/port-parity.md);
+# - accepted: a divergence an ADR accepts, listed by row in _par_accepted;
+# - pending: its function isn't ported yet (no dispatcher entry).
+#
+# Per function it prints the row counts and the ulp histogram, which is the step 8
+# baseline. Shadow lines (`fn ~ candidate`) compare the same rows against another Cyrius
+# candidate and are never gated. The exit code is the number of modules with a failure, at
+# most a handful, so the 8-bit exit status can't wrap.
+
+include "tests/ulp.cyr"
+include "src/constants.cyr"
+
+alloc_init();
+
+include "tests/parity_core.cyr"
+
+# ── dispatch ────────────────────────────────────────────────────────────────────────
+# Each module's dispatcher fills the got list for one row. It returns 1 when it handled
+# the function, 0 when the function is pending (not ported), or -1 when the inputs are
+# unusable (a defect, counted as a failure). Add a function the moment it's ported.
+
+# `const` rows (input `s:<module>::<NAME>`). The physical constants are src/constants.cyr's
+# KM_ consts; the module data constants are generated with their module (M2–M4) and are
+# pending until then. Any other name is a defect.
+fn _par_constants(fp, fl): i64 {
+    if (_par_eq(fp, fl, "const") != 1 || _par_in_n != 1) { return 0 - 1; }
+    var np = load64(_par_in_v);
+    var nl = load64(_par_in_l);
+    var x: f64 = 0.0;
+    if (_par_eq(np, nl, "electrochemistry::FARADAY") == 1) { x = KM_FARADAY; }
+    elif (_par_eq(np, nl, "electrochemistry::ELEMENTARY_CHARGE") == 1) { x = KM_ELEMENTARY_CHARGE; }
+    elif (_par_eq(np, nl, "element::AVOGADRO") == 1) { x = KM_AVOGADRO; }
+    elif (_par_eq(np, nl, "element::GAS_CONSTANT") == 1) { x = KM_GAS_CONSTANT; }
+    elif (_par_eq(np, nl, "kinetics::BOLTZMANN") == 1) { x = KM_BOLTZMANN; }
+    elif (_par_eq(np, nl, "nuclear::AMU_MEV") == 1) { x = KM_AMU_MEV; }
+    elif (_par_eq(np, nl, "nuclear::PROTON_MASS_U") == 1) { x = KM_PROTON_MASS_U; }
+    elif (_par_eq(np, nl, "nuclear::NEUTRON_MASS_U") == 1) { x = KM_NEUTRON_MASS_U; }
+    elif (_par_eq(np, nl, "nuclear::HYDROGEN_ATOM_MASS_U") == 1) { x = KM_HYDROGEN_ATOM_MASS_U; }
+    elif (_par_eq(np, nl, "potential::COULOMB_CONSTANT") == 1) { x = KM_COULOMB_CONSTANT; }
+    elif (_par_eq(np, nl, "spectroscopy::PLANCK") == 1) { x = KM_PLANCK; }
+    elif (_par_eq(np, nl, "spectroscopy::SPEED_OF_LIGHT") == 1) { x = KM_SPEED_OF_LIGHT; }
+    elif (_par_eq(np, nl, "spectroscopy::RYDBERG") == 1) { x = KM_RYDBERG; }
+    elif (_par_eq(np, nl, "spectroscopy::RYDBERG_EV") == 1) { x = KM_RYDBERG_EV; }
+    else { return _par_constant_pending(np, nl); }
+    _par_got_f(x);
+    return 1;
+}
+
+# The module data constants: 0 (pending) for each, -1 for a name that is no kimiya constant.
+#must_use
+fn _par_constant_pending(np, nl): i64 {
+    # M2: gas, phase, thermo
+    if (_par_eq(np, nl, "gas::STP_TEMPERATURE") == 1) { return 0; }
+    if (_par_eq(np, nl, "gas::STP_PRESSURE") == 1) { return 0; }
+    if (_par_eq(np, nl, "phase::KB_WATER") == 1) { return 0; }
+    if (_par_eq(np, nl, "phase::KB_BENZENE") == 1) { return 0; }
+    if (_par_eq(np, nl, "phase::KB_ETHANOL") == 1) { return 0; }
+    if (_par_eq(np, nl, "phase::KB_CHLOROFORM") == 1) { return 0; }
+    if (_par_eq(np, nl, "phase::KF_WATER") == 1) { return 0; }
+    if (_par_eq(np, nl, "phase::KF_BENZENE") == 1) { return 0; }
+    if (_par_eq(np, nl, "phase::KF_CYCLOHEXANE") == 1) { return 0; }
+    if (_par_eq(np, nl, "phase::KF_CAMPHOR") == 1) { return 0; }
+    if (_par_eq(np, nl, "thermo::WATER_SPECIFIC_HEAT") == 1) { return 0; }
+    # M3: solution
+    if (_par_eq(np, nl, "solution::KW_WATER_25C") == 1) { return 0; }
+    if (_par_eq(np, nl, "solution::DH_A_WATER_25C") == 1) { return 0; }
+    if (_par_eq(np, nl, "solution::DH_B_WATER_25C") == 1) { return 0; }
+    if (_par_eq(np, nl, "solution::LAMBDA_H_PLUS") == 1) { return 0; }
+    if (_par_eq(np, nl, "solution::LAMBDA_OH_MINUS") == 1) { return 0; }
+    if (_par_eq(np, nl, "solution::LAMBDA_NA_PLUS") == 1) { return 0; }
+    if (_par_eq(np, nl, "solution::LAMBDA_K_PLUS") == 1) { return 0; }
+    if (_par_eq(np, nl, "solution::LAMBDA_CL_MINUS") == 1) { return 0; }
+    if (_par_eq(np, nl, "solution::LAMBDA_NO3_MINUS") == 1) { return 0; }
+    if (_par_eq(np, nl, "solution::LAMBDA_SO4_2MINUS") == 1) { return 0; }
+    # M4: inorganic
+    if (_par_eq(np, nl, "inorganic::MADELUNG_NACL") == 1) { return 0; }
+    if (_par_eq(np, nl, "inorganic::MADELUNG_CSCL") == 1) { return 0; }
+    if (_par_eq(np, nl, "inorganic::MADELUNG_ZNS") == 1) { return 0; }
+    if (_par_eq(np, nl, "inorganic::MADELUNG_FLUORITE") == 1) { return 0; }
+    if (_par_eq(np, nl, "inorganic::MADELUNG_RUTILE") == 1) { return 0; }
+    if (_par_eq(np, nl, "inorganic::BORN_EXP_HE") == 1) { return 0; }
+    if (_par_eq(np, nl, "inorganic::BORN_EXP_NE") == 1) { return 0; }
+    if (_par_eq(np, nl, "inorganic::BORN_EXP_AR") == 1) { return 0; }
+    if (_par_eq(np, nl, "inorganic::BORN_EXP_KR") == 1) { return 0; }
+    if (_par_eq(np, nl, "inorganic::BORN_EXP_XE") == 1) { return 0; }
+    return 0 - 1;
+}
+
+# `f64::` rows: the Cyrius counterpart of each Rust std method (port plan §6.1), where one
+# exists with Rust's semantics. Pending until M1's local helpers, because the stdlib's
+# nearest function differs from Rust (probed 2026-11-09; the shadow lines below show it):
+# - min / max: f64_min / f64_max return their second operand when it is NaN; Rust ignores a
+#   NaN on either side (_km_min / _km_max);
+# - round: f64_round ties to even; Rust rounds half away from zero (_km_round_half_away);
+# - signum: f64_sign gives 0 for ±0 and NaN; Rust gives ±1 and NaN (_km_signum);
+# - log10, exp_m1, powi, total_cmp, is_finite: no stdlib function (_km_log10, _km_expm1,
+#   _km_powi, …).
+# clamp is dispatched: f64_clamp has Rust's semantics for valid bounds (min ≤ max, no NaN
+# bound, which Rust asserts), so it is compared rather than assumed.
+fn _par_math(fp, fl): i64 {
+    var x: f64 = _par_in(0);
+    if (_par_eq(fp, fl, "f64::sqrt") == 1) { var r: f64 = f64_sqrt(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::abs") == 1) { var r: f64 = f64_abs(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::floor") == 1) { var r: f64 = f64_floor(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::trunc") == 1) { var r: f64 = f64_trunc(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::cbrt") == 1) { var r: f64 = ganita_f64_cbrt(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::exp") == 1) { var r: f64 = f64_exp(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::ln") == 1) { var r: f64 = f64_ln(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::sin") == 1) { var r: f64 = f64_sin(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::cos") == 1) { var r: f64 = f64_cos(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::acos") == 1) { var r: f64 = ganita_f64_acos(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::powf_base10") == 1) {
+        var r: f64 = ganita_f64_pow(10.0, x);
+        _par_got_f(r);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "f64::powf_base2") == 1) {
+        var r: f64 = ganita_f64_pow(2.0, x);
+        _par_got_f(r);
+        return 1;
+    }
+    var y: f64 = _par_in(1);
+    if (_par_eq(fp, fl, "f64::powf") == 1) { var r: f64 = ganita_f64_pow(x, y); _par_got_f(r); return 1; }
+    # Rust's y.atan2(x) is the golden f64::atan2(y, x): inputs in C order.
+    if (_par_eq(fp, fl, "f64::atan2") == 1) { var r: f64 = ganita_f64_atan2(x, y); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::clamp") == 1) {
+        var hi: f64 = _par_in(2);
+        var r: f64 = f64_clamp(x, y, hi);
+        _par_got_f(r);
+        return 1;
+    }
+    return 0;
+}
+
+# Routes a row to its module's dispatcher. 0 (pending) for a module with none yet.
+fn _par_dispatch(mp, ml, fp, fl): i64 {
+    _par_got_n = 0;
+    if (_par_eq(mp, ml, "constants") == 1) { return _par_constants(fp, fl); }
+    if (_par_eq(mp, ml, "math") == 1) { return _par_math(fp, fl); }
+    return 0;
+}
+
+# Shadow comparisons, never gated: the same golden rows through another Cyrius candidate.
+# - the exp / ln polyfills, which give the same bits on every target (the builtins are x87
+#   on x86_64), as the step-8 alternative if a target's builtin disagrees with glibc;
+# - the stdlib functions the M1 helpers replace, to show where their semantics differ.
+fn _par_shadows(mp, ml, fp, fl, cls) {
+    if (_par_eq(mp, ml, "math") != 1) { return 0; }
+    var x: f64 = _par_in(0);
+    if (_par_eq(fp, fl, "f64::exp") == 1) {
+        _par_got_n = 0;
+        var r: f64 = _f64_exp_polyfill(x);
+        _par_got_f(r);
+        _par_shadow_record("f64::exp ~ _f64_exp_polyfill", cls);
+        return 0;
+    }
+    if (_par_eq(fp, fl, "f64::ln") == 1) {
+        _par_got_n = 0;
+        var r: f64 = _f64_ln_polyfill(x);
+        _par_got_f(r);
+        _par_shadow_record("f64::ln ~ _f64_ln_polyfill", cls);
+        return 0;
+    }
+    if (_par_eq(fp, fl, "f64::round") == 1) {
+        _par_got_n = 0;
+        var r: f64 = f64_round(x);
+        _par_got_f(r);
+        _par_shadow_record("f64::round ~ f64_round", cls);
+        return 0;
+    }
+    if (_par_eq(fp, fl, "f64::signum") == 1) {
+        _par_got_n = 0;
+        var r: f64 = f64_sign(x);
+        _par_got_f(r);
+        _par_shadow_record("f64::signum ~ f64_sign", cls);
+        return 0;
+    }
+    var y: f64 = _par_in(1);
+    if (_par_eq(fp, fl, "f64::max") == 1) {
+        _par_got_n = 0;
+        var r: f64 = f64_max(x, y);
+        _par_got_f(r);
+        _par_shadow_record("f64::max ~ f64_max", cls);
+        return 0;
+    }
+    if (_par_eq(fp, fl, "f64::min") == 1) {
+        _par_got_n = 0;
+        var r: f64 = f64_min(x, y);
+        _par_got_f(r);
+        _par_shadow_record("f64::min ~ f64_min", cls);
+        return 0;
+    }
+    return 0;
+}
+
+# The class-C bound for a function, in ulps; -1 when none is set yet (the rows are measured).
+# Bounds are derived in M0 step 8 (docs/development/port-parity.md) per target against glibc,
+# BEFORE the function's first gated comparison, and never raised to make a row pass.
+#
+# The math primitives get 2 ulp: glibc and each Cyrius counterpart (lib/math.cyr, ganita) document
+# < 1 ulp, so two implementations can differ by up to 2. Measured 2026-11-08 on x86_64 ELF, x86_64
+# PE and aarch64: max 1 ulp on every row (port-parity.md §2). log10 and exp_m1 get their bound
+# when their M1 helpers exist.
+#must_use
+fn _par_c_bound(fp, fl): i64 {
+    if (_par_eq(fp, fl, "f64::exp") == 1) { return 2; }
+    if (_par_eq(fp, fl, "f64::ln") == 1) { return 2; }
+    if (_par_eq(fp, fl, "f64::powf") == 1) { return 2; }
+    if (_par_eq(fp, fl, "f64::powf_base10") == 1) { return 2; }
+    if (_par_eq(fp, fl, "f64::powf_base2") == 1) { return 2; }
+    if (_par_eq(fp, fl, "f64::cos") == 1) { return 2; }
+    if (_par_eq(fp, fl, "f64::sin") == 1) { return 2; }
+    if (_par_eq(fp, fl, "f64::acos") == 1) { return 2; }
+    if (_par_eq(fp, fl, "f64::atan2") == 1) { return 2; }
+    return 0 - 1;
+}
+
+# The ADR accepting a divergent row (function and raw input field), or 0. Each entry names
+# its ADR; an accepted row is reported on every run and doesn't fail its module. The ADR 0002
+# divergences (port plan §2.3) arrive with their modules' golden rows.
+#must_use
+fn _par_accepted(fp, fl, ip, il): i64 {
+    # ADR 0004: ganita pow(-1, DBL_MAX) gives +inf instead of 1 (tanmatra ADR 0007, filed upstream).
+    if (_par_eq(fp, fl, "f64::powf") == 1 && _par_eq(ip, il, "f:bff0000000000000 f:7fefffffffffffff") == 1) {
+        return 4;
+    }
+    return 0;
+}
+
+# kimiya has one harness: no module is skipped.
+#must_use
+fn _par_skip(mp, ml): i64 {
+    return 0;
+}
+
+var exit_code = _par_main();
+sys_exit_group(exit_code);

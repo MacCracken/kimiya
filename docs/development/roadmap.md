@@ -8,6 +8,7 @@ Public API unchanged from 1.1 apart from additions.
 
 Next: **Cyrius port** — plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md)
 (tanmatra template: Rust 1.2.0 frozen in `rust-old/` as the parity oracle, Cyrius ships 2.0.0).
+M0 is in progress — live status in [`state.md`](state.md).
 
 ---
 

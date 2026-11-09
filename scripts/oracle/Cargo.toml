@@ -1,0 +1,24 @@
+[package]
+name = "kimiya-oracle"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-only"
+publish = false
+description = "Drives the frozen Rust kimiya 1.2.0 in rust-old/ to write the Cyrius port's golden corpus"
+
+# The oracle is used by path and never built or edited in place (CLAUDE.md: do not
+# modify rust-old/). Cargo.lock was seeded from rust-old/Cargo.lock, so every shared
+# dependency (hisab 1.4.0 above all) resolves to the version the oracle was tested with.
+# No features: `soorat-compat` and `logging` are deferred (port plan §2.2) and change no
+# value the corpus records.
+[dependencies]
+kimiya = { path = "../../rust-old" }
+
+[[bin]]
+name = "oracle"
+path = "src/main.rs"
+
+[profile.release]
+# Correctness, not speed: keep overflow checks so a bad grid index fails loudly.
+overflow-checks = true

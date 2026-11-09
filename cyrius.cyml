@@ -1,0 +1,43 @@
+[package]
+name = "kimiya"
+version = "${file:VERSION}"
+description = "kimiya — chemistry engine: elements, molecules, stoichiometry, thermochemistry, gases, solutions, electrochemistry, kinetics, spectroscopy, nuclear chemistry"
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/kimiya"
+language = "cyrius"
+cyrius = "6.7.18"
+
+[build]
+entry = "src/main.cyr"
+output = "build/kimiya"
+
+# stdlib leaves, vendored into lib/ by `cyrius deps` and prepended to every compile.
+#   math     — f64_sin / f64_cos on every target; exp / ln / atan on aarch64
+#   ganita   — ganita_f64_acos / atan2 / cbrt / pow / hypot (ganita 1.2.15 in the 6.7.18 bundle)
+#   overflow — the saturating `+|` / `-|` / `*|` operators (atom counts, balancing)
+#   tagged / result — the value-form Option and Result
+#   fnptr    — callbacks into the ODE and root-finding code (port plan §6.3)
+# hisab's own bundle needs math, alloc, vec, ganita, result, str and fmt (dist/hisab.deps).
+[deps]
+stdlib = ["syscalls", "string", "alloc", "str", "fmt", "io", "vec", "args", "math", "ganita",
+    "overflow", "tagged", "result", "fnptr"]
+
+# hisab 3.4.1, pinned by tag: the numerical methods (port plan §6.2). No `path =` override,
+# which would bypass the commit pin that cyrius.lock records.
+[deps.hisab]
+git = "https://github.com/MacCracken/hisab.git"
+tag = "3.4.1"
+modules = ["dist/hisab.cyr"]
+
+# Test / bench / fuzz compiles only.
+[test]
+stdlib = ["assert", "bench"]
+
+# `[lib]` (the bundle `cyrius distlib` writes to dist/kimiya.cyr) is added in M1 with its first
+# module, src/error.cyr — `[lib] modules = []` is invalid. Its order is load-bearing (no src/
+# file has an `include`); the full order is in docs/development/kimiya-port-plan.md §3 step 3:
+#   error → constants → validate → element_data → element → molecule → reaction → thermo →
+#   thermochem_data → thermochem → phase_data → phase → gas → solution → electrochemistry_data →
+#   electrochemistry → kinetics → stoichiometry → organic → inorganic_data → inorganic →
+#   potential → nuclear_data → nuclear → spectroscopy → numerics → reaction_dynamics → network →
+#   fitting → sensitivity

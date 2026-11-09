@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Rust 1.2.0 is frozen in
+`rust-old/` as the parity oracle (ADR 0001).
+
+### Added
+- **M0 initialize** — `cyrius port` scaffold on Cyrius 6.7.18; `cyrius.cyml` with hisab 3.4.1; golden-value
+  generator `scripts/oracle/` (constants 45 + math 18,647 rows, glibc 2.44-pinned, `--check`, independent
+  `validate.py`); generated `src/constants.cyr` (14 `KM_` physical constants); parity harness
+  `tests/parity.tcyr` — 13,340 rows ok, 0 failed on x86_64 ELF, x86_64 PE and aarch64 (`docs/development/port-parity.md`)
+- ADRs 0001 (port with Rust oracle), 0002 (API changes in the Cyrius 2.0 API), 0003 (transcribe the hisab 1.4.0
+  routines hisab 3.4.1 lacks), 0004 (accept ganita `pow(-1, DBL_MAX)`)
+
+### Changed
+- Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
+  (`test`, `test --bounds`, `deps --locked`, `audit`)
+
 ## [1.2.0] - 2026-11-08
 
 Refresh + audit release: current toolchain and dependencies, then a full-crate audit

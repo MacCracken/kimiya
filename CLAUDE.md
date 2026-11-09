@@ -1,45 +1,97 @@
-# Kimiya — Claude Code Instructions
+# kimiya — Claude Code Instructions
+
+> **Core rule**: this file is **preferences, process, and procedures** —
+> durable rules that change rarely. Volatile state (current version,
+> module line counts, port progress, test counts, consumers) lives in
+> [`docs/development/state.md`](docs/development/state.md).
+> Do not inline state here.
 
 ## Project Identity
 
 **Kimiya** (Arabic: كيمياء — alchemy, the root of "chemistry") — Chemistry engine for AGNOS
 
-- **Type**: Flat library crate
+- **Type**: Flat library (Cyrius), being ported from the Rust crate 1.2.0; the port ships as 2.0.0
 - **License**: GPL-3.0-only
-- **MSRV**: 1.99
-- **Version**: SemVer 1.0.0
+- **Language**: Cyrius. The toolchain is pinned in `cyrius.cyml` `[package].cyrius`
+- **Version**: `VERSION` at the project root is the source of truth. Don't inline the number here
+- **Rust oracle**: kimiya 1.2.0, frozen at `rust-old/`. It stays the parity reference until the deferred
+  bridges and integrations are ported or dropped (port plan §2.2)
+- **Plan of record**: [`docs/development/kimiya-port-plan.md`](docs/development/kimiya-port-plan.md)
+- **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md) · [First-Party Documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
+
+## Goal
+
+kimiya owns chemistry for AGNOS: elements and molecules, stoichiometry, thermochemistry,
+gases, solutions, electrochemistry, kinetics and reaction dynamics, spectroscopy, nuclear
+chemistry and intermolecular potentials. Every value comes from an evaluated primary source.
 
 ## Consumers
 
-ushma (thermochemistry coupling), bijli (electrochemistry), joshua (chemistry simulation), dravya (material composition)
+The published Rust dependents (jivanu, khanij, kiran, jnana, tara) use the Rust crate; the
+current list and what each calls is in `state.md`. Cyrius consumers: none yet.
+
+## Quick Start
+
+```sh
+cyrius deps                                   # resolve dependencies (vendors lib/, incl. hisab)
+cyrius build src/main.cyr build/kimiya        # compile
+cyrius test                                   # run tests/*.tcyr (parity + reference tests)
+cyrius bench                                  # run tests/*.bcyr
+cargo test --manifest-path rust-old/Cargo.toml --all-features   # the Rust oracle, read-only
+cargo run --release --locked --manifest-path scripts/oracle/Cargo.toml -- --check   # golden corpus up to date
+python3 -I scripts/oracle/validate.py .                         # independent check of the corpus
+```
 
 ## Development Process
 
 ### P(-1): Scaffold Hardening (before any new features)
 
-0. Read roadmap, CHANGELOG, and open issues — know what was intended before auditing what was built
-1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`, `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`
-3. Get baseline benchmarks (`./scripts/bench-history.sh`)
-4. Initial refactor + audit (performance, memory, security, edge cases)
-5. Cleanliness check — must be clean after audit
-6. Additional tests/benchmarks from observations
-7. Post-audit benchmarks — prove the wins
-8. Repeat audit if heavy
+0. Read the roadmap, the port plan, the CHANGELOG and the open issues
+1. Test + benchmark sweep of the existing code
+2. Cleanliness check (below)
+3. Get baseline benchmarks
+4. Internal deep review
+5. External research — CODATA, NIST, IUPAC, CRC, JANAF, AME/NUBASE
+6. Cleanliness check — must be clean after the review
+7. Additional tests/benchmarks from the findings
+8. Post-review benchmarks
+9. Repeat if heavy
 
-### Work Loop / Working Loop (continuous)
+### Cleanliness check
 
-1. Work phase — new features, roadmap items, bug fixes
+```sh
+cyrius fmt --check
+cyrius lint
+cyrius vet
+cyrius build src/main.cyr build/kimiya
+cyrius test                 # must be warning-free, not just passing
+cyrius test --bounds
+cyrius bench
+cyrius distlib --all && cyrius distlib --check   # once [lib] exists (M1)
+cyrius deps --locked
+cyrius audit
+```
+
+`cyrius test` must be **warning-free**. The f64 type diagnostics come only from the
+compiles that `test` and `build` drive, never from `cyrius lint`. Each one is a bug:
+- *integer arithmetic with an f64 right operand*
+- *f64 arithmetic with a non-f64 right operand*
+- *an integer stored into an f64 slot*
+- *comparison mixes f64 and integer*
+
+### Work Loop (continuous)
+
+1. Work phase — one module at a time, in the order the port plan gives
 2. Cleanliness check
-3. Test + benchmark additions for new code
-4. Run benchmarks (`./scripts/bench-history.sh`)
-5. Audit phase
-6. Cleanliness check — must be clean after audit
-7. Deeper tests/benchmarks from audit observations
-8. Run benchmarks again — prove the wins
-9. If audit heavy → return to step 5
-10. Documentation — update CHANGELOG, roadmap, docs
-11. Version check — VERSION, Cargo.toml, recipe all in sync
+3. Test + benchmark additions: golden parity rows, reference-value tests, benches
+4. Run benchmarks, recorded against the Rust numbers (`rust-old/benchmarks.md`)
+5. Internal review, including a surface-parity diff against `rust-old/src/`
+6. Cleanliness check
+7. Deeper tests/benchmarks
+8. Benchmarks again
+9. If the review was heavy, return to step 5
+10. Documentation — CHANGELOG, `state.md`, roadmap, the port plan's tracking table
+11. Version check — `VERSION` and `cyrius.cyml` (`${file:VERSION}`) in sync
 12. Return to step 1
 
 ### Task Sizing
@@ -52,93 +104,82 @@ ushma (thermochemistry coupling), bijli (electrochemistry), joshua (chemistry si
 
 - Refactor when the code tells you to — duplication, unclear boundaries, performance bottlenecks
 - Never refactor speculatively. Wait for the third instance before extracting an abstraction
-- Refactoring is part of the work loop, not a separate phase. If a review (step 5) reveals structural issues, refactor before moving to step 6
+- Refactoring is part of the work loop, not a separate phase
 - Every refactor must pass the same cleanliness + benchmark gates as new code
 
-### Key Principles
+## Key Principles
 
+- **Cross-check against `rust-old/`.** The port's correctness bar is "matches what Rust
+  did", within the tolerance class the port plan (§5) assigns. Diverge only with an ADR
+  in `docs/adr/` (ADR 0002 lists the API changes accepted for 2.0).
+- **Correctness over cleverness.** If the Cyrius behavior diverges silently from Rust, the bugs win.
+- Test after every change, not after the feature is "done". ONE change at a time.
 - **Never skip benchmarks.** Numbers don't lie.
-- **Tests + benchmarks are the way.** Minimum 80%+ coverage target.
-- **Own the stack.** Use hisab types, not adapters.
-- **`#[non_exhaustive]`** on all public enums.
-- **`#[must_use]`** on all pure functions.
-- **`#[inline]`** on hot-path functions.
+- **Own the stack.** Use hisab (Cyrius) for numerics; where hisab lacks a routine the oracle
+  used, follow the hisab-gap ADR rather than inventing a new algorithm.
+- **Enums.** Public enums have explicit, append-only numeric values that are never
+  renumbered (the Cyrius form of `#[non_exhaustive]`). Property functions `match` with an `_ =>` arm.
+- **`#must_use` on all pure functions**, plus `#pure` where it applies.
+- **No aborts in library code.** `src/` never uses `+?`, `-?` or `*?` (they exit the
+  process), `assert_fatal` or `result_unwrap`. Errors return a value-form `Result` or an
+  `err_out` code. Every guard rejects NaN and ±∞ (the 1.2 `validate` rule).
+- **f64 hygiene.**
+  - Bind every call result to a `: f64` local before using it in an operator.
+  - Never put hex in a `const`: it is an integer.
+  - Never write `(0 - x)` on an f64: use `-x`.
+  - No exponent notation in literals: the lexer has none. Generated files write decimals positionally.
+  - Use the canonical `ganita_f64_*` names, not the deprecated short aliases.
+- **Tables and constants are generated, never typed by hand.** `scripts/oracle/` writes
+  `src/constants.cyr` and `src/*_data.cyr` from the oracle's API. Regenerate them; never edit them.
 - **Element data must be accurate** — real atomic masses, real electronegativity values.
-- **Physical constants must be precise** — R=8.314462618, Avogadro=6.02214076e23.
+- **Physical constants must be precise** — R = 8.314462618, N_A = 6.02214076e23 (exact SI values).
+- **Every public global carries the `KM_` prefix** (constants, enum members, tables); private
+  helpers use `_km_`. A bundle shares one namespace with its consumers.
+- **Function names follow the Rust API**, except where ADR 0002 renames them.
+- Build with `cyrius build`, not raw `cat file | cc5` — the manifest auto-resolves deps.
+- Source files only need project includes — stdlib auto-resolves from `cyrius.cyml`.
+- `var buf[N]` = N **bytes**, not N entries.
 
 ## DO NOT
 
-- **Do not commit or push** — the user handles all git operations
-- **NEVER use `gh` CLI** — use `curl` to GitHub API only
-- Do not `unwrap()` or `panic!()` in library code
+- **Do not commit or push** — the user handles all git operations (including staging)
+- **NEVER use `gh` CLI** — use `curl` to the GitHub API only
+- **Do not modify `rust-old/`** — it is the parity oracle. Tools that drive it (golden and table
+  generators) live in `scripts/oracle/` and depend on it by path
+- Do not modify `lib/` files (vendored stdlib / dep symlinks)
+- Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth
+- Do not widen a parity tolerance class to make a row pass. Class-C bounds are set by the
+  rule in `docs/development/port-parity.md` before a function's first comparison
+- Do not add unnecessary dependencies
+- Do not break backward compatibility without a major version bump
 - Do not skip benchmarks before claiming performance improvements
+- Do not skip tests before claiming changes work
+- Do not use approximate/made-up chemistry values — always cite sources
 
 ## Documentation Structure
 
 ```
 Root files (required):
-  README.md          — quick start, features, dependency stack, consumers, license
-  CHANGELOG.md       — per-version changes (Added/Changed/Fixed/Removed)
-  CLAUDE.md          — this file (development process, principles, DO NOTs)
-  CONTRIBUTING.md    — fork, branch, make check, PR workflow
-  SECURITY.md        — supported versions, scope, reporting
-  CODE_OF_CONDUCT.md — Contributor Covenant
-  LICENSE            — GPL-3.0-only
+  README.md, CHANGELOG.md, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE
 
-docs/ (required):
-  architecture/
-    overview.md      — module map, data flow, consumers, dependency stack
-    math.md          — (if applicable) mathematical reference for algorithms/formulas
-  development/
-    roadmap.md       — completed items, backlog, future features (demand-gated), v1.0 criteria
-
-docs/ (when earned — not scaffolded empty):
-  adr/
-    NNN-title.md     — architectural decision records (when non-obvious choices are made)
-  development/
-    threat-model.md  — attack surface, mitigations (when security-relevant)
-    dependency-watch.md — deps to monitor for updates/CVEs
-  guides/
-    usage.md         — patterns, philosophy, code examples
-    testing.md       — test count, coverage, testing patterns
-
-ADR format:
-  # NNN — Title
-  ## Status: Accepted/Superseded
-  ## Context: Why this decision was needed
-  ## Decision: What we chose
-  ## Consequences: Trade-offs, what changes
+docs/:
+  development/kimiya-port-plan.md — the port plan of record
+  development/state.md            — live state
+  development/roadmap.md          — completed items, backlog, port API changes
+  development/port-parity.md      — measured parity baselines (M0 step 8)
+  adr/NNNN-title.md               — architecture decision records (template.md)
+  architecture/                   — non-obvious constraints
+  guides/                         — task-oriented how-tos
+rust-old/docs/                    — the Rust 1.2.0 architecture overview, kept for reference
 ```
 
 ## CHANGELOG Format
 
-Follow [Keep a Changelog](https://keepachangelog.com/):
+Follow [Keep a Changelog](https://keepachangelog.com/): `## [Unreleased]`, then per version
+`### Added / Changed / Fixed / Removed / Security / Performance`.
 
-```markdown
-# Changelog
-
-## [Unreleased]
-### Added — new features
-### Changed — changes to existing features
-### Fixed — bug fixes
-### Removed — removed features
-### Security — vulnerability fixes
-### Performance — benchmark-proven improvements (include numbers)
-
-## [X.Y.Z] - YYYY-MM-DD
-### Added
-- **module_name** — what was added and why
-### Changed
-- item: old behavior → new behavior
-### Fixed
-- issue description (root cause → fix)
-### Performance
-- benchmark_name: before → after (−XX%)
-```
-
-Rules:
-- Every PR/commit that changes behavior gets a CHANGELOG entry
-- Performance claims MUST include benchmark numbers
-- Breaking changes get a **Breaking** section with migration guide
-- Group by module when multiple changes in one release
-- Link to ADR if a change was driven by an architectural decision
+- Every change that alters behavior gets a CHANGELOG entry
+- Performance claims MUST include benchmark numbers (Rust vs Cyrius where relevant)
+- Breaking changes get a **Breaking** section with a migration guide
+- Group by module when multiple changes land in one release
+- Link the ADR when a change was driven by an architectural decision
