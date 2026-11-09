@@ -6,7 +6,8 @@
 23 modules, 118 elements, 688 tests (662 unit + 24 integration + 2 doc), `#![warn(missing_docs)]` clean.
 Public API unchanged from 1.1 apart from additions.
 
-Next: **Cyrius port** (see below).
+Next: **Cyrius port** — plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md)
+(tanmatra template: Rust 1.2.0 frozen in `rust-old/` as the parity oracle, Cyrius ships 2.0.0).
 
 ---
 
@@ -30,6 +31,9 @@ Next: **Cyrius port** (see below).
 ## Cyrius Port Preparation
 
 Kimiya is listed in the AGNOS Cyrius migration plan (Phase 2B, pure-math science crates).
+The milestones (M0 initialize → M1 foundation → M2 thermochemistry & gases → M3 solutions &
+electrochemistry → M4 structure, nuclear & spectroscopy → M5 numerics → M7 release 2.0.0) and
+the parity policy are in [`kimiya-port-plan.md`](kimiya-port-plan.md).
 
 Port-relevant facts after v1.2:
 - **hisab surface** is limited to `num` + `autodiff`; see `docs/architecture/overview.md` for
