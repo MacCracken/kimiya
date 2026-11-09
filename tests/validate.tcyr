@@ -40,11 +40,37 @@ fn _t_finite_rejects_nan_inf() {
     assert_eq(_km_is_finite(ninf), 0, "-inf");
 }
 
+# Cyrius-only: the edges of the M2a guards (x − x == 0 for finiteness, 0 < x < +∞ and 0 ≤ x < +∞):
+# DBL_MAX and the smallest subnormal are finite and positive, a negative-signed NaN is not, and −0
+# is not positive.
+fn _t_guard_edges() {
+    test_group("guard_edges");
+    var dmax: f64 = 0x7FEFFFFFFFFFFFFF;   # DBL_MAX
+    var dmin: f64 = 0.0;
+    store64(&dmin, 1);                    # the smallest subnormal (a small hex literal reads as an integer)
+    var neg_nan: f64 = 0.0;
+    store64(&neg_nan, 0xFFF8000000000000);   # −NaN (read as a small negative integer otherwise)
+    var ninf: f64 = -_KM_INF;
+    assert_eq(_km_is_finite(dmax), 1, "finite(DBL_MAX)");
+    assert_eq(_km_is_finite(dmin), 1, "finite(min subnormal)");
+    assert_eq(_km_is_finite(_KM_INF), 0, "finite(+inf)");
+    assert_eq(_km_is_finite(neg_nan), 0, "finite(-NaN)");
+    assert_eq(_km_is_positive(dmax), 1, "positive(DBL_MAX)");
+    assert_eq(_km_is_positive(dmin), 1, "positive(min subnormal)");
+    assert_eq(_km_is_positive(-0.0), 0, "positive(-0.0)");
+    assert_eq(_km_is_positive(neg_nan), 0, "positive(-NaN)");
+    assert_eq(_km_is_positive(ninf), 0, "positive(-inf)");
+    assert_eq(_km_is_non_negative(dmax), 1, "non_negative(DBL_MAX)");
+    assert_eq(_km_is_non_negative(neg_nan), 0, "non_negative(-NaN)");
+    assert_eq(_km_is_non_negative(ninf), 0, "non_negative(-inf)");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_positive_rejects_nan_inf_zero_negative();
     _t_non_negative_accepts_zero();
     _t_finite_rejects_nan_inf();
+    _t_guard_edges();
     return assert_summary();
 }
 

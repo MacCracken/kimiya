@@ -4,14 +4,17 @@
 //! one (`complete` proves it against `rust-old/src`), and `tests/golden/constants.tsv` pins
 //! every bit (`m_constants.rs`).
 //! - **Physical constants** (`Home::Constants`) are generated here, into `src/constants.cyr`,
-//!   which comes first in `[lib]` because 14 modules reach across for them.
-//! - **Module data** (`Home::Module`: K_b/K_f, Madelung, Born exponents, Λ°, Debye–Hückel,
-//!   K_w, STP, c_water) stays with its module and is generated with that module's data at
-//!   its milestone. Until then its golden rows are *pending* in the harness.
+//!   which comes first in `[lib]` because 14 modules reach across for them. So is
+//!   `thermo::WATER_SPECIFIC_HEAT` (M2a): `thermo` has no data file of its own, and
+//!   `constants.cyr` precedes it in `[lib]`.
+//! - **Module data** stays with its module and is generated with that module's data at its
+//!   milestone: `Home::Data` names the generated file (M2a: K_b/K_f into `src/phase_data.cyr`,
+//!   STP into `src/gas_data.cyr`); `Home::Module` is a later milestone (Madelung, Born exponents,
+//!   Λ°, Debye–Hückel, K_w), whose golden rows are *pending* in the harness until then.
 //!
 //! Values come from the oracle's API; the comments are the Rust doc comments, which carry
-//! the citations (CODATA 2018, SI 2019, AME2020, …). Struct-valued consts (`gas::PR_*`)
-//! arrive with their module (M2).
+//! the citations (CODATA 2018, SI 2019, AME2020, …). The struct-valued consts (`gas::PR_*`)
+//! are `src/gas_data.cyr`'s (`t_gas.rs`), pinned by their own `gas.tsv` rows.
 
 use crate::cyr::{doc_comment, f64_lit, header};
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,7 +25,9 @@ use std::path::Path;
 pub enum Home {
     /// `src/constants.cyr` (this generator).
     Constants,
-    /// With its module's data, at the named milestone.
+    /// With its module's data, in the named generated file (`src/<name>.cyr`).
+    Data(&'static str),
+    /// With its module's data, at the named (later) milestone.
     Module(&'static str),
 }
 
@@ -53,7 +58,8 @@ macro_rules! constants {
 }
 
 const PHYS: Home = Home::Constants;
-const M2: Home = Home::Module("M2");
+const PHASE: Home = Home::Data("phase_data");
+const GAS: Home = Home::Data("gas_data");
 const M3: Home = Home::Module("M3");
 const M4: Home = Home::Module("M4");
 
@@ -64,8 +70,8 @@ const ALL: &[Constant] = constants!(
     electrochemistry::ELEMENTARY_CHARGE => PHYS,
     element::AVOGADRO => PHYS,
     element::GAS_CONSTANT => PHYS,
-    gas::STP_TEMPERATURE => M2,
-    gas::STP_PRESSURE => M2,
+    gas::STP_TEMPERATURE => GAS,
+    gas::STP_PRESSURE => GAS,
     inorganic::MADELUNG_NACL => M4,
     inorganic::MADELUNG_CSCL => M4,
     inorganic::MADELUNG_ZNS => M4,
@@ -81,14 +87,14 @@ const ALL: &[Constant] = constants!(
     nuclear::PROTON_MASS_U => PHYS,
     nuclear::NEUTRON_MASS_U => PHYS,
     nuclear::HYDROGEN_ATOM_MASS_U => PHYS,
-    phase::KB_WATER => M2,
-    phase::KB_BENZENE => M2,
-    phase::KB_ETHANOL => M2,
-    phase::KB_CHLOROFORM => M2,
-    phase::KF_WATER => M2,
-    phase::KF_BENZENE => M2,
-    phase::KF_CYCLOHEXANE => M2,
-    phase::KF_CAMPHOR => M2,
+    phase::KB_WATER => PHASE,
+    phase::KB_BENZENE => PHASE,
+    phase::KB_ETHANOL => PHASE,
+    phase::KB_CHLOROFORM => PHASE,
+    phase::KF_WATER => PHASE,
+    phase::KF_BENZENE => PHASE,
+    phase::KF_CYCLOHEXANE => PHASE,
+    phase::KF_CAMPHOR => PHASE,
     potential::COULOMB_CONSTANT => PHYS,
     solution::KW_WATER_25C => M3,
     solution::DH_A_WATER_25C => M3,
@@ -104,7 +110,7 @@ const ALL: &[Constant] = constants!(
     spectroscopy::SPEED_OF_LIGHT => PHYS,
     spectroscopy::RYDBERG => PHYS,
     spectroscopy::RYDBERG_EV => PHYS,
-    thermo::WATER_SPECIFIC_HEAT => M2,
+    thermo::WATER_SPECIFIC_HEAT => PHYS,
 );
 
 /// Every constant, for the golden emitter too.
@@ -165,7 +171,6 @@ pub fn complete(root: &Path) -> Result<(), String> {
 }
 
 pub fn emit(root: &Path, provenance: &str) -> Result<String, String> {
-    complete(root)?;
     let mut out = header(
         "physical and universal constants",
         provenance,
@@ -173,12 +178,25 @@ pub fn emit(root: &Path, provenance: &str) -> Result<String, String> {
             "Each value is the shortest decimal that round-trips to the oracle's f64, written out\n\
              positionally: the Cyrius lexer has no exponent notation, and decimal literals are\n\
              correctly rounded (6.6.10+). tests/golden/constants.tsv pins every bit.",
-            "Module data constants (K_b/K_f, Madelung, Born exponents, Λ°, Debye–Hückel, K_w, STP,\n\
-             water's specific heat) are generated with their module at its milestone, not here.",
+            "Module data constants are generated with their module's data, not here: K_b/K_f in\n\
+             src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung, Born exponents, Λ°,\n\
+             Debye–Hückel and K_w at M3–M4. The exception is thermo::WATER_SPECIFIC_HEAT (M2a), at\n\
+             the end: thermo has no data file, and this file precedes it in [lib].",
         ],
     );
+    out.push_str(&consts(root, Home::Constants)?);
+    Ok(out.trim_end().to_string() + "\n")
+}
+
+/// Every constant of `home`, in `ALL` order, as `const KM_<NAME> = <literal>;` under its Rust doc
+/// comment and a `# Rust: kimiya::<module>::<NAME>` line (which `validate.py` and
+/// `probe_tables.py` read to tie it to its golden row). `t_phase` and `t_gas` emit their
+/// `Home::Data` constants with this.
+pub fn consts(root: &Path, home: Home) -> Result<String, String> {
+    complete(root)?;
+    let mut out = String::new();
     let mut sources = BTreeMap::new();
-    for c in ALL.iter().filter(|c| c.home == Home::Constants) {
+    for c in ALL.iter().filter(|c| c.home == home) {
         if !sources.contains_key(c.module) {
             let p = root.join(format!("rust-old/src/{}.rs", c.module));
             let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -189,5 +207,8 @@ pub fn emit(root: &Path, provenance: &str) -> Result<String, String> {
         out.push_str(&format!("# Rust: kimiya::{}\n", c.path()));
         out.push_str(&format!("const KM_{} = {};\n\n", c.name, f64_lit(c.value)?));
     }
-    Ok(out.trim_end().to_string() + "\n")
+    if out.is_empty() {
+        return Err("t_constants::consts: no constant has that home".to_string());
+    }
+    Ok(out)
 }

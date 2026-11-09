@@ -1,0 +1,250 @@
+# phase.cyr — phase equilibria: Raoult's law, Henry's law, colligative properties,
+# Clausius–Clapeyron, the Antoine equation and the Gibbs phase rule (port of rust-old/src/phase.rs).
+#
+# Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and reject NaN
+# and ±∞ inputs. Every expression keeps Rust's operation order, so the arithmetic functions are
+# bit-identical (class B); clausius_clapeyron (one exp) and the Antoine functions (one pow) are
+# class C (docs/development/port-parity.md). The data — struct KmAntoineCoeffs, the 8 ANTOINE_DATA
+# sets, the mmHg → Pa factor and the KM_KB_* / KM_KF_* constants — is src/phase_data.cyr
+# (generated).
+#
+# ADR 0002 #4 (the one API change here): antoine_pressure_mmhg / antoine_pressure_pa return a
+# Result, Err outside the coefficient set's fitted range t_min_c ..= t_max_c, at or below the pole
+# (C + T ≤ 0) and for any non-finite input, where Rust 1.2 extrapolates silently or returns NaN.
+# There is no extrapolating variant. In range the value is Rust's, operation for operation.
+#
+# ANTOINE_DATA rows are reached by handle (port plan §6.4): row + 1, and 0 for None.
+# antoine_data_name(h) and antoine_data_coeffs(h) read row h − 1; an invalid handle gives "" and a
+# set of NaN fields (which antoine_pressure_* reject).
+
+include "lib/string.cyr"
+include "lib/math.cyr"
+include "lib/ganita.cyr"
+
+# 1 if 0 ≤ x ≤ 1 (Rust's `(0.0..=1.0).contains(&x)`, false for NaN).
+#must_use
+fn _km_in_unit_interval(x: f64): i64 {
+    if (x >= 0.0 && x <= 1.0) { return 1; }
+    return 0;
+}
+
+# ── Raoult's law ────────────────────────────────────────────────────────────────────
+
+# Raoult's law P = x × P°: the partial vapour pressure of a component of an ideal solution, from its
+# mole fraction x (0 to 1) and the pure component's vapour pressure P° (Pa, or any unit, which the
+# result keeps). Ok(P), or Err(KM_ERR_INVALID_INPUT) if x is not in [0, 1] or P° is negative or
+# non-finite (NaN included). Mirrors `phase::raoult_pressure`.
+#must_use
+fn raoult_pressure(mole_fraction: f64, pure_vapor_pressure: f64): Result {
+    if (_km_in_unit_interval(mole_fraction) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(pure_vapor_pressure) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var p: f64 = mole_fraction * pure_vapor_pressure;
+    return Ok(p);
+}
+
+# Total vapour pressure over a binary ideal solution, P = x_A × P°_A + (1 − x_A) × P°_B, in the
+# pressures' (consistent) unit. Ok(P), or Err(KM_ERR_INVALID_INPUT) if x_A is not in [0, 1] or
+# either pure-component pressure is negative or non-finite. Mirrors `phase::raoult_total_binary`.
+#must_use
+fn raoult_total_binary(x_a: f64, p_pure_a: f64, p_pure_b: f64): Result {
+    if (_km_in_unit_interval(x_a) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(p_pure_a) != 1 || _km_is_non_negative(p_pure_b) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    var p: f64 = (x_a * p_pure_a) + ((1.0 - x_a) * p_pure_b);
+    return Ok(p);
+}
+
+# ── Henry's law ─────────────────────────────────────────────────────────────────────
+
+# Henry's law P = K_H × x: the dissolved gas's partial pressure from Henry's constant K_H (Pa, or the
+# output's unit) and its mole fraction x (0 to 1). Ok(P), or Err(KM_ERR_INVALID_INPUT) if K_H is not
+# positive and finite or x is not in [0, 1] (NaN included). Mirrors `phase::henry_pressure`.
+#must_use
+fn henry_pressure(henry_constant: f64, mole_fraction: f64): Result {
+    if (_km_is_positive(henry_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_in_unit_interval(mole_fraction) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var p: f64 = henry_constant * mole_fraction;
+    return Ok(p);
+}
+
+# A gas's solubility (mole fraction) from Henry's law, x = P / K_H, with P and K_H in the same
+# pressure unit. Henry's law is a dilute-solution limit; results near 1 are outside its range.
+# Ok(x), or Err(KM_ERR_INVALID_INPUT) if K_H is not positive and finite or P is negative or
+# non-finite. Mirrors `phase::henry_solubility`.
+#must_use
+fn henry_solubility(partial_pressure: f64, henry_constant: f64): Result {
+    if (_km_is_positive(henry_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(partial_pressure) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var x: f64 = partial_pressure / henry_constant;
+    return Ok(x);
+}
+
+# ── colligative properties ──────────────────────────────────────────────────────────
+
+# Boiling point elevation ΔT_b = K_b × m × i in K, from the ebullioscopic constant K_b (K·kg/mol,
+# e.g. KM_KB_WATER), the molality m (mol solute / kg solvent) and the van 't Hoff factor i (1 for
+# non-electrolytes). Mirrors `phase::boiling_point_elevation`.
+#must_use
+fn boiling_point_elevation(kb: f64, molality: f64, van_t_hoff_factor: f64): f64 {
+    var dt: f64 = (kb * molality) * van_t_hoff_factor;
+    return dt;
+}
+
+# Freezing point depression ΔT_f = K_f × m × i, the (positive) depression in K, from the cryoscopic
+# constant K_f (K·kg/mol, e.g. KM_KF_WATER), the molality m and the van 't Hoff factor i. Mirrors
+# `phase::freezing_point_depression`.
+#must_use
+fn freezing_point_depression(kf: f64, molality: f64, van_t_hoff_factor: f64): f64 {
+    var dt: f64 = (kf * molality) * van_t_hoff_factor;
+    return dt;
+}
+
+# Osmotic pressure π = i × M × R × T in Pa, from the van 't Hoff factor i, the molarity M (mol/L)
+# and T in K (R in L·Pa/(mol·K) is KM_GAS_CONSTANT × 1000). Ok(π),
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite, or Err(KM_ERR_INVALID_INPUT) if
+# i is not positive and finite or M is negative or non-finite. Mirrors `phase::osmotic_pressure`.
+#must_use
+fn osmotic_pressure(van_t_hoff_factor: f64, molarity: f64, temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_positive(van_t_hoff_factor) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(molarity) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var p: f64 = (((van_t_hoff_factor * molarity) * KM_GAS_CONSTANT) * 1000.0) * temperature_k;
+    return Ok(p);
+}
+
+# ── Clausius–Clapeyron ──────────────────────────────────────────────────────────────
+
+# The Clausius–Clapeyron equation ln(P₂/P₁) = −(ΔH_vap/R)(1/T₂ − 1/T₁): the vapour pressure P₂ at
+# T₂ (K), in p1's unit, from P₁ at T₁ (K) and the enthalpy of vaporization ΔH_vap (J/mol). Ok(P₂),
+# Err(KM_ERR_INVALID_INPUT) if P₁ is not positive and finite or ΔH_vap is not finite, or
+# Err(KM_ERR_INVALID_TEMPERATURE) if either temperature is not positive and finite. Mirrors
+# `phase::clausius_clapeyron`.
+#must_use
+fn clausius_clapeyron(p1: f64, t1_k: f64, t2_k: f64, delta_h_vap_j: f64): Result {
+    if (_km_is_positive(p1) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(t1_k) != 1 || _km_is_positive(t2_k) != 1) {
+        return Err(KM_ERR_INVALID_TEMPERATURE);
+    }
+    if (_km_is_finite(delta_h_vap_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var h: f64 = delta_h_vap_j / KM_GAS_CONSTANT;
+    var exponent: f64 = -h * ((1.0 / t2_k) - (1.0 / t1_k));
+    var e: f64 = f64_exp(exponent);
+    var p2: f64 = p1 * e;
+    return Ok(p2);
+}
+
+# ── Antoine equation ────────────────────────────────────────────────────────────────
+
+# Vapour pressure from the Antoine equation, log₁₀(P) = A − B/(C + T), in mmHg, from a coefficient
+# set (struct KmAntoineCoeffs: a built-in one from antoine_data_coeffs, or your own) and T in °C.
+# Ok(P); Err(KM_ERR_INVALID_INPUT) if A, B, C, t_min_c or t_max_c is not finite;
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is outside t_min_c ..= t_max_c (NaN included) or at or below
+# the pole, C + T ≤ 0. In range, P is Rust's 10^(A − B/(C + T)), which overflows to +∞ for an
+# exponent past 308.25 (no built-in set comes near). Mirrors `phase::antoine_pressure_mmhg`, with
+# ADR 0002 #4's Result.
+#must_use
+fn antoine_pressure_mmhg(coeffs: KmAntoineCoeffs, temperature_c: f64): Result {
+    var a: f64 = coeffs.a;
+    var b: f64 = coeffs.b;
+    var c: f64 = coeffs.c;
+    var lo: f64 = coeffs.t_min_c;
+    var hi: f64 = coeffs.t_max_c;
+    if (_km_is_finite(a) != 1 || _km_is_finite(b) != 1 || _km_is_finite(c) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (_km_is_finite(lo) != 1 || _km_is_finite(hi) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (temperature_c >= lo && temperature_c <= hi) {
+        var denom: f64 = c + temperature_c;
+        if (_km_is_positive(denom) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+        var x: f64 = a - (b / denom);
+        var p: f64 = ganita_f64_pow(10.0, x);
+        return Ok(p);
+    }
+    return Err(KM_ERR_INVALID_TEMPERATURE);
+}
+
+# Vapour pressure from the Antoine equation in Pa: antoine_pressure_mmhg's value (and its Err
+# cases) × 133.322 387 415 Pa/mmHg (_KM_PA_PER_MMHG). Mirrors `phase::antoine_pressure_pa`, with
+# ADR 0002 #4's Result.
+#must_use
+fn antoine_pressure_pa(coeffs: KmAntoineCoeffs, temperature_c: f64): Result {
+    var t, v = antoine_pressure_mmhg(coeffs, temperature_c);
+    if (is_ok(t) != 1) { return Err(v); }
+    var mmhg: f64 = v;
+    var pa: f64 = mmhg * _KM_PA_PER_MMHG;
+    return Ok(pa);
+}
+
+# The ANTOINE_DATA row of handle h (h − 1), or -1 if h is no handle.
+#must_use
+fn _km_antoine_row(h): i64 {
+    if (h >= 1 && h <= KM_ANTOINE_COUNT) { return h - 1; }
+    return 0 - 1;
+}
+
+# The built-in Antoine coefficients (P in mmHg, T in °C) of the solvent named by the C string
+# `name`, exactly and case-sensitively ("water", "diethyl_ether"), as a handle (its ANTOINE_DATA
+# row + 1); 0 when none matches (or `name` is 0). Mirrors `phase::lookup_antoine`.
+#must_use
+fn lookup_antoine(name): i64 {
+    if (name == 0) { return 0; }
+    var row = 0;
+    while (row < KM_ANTOINE_COUNT) {
+        if (streq(&_KM_ANTOINE_NAME_BYTES + _KM_ANTOINE_NAME_OFF[row], name) == 1) { return row + 1; }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The solvent name of ANTOINE_DATA handle h ("water") as a C string in the baked table; "" for an
+# invalid handle. With antoine_data_coeffs and KM_ANTOINE_COUNT, this mirrors iterating
+# `phase::ANTOINE_DATA`.
+#must_use
+fn antoine_data_name(h): i64 {
+    var row = _km_antoine_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_ANTOINE_NAME_BYTES + _KM_ANTOINE_NAME_OFF[row];
+}
+
+# The coefficient set of ANTOINE_DATA handle h, by value; every field NaN for an invalid handle (so
+# antoine_pressure_* give Err(KM_ERR_INVALID_INPUT)). Mirrors `phase::ANTOINE_DATA[h − 1].1`.
+#must_use
+fn antoine_data_coeffs(h): KmAntoineCoeffs {
+    var c: KmAntoineCoeffs;
+    var row = _km_antoine_row(h);
+    if (row < 0) {
+        var n: f64 = _km_nan();
+        c.a = n;
+        c.b = n;
+        c.c = n;
+        c.t_min_c = n;
+        c.t_max_c = n;
+        return c;
+    }
+    c.a = KM_ANTOINE_A[row];
+    c.b = KM_ANTOINE_B[row];
+    c.c = KM_ANTOINE_C[row];
+    c.t_min_c = KM_ANTOINE_T_MIN_C[row];
+    c.t_max_c = KM_ANTOINE_T_MAX_C[row];
+    return c;
+}
+
+# ── Gibbs phase rule ────────────────────────────────────────────────────────────────
+
+# The Gibbs phase rule F = C − P + 2: the degrees of freedom of a system of `components`
+# independent components in `phases` phases, both Rust u32s (0 ..= 4294967295). Ok(F), or
+# Err(KM_ERR_INVALID_INPUT) if phases is 0, phases > components + 2 (F would be negative), F does
+# not fit a u32 (components = u32::MAX with one phase), or either count is outside the u32 range
+# (Rust can't be given one; here it is refused, never wrapped). Mirrors `phase::phase_rule`.
+#must_use
+fn phase_rule(components, phases): Result {
+    if (components < 0 || components > 0xFFFFFFFF || phases < 0 || phases > 0xFFFFFFFF) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (phases == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    var f = (components - phases) + 2;     # |C − P + 2| ≤ 2³² + 1: no i64 overflow
+    if (f < 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (f > 0xFFFFFFFF) { return Err(KM_ERR_INVALID_INPUT); }
+    return Ok(f);
+}

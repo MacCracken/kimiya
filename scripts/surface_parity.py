@@ -11,7 +11,8 @@ Cyrius name the porting rules give (CLAUDE.md, port plan §6.4):
                                         bare Rust name would be ambiguous in one flat namespace
 - `pub(crate) fn f` (validate)       -> `fn _km_f(` (private helpers carry `_km_`)
 - `impl Struct { pub fn m }`         -> `fn m(` inside `impl Km<Struct> {`
-- `pub const X`                      -> `const KM_X =`
+- `pub const X`                      -> `const KM_X =`, or for a struct-valued const (gas::PR_*) a
+                                        top-level struct value `var KM_X = Km<Struct> {`
 - `pub enum E` and each variant V    -> `enum Km<E> {` and `KM_<SNAKE(E)>_<SNAKE(V)> =`
                                         (KimiyaError: `enum KmError`, `KM_ERR_<SNAKE(V)>`)
 - `pub struct S`                     -> `struct Km<S> {`, or a handle with accessors (STRUCT_ACCESSORS)
@@ -31,6 +32,11 @@ MODULES = {
     "validate": {"prefix": "_km_", "structs": set()},
     "element": {"prefix": "element_", "structs": set()},
     "molecule": {"prefix": "", "structs": {"Molecule"}},
+    "reaction": {"prefix": "", "structs": set()},
+    "thermo": {"prefix": "", "structs": set()},
+    "thermochem": {"prefix": "", "structs": {"Shomate"}},
+    "phase": {"prefix": "", "structs": {"AntoineCoeffs"}},
+    "gas": {"prefix": "", "structs": {"PengRobinsonParams"}},
 }
 
 # Rust structs that became handles (port plan §6.4: `Option<&'static T>` → a handle, 0 for None):
@@ -39,6 +45,7 @@ STRUCT_ACCESSORS = {
     "Element": "element_",                    # handle = Z (1–118)
     "ElementProperties": "element_properties_",  # handle = property row + 1 (1–32)
     "Atom": "atom_",                          # entry k of a KmMolecule: `m.atom_<field>(k)`
+    "ThermochemData": "thermochem_data_",     # handle = THERMOCHEM_DATA row + 1 (1–76)
 }
 
 # Rust item -> why it has no direct Cyrius name (it is still checked to exist in Rust).
@@ -57,11 +64,22 @@ EXCEPTIONS = {
                                 "KmMolecule.atoms_len() is `atoms.len()`",
     "element::const AVOGADRO": "KM_AVOGADRO in src/constants.cyr (generated; 14 modules share the constants)",
     "element::const GAS_CONSTANT": "KM_GAS_CONSTANT in src/constants.cyr (generated)",
+    "phase::static ANTOINE_DATA": "the generated columns KM_ANTOINE_A / _B / _C / _T_MIN_C / _T_MAX_C and the "
+                                  "name blob _KM_ANTOINE_NAME_BYTES in src/phase_data.cyr (KM_ANTOINE_COUNT "
+                                  "rows), read through handles (row + 1): lookup_antoine, antoine_data_name, "
+                                  "antoine_data_coeffs (port plan §6.4)",
+    "thermochem::static THERMOCHEM_DATA": "the generated columns KM_THERMOCHEM_DELTA_HF_KJ / _DELTA_GF_KJ / "
+                                          "_S_STANDARD_J and the formula / name blobs in src/thermochem_data.cyr "
+                                          "(KM_THERMOCHEM_COUNT rows), read through handles (row + 1): "
+                                          "lookup_thermochem and the thermochem_data_* accessors (port plan §6.4)",
+    "thermochem::static SHOMATE_DATA": "the generated columns KM_SHOMATE_A … _T_MAX and the formula blob in "
+                                       "src/thermochem_data.cyr (KM_SHOMATE_COUNT rows), read through handles "
+                                       "(row + 1): lookup_shomate, lookup_shomate_at, shomate_data_formula, "
+                                       "shomate_data_coeffs (port plan §6.4)",
 }
 
 # Later milestones (port plan §2.1): counted, not checked.
 PENDING_MODULES = {
-    "reaction": "M2", "thermo": "M2", "thermochem": "M2", "phase": "M2", "gas": "M2",
     "solution": "M3", "electrochemistry": "M3", "kinetics": "M3",
     "stoichiometry": "M4", "organic": "M4", "inorganic": "M4", "potential": "M4", "nuclear": "M4",
     "spectroscopy": "M4",
@@ -153,7 +171,8 @@ def has_counterpart(module, kind, owner, name):
     if kind == "fn":
         return re.search(rf"^fn {kinds['prefix']}{name}\(", cyr, re.M) is not None
     if kind == "const":
-        return re.search(rf"^const KM_{name} =", cyr, re.M) is not None
+        return (re.search(rf"^const KM_{name} =", cyr, re.M) is not None
+                or re.search(rf"^var KM_{name} = Km\w+ \{{", cyr, re.M) is not None)
     if kind == "enum":
         cname = "KmError" if name == "KimiyaError" else f"Km{name}"
         return re.search(rf"^enum {cname} \{{", cyr, re.M) is not None

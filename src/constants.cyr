@@ -7,8 +7,10 @@
 # positionally: the Cyrius lexer has no exponent notation, and decimal literals are
 # correctly rounded (6.6.10+). tests/golden/constants.tsv pins every bit.
 #
-# Module data constants (K_b/K_f, Madelung, Born exponents, Λ°, Debye–Hückel, K_w, STP,
-# water's specific heat) are generated with their module at its milestone, not here.
+# Module data constants are generated with their module's data, not here: K_b/K_f in
+# src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung, Born exponents, Λ°,
+# Debye–Hückel and K_w at M3–M4. The exception is thermo::WATER_SPECIFIC_HEAT (M2a), at
+# the end: thermo has no data file, and this file precedes it in [lib].
 
 # Faraday constant (C/mol) — charge of one mole of electrons.
 #
@@ -76,3 +78,7 @@ const KM_RYDBERG = 10973731.56816;
 # of the reduced-mass correction).
 # Rust: kimiya::spectroscopy::RYDBERG_EV
 const KM_RYDBERG_EV = 13.605693122994;
+
+# Specific heat capacity of water in J/(g·°C).
+# Rust: kimiya::thermo::WATER_SPECIFIC_HEAT
+const KM_WATER_SPECIFIC_HEAT = 4.184;

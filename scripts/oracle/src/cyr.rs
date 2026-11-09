@@ -199,7 +199,17 @@ pub fn string_column(
         }
         offsets.push(u16::try_from(at).map_err(|_| format!("{off_name}: offset {at} > u16"))?);
         let codes: Vec<String> = s.bytes().chain([0]).map(|b| b.to_string()).collect();
-        lines.push(format!("    {},  # {s}", codes.join(", ")));
+        let one = format!("    {},  # {s}", codes.join(", "));
+        if one.chars().count() <= 120 {
+            lines.push(one);
+        } else {
+            // A long string (thermochem's "Phosphorus pentachloride") would break the 120-column
+            // lint: 16 bytes per line, the text as the first line's label.
+            for (k, chunk) in codes.chunks(16).enumerate() {
+                let label = if k == 0 { format!("  # {s}") } else { String::new() };
+                lines.push(format!("    {},{label}", chunk.join(", ")));
+            }
+        }
         at += s.len() + 1;
     }
     let labels: Vec<String> = strings.iter().map(|s| (*s).to_string()).collect();

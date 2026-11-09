@@ -40,6 +40,76 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     `distlib --check` and surface parity
   - benchmarks `element/lookup_by_symbol`, `element/lookup_by_number`, `molecule/molecular_weight_glucose`
     against Rust ([`docs/benchmarks-rust-v-cyrius.md`](docs/benchmarks-rust-v-cyrius.md))
+- **M2a reaction, thermo, phase, gas** (port plan §4, §6.4; M2b, thermochem, follows):
+  - **reaction** — `gibbs_free_energy`, `equilibrium_constant`, `is_spontaneous`
+  - **thermo** — `heat_transfer`, `hess_law(xs, n)`, `enthalpy_from_formation(p, np, r, nr)` (a Rust slice is a
+    pointer and a count; the empty sum is Rust's −0.0), `specific_heat_from_calorimetry` (hisab's `EPSILON_F64`
+    threshold); `KM_WATER_SPECIFIC_HEAT` generated into `src/constants.cyr`
+  - **phase** — generated `src/phase_data.cyr` (`struct KmAntoineCoeffs`, the 8 `ANTOINE_DATA` sets as columns
+    with a name blob, `KM_ANTOINE_COUNT`, the mmHg → Pa factor, `KM_KB_*` / `KM_KF_*`); Raoult, Henry,
+    colligative properties, osmotic pressure, Clausius–Clapeyron, Antoine (ADR 0002 #4, below),
+    `lookup_antoine` (a handle, 0 for none) with `antoine_data_name` / `antoine_data_coeffs`, `phase_rule`
+  - **gas** — generated `src/gas_data.cyr` (`struct KmPengRobinsonParams`, `KM_STP_*`, the `KM_PR_*` presets as
+    struct values); ideal gas, van der Waals, Dalton, density, Peng–Robinson pressure / Z / roots (a caller's
+    three-f64 buffer, `Ok(n)`) / fugacity coefficient / fugacity with Rust's analytic cubic transcribed,
+    Redlich–Kwong, `joule_thomson_ideal`
+  - **mathx** — correctly rounded `_km_acos`, `_km_cos`, `_km_ln`, `_km_pow_2_5` (double-double, the same bits on
+    every target) for the Peng–Robinson and Redlich–Kwong functions, which are ill-conditioned near a double
+    root, at extreme states and near P = 0
+    ([ADR 0005](docs/adr/0005-correctly-rounded-primitives-for-ill-conditioned-functions.md))
+  - golden modules `reaction` (1,188 rows), `thermo` (1,107), `phase` (3,276), `gas` (19,717), and 7,500 more
+    `math` rows: 54,466 ok, 0 failed, 0 measured on x86_64 ELF, x86_64 PE and aarch64; every class-B row and every
+    PR root bit-identical; class-C bounds K = 2–10 set by the port-parity rule
+    ([`port-parity.md`](docs/development/port-parity.md) §5); `validate.py` recomputes all 25,288 rows and
+    measures each class-C function's sensitivity (`--sensitivity`); `probe_tables.py` compiles the 65 new table cells
+    and 11 new constants
+  - 90 Rust tests ported (`tests/{reaction,thermo,phase,gas}.tcyr`, none skipped) plus 6 Cyrius-only groups and a
+    `validate` group for the faster guards' edges (DBL_MAX, the smallest subnormal, −NaN, ±∞, −0);
+    surface parity 113/113; benches `reaction/gibbs_free_energy`, `thermo/heat_transfer`,
+    `gas/ideal_gas_pressure`, `gas/peng_robinson_z_n2_1mpa`
+  - ADR 0005 (correctly rounded primitives for the ill-conditioned gas functions)
+- **M2b thermochem** (port plan §4, §6.4; M2 is complete):
+  - generated `src/thermochem_data.cyr`: `struct KmShomate` (with its Rust field docs), the 76 `THERMOCHEM_DATA` rows
+    (formula / name blobs, ΔH_f°, ΔG_f°, S°) and the 34 `SHOMATE_DATA` segments as columns, `KM_THERMOCHEM_COUNT`,
+    `KM_SHOMATE_COUNT`, with the literals' sources and caveats (the unsourced C₂H₆ / C₃H₈ / HF fits) as comments
+  - **thermochem** — `lookup_thermochem` (a handle, 0 for none) with `thermochem_data_formula` / `_name` /
+    `_delta_hf_kj` / `_delta_gf_kj` / `_s_standard_j`; `reaction_enthalpy`, `reaction_gibbs_energy` (J/mol, below),
+    `reaction_entropy` over species lists (a pointer to n 16-byte (formula, coefficient) records and n);
+    `vant_hoff_k`; `KmShomate.cp` / `.enthalpy_antiderivative`; `lookup_shomate`, `lookup_shomate_at` with
+    `shomate_data_formula` / `shomate_data_coeffs`; `enthalpy_change_cp` (analytic, piecewise across segments);
+    `adiabatic_flame_temperature` with hisab 1.4.0's `newton_raphson` and `bisection` transcribed as private helpers
+    ([ADR 0003, amendment M2b](docs/adr/0003-transcribe-missing-hisab-routines.md)): the whole path is + − × ÷, so the
+    flame temperature is bit-identical to Rust's, on the Newton and on the bisection fallback path
+  - golden module `thermochem` (9,487 rows): 63,953 ok, 0 failed, 0 measured on x86_64 ELF, x86_64 PE and aarch64;
+    every class-B row 0 ulp (1,836 flame temperatures: 1,682 from Newton, 154 from the bisection fallback);
+    `vant_hoff_k` class C, K = 6 by the port-parity rule ([`port-parity.md`](docs/development/port-parity.md) §6);
+    each flame row's note names its solver path, and `validate.py` recomputes all 9,487 rows and the paths, and checks
+    that Rust's typed flame constants are pinned by the corpus; `probe_tables.py` compiles the 654 new table cells
+  - 62 Rust tests ported (`tests/thermochem.tcyr`, none skipped; 4 assert J/mol for ADR 0002 #1) plus 6 Cyrius-only
+    groups (species lists, handles, J/mol, the solver's tolerances and derivative threshold, > 32 products, the struct
+    methods): 400 assertions; surface parity 140/140; benches `thermochem/reaction_enthalpy_ch4`,
+    `thermochem/vant_hoff_k`, `thermochem/enthalpy_change_cp`, `thermochem/shomate_cp`,
+    `thermochem/adiabatic_flame_ch4_air`
+  - generator: `Module::row_noted` (a bracketed note suffix), `cyr::string_column` splits blob lines past 120 columns
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
+- **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
+  kJ/mol result × 1000 exactly (Rust's difference, then one multiply). `reaction_entropy` (J/(mol·K)) and the table
+  fields `thermochem_data_delta_hf_kj` / `_delta_gf_kj` (kJ/mol, as tabulated) are unchanged.
+  *Migration:* drop the `* 1000.0` before `vant_hoff_k` / `adiabatic_flame_temperature` —
+  `adiabatic_flame_temperature(dh_kj * 1000.0, …)` becomes `adiabatic_flame_temperature(dh_j, products, n, t0)` with
+  `var t, dh_j = reaction_enthalpy(p, np, r, nr);`; code that displays or compares the result in kJ/mol divides by
+  1000; in ΔG = ΔH − TΔS with `reaction_entropy`, the `/ 1000.0` on TΔS goes away.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #4)
+- **phase** — `antoine_pressure_mmhg` / `antoine_pressure_pa` return a `Result` instead of a bare value, and
+  return `Err` where 1.2 extrapolated or returned NaN: `Err(KM_ERR_INVALID_TEMPERATURE)` for T outside the
+  coefficient set's `t_min_c ..= t_max_c` (NaN included) or at/below the pole (C + T ≤ 0),
+  `Err(KM_ERR_INVALID_INPUT)` for a non-finite A, B, C or range end. There is no extrapolating variant.
+  *Migration:* `let p = antoine_pressure_mmhg(c, t);` becomes
+  `var tag, v = antoine_pressure_mmhg(c, t); if (is_ok(tag) == 1) { var p: f64 = v; … }`; code that relied on
+  extrapolation must use a coefficient set fitted over its temperatures (or `clausius_clapeyron`); code that
+  tested `p.is_nan()` tests `is_err_result(tag)`. In range, the value is 1.2's to within the class-C bound.
 
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
@@ -49,6 +119,14 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
 - `molecule/molecular_weight_glucose`: 121 ns → 26.7 ns (−78%; Rust 3.63 ns) by walking the atom buffer and
   inlining the element range check; `element/lookup_by_number`: 7.03 → 4.54 ns (−35%; Rust 0.84 ns);
   `element/lookup_by_symbol`: 92.4 → 67.0 ns (−27%, first-byte compare; Rust 44.73 ns)
+- validate / mathx guards without nested calls (`_km_is_finite` as `x − x == 0`, `_km_is_positive` /
+  `_km_is_non_negative` against +∞): `reaction/gibbs_free_energy` 23.3 → 16.9 ns (−27%; Rust 1.75 ns),
+  `gas/ideal_gas_pressure` 26.7 → 16.7 ns (−37%; Rust 2.18 ns), `gas/peng_robinson_z_n2_1mpa` 289 → 270 ns
+  (−7%; Rust 61.39 ns)
+- M2b thermochem, first measurement (Rust 1.2.0 → Cyrius): `thermochem/reaction_enthalpy_ch4` 38.58 ns → 250 ns,
+  `thermochem/vant_hoff_k` 9.51 → 58.9 ns, `thermochem/enthalpy_change_cp` 24.00 → 166 ns, `thermochem/shomate_cp`
+  2.34 → 14.5 ns, `thermochem/adiabatic_flame_ch4_air` 301.48 ns → 3.24 µs (6.2–10.7×; two optimizations were
+  tried and not kept, [`docs/benchmarks-rust-v-cyrius.md`](docs/benchmarks-rust-v-cyrius.md))
 
 ## [1.2.0] - 2026-11-08
 

@@ -149,6 +149,18 @@ impl Module {
 
     pub fn row(&mut self, func: &str, class: Class, ins: &[Tok], outs: &[Tok]) {
         let note = format!("{func}({}) -> {}", human_list(ins), human_list(outs));
+        self.push(func, class, ins, outs, &note);
+    }
+
+    /// As [`Module::row`], with `extra` appended to the note in brackets: how the expected value
+    /// was obtained (ADR 0002 #1's × 1000) or which solver produced it. For review and
+    /// `validate.py` only; the harness ignores the note.
+    pub fn row_noted(&mut self, func: &str, class: Class, ins: &[Tok], outs: &[Tok], extra: &str) {
+        let note = format!("{func}({}) -> {} [{extra}]", human_list(ins), human_list(outs));
+        self.push(func, class, ins, outs, &note);
+    }
+
+    fn push(&mut self, func: &str, class: Class, ins: &[Tok], outs: &[Tok], note: &str) {
         self.rows.push(format!(
             "{func}\t{}\t{}\t{}\t{note}",
             class.letter(),

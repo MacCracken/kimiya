@@ -36,7 +36,9 @@
 //! - **B**: powi (repeated multiplication, Rust's `__powidf2` order).
 //! - **C**: exp, exp_m1, ln, log10, powf (all three forms), cos, sin, acos, atan2.
 //!
-//! Inputs are the special values, the ranges kimiya feeds each function, and seeded sweeps.
+//! Inputs are the special values, the ranges kimiya feeds each function, and seeded sweeps; M2a
+//! added dense sweeps of cos, acos, ln and powf(·, 2.5) over the Peng–Robinson / Redlich–Kwong
+//! argument ranges (the port's correctly rounded counterparts, ADR 0005).
 
 use std::cmp::Ordering;
 use std::hint::black_box;
@@ -409,6 +411,28 @@ pub fn emit() -> Module {
         at.push((y, rng.signed_log_uniform(-25.0, 2.0)));
     }
     binary(&mut m, "f64::atan2", Class::C, f64::atan2, &at);
+
+    // M2a: dense sweeps where the Peng–Robinson and Redlich–Kwong functions call cos, acos, ln
+    // and powf(·, 2.5), whose port counterparts are correctly rounded (src/mathx.cyr, ADR 0005).
+    // glibc is not correctly rounded on about 0.1 % of these arguments; the harness's shadow lines
+    // show the port's functions differ from glibc on exactly those rows (validate.py counts them).
+    unary(&mut m, "f64::cos", Class::C, f64::cos, &sweep(0x5105, 2000, -2.2, 3.2));
+    let mut ac2 = sweep(0xac03, 1500, -1.0, 1.0);
+    let mut rng = Rng::new(0xac04);
+    for _ in 0..500 {
+        let d = rng.log_uniform(-16.0, -0.3);
+        ac2.push(if rng.unit() < 0.5 { 1.0 - d } else { d - 1.0 });
+    }
+    unary(&mut m, "f64::acos", Class::C, f64::acos, &ac2);
+    let mut lg2 = sweep(0x1064, 1500, 1e-9, 4.0);
+    lg2.extend(sweep(0x1065, 500, 0.9, 1.1));
+    lg2.extend(log_sweep(0x1066, 500, -300.0, 300.0));
+    unary(&mut m, "f64::ln", Class::C, f64::ln, &lg2);
+    let pf2: Vec<(f64, f64)> = log_sweep(0x9003, 1000, -1.0, 3.3)
+        .into_iter()
+        .map(|t| (t, 2.5))
+        .collect();
+    binary(&mut m, "f64::powf", Class::C, f64::powf, &pf2);
 
     m
 }

@@ -1,0 +1,643 @@
+# thermochem.cyr — thermochemical data and the functions over it: reaction enthalpy, Gibbs energy
+# and entropy from the formation table, the van 't Hoff equation, Shomate heat capacities and
+# enthalpies, and the adiabatic flame temperature (port of rust-old/src/thermochem.rs).
+#
+# The data — struct KmShomate, the 76 THERMOCHEM_DATA rows and the 34 SHOMATE_DATA segments — is
+# src/thermochem_data.cyr (generated). Fallible functions return a value-form Result whose Err
+# payload is a KM_ERR_* code. Every expression keeps Rust's operation order, so everything but
+# vant_hoff_k is + − × ÷ and bit-identical (class B); vant_hoff_k's one exp is f64_exp (class C,
+# docs/development/port-parity.md §6).
+#
+# Units: reaction_enthalpy and reaction_gibbs_energy return **J/mol** (ADR 0002 #1: Rust 1.2 returns
+# kJ/mol; here Rust's kJ difference is multiplied by 1000.0 once, so the value is the oracle's × 1000
+# exactly); reaction_entropy returns J/(mol·K); enthalpy_change_cp returns J/mol; vant_hoff_k and
+# adiabatic_flame_temperature take J/mol. The table fields stay as tabulated (ΔH_f°, ΔG_f° in kJ/mol).
+#
+# - Rows are reached by handle (port plan §6.4): THERMOCHEM_DATA and SHOMATE_DATA row + 1, 0 for
+#   None. thermochem_data_<field>(h) reads a THERMOCHEM_DATA row ("" or NaN for an invalid handle);
+#   shomate_data_formula(h) / shomate_data_coeffs(h) a segment (NaN fields for an invalid handle).
+# - A species list `&[(&str, f64)]` is a pointer to n 16-byte records — a C-string pointer, then the
+#   f64's bits — and the count n, as KmMolecule_new's pairs. A negative n, or a null pointer with
+#   n > 0, is no list: Err(KM_ERR_INVALID_INPUT).
+# - Rust's private Segments (one species' run of adjacent SHOMATE_DATA rows) is a (start row, count)
+#   pair, and its lookup / cp / enthalpy_change are _km_segments_* helpers in Rust's operation order.
+# - adiabatic_flame_temperature transcribes hisab 1.4.0's newton_raphson and bisection operation for
+#   operation (ADR 0003, amendment M2b), specialised to the flame balance: _km_flame_newton and
+#   _km_flame_bisection call _km_flame_f / _km_flame_df directly. The derivative threshold is hisab's
+#   EPSILON_F64 (10⁻¹², the value of hisab 1.4.0's), which thermo.cyr's include of lib/hisab.cyr
+#   supplies too.
+
+include "lib/string.cyr"
+include "lib/math.cyr"
+include "lib/hisab.cyr"
+
+# ── THERMOCHEM_DATA ─────────────────────────────────────────────────────────────────
+
+# The THERMOCHEM_DATA row of handle h (h − 1), or -1 if h is no handle.
+#must_use
+fn _km_thermochem_row(h): i64 {
+    if (h >= 1 && h <= KM_THERMOCHEM_COUNT) { return h - 1; }
+    return 0 - 1;
+}
+
+# The standard thermochemical data of the substance whose formula is the C string `formula`,
+# exactly and case-sensitively ("H2O(l)", "CO2(g)"), as a handle (its THERMOCHEM_DATA row + 1); 0 when
+# none matches (or `formula` is 0). The first match in table order, as Rust's linear `find`. Mirrors
+# `thermochem::lookup_thermochem`.
+#must_use
+fn lookup_thermochem(formula): i64 {
+    if (formula == 0) { return 0; }
+    var c0 = load8(formula);
+    if (c0 == 0) { return 0; }
+    var n = strlen(formula);
+    var row = 0;
+    while (row < KM_THERMOCHEM_COUNT) {
+        var p = &_KM_THERMOCHEM_FORMULA_BYTES + _KM_THERMOCHEM_FORMULA_OFF[row];
+        # The first byte decides most rows; memeq stops at p's NUL, which differs from formula's byte.
+        if (load8(p) == c0) {
+            if (memeq(p, formula, n) == 1 && load8(p + n) == 0) { return row + 1; }
+        }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The chemical formula of THERMOCHEM_DATA handle h ("H2O(l)") as a C string in the baked table; ""
+# for an invalid handle. Mirrors `ThermochemData::formula`.
+#must_use
+fn thermochem_data_formula(h): i64 {
+    var row = _km_thermochem_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_THERMOCHEM_FORMULA_BYTES + _KM_THERMOCHEM_FORMULA_OFF[row];
+}
+
+# The common name of THERMOCHEM_DATA handle h ("Water (liquid)"); "" for an invalid handle. Mirrors
+# `ThermochemData::name`.
+#must_use
+fn thermochem_data_name(h): i64 {
+    var row = _km_thermochem_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_THERMOCHEM_NAME_BYTES + _KM_THERMOCHEM_NAME_OFF[row];
+}
+
+# The standard enthalpy of formation ΔH_f° (kJ/mol, as tabulated) of handle h; NaN for an invalid
+# handle. Mirrors `ThermochemData::delta_hf_kj`.
+#must_use
+fn thermochem_data_delta_hf_kj(h): f64 {
+    var row = _km_thermochem_row(h);
+    if (row < 0) { return _km_nan(); }
+    var x: f64 = KM_THERMOCHEM_DELTA_HF_KJ[row];
+    return x;
+}
+
+# The standard Gibbs energy of formation ΔG_f° (kJ/mol, as tabulated) of handle h; NaN for an
+# invalid handle. Mirrors `ThermochemData::delta_gf_kj`.
+#must_use
+fn thermochem_data_delta_gf_kj(h): f64 {
+    var row = _km_thermochem_row(h);
+    if (row < 0) { return _km_nan(); }
+    var x: f64 = KM_THERMOCHEM_DELTA_GF_KJ[row];
+    return x;
+}
+
+# The standard molar entropy S° (J/(mol·K)) of handle h; NaN for an invalid handle. Mirrors
+# `ThermochemData::s_standard_j`.
+#must_use
+fn thermochem_data_s_standard_j(h): f64 {
+    var row = _km_thermochem_row(h);
+    if (row < 0) { return _km_nan(); }
+    var x: f64 = KM_THERMOCHEM_S_STANDARD_J[row];
+    return x;
+}
+
+# ── reaction thermochemistry from the table ─────────────────────────────────────────
+
+# Σ coefficient × property over the n (formula, coefficient) records at `species`, in list order,
+# reading the property from the THERMOCHEM_DATA f64 column `col` (Rust's private sum_property): from
+# +0.0 with `total += coeff * prop`, as Rust (not `.sum()`), and no coefficient guard (a NaN
+# coefficient gives NaN, as Rust). (code, Σ): KM_ERR_INVALID_REACTION for the first formula with no
+# row, KM_ERR_INVALID_INPUT if (species, n) is no list.
+#must_use
+fn _km_sum_property(species, n, col): (i64, f64) {
+    if (n < 0 || (n > 0 && species == 0)) { return (KM_ERR_INVALID_INPUT, 0.0); }
+    var total: f64 = 0.0;
+    var k = 0;
+    while (k < n) {
+        var h = lookup_thermochem(load64(species + k * 16));
+        if (h == 0) { return (KM_ERR_INVALID_REACTION, 0.0); }
+        var coeff: f64 = load64(species + k * 16 + 8);
+        var prop: f64 = load64(col + (h - 1) * 8);
+        total = total + (coeff * prop);
+        k = k + 1;
+    }
+    return (KM_ERR_NONE, total);
+}
+
+# Σ over the products minus Σ over the reactants of the column `col`: (code, difference).
+#must_use
+fn _km_reaction_property(products, np, reactants, nr, col): (i64, f64) {
+    var ep, sum_products = _km_sum_property(products, np, col);
+    if (ep != KM_ERR_NONE) { return (ep, 0.0); }
+    var er, sum_reactants = _km_sum_property(reactants, nr, col);
+    if (er != KM_ERR_NONE) { return (er, 0.0); }
+    var d: f64 = sum_products - sum_reactants;
+    return (KM_ERR_NONE, d);
+}
+
+# The standard reaction enthalpy at 298.15 K from formation enthalpies,
+# ΔH°_rxn = Σ n_i·ΔH_f°(products) − Σ n_j·ΔH_f°(reactants), in **J/mol** (per mole of reaction as
+# written), from np product and nr reactant (formula, coefficient) records. Ok(ΔH);
+# Err(KM_ERR_INVALID_REACTION) if a formula has no THERMOCHEM_DATA row (the products are read
+# first); Err(KM_ERR_INVALID_INPUT) if either list is no list. Mirrors
+# `thermochem::reaction_enthalpy` with ADR 0002 #1: Rust returns the kJ/mol difference; this
+# returns it × 1000.0, the one multiply after Rust's subtraction (so vant_hoff_k and
+# adiabatic_flame_temperature take it as it is).
+#must_use
+fn reaction_enthalpy(products, np, reactants, nr): Result {
+    var e, d = _km_reaction_property(products, np, reactants, nr, &KM_THERMOCHEM_DELTA_HF_KJ);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var kj: f64 = d;
+    var j: f64 = kj * 1000.0;
+    return Ok(j);
+}
+
+# The standard reaction Gibbs energy at 298.15 K,
+# ΔG°_rxn = Σ n_i·ΔG_f°(products) − Σ n_j·ΔG_f°(reactants), in **J/mol**; arguments and errors as
+# reaction_enthalpy. Mirrors `thermochem::reaction_gibbs_energy` with ADR 0002 #1 (Rust's kJ/mol
+# difference × 1000.0).
+#must_use
+fn reaction_gibbs_energy(products, np, reactants, nr): Result {
+    var e, d = _km_reaction_property(products, np, reactants, nr, &KM_THERMOCHEM_DELTA_GF_KJ);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var kj: f64 = d;
+    var j: f64 = kj * 1000.0;
+    return Ok(j);
+}
+
+# The standard reaction entropy change at 298.15 K,
+# ΔS°_rxn = Σ n_i·S°(products) − Σ n_j·S°(reactants), in J/(mol·K) (unchanged from Rust; with the
+# J/mol reaction_enthalpy, ΔG = ΔH − TΔS needs no unit factor); arguments and errors as
+# reaction_enthalpy. Mirrors `thermochem::reaction_entropy`.
+#must_use
+fn reaction_entropy(products, np, reactants, nr): Result {
+    var e, d = _km_reaction_property(products, np, reactants, nr, &KM_THERMOCHEM_S_STANDARD_J);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var ds: f64 = d;
+    return Ok(ds);
+}
+
+# ── van 't Hoff equation ────────────────────────────────────────────────────────────
+
+# The van 't Hoff equation ln(K₂/K₁) = −(ΔH°/R)(1/T₂ − 1/T₁): the equilibrium constant at t_new_k
+# (K), dimensionless, from K₁ = k_ref at t_ref_k (K) and ΔH° in J/mol (reaction_enthalpy's unit),
+# assumed constant over the range. It may overflow to Ok(+∞) for extreme ΔH°, as Rust. Ok(K₂),
+# Err(KM_ERR_INVALID_TEMPERATURE) if a temperature is not positive and finite, or
+# Err(KM_ERR_INVALID_INPUT) if k_ref is not positive and finite or ΔH° is not finite. Mirrors
+# `thermochem::vant_hoff_k`.
+#must_use
+fn vant_hoff_k(k_ref: f64, delta_h_j: f64, t_ref_k: f64, t_new_k: f64): Result {
+    if (_km_is_positive(t_ref_k) != 1 || _km_is_positive(t_new_k) != 1) {
+        return Err(KM_ERR_INVALID_TEMPERATURE);
+    }
+    if (_km_is_positive(k_ref) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(delta_h_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var h: f64 = delta_h_j / KM_GAS_CONSTANT;
+    var exponent: f64 = -h * ((1.0 / t_new_k) - (1.0 / t_ref_k));
+    var e: f64 = f64_exp(exponent);
+    var k: f64 = k_ref * e;
+    return Ok(k);
+}
+
+# ── Shomate heat capacities ─────────────────────────────────────────────────────────
+
+# Cp = A + B·t + C·t² + D·t³ + E/t² in J/(mol·K), t = T/1000, in Rust's order: the one evaluation
+# behind KmShomate.cp and the table-row path.
+#must_use
+fn _km_shomate_cp5(a: f64, b: f64, c: f64, d: f64, e: f64, temperature_k: f64): f64 {
+    var t: f64 = temperature_k / 1000.0;
+    var r: f64 = (((a + (b * t)) + ((c * t) * t)) + (((d * t) * t) * t)) + (e / (t * t));
+    return r;
+}
+
+# ∫Cp dT = 1000·(A·t + B·t²/2 + C·t³/3 + D·t⁴/4 − E/t) in J/mol, t = T/1000, in Rust's nested
+# order: the one evaluation behind KmShomate.enthalpy_antiderivative and the table-row path.
+#must_use
+fn _km_shomate_h5(a: f64, b: f64, c: f64, d: f64, e: f64, temperature_k: f64): f64 {
+    var t: f64 = temperature_k / 1000.0;
+    var inner: f64 = t * (a + (t * ((b / 2.0) + (t * ((c / 3.0) + (t * (d / 4.0)))))));
+    var r: f64 = 1000.0 * (inner - (e / t));
+    return r;
+}
+
+impl KmShomate {
+    # Cp at temperature_k (K) in J/(mol·K). The range t_min ..= t_max is not checked: outside it the
+    # polynomial is an extrapolation (lookup_shomate_at picks the right segment). Mirrors
+    # `Shomate::cp`.
+    #must_use
+    fn cp(self, temperature_k: f64): f64 {
+        var r: f64 = _km_shomate_cp5(self.a, self.b, self.c, self.d, self.e, temperature_k);
+        return r;
+    }
+
+    # The antiderivative of cp with respect to T, in J/mol, without NIST's integration constant:
+    # only differences within one segment are meaningful (enthalpy_change_cp spans segments).
+    # Mirrors `Shomate::enthalpy_antiderivative`.
+    #must_use
+    fn enthalpy_antiderivative(self, temperature_k: f64): f64 {
+        var r: f64 = _km_shomate_h5(self.a, self.b, self.c, self.d, self.e, temperature_k);
+        return r;
+    }
+}
+
+# Cp of SHOMATE_DATA row `row` at temperature_k (the row's KmShomate.cp, read from the columns).
+#must_use
+fn _km_shomate_row_cp(row, temperature_k: f64): f64 {
+    var r: f64 = _km_shomate_cp5(KM_SHOMATE_A[row], KM_SHOMATE_B[row], KM_SHOMATE_C[row], KM_SHOMATE_D[row],
+        KM_SHOMATE_E[row], temperature_k);
+    return r;
+}
+
+# The antiderivative of SHOMATE_DATA row `row` at temperature_k (its enthalpy_antiderivative).
+#must_use
+fn _km_shomate_row_h(row, temperature_k: f64): f64 {
+    var r: f64 = _km_shomate_h5(KM_SHOMATE_A[row], KM_SHOMATE_B[row], KM_SHOMATE_C[row], KM_SHOMATE_D[row],
+        KM_SHOMATE_E[row], temperature_k);
+    return r;
+}
+
+# 1 if SHOMATE_DATA row `row`'s formula is the C string `formula` of length n, whose first byte is c0.
+#must_use
+fn _km_shomate_formula_is(row, formula, c0, n): i64 {
+    var p = &_KM_SHOMATE_FORMULA_BYTES + _KM_SHOMATE_FORMULA_OFF[row];
+    if (load8(p) != c0) { return 0; }
+    if (memeq(p, formula, n) == 1 && load8(p + n) == 0) { return 1; }
+    return 0;
+}
+
+# The SHOMATE_DATA row of handle h (h − 1), or -1 if h is no handle.
+#must_use
+fn _km_shomate_row(h): i64 {
+    if (h >= 1 && h <= KM_SHOMATE_COUNT) { return h - 1; }
+    return 0 - 1;
+}
+
+# The Shomate coefficients of the species whose formula is the C string `formula` (exact,
+# case-sensitive), as a handle (its SHOMATE_DATA row + 1): the first, lowest-temperature segment; 0
+# when there is none (or `formula` is 0). For a species with several segments use lookup_shomate_at.
+# Mirrors `thermochem::lookup_shomate`.
+#must_use
+fn lookup_shomate(formula): i64 {
+    if (formula == 0) { return 0; }
+    var c0 = load8(formula);
+    if (c0 == 0) { return 0; }
+    var n = strlen(formula);
+    var row = 0;
+    while (row < KM_SHOMATE_COUNT) {
+        if (_km_shomate_formula_is(row, formula, c0, n) == 1) { return row + 1; }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The Shomate segment of `formula` whose range covers temperature_k, t_min ≤ T ≤ t_max, as a handle;
+# at a boundary two segments share, the lower-temperature one (the first in table order). 0 if the
+# formula is unknown or no segment covers T (NaN included). Mirrors `thermochem::lookup_shomate_at`.
+#must_use
+fn lookup_shomate_at(formula, temperature_k: f64): i64 {
+    if (formula == 0) { return 0; }
+    var c0 = load8(formula);
+    if (c0 == 0) { return 0; }
+    var n = strlen(formula);
+    var row = 0;
+    while (row < KM_SHOMATE_COUNT) {
+        if (_km_shomate_formula_is(row, formula, c0, n) == 1) {
+            var lo: f64 = KM_SHOMATE_T_MIN[row];
+            var hi: f64 = KM_SHOMATE_T_MAX[row];
+            if (temperature_k >= lo && temperature_k <= hi) { return row + 1; }
+        }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The formula of SHOMATE_DATA handle h ("H2O(g)") as a C string in the baked table; "" for an invalid
+# handle. With shomate_data_coeffs and KM_SHOMATE_COUNT, this mirrors iterating
+# `thermochem::SHOMATE_DATA`.
+#must_use
+fn shomate_data_formula(h): i64 {
+    var row = _km_shomate_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_SHOMATE_FORMULA_BYTES + _KM_SHOMATE_FORMULA_OFF[row];
+}
+
+# The coefficients of SHOMATE_DATA handle h, by value; every field NaN for an invalid handle. Mirrors
+# `thermochem::SHOMATE_DATA[h − 1].1` (and the `&Shomate` lookup_shomate / lookup_shomate_at return).
+#must_use
+fn shomate_data_coeffs(h): KmShomate {
+    var s: KmShomate;
+    var row = _km_shomate_row(h);
+    if (row < 0) {
+        var x: f64 = _km_nan();
+        s.a = x;
+        s.b = x;
+        s.c = x;
+        s.d = x;
+        s.e = x;
+        s.t_min = x;
+        s.t_max = x;
+        return s;
+    }
+    s.a = KM_SHOMATE_A[row];
+    s.b = KM_SHOMATE_B[row];
+    s.c = KM_SHOMATE_C[row];
+    s.d = KM_SHOMATE_D[row];
+    s.e = KM_SHOMATE_E[row];
+    s.t_min = KM_SHOMATE_T_MIN[row];
+    s.t_max = KM_SHOMATE_T_MAX[row];
+    return s;
+}
+
+# ── one species' segments (Rust's private Segments) ─────────────────────────────────
+
+# The run of SHOMATE_DATA rows of `formula` (adjacent in the table): (first row, count), or (-1, 0)
+# if it has none. Its covered range is KM_SHOMATE_T_MIN[first] ..= KM_SHOMATE_T_MAX[first + count − 1].
+# Rust's Segments::lookup.
+#must_use
+fn _km_segments_lookup(formula): (i64, i64) {
+    if (formula == 0) { return (0 - 1, 0); }
+    var c0 = load8(formula);
+    if (c0 == 0) { return (0 - 1, 0); }
+    var n = strlen(formula);
+    var start = 0;
+    while (start < KM_SHOMATE_COUNT) {
+        if (_km_shomate_formula_is(start, formula, c0, n) == 1) {
+            var count = 1;
+            while (start + count < KM_SHOMATE_COUNT && _km_shomate_formula_is(start + count, formula, c0, n) == 1) {
+                count = count + 1;
+            }
+            return (start, count);
+        }
+        start = start + 1;
+    }
+    return (0 - 1, 0);
+}
+
+# Cp(T) in J/(mol·K) from the first segment of the run (start, count) whose t_max ≥ T, else the last
+# (extrapolated below the first and above the last; NaN T reaches the last). Rust's Segments::cp.
+#must_use
+fn _km_segments_cp(start, count, temperature_k: f64): f64 {
+    var k = 0;
+    while (k < count) {
+        var hi: f64 = KM_SHOMATE_T_MAX[start + k];
+        if (temperature_k <= hi) {
+            var r: f64 = _km_shomate_row_cp(start + k, temperature_k);
+            return r;
+        }
+        k = k + 1;
+    }
+    var last: f64 = _km_shomate_row_cp(start + count - 1, temperature_k);
+    return last;
+}
+
+# ∫[T₁→T₂] Cp dT in J/mol over the run (start, count), analytically and segment by segment: the
+# boundaries are the interior t_max values, the first and last segments extrapolate beyond the covered
+# range. From +0.0 with `total +=`, then × ±1, as Rust's Segments::enthalpy_change.
+#must_use
+fn _km_segments_enthalpy_change(start, count, t1_k: f64, t2_k: f64): f64 {
+    var lo: f64 = t2_k;
+    var hi: f64 = t1_k;
+    var sign: f64 = -1.0;
+    if (t1_k <= t2_k) {
+        lo = t1_k;
+        hi = t2_k;
+        sign = 1.0;
+    }
+    var inf: f64 = _KM_INF;
+    var total: f64 = 0.0;
+    var lower: f64 = -inf;
+    var k = 0;
+    while (k < count) {
+        var row = start + k;
+        var upper: f64 = KM_SHOMATE_T_MAX[row];
+        if (k + 1 == count) { upper = inf; }
+        var a: f64 = _km_max(lo, lower);
+        var b: f64 = _km_min(hi, upper);
+        if (b > a) {
+            var hb: f64 = _km_shomate_row_h(row, b);
+            var ha: f64 = _km_shomate_row_h(row, a);
+            total = total + (hb - ha);
+        }
+        if (upper >= hi) { break; }
+        lower = upper;
+        k = k + 1;
+    }
+    var r: f64 = sign * total;
+    return r;
+}
+
+# The sensible-enthalpy change of one species from T₁ to T₂ (K), ΔH = ∫[T₁→T₂] Cp(T) dT in **J/mol**,
+# integrating the Shomate polynomials analytically and piecewise across the species' segments
+# (negative when T₂ < T₁). Ok(ΔH); Err(KM_ERR_INVALID_REACTION) if the formula has no Shomate data
+# (checked first); Err(KM_ERR_INVALID_TEMPERATURE) if a temperature is not positive and finite, or any
+# part of [T₁, T₂] lies outside the range the segments cover. Mirrors `thermochem::enthalpy_change_cp`.
+#must_use
+fn enthalpy_change_cp(formula, t1_k: f64, t2_k: f64): Result {
+    var start, count = _km_segments_lookup(formula);
+    if (count == 0) { return Err(KM_ERR_INVALID_REACTION); }
+    if (_km_is_positive(t1_k) != 1 || _km_is_positive(t2_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    var lo: f64 = _km_min(t1_k, t2_k);
+    var hi: f64 = _km_max(t1_k, t2_k);
+    var t_min: f64 = KM_SHOMATE_T_MIN[start];
+    var t_max: f64 = KM_SHOMATE_T_MAX[start + count - 1];
+    if (lo < t_min || hi > t_max) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    var dh: f64 = _km_segments_enthalpy_change(start, count, t1_k, t2_k);
+    return Ok(dh);
+}
+
+# ── adiabatic flame temperature ─────────────────────────────────────────────────────
+
+# How many products' resolved segments adiabatic_flame_temperature keeps in its stack table (2 words
+# each); a longer list resolves the rest again at each evaluation (same values, slower). Rust keeps a
+# Vec; the port doesn't allocate (the bump allocator can't free, and this is called in loops).
+const _KM_FLAME_CACHED = 32;
+
+# The segments (start, count) of product k: from the stack table `cache` for k < _KM_FLAME_CACHED,
+# else resolved from its formula (already checked to have segments).
+#must_use
+fn _km_flame_segments(products, cache, k): (i64, i64) {
+    if (k < _KM_FLAME_CACHED) { return (load64(cache + k * 16), load64(cache + k * 16 + 8)); }
+    var start, count = _km_segments_lookup(load64(products + k * 16));
+    return (start, count);
+}
+
+# The flame's energy balance f(T) = −ΔH_rxn − Σ nᵢ·∫[T₀→T] Cpᵢ dT (J/mol): Rust's closure `f`, the sum
+# folded from −0.0 (Rust's `.sum()`) in product order.
+#must_use
+fn _km_flame_f(dh: f64, products, n, cache, t0: f64, t: f64): f64 {
+    var heat: f64 = -0.0;
+    var k = 0;
+    while (k < n) {
+        var start, count = _km_flame_segments(products, cache, k);
+        var moles: f64 = load64(products + k * 16 + 8);
+        var d: f64 = _km_segments_enthalpy_change(start, count, t0, t);
+        heat = heat + (moles * d);
+        k = k + 1;
+    }
+    var ndh: f64 = -dh;
+    var r: f64 = ndh - heat;
+    return r;
+}
+
+# Its derivative f′(T) = −Σ nᵢ·Cpᵢ(T): Rust's closure `df`, the sum folded from −0.0.
+#must_use
+fn _km_flame_df(products, n, cache, t: f64): f64 {
+    var cp: f64 = -0.0;
+    var k = 0;
+    while (k < n) {
+        var start, count = _km_flame_segments(products, cache, k);
+        var moles: f64 = load64(products + k * 16 + 8);
+        var c: f64 = _km_segments_cp(start, count, t);
+        cp = cp + (moles * c);
+        k = k + 1;
+    }
+    var r: f64 = -cp;
+    return r;
+}
+
+# hisab 1.4.0 `num::newton_raphson(f, df, x0, tol, max_iter)` on the flame balance, operation for
+# operation, with Rust's FLAME_NEWTON_TOL_J = 1e-3 J/mol and max_iter = 50: per iteration, stop with
+# x if |f(x)| < tol; fail if |f′(x)| < EPSILON_F64 (10⁻¹²); else x −= f(x)/f′(x). (KM_ERR_NONE, x), or
+# (KM_ERR_INVALID_INPUT, x) for hisab's "derivative is zero" and (KM_ERR_COMPUTATION_ERROR, x) for its
+# NoConvergence; the caller only tells Ok from Err, as Rust's `if let Ok`.
+#must_use
+fn _km_flame_newton(dh: f64, products, n, cache, t0: f64, x0: f64): (i64, f64) {
+    var tol: f64 = 0.001;
+    var eps: f64 = EPSILON_F64;
+    var x: f64 = x0;
+    var it = 0;
+    while (it < 50) {
+        var fx: f64 = _km_flame_f(dh, products, n, cache, t0, x);
+        var afx: f64 = f64_abs(fx);
+        if (afx < tol) { return (KM_ERR_NONE, x); }
+        var dfx: f64 = _km_flame_df(products, n, cache, x);
+        var adfx: f64 = f64_abs(dfx);
+        if (adfx < eps) { return (KM_ERR_INVALID_INPUT, x); }
+        x = x - (fx / dfx);
+        it = it + 1;
+    }
+    return (KM_ERR_COMPUTATION_ERROR, x);
+}
+
+# hisab 1.4.0 `num::bisection(f, a, b, tol, max_iter)` on the flame balance, operation for operation,
+# with Rust's FLAME_BISECTION_TOL = 1e-6 and max_iter = 200: fail if f(a)·f(b) > 0; orient so f(lo) < 0
+# (swap when f(a) > 0); per iteration mid = (lo + hi)·0.5, stop with mid if |f(mid)| < tol or
+# |hi − lo| < tol, else move the end whose sign f(mid) shares; after max_iter, (lo + hi)·0.5.
+# (KM_ERR_NONE, T) or (KM_ERR_INVALID_INPUT, 0.0) for hisab's opposite-signs error.
+#must_use
+fn _km_flame_bisection(dh: f64, products, n, cache, t0: f64, a: f64, b: f64): (i64, f64) {
+    var tol: f64 = 0.000001;
+    var lo: f64 = a;
+    var hi: f64 = b;
+    var f_lo: f64 = _km_flame_f(dh, products, n, cache, t0, lo);
+    var f_hi: f64 = _km_flame_f(dh, products, n, cache, t0, hi);
+    var pr: f64 = f_lo * f_hi;
+    if (pr > 0.0) { return (KM_ERR_INVALID_INPUT, 0.0); }
+    if (f_lo > 0.0) {
+        var sw: f64 = lo;
+        lo = hi;
+        hi = sw;
+    }
+    var it = 0;
+    while (it < 200) {
+        var mid: f64 = (lo + hi) * 0.5;
+        var f_mid: f64 = _km_flame_f(dh, products, n, cache, t0, mid);
+        var am: f64 = f64_abs(f_mid);
+        var w: f64 = hi - lo;
+        var aw: f64 = f64_abs(w);
+        if (am < tol || aw < tol) { return (KM_ERR_NONE, mid); }
+        if (f_mid < 0.0) { lo = mid; } else { hi = mid; }
+        it = it + 1;
+    }
+    var r: f64 = (lo + hi) * 0.5;
+    return (KM_ERR_NONE, r);
+}
+
+# The adiabatic flame temperature in K (no dissociation, constant pressure): T where
+# ΔH_rxn + Σ nᵢ·∫[T₀→T] Cpᵢ dT = 0, the sensible enthalpies integrated analytically and piecewise
+# across each product's Shomate segments. From reaction_enthalpy_j, ΔH_rxn in **J/mol** (exothermic
+# negative) at T₀ (reaction_enthalpy's value, corrected to T₀ if T₀ ≠ 298.15 K), the n product
+# (formula, moles) records at `products` (per mole of reaction; each needs Shomate data) and T₀ =
+# t_initial_k. The search is restricted to the range every product's data covers: Newton–Raphson from
+# T₀ − ΔH/(40·Σn) (an average Cp of 40 J/(mol·K) per mole of product) clamped to [T₀, T_max], accepted
+# only inside it, else bisection on [T₀, T_max] (hisab 1.4.0's loops, transcribed). Ok(T);
+# Err(KM_ERR_INVALID_TEMPERATURE) if T₀ is not positive and finite or lies outside the products' common
+# range [T_min, T_max); Err(KM_ERR_INVALID_INPUT) if ΔH is not finite, the list is empty (or no list),
+# or a product's moles are not positive and finite; Err(KM_ERR_INVALID_REACTION) for a product with no
+# Shomate data (the first bad product in list order decides); Err(KM_ERR_COMPUTATION_ERROR) if the root
+# can't be bracketed (ΔH ≥ 0, or the flame temperature is past T_max; the test is the product
+# f(T₀)·f(T_max) < 0, so NaN fails it) or the bisection fails. Mirrors
+# `thermochem::adiabatic_flame_temperature`, in Rust's order of checks.
+#must_use
+fn adiabatic_flame_temperature(reaction_enthalpy_j: f64, products, n, t_initial_k: f64): Result {
+    if (_km_is_positive(t_initial_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(reaction_enthalpy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n <= 0 || products == 0) { return Err(KM_ERR_INVALID_INPUT); }
+
+    # Resolve each product's segments once (Rust's `resolved`, one pass in list order) and the range
+    # every product covers.
+    var cache: i64[64];
+    var inf: f64 = _KM_INF;
+    var range_min: f64 = -inf;
+    var range_max: f64 = inf;
+    var k = 0;
+    while (k < n) {
+        var start, count = _km_segments_lookup(load64(products + k * 16));
+        if (count == 0) { return Err(KM_ERR_INVALID_REACTION); }
+        var moles: f64 = load64(products + k * 16 + 8);
+        if (_km_is_positive(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        var smin: f64 = KM_SHOMATE_T_MIN[start];
+        var smax: f64 = KM_SHOMATE_T_MAX[start + count - 1];
+        range_min = _km_max(range_min, smin);
+        range_max = _km_min(range_max, smax);
+        if (k < _KM_FLAME_CACHED) {
+            store64(&cache + k * 16, start);
+            store64(&cache + k * 16 + 8, count);
+        }
+        k = k + 1;
+    }
+    if (t_initial_k < range_min || t_initial_k >= range_max) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+
+    # f(T₀) = −ΔH_rxn and f decreases, so a sign change on [T₀, T_max] means an exothermic reaction
+    # whose root lies in the data range. A product test, so NaN fails it.
+    var t_lo: f64 = t_initial_k;
+    var t_hi: f64 = range_max;
+    var f_lo: f64 = _km_flame_f(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_lo);
+    var f_hi: f64 = _km_flame_f(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_hi);
+    var pr: f64 = f_lo * f_hi;
+    var bracketed = 0;
+    if (pr < 0.0) { bracketed = 1; }
+    if (bracketed != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+
+    # The initial guess: an average Cp of 40 J/(mol·K) per mole of product (Rust's typed constant).
+    var total_moles: f64 = -0.0;
+    k = 0;
+    while (k < n) {
+        var m: f64 = load64(products + k * 16 + 8);
+        total_moles = total_moles + m;
+        k = k + 1;
+    }
+    var g0: f64 = t_initial_k - (reaction_enthalpy_j / (total_moles * 40.0));
+    var g1: f64 = _km_max(g0, t_lo);
+    var t_guess: f64 = _km_min(g1, t_hi);
+
+    # Newton first; accept only a root in t_lo ..= t_hi.
+    var en, tn = _km_flame_newton(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_guess);
+    var t_newton: f64 = tn;
+    if (en == KM_ERR_NONE && t_newton >= t_lo && t_newton <= t_hi) { return Ok(t_newton); }
+
+    # Fallback: bisection on the verified bracket.
+    var eb, tb = _km_flame_bisection(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_lo, t_hi);
+    if (eb != KM_ERR_NONE) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var t_bis: f64 = tb;
+    return Ok(t_bis);
+}

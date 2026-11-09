@@ -1,0 +1,691 @@
+# gas.tcyr — the tests of rust-old/src/gas.rs, ported one for one (each test_group is the Rust test's
+# name), plus Cyrius-only tests of the roots buffer and presets and of the correctly rounded
+# primitives the Peng–Robinson and Redlich–Kwong functions use (ADR 0005). Rust's private
+# cubic_real_roots and pr_dimensionless are _km_cubic_real_roots and _km_pr_dimensionless here
+# (one namespace). peng_robinson_z_roots fills a caller's buffer of three f64 and returns Ok(n). The
+# golden corpus separately checks every function over its grid (tests/parity.tcyr).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/gas_data.cyr"
+include "src/gas.cyr"
+
+alloc_init();
+
+# 1 if |a - b| < eps.
+#must_use
+fn near(a: f64, b: f64, eps: f64): i64 {
+    var d: f64 = f64_abs(a - b);
+    if (d < eps) { return 1; }
+    return 0;
+}
+
+# 1 if the Result (t, v) is Err(code).
+#must_use
+fn is_err_code(t, v, code): i64 {
+    if (is_err_result(t) == 1 && v == code) { return 1; }
+    return 0;
+}
+
+# A copy of `p` with field k (0 tc, 1 pc, 2 omega) set to x (Rust's `{ field: x, ..p }`).
+#must_use
+fn with_field(p: KmPengRobinsonParams, k, x: f64): KmPengRobinsonParams {
+    var q: KmPengRobinsonParams = p;
+    if (k == 0) { q.tc = x; }
+    if (k == 1) { q.pc = x; }
+    if (k == 2) { q.omega = x; }
+    return q;
+}
+
+# The residual of the PR cubic at Z, for checking roots (the Rust test helper pr_residual).
+#must_use
+fn pr_residual(params: KmPengRobinsonParams, t: f64, p: f64, z: f64): f64 {
+    var e, a, b = _km_pr_dimensionless(params, t, p);
+    var z3: f64 = (z * z) * z;
+    var t2: f64 = ((1.0 - b) * z) * z;
+    var t1: f64 = ((a - ((3.0 * b) * b)) - (2.0 * b)) * z;
+    var t0: f64 = ((a * b) - (b * b)) - ((b * b) * b);
+    var r: f64 = ((z3 - t2) + t1) - t0;
+    return r;
+}
+
+# The f64 with bit pattern b (for a pattern the compiler would read as an integer literal).
+#must_use
+fn from_bits(b): f64 {
+    var x: f64 = 0.0;
+    store64(&x, b);
+    return x;
+}
+
+# The Ok f64 payload of a Result, NaN for Err.
+#must_use
+fn okf(t, v): f64 {
+    if (is_ok(t) != 1) { return _km_nan(); }
+    var x: f64 = v;
+    return x;
+}
+
+fn _t_ideal_gas_stp_volume() {
+    test_group("ideal_gas_stp_volume");
+    var t, v = ideal_gas_volume(1.0, KM_STP_TEMPERATURE, KM_STP_PRESSURE);
+    var vl: f64 = okf(t, v) * 1000.0;
+    # 1 mol at 273.15 K / 101 325 Pa = 22.413 97 L (CODATA molar volume).
+    assert(near(vl, 22.413969, 0.00001), "1 mol at STP should be 22.414 L");
+}
+
+fn _t_ideal_gas_roundtrip() {
+    test_group("ideal_gas_roundtrip");
+    var t1, v1 = ideal_gas_pressure(2.0, 300.0, 0.05);
+    var p: f64 = okf(t1, v1);
+    var t2, v2 = ideal_gas_volume(2.0, 300.0, p);
+    var v: f64 = okf(t2, v2);
+    assert(near(v, 0.05, 0.0000000001), "roundtrip should recover volume");
+}
+
+fn _t_van_der_waals_approaches_ideal() {
+    test_group("van_der_waals_approaches_ideal");
+    var t1, v1 = ideal_gas_pressure(1.0, 300.0, 0.025);
+    var t2, v2 = van_der_waals_pressure(1.0, 300.0, 0.025, 0.0, 0.0);
+    var pi: f64 = okf(t1, v1);
+    var pv: f64 = okf(t2, v2);
+    assert(near(pi, pv, 0.000000001), "a=0 b=0 should match ideal gas");
+}
+
+fn _t_van_der_waals_co2_value() {
+    test_group("van_der_waals_co2_value");
+    # CO₂: a = 0.3640 Pa·m⁶/mol², b = 4.267e-5 m³/mol, 1 mol in 1 L at 300 K.
+    # P = RT/(V−b) − a/V² = 2494.34/9.5733e-4 − 0.364/1e-6 = 2.2416 MPa.
+    var t, v = van_der_waals_pressure(1.0, 300.0, 0.001, 0.3640, 0.00004267);
+    var p: f64 = okf(t, v);
+    var expected: f64 = ((KM_GAS_CONSTANT * 300.0) / (0.001 - 0.00004267)) - (0.3640 / (0.001 * 0.001));
+    assert(near(p, expected, 0.000001), "the formula");
+    assert(near(p, 2241600.0, 1000.0), "2.2416 MPa");
+}
+
+fn _t_van_der_waals_rejects_bad_temperature() {
+    test_group("van_der_waals_rejects_bad_temperature");
+    var ts: f64[4];
+    ts[0] = 0.0;
+    ts[1] = -10.0;
+    ts[2] = _km_nan();
+    ts[3] = 1.0 / 0.0;
+    var k = 0;
+    while (k < 4) {
+        var x: f64 = ts[k];
+        var t, v = van_der_waals_pressure(1.0, x, 0.025, 0.1, 0.00001);
+        assert(is_err_code(t, v, KM_ERR_INVALID_TEMPERATURE), "T should be rejected");
+        k = k + 1;
+    }
+}
+
+fn _t_van_der_waals_rejects_nan_inputs() {
+    test_group("van_der_waals_rejects_nan_inputs");
+    var nan: f64 = _km_nan();
+    var t1, v1 = van_der_waals_pressure(nan, 300.0, 0.025, 0.1, 0.00001);
+    assert_eq(is_err_result(t1), 1, "NaN n");
+    var t2, v2 = van_der_waals_pressure(1.0, 300.0, nan, 0.1, 0.00001);
+    assert_eq(is_err_result(t2), 1, "NaN V");
+    var t3, v3 = van_der_waals_pressure(1.0, 300.0, 0.025, nan, 0.00001);
+    assert_eq(is_err_result(t3), 1, "NaN a");
+    var t4, v4 = van_der_waals_pressure(1.0, 300.0, 0.025, 0.1, nan);
+    assert_eq(is_err_result(t4), 1, "NaN b");
+    var t5, v5 = van_der_waals_pressure(1.0, 300.0, 0.025, -0.1, 0.00001);
+    assert_eq(is_err_result(t5), 1, "negative a");
+}
+
+fn _t_partial_pressure_basic() {
+    test_group("partial_pressure_basic");
+    var pp: f64 = partial_pressure(101325.0, 0.21);
+    assert(near(pp, 21278.25, 0.000000001), "0.21 atm");
+}
+
+fn _t_gas_density_air_at_stp() {
+    test_group("gas_density_air_at_stp");
+    var t, v = gas_density(KM_STP_PRESSURE, 0.029, KM_STP_TEMPERATURE);
+    # 101325 × 0.029 / (8.314462618 × 273.15) = 1.293 86 kg/m³
+    var rho: f64 = okf(t, v);
+    assert(near(rho, 1.29386, 0.0001), "air density at STP should be ~1.294");
+}
+
+fn _t_gas_density_rejects_nan() {
+    test_group("gas_density_rejects_nan");
+    var nan: f64 = _km_nan();
+    var t1, v1 = gas_density(nan, 0.029, 300.0);
+    assert_eq(is_err_result(t1), 1, "NaN P");
+    var t2, v2 = gas_density(101325.0, nan, 300.0);
+    assert_eq(is_err_result(t2), 1, "NaN M");
+    var t3, v3 = gas_density(101325.0, 0.029, nan);
+    assert_eq(is_err_result(t3), 1, "NaN T");
+    var t4, v4 = gas_density(-1.0, 0.029, 300.0);
+    assert_eq(is_err_result(t4), 1, "negative P");
+}
+
+fn _t_stp_pressure_is_one_atm() {
+    test_group("stp_pressure_is_one_atm");
+    var p: f64 = KM_STP_PRESSURE;
+    var t: f64 = KM_STP_TEMPERATURE;
+    assert(near(p, 101325.0, 0.0000000000000002220446049250313), "1 atm");
+    assert(near(t, 273.15, 0.0000000000000002220446049250313), "0 C");
+}
+
+fn _t_zero_volume_is_error() {
+    test_group("zero_volume_is_error");
+    var t, v = ideal_gas_pressure(1.0, 300.0, 0.0);
+    assert_eq(is_err_result(t), 1, "V = 0");
+}
+
+fn _t_zero_pressure_is_error() {
+    test_group("zero_pressure_is_error");
+    var t, v = ideal_gas_volume(1.0, 300.0, 0.0);
+    assert_eq(is_err_result(t), 1, "P = 0");
+}
+
+fn _t_zero_temp_density_is_error() {
+    test_group("zero_temp_density_is_error");
+    var t, v = gas_density(101325.0, 0.029, 0.0);
+    assert_eq(is_err_result(t), 1, "T = 0");
+}
+
+fn _t_negative_temp_pressure_is_error() {
+    test_group("negative_temp_pressure_is_error");
+    var t, v = ideal_gas_pressure(1.0, -100.0, 0.025);
+    assert_eq(is_err_result(t), 1, "T = -100");
+}
+
+fn _t_negative_temp_volume_is_error() {
+    test_group("negative_temp_volume_is_error");
+    var t, v = ideal_gas_volume(1.0, -100.0, 101325.0);
+    assert_eq(is_err_result(t), 1, "T = -100");
+}
+
+fn _t_van_der_waals_volume_too_small_is_error() {
+    test_group("van_der_waals_volume_too_small_is_error");
+    # V = 0.001 m³ < n*b = 1.0 * 0.01 = 0.01
+    var t, v = van_der_waals_pressure(1.0, 300.0, 0.001, 0.0, 0.01);
+    assert_eq(is_err_result(t), 1, "V < n b");
+}
+
+fn _t_nan_inputs_are_rejected() {
+    test_group("nan_inputs_are_rejected");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var t1, v1 = ideal_gas_pressure(nan, 300.0, 0.025);
+    assert_eq(is_err_result(t1), 1, "P: NaN n");
+    var t2, v2 = ideal_gas_pressure(1.0, nan, 0.025);
+    assert_eq(is_err_result(t2), 1, "P: NaN T");
+    var t3, v3 = ideal_gas_pressure(1.0, 300.0, nan);
+    assert_eq(is_err_result(t3), 1, "P: NaN V");
+    var t4, v4 = ideal_gas_pressure(1.0, inf, 0.025);
+    assert_eq(is_err_result(t4), 1, "P: inf T");
+    var t5, v5 = ideal_gas_volume(nan, 300.0, 101325.0);
+    assert_eq(is_err_result(t5), 1, "V: NaN n");
+    var t6, v6 = ideal_gas_volume(1.0, nan, 101325.0);
+    assert_eq(is_err_result(t6), 1, "V: NaN T");
+    var t7, v7 = ideal_gas_volume(1.0, 300.0, nan);
+    assert_eq(is_err_result(t7), 1, "V: NaN P");
+    var t8, v8 = ideal_gas_volume(1.0, 300.0, inf);
+    assert_eq(is_err_result(t8), 1, "V: inf P");
+}
+
+fn _t_pr_z_ideal_at_low_pressure() {
+    test_group("pr_z_ideal_at_low_pressure");
+    # At very low pressure, Z → 1 (ideal gas behavior)
+    var t, v = peng_robinson_z(KM_PR_NITROGEN, 300.0, 1000.0);
+    var z: f64 = okf(t, v);
+    assert(near(z, 1.0, 0.0001), "Z at low P should approach 1.0");
+}
+
+fn _t_pr_z_nitrogen_at_stp() {
+    test_group("pr_z_nitrogen_at_stp");
+    # N₂ at 273.15 K / 1 atm: PR gives Z = 0.999 230 (reference: numpy.roots on the same cubic).
+    var t, v = peng_robinson_z(KM_PR_NITROGEN, 273.15, 101325.0);
+    var z: f64 = okf(t, v);
+    assert(near(z, 0.99923019, 0.0000001), "N2 Z at STP should be 0.99923");
+}
+
+fn _t_pr_z_nitrogen_1mpa() {
+    test_group("pr_z_nitrogen_1mpa");
+    # Benchmark case. Reference root: 0.996 007 28.
+    var t, v = peng_robinson_z(KM_PR_NITROGEN, 300.0, 1000000.0);
+    var z: f64 = okf(t, v);
+    assert(near(z, 0.99600728, 0.0000001), "0.99600728");
+}
+
+# One case of pr_z_high_pressure_takes_physical_root.
+fn high_pressure_case(p: KmPengRobinsonParams, tk: f64, pk: f64, want: f64) {
+    var t, v = peng_robinson_z(p, tk, pk);
+    var z: f64 = okf(t, v);
+    assert(near(z, want, 0.0000001), "expected Z");
+    var roots[24];
+    var tr, n = peng_robinson_z_roots(p, tk, pk, &roots);
+    assert(is_ok(tr) == 1 && n == 1, "only one root has Z > B");
+    var res: f64 = pr_residual(p, tk, pk, z);
+    var ares: f64 = f64_abs(res);
+    assert(ares < 0.000000000001, "residual < 1e-12");
+}
+
+fn _t_pr_z_high_pressure_takes_physical_root() {
+    test_group("pr_z_high_pressure_takes_physical_root");
+    # Newton from Z = 1 used to converge to the negative roots (−1.65, −1.87, −1.49). Reference
+    # physical roots from numpy.roots.
+    high_pressure_case(KM_PR_NITROGEN, 300.0, 90000000.0, 1.66363553);
+    high_pressure_case(KM_PR_NITROGEN, 300.0, 100000000.0, 1.76408716);
+    high_pressure_case(KM_PR_METHANE, 1000.0, 200000000.0, 1.60490783);
+}
+
+# One case of pr_z_consistent_with_pr_pressure: every root's V = ZRT/P gives P back.
+fn consistent_case(p: KmPengRobinsonParams, tk: f64, pk: f64) {
+    var roots[24];
+    var t, n = peng_robinson_z_roots(p, tk, pk, &roots);
+    assert_eq(is_ok(t), 1, "roots Ok");
+    var j = 0;
+    while (j < n) {
+        var z: f64 = load64(&roots + j * 8);
+        var vm: f64 = ((z * KM_GAS_CONSTANT) * tk) / pk;
+        var tb, vb = peng_robinson_pressure(p, tk, vm);
+        var back: f64 = okf(tb, vb);
+        var rel: f64 = f64_abs((back - pk) / pk);
+        assert(rel < 0.00000001, "P(V) = P");
+        j = j + 1;
+    }
+}
+
+fn _t_pr_z_consistent_with_pr_pressure() {
+    test_group("pr_z_consistent_with_pr_pressure");
+    # V = ZRT/P fed back into the explicit PR pressure must give P back.
+    consistent_case(KM_PR_NITROGEN, 300.0, 1000000.0);
+    consistent_case(KM_PR_NITROGEN, 300.0, 90000000.0);
+    consistent_case(KM_PR_METHANE, 1000.0, 200000000.0);
+    consistent_case(KM_PR_CO2, 304.1, 7375000.0);
+    consistent_case(KM_PR_WATER, 300.0, 101325.0);
+    consistent_case(KM_PR_OXYGEN, 200.0, 10000000.0);
+}
+
+fn _t_pr_z_roots_water_three_roots() {
+    test_group("pr_z_roots_water_three_roots");
+    # Water at 300 K / 1 atm: liquid 0.000 863 44, unstable 0.013 783 68, vapor 0.984 582 22
+    # (numpy.roots).
+    var roots[24];
+    var t, n = peng_robinson_z_roots(KM_PR_WATER, 300.0, 101325.0, &roots);
+    assert(is_ok(t) == 1 && n == 3, "three roots");
+    var ex: f64[3];
+    ex[0] = 0.0008634408;
+    ex[1] = 0.013783678;
+    ex[2] = 0.984582222;
+    var k = 0;
+    while (k < 3) {
+        var z: f64 = load64(&roots + k * 8);
+        var e: f64 = ex[k];
+        var rel: f64 = f64_abs((z - e) / e);
+        assert(rel < 0.0000001, "root within 1e-7");
+        k = k + 1;
+    }
+    var z0: f64 = load64(&roots);
+    var z1: f64 = load64(&roots + 8);
+    var z2: f64 = load64(&roots + 16);
+    assert(z0 < z1 && z1 < z2, "ascending");
+    var tz, vz = peng_robinson_z(KM_PR_WATER, 300.0, 101325.0);
+    var z: f64 = okf(tz, vz);
+    var e2: f64 = ex[2];
+    assert(near(z, e2, 0.00000001), "vapor root returned");
+}
+
+fn _t_pr_z_roots_co2_subcritical_three_roots() {
+    test_group("pr_z_roots_co2_subcritical_three_roots");
+    # CO₂ at 280 K / 4 MPa: 0.089 225 14, 0.202 907 08, 0.662 039 25.
+    var roots[24];
+    var t, n = peng_robinson_z_roots(KM_PR_CO2, 280.0, 4000000.0, &roots);
+    assert(is_ok(t) == 1 && n == 3, "three roots");
+    var ex: f64[3];
+    ex[0] = 0.08922514;
+    ex[1] = 0.20290708;
+    ex[2] = 0.66203925;
+    var k = 0;
+    while (k < 3) {
+        var z: f64 = load64(&roots + k * 8);
+        var e: f64 = ex[k];
+        assert(near(z, e, 0.0000001), "root within 1e-7");
+        k = k + 1;
+    }
+}
+
+fn _t_pr_z_near_critical_point() {
+    test_group("pr_z_near_critical_point");
+    # At (Tc, Pc) the cubic is nearly a triple root (A = 0.45724, B = 0.0778); the solver must
+    # still return a valid root.
+    var p: KmPengRobinsonParams = KM_PR_CO2;
+    var tc: f64 = p.tc;
+    var pc: f64 = p.pc;
+    var t, v = peng_robinson_z(p, tc, pc);
+    var z: f64 = okf(t, v);
+    assert(near(z, 0.32137903, 0.000001), "Z = 0.32138");
+    var res: f64 = pr_residual(p, tc, pc, z);
+    var ares: f64 = f64_abs(res);
+    assert(ares < 0.00000000000001, "residual < 1e-14");
+}
+
+fn _t_cubic_double_and_triple_roots() {
+    test_group("cubic_double_and_triple_roots");
+    var r[24];
+    # (z − 1)²(z − 2) = z³ − 4z² + 5z − 2
+    var n = _km_cubic_real_roots(-4.0, 5.0, -2.0, &r);
+    assert_eq(n, 3, "three roots");
+    var r0: f64 = load64(&r);
+    var r1: f64 = load64(&r + 8);
+    var r2: f64 = load64(&r + 16);
+    assert(near(r0, 1.0, 0.0000001) && near(r1, 1.0, 0.0000001), "double root 1");
+    assert(near(r2, 2.0, 0.000000000001), "root 2");
+    # (z − 0.5)³ = z³ − 1.5z² + 0.75z − 0.125
+    var m = _km_cubic_real_roots(-1.5, 0.75, -0.125, &r);
+    assert(m >= 1, "at least one root");
+    var k = 0;
+    while (k < m) {
+        var z: f64 = load64(&r + k * 8);
+        assert(near(z, 0.5, 0.00001), "triple root 0.5");
+        k = k + 1;
+    }
+    # z³ + z = 0 → single real root 0
+    var o = _km_cubic_real_roots(0.0, 1.0, 0.0, &r);
+    assert_eq(o, 1, "one root");
+    var z0: f64 = load64(&r);
+    var az: f64 = f64_abs(z0);
+    assert(az < 0.000000000000001, "root 0");
+}
+
+fn _t_pr_pressure_positive() {
+    test_group("pr_pressure_positive");
+    # V = 0.025 m³/mol at 300K for N₂
+    var t, v = peng_robinson_pressure(KM_PR_NITROGEN, 300.0, 0.025);
+    var p: f64 = okf(t, v);
+    assert(p > 0.0, "pressure should be positive");
+}
+
+fn _t_pr_approaches_ideal_at_high_v() {
+    test_group("pr_approaches_ideal_at_high_v");
+    # At very large molar volume, PR should approach ideal gas
+    var t1, v1 = ideal_gas_pressure(1.0, 300.0, 1.0);   # 1 m³/mol — very dilute
+    var t2, v2 = peng_robinson_pressure(KM_PR_NITROGEN, 300.0, 1.0);
+    var pi: f64 = okf(t1, v1);
+    var pp: f64 = okf(t2, v2);
+    var rel: f64 = f64_abs(pp - pi) / pi;
+    assert(rel < 0.0001, "PR should approach ideal at large V");
+}
+
+fn _t_pr_zero_temp_is_error() {
+    test_group("pr_zero_temp_is_error");
+    var t1, v1 = peng_robinson_z(KM_PR_NITROGEN, 0.0, 101325.0);
+    assert_eq(is_err_result(t1), 1, "Z at T = 0");
+    var t2, v2 = peng_robinson_pressure(KM_PR_NITROGEN, 0.0, 0.025);
+    assert_eq(is_err_result(t2), 1, "P at T = 0");
+}
+
+fn _t_pr_rejects_nan_state() {
+    test_group("pr_rejects_nan_state");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var roots[24];
+    var t1, v1 = peng_robinson_z(KM_PR_NITROGEN, nan, 101325.0);
+    assert_eq(is_err_result(t1), 1, "Z: NaN T");
+    var t2, v2 = peng_robinson_z(KM_PR_NITROGEN, 300.0, nan);
+    assert_eq(is_err_result(t2), 1, "Z: NaN P");
+    var t3, v3 = peng_robinson_z(KM_PR_NITROGEN, 300.0, inf);
+    assert_eq(is_err_result(t3), 1, "Z: inf P");
+    var t4, v4 = peng_robinson_z_roots(KM_PR_NITROGEN, 300.0, -1.0, &roots);
+    assert_eq(is_err_result(t4), 1, "roots: negative P");
+    var t5, v5 = peng_robinson_pressure(KM_PR_NITROGEN, nan, 0.025);
+    assert_eq(is_err_result(t5), 1, "P: NaN T");
+    var t6, v6 = peng_robinson_pressure(KM_PR_NITROGEN, 300.0, nan);
+    assert_eq(is_err_result(t6), 1, "P: NaN V");
+    var t7, v7 = peng_robinson_pressure(KM_PR_NITROGEN, 300.0, inf);
+    assert_eq(is_err_result(t7), 1, "P: inf V");
+    var t8, v8 = fugacity_coefficient_pr(KM_PR_NITROGEN, nan, 100000.0);
+    assert_eq(is_err_result(t8), 1, "phi: NaN T");
+}
+
+# One case of pr_rejects_bad_critical_constants: all four PR functions refuse `p`.
+fn rejects_all(p: KmPengRobinsonParams) {
+    var roots[24];
+    var t1, v1 = peng_robinson_z(p, 300.0, 100000.0);
+    assert_eq(is_err_result(t1), 1, "Z");
+    var t2, v2 = peng_robinson_z_roots(p, 300.0, 100000.0, &roots);
+    assert_eq(is_err_result(t2), 1, "roots");
+    var t3, v3 = peng_robinson_pressure(p, 300.0, 0.025);
+    assert_eq(is_err_result(t3), 1, "P");
+    var t4, v4 = fugacity_coefficient_pr(p, 300.0, 100000.0);
+    assert_eq(is_err_result(t4), 1, "phi");
+}
+
+fn _t_pr_rejects_bad_critical_constants() {
+    test_group("pr_rejects_bad_critical_constants");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    rejects_all(with_field(KM_PR_NITROGEN, 0, 0.0));
+    rejects_all(with_field(KM_PR_NITROGEN, 0, nan));
+    rejects_all(with_field(KM_PR_NITROGEN, 1, -1.0));
+    rejects_all(with_field(KM_PR_NITROGEN, 1, inf));
+    rejects_all(with_field(KM_PR_NITROGEN, 2, nan));
+}
+
+fn _t_fugacity_coefficient_ideal_at_low_p() {
+    test_group("fugacity_coefficient_ideal_at_low_p");
+    # At low pressure, φ → 1
+    var t, v = fugacity_coefficient_pr(KM_PR_NITROGEN, 300.0, 1000.0);
+    var phi: f64 = okf(t, v);
+    assert(near(phi, 1.0, 0.0001), "phi at low P should be ~1.0");
+}
+
+fn _t_fugacity_equals_pressure_at_low_p() {
+    test_group("fugacity_equals_pressure_at_low_p");
+    var t, v = fugacity_pr(KM_PR_NITROGEN, 300.0, 1000.0);
+    var f: f64 = okf(t, v);
+    assert(near(f, 1000.0, 0.1), "fugacity should ~ P at low P");
+}
+
+# One case of fugacity_finite_positive_at_high_pressure.
+fn fugacity_case(p: KmPengRobinsonParams, tk: f64, pk: f64, want: f64) {
+    var t, v = fugacity_coefficient_pr(p, tk, pk);
+    var phi: f64 = okf(t, v);
+    assert(_km_is_finite(phi) == 1 && phi > 0.0, "finite and positive");
+    assert(near(phi, want, 0.000001), "reference phi");
+    var tf, vf = fugacity_pr(p, tk, pk);
+    var f: f64 = okf(tf, vf);
+    var d: f64 = f64_abs(f - (phi * pk));
+    assert(d <= (0.000000001 * f), "f = phi P");
+}
+
+fn _t_fugacity_finite_positive_at_high_pressure() {
+    test_group("fugacity_finite_positive_at_high_pressure");
+    # Used to be Ok(NaN): ln(Z − B) of the negative root. Reference φ from the physical root:
+    # 1.418 438, 1.529 092, 1.755 352.
+    fugacity_case(KM_PR_NITROGEN, 300.0, 90000000.0, 1.4184383);
+    fugacity_case(KM_PR_NITROGEN, 300.0, 100000000.0, 1.5290917);
+    fugacity_case(KM_PR_METHANE, 1000.0, 200000000.0, 1.7553522);
+}
+
+fn _t_fugacity_water_vapor_root() {
+    test_group("fugacity_water_vapor_root");
+    # φ at the vapor root of water, 300 K / 1 atm: 0.984 806.
+    var t, v = fugacity_coefficient_pr(KM_PR_WATER, 300.0, 101325.0);
+    var phi: f64 = okf(t, v);
+    assert(near(phi, 0.984806, 0.00001), "0.984806");
+}
+
+fn _t_joule_thomson_ideal_is_zero() {
+    test_group("joule_thomson_ideal_is_zero");
+    var j: f64 = joule_thomson_ideal();
+    assert(near(j, 0.0, 0.0000000000000002220446049250313), "0 K/Pa");
+}
+
+fn _t_rk_approaches_ideal_at_high_v() {
+    test_group("rk_approaches_ideal_at_high_v");
+    # N₂: Tc=126.2, Pc=3394000
+    var t1, v1 = ideal_gas_pressure(1.0, 300.0, 1.0);
+    var t2, v2 = redlich_kwong_pressure(126.2, 3394000.0, 300.0, 1.0);
+    var pi: f64 = okf(t1, v1);
+    var pr: f64 = okf(t2, v2);
+    var rel: f64 = f64_abs(pr - pi) / pi;
+    assert(rel < 0.0001, "RK should approach ideal at large V");
+}
+
+fn _t_rk_zero_temp_is_error() {
+    test_group("rk_zero_temp_is_error");
+    var t, v = redlich_kwong_pressure(126.2, 3394000.0, 0.0, 0.025);
+    assert_eq(is_err_result(t), 1, "T = 0");
+}
+
+fn _t_rk_rejects_nan_inputs() {
+    test_group("rk_rejects_nan_inputs");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var t1, v1 = redlich_kwong_pressure(126.2, 3394000.0, nan, 0.025);
+    assert_eq(is_err_result(t1), 1, "NaN T");
+    var t2, v2 = redlich_kwong_pressure(nan, 3394000.0, 300.0, 0.025);
+    assert_eq(is_err_result(t2), 1, "NaN Tc");
+    var t3, v3 = redlich_kwong_pressure(126.2, nan, 300.0, 0.025);
+    assert_eq(is_err_result(t3), 1, "NaN Pc");
+    var t4, v4 = redlich_kwong_pressure(126.2, 0.0, 300.0, 0.025);
+    assert_eq(is_err_result(t4), 1, "Pc = 0");
+    var t5, v5 = redlich_kwong_pressure(126.2, 3394000.0, 300.0, nan);
+    assert_eq(is_err_result(t5), 1, "NaN V");
+    var t6, v6 = redlich_kwong_pressure(126.2, 3394000.0, 300.0, inf);
+    assert_eq(is_err_result(t6), 1, "inf V");
+}
+
+# Cyrius-only: the presets are Rust's values; a struct passes by value (the callee's copy);
+# peng_robinson_z_roots writes only its n roots and reports n in Ok; each guard's error code, in
+# Rust's order (T, P, then the critical constants); overflow is ComputationError.
+fn _t_cyrius_presets_and_roots() {
+    test_group("cyrius_presets_and_roots");
+    var w: KmPengRobinsonParams = KM_PR_WATER;
+    var wtc: f64 = w.tc;
+    var wpc: f64 = w.pc;
+    var wom: f64 = w.omega;
+    assert(wtc == 647.1 && wpc == 22064000.0 && wom == 0.3443, "PR_WATER");
+    var n2: KmPengRobinsonParams = KM_PR_NITROGEN;
+    var bad = with_field(n2, 0, -1.0);
+    var ntc: f64 = KM_PR_NITROGEN.tc;
+    assert(ntc == 126.2, "with_field copied, the preset is unchanged");
+    var roots[24];
+    store64(&roots + 16, 0x7FF8000000000001);
+    var t, n = peng_robinson_z_roots(KM_PR_NITROGEN, 300.0, 1000000.0, &roots);
+    assert(is_ok(t) == 1 && n == 1, "one root at 300 K, 1 MPa");
+    assert_eq(load64(&roots + 16), 0x7FF8000000000001, "slot 2 untouched");
+    var nan: f64 = _km_nan();
+    var t1, v1 = peng_robinson_z(bad, nan, -1.0);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_TEMPERATURE), "T first");
+    var t2, v2 = peng_robinson_z(bad, 300.0, -1.0);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT), "then P");
+    var t3, v3 = peng_robinson_z(bad, 300.0, 100000.0);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_TEMPERATURE), "then Tc");
+    var pcbad = with_field(n2, 1, 0.0);
+    var t4, v4 = peng_robinson_pressure(pcbad, 300.0, 0.025);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT), "Pc = 0 is InvalidInput");
+    var huge: f64 = 0x7FEFFFFFFFFFFFFF;
+    var t5, v5 = peng_robinson_z(KM_PR_NITROGEN, 300.0, huge);
+    assert(is_err_code(t5, v5, KM_ERR_COMPUTATION_ERROR), "P = DBL_MAX overflows: ComputationError");
+}
+
+# Cyrius-only, ADR 0005: _km_acos, _km_cos, _km_ln and _km_pow_2_5 are correctly rounded. At these
+# arguments glibc 2.44 (the oracle) is 1 ulp off the correctly rounded value (scripts/oracle/
+# validate.py's 60-digit reference); the port returns the correctly rounded bits. Plus the special
+# values each mirrors from Rust.
+fn _t_cyrius_correctly_rounded_primitives() {
+    test_group("cyrius_correctly_rounded_primitives");
+    var a: f64 = 0.9063776739144427;
+    var ra: f64 = _km_acos(a);
+    assert_bits_eq(ra, 0x3FDBEA28A544ED43, "acos(0.9063776739144427)");
+    var c: f64 = 2.3734367101827383;
+    var rc: f64 = _km_cos(c);
+    assert_bits_eq(rc, 0xBFE703A1604251B1, "cos(2.3734367101827383)");
+    var l: f64 = 1.7602758701689474;
+    var rl: f64 = _km_ln(l);
+    assert_bits_eq(rl, 0x3FE21855AD272D79, "ln(1.7602758701689474)");
+    var p: f64 = 443.38094864525084;
+    var rp: f64 = _km_pow_2_5(p);
+    assert_bits_eq(rp, 0x414F94DCA9F5C8F0, "443.38094864525084^2.5");
+    var one: f64 = 1.0;
+    var m1: f64 = -1.0;
+    var r1: f64 = _km_acos(one);
+    assert_bits_eq(r1, 0, "acos(1) = +0");
+    var r2: f64 = _km_acos(m1);
+    assert_bits_eq(r2, 0x400921FB54442D18, "acos(-1) = pi");
+    var two: f64 = 2.0;
+    var r3: f64 = _km_acos(two);
+    assert_eq(ulp_is_nan(r3), 1, "acos(2) = NaN");
+    var zero: f64 = 0.0;
+    var r4: f64 = _km_cos(zero);
+    assert_bits_eq(r4, 0x3FF0000000000000, "cos(0) = 1");
+    var inf: f64 = 1.0 / 0.0;
+    var r5: f64 = _km_cos(inf);
+    assert_eq(ulp_is_nan(r5), 1, "cos(inf) = NaN");
+    var r6: f64 = _km_ln(one);
+    assert_bits_eq(r6, 0, "ln(1) = +0");
+    var r7: f64 = _km_ln(zero);
+    assert_bits_eq(r7, 0xFFF0000000000000, "ln(0) = -inf");
+    var r8: f64 = _km_ln(m1);
+    assert_eq(ulp_is_nan(r8), 1, "ln(-1) = NaN");
+    var sub: f64 = from_bits(1);   # the smallest subnormal, 5e-324
+    var r9: f64 = _km_ln(sub);
+    assert_bits_eq(r9, 0xC0874385446D71C3, "ln(5e-324) = -744.44007192138126");
+    var four: f64 = 4.0;
+    var r10: f64 = _km_pow_2_5(four);
+    assert_bits_eq(r10, 0x4040000000000000, "4^2.5 = 32");
+    var r11: f64 = _km_pow_2_5(m1);
+    assert_eq(ulp_is_nan(r11), 1, "(-1)^2.5 = NaN");
+    var big: f64 = 0x7FEFFFFFFFFFFFFF;
+    var r12: f64 = _km_pow_2_5(big);
+    assert_bits_eq(r12, 0x7FF0000000000000, "DBL_MAX^2.5 = +inf");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_ideal_gas_stp_volume();
+    _t_ideal_gas_roundtrip();
+    _t_van_der_waals_approaches_ideal();
+    _t_van_der_waals_co2_value();
+    _t_van_der_waals_rejects_bad_temperature();
+    _t_van_der_waals_rejects_nan_inputs();
+    _t_partial_pressure_basic();
+    _t_gas_density_air_at_stp();
+    _t_gas_density_rejects_nan();
+    _t_stp_pressure_is_one_atm();
+    _t_zero_volume_is_error();
+    _t_zero_pressure_is_error();
+    _t_zero_temp_density_is_error();
+    _t_negative_temp_pressure_is_error();
+    _t_negative_temp_volume_is_error();
+    _t_van_der_waals_volume_too_small_is_error();
+    _t_nan_inputs_are_rejected();
+    _t_pr_z_ideal_at_low_pressure();
+    _t_pr_z_nitrogen_at_stp();
+    _t_pr_z_nitrogen_1mpa();
+    _t_pr_z_high_pressure_takes_physical_root();
+    _t_pr_z_consistent_with_pr_pressure();
+    _t_pr_z_roots_water_three_roots();
+    _t_pr_z_roots_co2_subcritical_three_roots();
+    _t_pr_z_near_critical_point();
+    _t_cubic_double_and_triple_roots();
+    _t_pr_pressure_positive();
+    _t_pr_approaches_ideal_at_high_v();
+    _t_pr_zero_temp_is_error();
+    _t_pr_rejects_nan_state();
+    _t_pr_rejects_bad_critical_constants();
+    _t_fugacity_coefficient_ideal_at_low_p();
+    _t_fugacity_equals_pressure_at_low_p();
+    _t_fugacity_finite_positive_at_high_pressure();
+    _t_fugacity_water_vapor_root();
+    _t_joule_thomson_ideal_is_zero();
+    _t_rk_approaches_ideal_at_high_v();
+    _t_rk_zero_temp_is_error();
+    _t_rk_rejects_nan_inputs();
+    _t_cyrius_presets_and_roots();
+    _t_cyrius_correctly_rounded_primitives();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

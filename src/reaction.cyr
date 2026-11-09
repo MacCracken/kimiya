@@ -1,0 +1,46 @@
+# reaction.cyr — reaction thermodynamics: Gibbs free energy (ΔG = ΔH − TΔS), the equilibrium
+# constant K = exp(−ΔG/RT) and spontaneity (port of rust-old/src/reaction.rs).
+#
+# SI units throughout: J/mol, J/(mol·K), K. Fallible functions return a value-form Result whose
+# Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs instead of returning Ok(NaN).
+# Every expression keeps Rust's operation order: gibbs_free_energy is bit-identical (class B);
+# equilibrium_constant's one exp is f64_exp (class C, docs/development/port-parity.md), which
+# lib/math.cyr supplies on aarch64 (its polyfill).
+
+include "lib/math.cyr"
+
+# Gibbs free energy ΔG = ΔH − T·ΔS in J/mol, from ΔH in J/mol, T in K and ΔS in J/(mol·K):
+# Ok(ΔG), Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite, or
+# Err(KM_ERR_INVALID_INPUT) if ΔH or ΔS is not finite. Mirrors `reaction::gibbs_free_energy`.
+#must_use
+fn gibbs_free_energy(enthalpy_j: f64, temperature_k: f64, entropy_j_per_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(enthalpy_j) != 1 || _km_is_finite(entropy_j_per_k) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    var g: f64 = enthalpy_j - (temperature_k * entropy_j_per_k);
+    return Ok(g);
+}
+
+# Equilibrium constant K = exp(−ΔG / (R·T)), dimensionless, from ΔG in J/mol and T in K. For
+# ΔG/RT above ≈ 745 it underflows to 0.0. Ok(K), Err(KM_ERR_INVALID_TEMPERATURE) if T is not
+# positive and finite, Err(KM_ERR_INVALID_INPUT) if ΔG is not finite, or
+# Err(KM_ERR_COMPUTATION_ERROR) if K overflows f64 (−ΔG/RT > ≈ 709.8, e.g. ΔG = −2 MJ/mol at
+# 298 K); work with ln K = −ΔG/RT instead. Mirrors `reaction::equilibrium_constant`.
+#must_use
+fn equilibrium_constant(delta_g_j: f64, temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(delta_g_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var x: f64 = -delta_g_j / (KM_GAS_CONSTANT * temperature_k);
+    var k: f64 = f64_exp(x);
+    if (_km_is_finite(k) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    return Ok(k);
+}
+
+# 1 if a reaction with this ΔG (any energy unit) is spontaneous, ΔG < 0; 0 otherwise, NaN
+# included. Mirrors `reaction::is_spontaneous`.
+#must_use
+fn is_spontaneous(delta_g: f64): i64 {
+    if (delta_g < 0.0) { return 1; }
+    return 0;
+}

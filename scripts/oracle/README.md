@@ -49,8 +49,13 @@ python3 -I scripts/oracle/probe_tables.py .                                     
 |---|---|---|---|---|
 | `constants` | M0 | 45 | `src/m_constants.rs` | `src/constants.cyr` (`src/t_constants.rs`): the 14 physical constants. The other 31 rows (K_b/K_f, Madelung, Born exponents, Λ°, Debye–Hückel, K_w, STP, c_water) are generated with their module's data at M2–M4 |
 | `element` | M1 | 975 | `src/m_element.rs`: `lookup_by_number` and `lookup_properties` over every u8 (0..=255), `lookup_by_symbol` over every symbol, its lower- and upper-case forms, every name, and `""`, `"Xx"`, `"FE"`, `"Fe "`, `" Fe"`, a 300-byte string | `src/element_data.cyr` (`src/t_element.rs`): `enum KmElementCategory`, the 118 `ELEMENTS` rows (atomic number, symbol and name blobs, mass, electronegativity flag + value, category) and the 32 `ELEMENT_PROPERTIES` rows (oxidation states flattened over an `i8` table) |
-| `math` | M0 step 8 | 18,647 | `src/m_math.rs` | — |
+| `math` | M0 step 8 (M2a: +7,500) | 26,147 | `src/m_math.rs`; M2a added dense cos / acos / ln / powf(·, 2.5) sweeps over the Peng–Robinson and Redlich–Kwong argument ranges | — |
 | `molecule` | M1 | 2,472 | `src/m_molecule.rs`: the four presets, the cases the 1.2 tests pin, 600 seeded compositions (1–8 atoms, counts 0..=200, repeats, invalid Z 0/119/255, u32::MAX counts); `new`, `molecular_weight` (B), `formula`, `total_atoms` on each | — |
+| `reaction` | M2a | 1,188 | `src/m_reaction.rs`: `gibbs_free_energy` (B) and `equilibrium_constant` (C) over each argument's edges, ΔG from target exponents across exp's underflow/overflow ends, the Rust tests' values, seeded sweeps; `is_spontaneous` (A) | — |
+| `thermo` | M2a | 1,107 | `src/m_thermo.rs`: all class B — `heat_transfer`, `hess_law` and `enthalpy_from_formation` (slices as `v:n` + values; −0.0 sums, ∞ − ∞, cancellation, seeded slices), `specific_heat_from_calorimetry` (the 1e-12 threshold ± 1 ulp) | `src/constants.cyr` gains `KM_WATER_SPECIFIC_HEAT` (thermo has no data file) |
+| `phase` | M2a | 3,276 | `src/m_phase.rs`: Raoult, Henry, colligative, osmotic (B); Clausius–Clapeyron (C); Antoine mmHg / Pa (C) for every set at and one ulp past each range end, 0.5/1/10 °C outside, a 5 °C ladder, seeded points, the pole ± 1 ulp, specials, custom sets (non-finite fields, inverted range, pole inside the range, overflow), and the unit set's class-A rows that pin `PA_PER_MMHG`; `lookup_antoine`, `phase_rule` (all pairs of 13 u32 probes), `ANTOINE_DATA` / `ANTOINE_DATA[]` (A) | `src/phase_data.cyr` (`src/t_phase.rs`): `struct KmAntoineCoeffs`, the 8 sets (name blob + A, B, C, t_min_c, t_max_c columns), `_KM_PA_PER_MMHG` (through the API, see below), `KM_KB_*` / `KM_KF_*` |
+| `thermochem` | M2b | 9,487 | `src/m_thermochem.rs`: the tables and lookups (A); `Shomate::cp` / `enthalpy_antiderivative` per segment incl. range ends, extrapolation, T = 0 / ±∞ / NaN, `enthalpy_change_cp` within and across segments (B); `reaction_enthalpy` / `_gibbs_energy` (B, **J/mol: the oracle's kJ/mol × 1000.0, computed by the generator**, ADR 0002 #1, said in the row note) and `reaction_entropy` over seeded species lists (`v:n` + `s:formula f:coeff` pairs); `vant_hoff_k` (C); `adiabatic_flame_temperature` (B) over fuels, equivalence ratios, oxidisers, T₀, 10⁻²⁰⁰…10³⁰⁰ scalings and every Err path, **each Ok row's note naming the solver that answered** (`[newton, k steps]`, `[bisection after newton: …, k halvings]`) | `src/thermochem_data.cyr` (`src/t_thermochem.rs`): `struct KmShomate`, the 76 `THERMOCHEM_DATA` rows (formula and name blobs, ΔH_f°, ΔG_f°, S°), the 34 `SHOMATE_DATA` segments (formula blob, a … t_max), `KM_THERMOCHEM_COUNT`, `KM_SHOMATE_COUNT`, and the literals' `//` comments |
+| `gas` | M2a | 19,717 | `src/m_gas.rs`: ideal gas, van der Waals, Dalton, density, `peng_robinson_pressure` (B); `peng_robinson_z`, `_z_roots` (`v:n` + roots), `fugacity_coefficient_pr`, `fugacity_pr` over each preset × 26 temperatures × 29 pressures (one- and three-root regions, the critical point ± 10⁻⁶, 90–200 MPa), seeded states, validation edges and overflow, and `redlich_kwong_pressure` (C); the `PR_*` presets and `joule_thomson_ideal` (A) | `src/gas_data.cyr` (`src/t_gas.rs`): `struct KmPengRobinsonParams`, `KM_STP_*`, the 5 `KM_PR_*` presets as top-level struct values |
 
 ## glibc, not the `libm` crate
 
@@ -163,6 +168,24 @@ comments, which carry the citations (SI 2019, CODATA 2018, AME2020, …) into th
 and `t_constants::complete` proves the list is every `pub const NAME: f64` in
 `rust-old/src` — no more, no fewer — before anything is written.
 
+### `PA_PER_MMHG`: a private constant through the API
+
+Rust's `phase::PA_PER_MMHG` is private. `t_phase.rs` reads it as `antoine_pressure_pa` of the unit set
+(A = B = 0, C = 1, range [0, 0]) at T = 0: `antoine_pressure_mmhg` of that set is 10⁰ = 1.0 exactly (checked),
+so the Pa value is the factor itself. Its golden row is class A, and the source literal is a cross-check.
+
+### The flame solver's path, and ADR 0002 #1's × 1000
+
+Two kinds of golden row carry a bracketed suffix in their note (`Module::row_noted`; the harness ignores notes):
+- `thermochem::reaction_enthalpy` / `reaction_gibbs_energy`: `[J/mol: the oracle's kJ/mol result × 1000.0 (ADR 0002
+  #1)]`. The Cyrius functions return J/mol; the generator multiplies Rust's kJ/mol value by 1000.0, the port's one
+  multiply after the same subtraction, so the rows compare directly (class B, 0 ulp).
+- `thermochem::adiabatic_flame_temperature`: the solver that produced an `Ok` value. `m_thermochem::flame_replica`
+  rebuilds the solver from the public API (`SHOMATE_DATA`, `Shomate::cp`, `Shomate::enthalpy_antiderivative`, Rust's
+  private `Segments` logic, hisab 1.4.0's `newton_raphson` and `bisection` loops), and generation fails unless it
+  gives the oracle's bits, or the oracle's error, on every row. `validate.py` recomputes the path independently and
+  checks the note. The generator prints the tally (1,682 Newton, 154 bisection, 101 Err).
+
 ### Emission rules
 
 Probed on Cyrius 6.7.18 (by tanmatra; re-proven here by `probe_tables.py`), and enforced by
@@ -179,7 +202,11 @@ the generator:
   read (probed on x86_64 ELF/PE and aarch64), so oxidation states keep Rust's `i8`.
 - **String columns are a NUL-separated `u8` blob plus a `u16` offset column** (`cyr::string_column`):
   an array initializer can't hold a string literal. `&_KM_X_BYTES + _KM_X_OFF[i]` is row i's C string;
-  one blob line per row, its bytes then the text as the label. ASCII and NUL-free, or a generator error.
+  one blob line per row, its bytes then the text as the label (a row past 120 columns, M2b's longest names, is
+  split into lines of 16 bytes with the label on the first). ASCII and NUL-free, or a generator error.
+- **Comments inside a table literal** (M2a's methanol source, M2b's sections and Shomate sources / caveats) travel
+  into the table's comment block, keyed by row and word-wrapped; `t_thermochem` cross-checks each literal's row
+  keys against the API's rows, in order.
 - **`Option<f64>` cells are a `bool` presence column plus the value** (0.0 for `None`), since a
   compile-time f64 can't be NaN; the accessor returns the value-form `Option`.
 - **Per-cell `//` notes in the Rust literal** (the IUPAC conventional and CIAAW 2024 atomic weights)
@@ -196,6 +223,8 @@ A bundle is concatenated into its consumers, so every generated global is prefix
 | enum `ElementCategory` (M1) | `enum KmElementCategory`, plus `const KM_ELEMENT_CATEGORY_COUNT`; variant `KM_` + snake(enum) + `_` + snake(variant), as tanmatra (`e:ElementCategory.NobleGas` is `KM_ELEMENT_CATEGORY_NOBLE_GAS`). `t_element` proves the variant list against the Rust declaration |
 | `ELEMENTS[i].field` (M1) | `KM_ELEMENT_<FIELD>[i]`, row i = Z − 1; symbol and name `_KM_ELEMENT_{SYMBOL,NAME}_{BYTES,OFF}`; `KM_ELEMENT_COUNT` |
 | `ELEMENT_PROPERTIES[k].field` (M1) | `KM_ELEMENT_PROPERTIES_<FIELD>[k]`; oxidation states `..._OXIDATION_STATE_START` / `_COUNT` over `..._OXIDATION_STATES`; `KM_ELEMENT_PROPERTIES_COUNT` |
+| `THERMOCHEM_DATA[k].field` (M2b) | `KM_THERMOCHEM_<FIELD>[k]`; formula and name `_KM_THERMOCHEM_{FORMULA,NAME}_{BYTES,OFF}`; `KM_THERMOCHEM_COUNT` |
+| `SHOMATE_DATA[k]` (M2b) | `KM_SHOMATE_<FIELD>[k]` (A … T_MAX); formula `_KM_SHOMATE_FORMULA_{BYTES,OFF}`; `KM_SHOMATE_COUNT`; `Shomate` is `struct KmShomate` |
 
 Each constant's comment block ends with `# Rust: kimiya::<module>::<NAME>`, which
 `validate.py` and `probe_tables.py` read to tie it to its golden row.
@@ -205,11 +234,15 @@ Each constant's comment block ends with `# Rust: kimiya::<module>::<NAME>`, whic
 `probe_tables.py` compiles a program that prints every generated constant and every
 `element_data.cyr` cell (1,055 in M1: each `ELEMENTS` field, symbol and name read through the blob
 offsets, each property and oxidation state, and each category checked against the enum member the
-golden variant names). It reads the arrays directly, not through `src/element.cyr`, so it tests the
+golden variant names), and from M2a every `phase_data.cyr` / `gas_data.cyr` value (65 cells: each Antoine
+name and coefficient, `KM_ANTOINE_COUNT`, `_KM_PA_PER_MMHG`, each preset field read through its struct; and
+their 10 constants), and from M2b every `thermochem_data.cyr` cell (654: each THERMOCHEM_DATA formula, name and
+f64 field, each SHOMATE_DATA formula and the seven columns, both counts). It reads the arrays directly, not through `src/element.cyr`, so it tests the
 data while the harness tests the accessors. It builds in `build/oracle-probe/` with the project's
 manifest, then compares each value bit for bit with the golden rows. It fails on any mismatch, any
 compiler warning, a generated constant with no golden row, and a table it doesn't probe. A mass, an
-oxidation state or a symbol byte tampered by one digit fails (checked in M1).
+oxidation state or a symbol byte tampered by one digit fails (checked in M1; in M2a an Antoine B, a name
+byte, the mmHg factor and a preset's ω).
 
 ## `validate.py`
 
@@ -234,12 +267,18 @@ needs only Python 3, with no packages (run it with `-I`).
 
   | Function | rows | 0 ulp | 1 ulp |
   |---|---|---|---|
-  | exp, ln, cos, acos, atan2, powf_base10 | 5,583 | all | 0 |
+  | exp, atan2, powf_base10 | 2,696 | all | 0 |
+  | ln | 3,857 | 3,854 | 3 |
+  | cos | 2,910 | 2,906 | 4 |
+  | acos | 2,620 | 2,619 | 1 |
   | exp_m1 | 810 | 776 | 34 |
   | log10 | 1,296 | 1,248 | 48 |
-  | powf | 750 | 749 | 1 |
+  | powf | 1,750 | 1,747 | 3 (2 of them powf(x, 2.5)) |
   | powf_base2 (exp2) | 369 | 368 | 1 |
   | sin | 710 | 708 | 2 |
+
+  (Before M2a's sweeps, ln, cos and acos had no 1-ulp row: glibc 2.44 is not correctly rounded on about
+  0.1 % of arguments.)
 
 - **element** (M1): every row against the `ELEMENTS` and `ELEMENT_PROPERTIES` literals parsed from
   `rust-old/src/element.rs` (Python's `float()` is correctly rounded, like rustc), with
@@ -251,6 +290,28 @@ needs only Python 3, with no packages (run it with `-I`).
   saturating `total_atoms`, `InvalidElement` for Z outside 1–118, and the presets parsed from
   `rust-old/src/molecule.rs`.
 
-Every function in `math.tsv`, `element.tsv` and `molecule.tsv` must have a rule in `validate.py`:
-a new one fails until it gets one. Extend it as modules arrive. A check that recomputes a row
-independently is worth more than one that re-reads the oracle.
+- **reaction, thermo, phase, gas** (M2a): every row recomputed from Rust 1.2.0's code transcribed in Python
+  in its operation order, with the validation guards in Rust's order and IEEE division (Python raises on a zero
+  divisor). Class B rows must match bit for bit. The class-C rows call Python's `math`, which is glibc's
+  exp, log, pow, acos and cos (and a correctly rounded cbrt, as Rust's compiler-builtins cbrt is), so they too
+  match bit for bit when the machine is the corpus's recorded libm platform; elsewhere only their Ok/Err shape
+  is checked. The tables and presets (`ANTOINE_DATA`, `PR_*`, `PA_PER_MMHG`) are parsed from the Rust source
+  literals, and the generated `src/phase_data.cyr` / `src/gas_data.cyr` literals are checked against them.
+- **thermochem** (M2b): every row recomputed from Rust 1.2.0's code transcribed in Python — `sum_property` from
+  +0.0 with `+=`, the J/mol × 1000.0 of ADR 0002 #1, `Segments` (lookup, cp, enthalpy_change with Rust's max/min),
+  the Shomate polynomial and antiderivative, `vant_hoff_k` (glibc's exp via Python), and the flame temperature with
+  hisab 1.4.0's `newton_raphson` and `bisection` loops; the solver path each flame row's note claims is checked
+  against the recomputation, at least 100 rows must be bisection rows, and each of Rust's typed flame constants
+  (10⁻³, 10⁻⁶, the 40 J/(mol·K) guess) must change some golden row's bits when perturbed. `THERMOCHEM_DATA` and
+  `SHOMATE_DATA` are parsed from the Rust literals, and the generated `src/thermochem_data.cyr` columns, string
+  blobs and `struct KmShomate` are checked against them.
+- **`--sensitivity`** (M2a; M2b adds `vant_hoff_k`): `python3 -I scripts/oracle/validate.py . --sensitivity` re-evaluates every class-C
+  row of the M2a functions with one primitive result nudged one ulp up and down, one call at a time, and prints
+  each function's S, c and K = 2·S·c + 2 — the port-parity rule's measurement
+  (`docs/development/port-parity.md` §5). Following ADR 0005, only calls whose result can differ between port
+  and oracle are nudged: exp and 10^x results, and the acos / cos / ln / x^2.5 results where glibc is not
+  correctly rounded (the port's are; the 60-digit references decide).
+
+Every function in every `.tsv` must have a rule in `validate.py`: a new one fails until it gets one. Extend it
+as modules arrive. A check that recomputes a row independently is worth more than one that re-reads the
+oracle.

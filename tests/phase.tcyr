@@ -1,0 +1,481 @@
+# phase.tcyr — the tests of rust-old/src/phase.rs, ported one for one (each test_group is the Rust
+# test's name), plus Cyrius-only tests of ADR 0002 #4's Antoine Result, the ANTOINE_DATA handles and
+# out-of-u32 phase-rule counts. `lookup_antoine(..).unwrap()` is a non-zero handle, read with
+# antoine_data_coeffs. One Rust test changes with ADR 0002 #4: antoine_pole_and_non_finite_give_nan
+# asserts NaN where the port returns Err (each case is Err here, and "just above the pole" lies
+# outside water's fitted range, so it is Err too). The golden corpus separately checks every
+# function over its grid (tests/parity.tcyr).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/phase_data.cyr"
+include "src/phase.cyr"
+
+alloc_init();
+
+# 1 if |a - b| < eps.
+#must_use
+fn near(a: f64, b: f64, eps: f64): i64 {
+    var d: f64 = f64_abs(a - b);
+    if (d < eps) { return 1; }
+    return 0;
+}
+
+# 1 if the Result (t, v) is Err(code).
+#must_use
+fn is_err_code(t, v, code): i64 {
+    if (is_err_result(t) == 1 && v == code) { return 1; }
+    return 0;
+}
+
+# The built-in coefficients of `name` (a handle that must exist).
+#must_use
+fn coeffs_of(name): KmAntoineCoeffs {
+    var h = lookup_antoine(name);
+    assert(h != 0, "lookup");
+    var c = antoine_data_coeffs(h);
+    return c;
+}
+
+fn _t_raoult_basic() {
+    test_group("raoult_basic");
+    var t, v = raoult_pressure(0.8, 101325.0);
+    var p: f64 = v;
+    assert(is_ok(t) == 1 && near(p, 81060.0, 1.0), "0.8 x 101325");
+}
+
+fn _t_raoult_pure_component() {
+    test_group("raoult_pure_component");
+    var t, v = raoult_pressure(1.0, 101325.0);
+    var p: f64 = v;
+    assert(is_ok(t) == 1 && near(p, 101325.0, 0.0000000000000002220446049250313), "x = 1");
+}
+
+fn _t_raoult_invalid_fraction() {
+    test_group("raoult_invalid_fraction");
+    var t1, v1 = raoult_pressure(1.5, 101325.0);
+    assert_eq(is_err_result(t1), 1, "x = 1.5");
+    var t2, v2 = raoult_pressure(-0.1, 101325.0);
+    assert_eq(is_err_result(t2), 1, "x = -0.1");
+}
+
+fn _t_raoult_binary_total() {
+    test_group("raoult_binary_total");
+    # x_A=0.6, P°_A=100, P°_B=50 → P = 60 + 20 = 80
+    var t, v = raoult_total_binary(0.6, 100.0, 50.0);
+    var p: f64 = v;
+    assert(is_ok(t) == 1 && near(p, 80.0, 0.000000000001), "80");
+}
+
+fn _t_raoult_rejects_bad_pressures_and_nan() {
+    test_group("raoult_rejects_bad_pressures_and_nan");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var t1, v1 = raoult_pressure(0.5, nan);
+    assert_eq(is_err_result(t1), 1, "NaN P");
+    var t2, v2 = raoult_pressure(0.5, inf);
+    assert_eq(is_err_result(t2), 1, "inf P");
+    var t3, v3 = raoult_pressure(nan, 100.0);
+    assert_eq(is_err_result(t3), 1, "NaN x");
+    var t4, v4 = raoult_total_binary(0.5, -1.0, 50.0);
+    assert_eq(is_err_result(t4), 1, "negative P_A");
+    var t5, v5 = raoult_total_binary(0.5, 100.0, -1.0);
+    assert_eq(is_err_result(t5), 1, "negative P_B");
+    var t6, v6 = raoult_total_binary(0.5, nan, 50.0);
+    assert_eq(is_err_result(t6), 1, "NaN P_A");
+    var t7, v7 = raoult_total_binary(0.5, 100.0, inf);
+    assert_eq(is_err_result(t7), 1, "inf P_B");
+    var t8, v8 = raoult_total_binary(nan, 100.0, 50.0);
+    assert_eq(is_err_result(t8), 1, "NaN x_A");
+}
+
+fn _t_henry_basic() {
+    test_group("henry_basic");
+    # O₂ in water: K_H ≈ 4.3e9 Pa, at P_O2 = 21278 Pa → x ≈ 4.95e-6
+    var t, v = henry_solubility(21278.0, 4300000000.0);
+    var x: f64 = v;
+    assert(is_ok(t) == 1 && x > 0.000004 && x < 0.000006, "x ~ 4.95e-6");
+}
+
+fn _t_henry_roundtrip() {
+    test_group("henry_roundtrip");
+    var kh: f64 = 100000000.0;
+    var x: f64 = 0.001;
+    var t1, v1 = henry_pressure(kh, x);
+    var p: f64 = v1;
+    var t2, v2 = henry_solubility(p, kh);
+    var back: f64 = v2;
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && near(back, x, 0.000000000000001), "round trip");
+}
+
+fn _t_henry_rejects_invalid_inputs() {
+    test_group("henry_rejects_invalid_inputs");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    # Negative partial pressure, x > 1, NaN P and K_H used to pass.
+    var t1, v1 = henry_solubility(-1.0, 4300000000.0);
+    assert_eq(is_err_result(t1), 1, "negative P");
+    var t2, v2 = henry_solubility(nan, 4300000000.0);
+    assert_eq(is_err_result(t2), 1, "NaN P");
+    var t3, v3 = henry_solubility(21278.0, nan);
+    assert_eq(is_err_result(t3), 1, "NaN K_H");
+    var t4, v4 = henry_solubility(21278.0, inf);
+    assert_eq(is_err_result(t4), 1, "inf K_H");
+    var t5, v5 = henry_pressure(100000000.0, 1.5);
+    assert_eq(is_err_result(t5), 1, "x = 1.5");
+    var t6, v6 = henry_pressure(100000000.0, nan);
+    assert_eq(is_err_result(t6), 1, "NaN x");
+    var t7, v7 = henry_pressure(nan, 0.001);
+    assert_eq(is_err_result(t7), 1, "NaN K_H");
+    var t8, v8 = henry_pressure(100000000.0, 1.0);
+    assert_eq(is_ok(t8), 1, "x = 1 is Ok");
+    var t9, v9 = henry_solubility(0.0, 4300000000.0);
+    assert_eq(is_ok(t9), 1, "P = 0 is Ok");
+}
+
+fn _t_bp_elevation_water() {
+    test_group("bp_elevation_water");
+    # 1 molal NaCl (i=2) in water: ΔT = 0.512 × 1.0 × 2 = 1.024 K
+    var dt: f64 = boiling_point_elevation(KM_KB_WATER, 1.0, 2.0);
+    assert(near(dt, 1.024, 0.001), "1.024 K");
+}
+
+fn _t_fp_depression_water() {
+    test_group("fp_depression_water");
+    # 1 molal glucose (i=1): ΔT = 1.86 × 1.0 × 1 = 1.86 K
+    var dt: f64 = freezing_point_depression(KM_KF_WATER, 1.0, 1.0);
+    assert(near(dt, 1.86, 0.0000000000000002220446049250313), "1.86 K");
+}
+
+fn _t_osmotic_pressure_basic() {
+    test_group("osmotic_pressure_basic");
+    # π = 2 × 0.1 mol/L × 8314.462618 L·Pa/(mol·K) × 298.15 K = 495 791.4 Pa
+    var t, v = osmotic_pressure(2.0, 0.1, 298.15);
+    var pi: f64 = v;
+    assert(is_ok(t) == 1 && near(pi, 495791.406, 0.01), "495791.4 Pa");
+}
+
+fn _t_osmotic_pressure_zero_temp_is_error() {
+    test_group("osmotic_pressure_zero_temp_is_error");
+    var t, v = osmotic_pressure(1.0, 0.1, 0.0);
+    assert_eq(is_err_result(t), 1, "T = 0");
+}
+
+fn _t_osmotic_pressure_rejects_invalid_inputs() {
+    test_group("osmotic_pressure_rejects_invalid_inputs");
+    var nan: f64 = _km_nan();
+    var t1, v1 = osmotic_pressure(1.0, -0.1, 298.15);
+    assert_eq(is_err_result(t1), 1, "negative M");
+    var t2, v2 = osmotic_pressure(1.0, nan, 298.15);
+    assert_eq(is_err_result(t2), 1, "NaN M");
+    var t3, v3 = osmotic_pressure(1.0, 0.1, nan);
+    assert_eq(is_err_result(t3), 1, "NaN T");
+    var t4, v4 = osmotic_pressure(nan, 0.1, 298.15);
+    assert_eq(is_err_result(t4), 1, "NaN i");
+    var t5, v5 = osmotic_pressure(0.0, 0.1, 298.15);
+    assert_eq(is_err_result(t5), 1, "i = 0");
+    var t6, v6 = osmotic_pressure(1.0, 0.0, 298.15);
+    assert_eq(is_ok(t6), 1, "M = 0 is Ok");
+}
+
+fn _t_clausius_clapeyron_water() {
+    test_group("clausius_clapeyron_water");
+    # Water: P₁ = 101325 Pa at T₁ = 373.15 K, ΔH_vap = 40670 J/mol; at T₂ = 363.15 K (90°C):
+    # 101325 × exp(−(40670/R)(1/363.15 − 1/373.15)) = 70 623.6 Pa (measured: 70.1 kPa).
+    var t, v = clausius_clapeyron(101325.0, 373.15, 363.15, 40670.0);
+    var p2: f64 = v;
+    assert(is_ok(t) == 1 && near(p2, 70623.55, 0.1), "water at 90C should be ~70.6 kPa");
+}
+
+fn _t_clausius_clapeyron_rejects_nan() {
+    test_group("clausius_clapeyron_rejects_nan");
+    var nan: f64 = _km_nan();
+    var t1, v1 = clausius_clapeyron(nan, 373.15, 363.15, 40670.0);
+    assert_eq(is_err_result(t1), 1, "NaN P1");
+    var t2, v2 = clausius_clapeyron(101325.0, nan, 363.15, 40670.0);
+    assert_eq(is_err_result(t2), 1, "NaN T1");
+    var t3, v3 = clausius_clapeyron(101325.0, 373.15, nan, 40670.0);
+    assert_eq(is_err_result(t3), 1, "NaN T2");
+    var t4, v4 = clausius_clapeyron(101325.0, 373.15, 363.15, nan);
+    assert_eq(is_err_result(t4), 1, "NaN dH");
+}
+
+fn _t_clausius_clapeyron_same_temp() {
+    test_group("clausius_clapeyron_same_temp");
+    var t, v = clausius_clapeyron(101325.0, 373.15, 373.15, 40670.0);
+    var p2: f64 = v;
+    assert(is_ok(t) == 1 && near(p2, 101325.0, 1.0), "same T gives P1");
+}
+
+fn _t_clausius_clapeyron_zero_temp_is_error() {
+    test_group("clausius_clapeyron_zero_temp_is_error");
+    var t, v = clausius_clapeyron(101325.0, 0.0, 373.15, 40670.0);
+    assert_eq(is_err_result(t), 1, "T1 = 0");
+}
+
+fn _t_antoine_water_100c() {
+    test_group("antoine_water_100c");
+    var t, v = antoine_pressure_mmhg(coeffs_of("water"), 100.0);
+    var p: f64 = v;
+    # Water at 100°C ≈ 760 mmHg
+    assert(is_ok(t) == 1 && near(p, 760.0, 10.0), "water at 100C should be ~760 mmHg");
+}
+
+fn _t_antoine_water_pa() {
+    test_group("antoine_water_pa");
+    var t, v = antoine_pressure_pa(coeffs_of("water"), 100.0);
+    var p: f64 = v;
+    # 760.086 mmHg × 133.322 387 Pa/mmHg = 101 336.5 Pa
+    assert(is_ok(t) == 1 && near(p, 101336.53, 0.05), "water at 100C should be ~101.3 kPa");
+}
+
+fn _t_antoine_mmhg_to_pa_factor() {
+    test_group("antoine_mmhg_to_pa_factor");
+    # 1 mmHg = 133.322 387 415 Pa (was truncated to 133.322).
+    var c = coeffs_of("water");
+    var t1, v1 = antoine_pressure_pa(c, 50.0);
+    var t2, v2 = antoine_pressure_mmhg(c, 50.0);
+    var pa: f64 = v1;
+    var mm: f64 = v2;
+    var ratio: f64 = pa / mm;
+    assert(near(ratio, 133.322387415, 0.000000001), "133.322 387 415");
+}
+
+fn _t_antoine_pole_and_non_finite_give_nan() {
+    test_group("antoine_pole_and_non_finite_give_nan");
+    # ADR 0002 #4: each case Rust returns NaN for is Err in the port.
+    var c = coeffs_of("water");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var cc: f64 = c.c;
+    # T = −C is the pole; below it the formula is meaningless.
+    var t1, v1 = antoine_pressure_mmhg(c, -cc);
+    assert_eq(is_err_result(t1), 1, "the pole");
+    var t2, v2 = antoine_pressure_mmhg(c, -cc - 10.0);
+    assert_eq(is_err_result(t2), 1, "below the pole");
+    var t3, v3 = antoine_pressure_pa(c, -300.0);
+    assert_eq(is_err_result(t3), 1, "-300 C in Pa");
+    var t4, v4 = antoine_pressure_mmhg(c, nan);
+    assert_eq(is_err_result(t4), 1, "NaN T");
+    var t5, v5 = antoine_pressure_mmhg(c, inf);
+    assert_eq(is_err_result(t5), 1, "inf T");
+    var bad = KmAntoineCoeffs { a: nan, b: c.b, c: c.c, t_min_c: c.t_min_c, t_max_c: c.t_max_c };
+    var t6, v6 = antoine_pressure_mmhg(bad, 50.0);
+    assert_eq(is_err_result(t6), 1, "NaN A");
+    # Just above the pole (−C + 1 = −232.4 °C) Rust gives a finite, tiny value; it is outside
+    # water's 1–100 °C range, so the port returns Err.
+    var t7, v7 = antoine_pressure_mmhg(c, -cc + 1.0);
+    assert_eq(is_err_result(t7), 1, "just above the pole, out of range");
+}
+
+fn _t_antoine_methanol_matches_nist() {
+    test_group("antoine_methanol_matches_nist");
+    var c = coeffs_of("methanol");
+    var cc: f64 = c.c;
+    var lo: f64 = c.t_min_c;
+    var hi: f64 = c.t_max_c;
+    assert(near(cc, 239.726, 0.000000001), "C = 239.726");
+    assert(near(lo, 15.0, 0.000000001) && near(hi, 84.0, 0.000000001), "15–84 C");
+    # NIST WebBook (Ambrose & Sprake 1970): log10(P/bar) = 5.20409 − 1581.341/(T/K − 33.50)
+    # → 16 938.45 Pa at 25 °C.
+    var t1, v1 = antoine_pressure_pa(c, 25.0);
+    var p: f64 = v1;
+    assert(is_ok(t1) == 1 && near(p, 16938.45, 2.0), "16938 Pa at 25 C");
+    # Normal boiling point 64.7 °C → ~760 mmHg.
+    var t2, v2 = antoine_pressure_mmhg(c, 64.7);
+    var pbp: f64 = v2;
+    assert(is_ok(t2) == 1 && near(pbp, 760.0, 6.0), "760 mmHg at 64.7 C");
+}
+
+fn _t_antoine_data_ranges_are_ordered() {
+    test_group("antoine_data_ranges_are_ordered");
+    var h = 1;
+    while (h <= KM_ANTOINE_COUNT) {
+        var c = antoine_data_coeffs(h);
+        var lo: f64 = c.t_min_c;
+        var hi: f64 = c.t_max_c;
+        var cc: f64 = c.c;
+        assert(lo < hi, antoine_data_name(h));
+        assert((cc + lo) > 0.0, "pole inside range");
+        h = h + 1;
+    }
+}
+
+fn _t_antoine_ethanol_78c() {
+    test_group("antoine_ethanol_78c");
+    var t, v = antoine_pressure_mmhg(coeffs_of("ethanol"), 78.4);
+    var p: f64 = v;
+    # Ethanol boils at 78.4°C → ~760 mmHg
+    assert(is_ok(t) == 1 && near(p, 760.0, 30.0), "ethanol at bp should be ~760 mmHg");
+}
+
+fn _t_antoine_lookup_nonexistent() {
+    test_group("antoine_lookup_nonexistent");
+    assert_eq(lookup_antoine("unobtainium"), 0, "None");
+}
+
+fn _t_phase_rule_water_triple_point() {
+    test_group("phase_rule_water_triple_point");
+    # C=1, P=3 → F = 0 (invariant)
+    var t, v = phase_rule(1, 3);
+    assert(is_ok(t) == 1 && v == 0, "F = 0");
+}
+
+fn _t_phase_rule_water_liquid_vapor() {
+    test_group("phase_rule_water_liquid_vapor");
+    var t, v = phase_rule(1, 2);
+    assert(is_ok(t) == 1 && v == 1, "F = 1");
+}
+
+fn _t_phase_rule_single_phase() {
+    test_group("phase_rule_single_phase");
+    var t, v = phase_rule(1, 1);
+    assert(is_ok(t) == 1 && v == 2, "F = 2");
+}
+
+fn _t_phase_rule_too_many_phases() {
+    test_group("phase_rule_too_many_phases");
+    var t, v = phase_rule(1, 4);
+    assert_eq(is_err_result(t), 1, "C=1, P=4");
+}
+
+fn _t_phase_rule_rejects_zero_phases() {
+    test_group("phase_rule_rejects_zero_phases");
+    var t1, v1 = phase_rule(2, 0);
+    assert_eq(is_err_result(t1), 1, "P = 0");
+    # Used to overflow i32 (panic in debug builds).
+    var t2, v2 = phase_rule(0x7FFFFFFF, 0);
+    assert_eq(is_err_result(t2), 1, "i32::MAX, P = 0");
+}
+
+fn _t_phase_rule_large_counts() {
+    test_group("phase_rule_large_counts");
+    # `as i32` used to wrap: u32::MAX → −1 gave Ok(0) here.
+    var t1, v1 = phase_rule(0xFFFFFFFF, 1);
+    assert_eq(is_err_result(t1), 1, "u32::MAX, 1: F > u32::MAX");
+    var t2, v2 = phase_rule(0xFFFFFFFF, 2);
+    assert(is_ok(t2) == 1 && v2 == 0xFFFFFFFF, "u32::MAX, 2");
+    var t3, v3 = phase_rule(0xFFFFFFFF, 0xFFFFFFFF);
+    assert(is_ok(t3) == 1 && v3 == 2, "u32::MAX, u32::MAX");
+    var t4, v4 = phase_rule(3000000000, 1);
+    assert(is_ok(t4) == 1 && v4 == 3000000001, "3e9, 1");
+    var t5, v5 = phase_rule(0, 0xFFFFFFFF);
+    assert_eq(is_err_result(t5), 1, "0, u32::MAX");
+}
+
+# Cyrius-only, ADR 0002 #4: the range ends are inclusive and one ulp outside is
+# Err(INVALID_TEMPERATURE); a non-finite coefficient or range end is Err(INVALID_INPUT); a custom set
+# whose pole lies inside its range is Err(INVALID_TEMPERATURE) at and below the pole and Ok above
+# it; a value past f64 is Ok(+inf), as Rust returns (no built-in set comes near).
+fn _t_cyrius_antoine_result() {
+    test_group("cyrius_antoine_result");
+    var c = coeffs_of("water");
+    var lo: f64 = c.t_min_c;
+    var hi: f64 = c.t_max_c;
+    var t1, v1 = antoine_pressure_mmhg(c, lo);
+    assert_eq(is_ok(t1), 1, "t_min is in range");
+    var t2, v2 = antoine_pressure_mmhg(c, hi);
+    assert_eq(is_ok(t2), 1, "t_max is in range");
+    var below: f64 = 0.9999999999999999;   # one ulp below t_min = 1
+    var t3, v3 = antoine_pressure_mmhg(c, below);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_TEMPERATURE), "one ulp below t_min");
+    var above: f64 = 100.00000000000001;   # one ulp above t_max = 100
+    var t4, v4 = antoine_pressure_pa(c, above);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_TEMPERATURE), "one ulp above t_max");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var t5, v5 = antoine_pressure_mmhg(c, nan);
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_TEMPERATURE), "NaN T is InvalidTemperature");
+    var open = KmAntoineCoeffs { a: c.a, b: c.b, c: c.c, t_min_c: lo, t_max_c: inf };
+    var t6, v6 = antoine_pressure_mmhg(open, 50.0);
+    assert(is_err_code(t6, v6, KM_ERR_INVALID_INPUT), "an infinite range end is InvalidInput");
+    var nb = KmAntoineCoeffs { a: c.a, b: nan, c: c.c, t_min_c: lo, t_max_c: hi };
+    var t7, v7 = antoine_pressure_pa(nb, 50.0);
+    assert(is_err_code(t7, v7, KM_ERR_INVALID_INPUT), "NaN B is InvalidInput");
+    var pole = KmAntoineCoeffs { a: c.a, b: c.b, c: -10.0, t_min_c: 0.0, t_max_c: 100.0 };
+    var t8, v8 = antoine_pressure_mmhg(pole, 10.0);
+    assert(is_err_code(t8, v8, KM_ERR_INVALID_TEMPERATURE), "at the pole inside the range");
+    var t9, v9 = antoine_pressure_mmhg(pole, 5.0);
+    assert(is_err_code(t9, v9, KM_ERR_INVALID_TEMPERATURE), "below the pole inside the range");
+    var t10, v10 = antoine_pressure_mmhg(pole, 50.0);
+    assert_eq(is_ok(t10), 1, "above the pole inside the range");
+    var huge = KmAntoineCoeffs { a: 400.0, b: c.b, c: c.c, t_min_c: lo, t_max_c: hi };
+    var t11, v11 = antoine_pressure_mmhg(huge, 50.0);
+    assert(is_ok(t11) == 1 && v11 == 0x7FF0000000000000, "10^400 overflows to Ok(+inf)");
+    var unit = KmAntoineCoeffs { a: 0.0, b: 0.0, c: 1.0, t_min_c: 0.0, t_max_c: 0.0 };
+    var t12, v12 = antoine_pressure_pa(unit, 0.0);
+    var pa: f64 = v12;
+    var f: f64 = _KM_PA_PER_MMHG;
+    assert_eq(is_ok(t12), 1, "the unit set at T = 0 is Ok");
+    assert_bits_eq(pa, f, "10^0 x the factor is the factor, exactly");
+}
+
+# Cyrius-only: ANTOINE_DATA handles run 1 .. KM_ANTOINE_COUNT; 0 and past the end are no handle
+# ("" and every field NaN, which antoine_pressure_* reject); lookup is exact and case-sensitive;
+# phase_rule refuses counts outside Rust's u32 instead of wrapping them.
+fn _t_cyrius_handles_and_counts() {
+    test_group("cyrius_handles_and_counts");
+    assert_eq(KM_ANTOINE_COUNT, 8, "8 sets");
+    assert_eq(lookup_antoine("water"), 1, "water is row 0");
+    assert_eq(lookup_antoine("chloroform"), 8, "chloroform is row 7");
+    assert_eq(lookup_antoine("Water"), 0, "case-sensitive");
+    assert_eq(lookup_antoine(""), 0, "empty name");
+    assert_eq(lookup_antoine(0), 0, "null name");
+    assert(streq(antoine_data_name(7), "diethyl_ether") == 1, "row 6 name");
+    assert(streq(antoine_data_name(0), "") == 1, "handle 0 has no name");
+    assert(streq(antoine_data_name(9), "") == 1, "handle 9 has no name");
+    var none = antoine_data_coeffs(9);
+    var na: f64 = none.a;
+    assert_eq(ulp_is_nan(na), 1, "handle 9: NaN fields");
+    var t1, v1 = antoine_pressure_mmhg(none, 50.0);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT), "handle 9: Err");
+    var t2, v2 = phase_rule(0 - 1, 1);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT), "components = -1");
+    var t3, v3 = phase_rule(1, 0x100000001);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT), "phases = 2^32 + 1 (not 1)");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_raoult_basic();
+    _t_raoult_pure_component();
+    _t_raoult_invalid_fraction();
+    _t_raoult_binary_total();
+    _t_raoult_rejects_bad_pressures_and_nan();
+    _t_henry_basic();
+    _t_henry_roundtrip();
+    _t_henry_rejects_invalid_inputs();
+    _t_bp_elevation_water();
+    _t_fp_depression_water();
+    _t_osmotic_pressure_basic();
+    _t_osmotic_pressure_zero_temp_is_error();
+    _t_osmotic_pressure_rejects_invalid_inputs();
+    _t_clausius_clapeyron_water();
+    _t_clausius_clapeyron_rejects_nan();
+    _t_clausius_clapeyron_same_temp();
+    _t_clausius_clapeyron_zero_temp_is_error();
+    _t_antoine_water_100c();
+    _t_antoine_water_pa();
+    _t_antoine_mmhg_to_pa_factor();
+    _t_antoine_pole_and_non_finite_give_nan();
+    _t_antoine_methanol_matches_nist();
+    _t_antoine_data_ranges_are_ordered();
+    _t_antoine_ethanol_78c();
+    _t_antoine_lookup_nonexistent();
+    _t_phase_rule_water_triple_point();
+    _t_phase_rule_water_liquid_vapor();
+    _t_phase_rule_single_phase();
+    _t_phase_rule_too_many_phases();
+    _t_phase_rule_rejects_zero_phases();
+    _t_phase_rule_large_counts();
+    _t_cyrius_antoine_result();
+    _t_cyrius_handles_and_counts();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

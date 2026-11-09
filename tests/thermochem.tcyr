@@ -1,0 +1,1331 @@
+# thermochem.tcyr — the tests of rust-old/src/thermochem.rs, ported one for one (each test_group is the
+# Rust test's name; all 62), plus Cyrius-only tests of the species-list convention, the handles, ADR 0002
+# #1's J/mol and the transcribed flame solver. `lookup_*(..).unwrap()` is a non-zero handle, read with the
+# thermochem_data_* accessors or shomate_data_coeffs. A species list is n 16-byte records (formula C
+# string, f64) built with sp1 / sp2 / sp3.
+#
+# Adapted for ADR 0002 #1 (reaction_enthalpy / reaction_gibbs_energy return J/mol, Rust's kJ × 1000):
+# combustion_of_methane_enthalpy, combustion_of_methane_gibbs, haber_process_enthalpy and
+# added_standard_state_elements assert Rust's kJ/mol values × 1000 with Rust's tolerance × 1000. No other
+# test changes: the Rust tests already pass J/mol to vant_hoff_k and adiabatic_flame_temperature, and the
+# table fields stay kJ/mol. The golden corpus separately checks every function over its grid
+# (tests/parity.tcyr).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/thermo.cyr"
+include "src/thermochem_data.cyr"
+include "src/thermochem.cyr"
+
+alloc_init();
+
+# 1 if |a - b| < eps.
+#must_use
+fn near(a: f64, b: f64, eps: f64): i64 {
+    var d: f64 = f64_abs(a - b);
+    if (d < eps) { return 1; }
+    return 0;
+}
+
+# 1 if the Result (t, v) is Err(code).
+#must_use
+fn is_err_code(t, v, code): i64 {
+    if (is_err_result(t) == 1 && v == code) { return 1; }
+    return 0;
+}
+
+# f64::EPSILON.
+#must_use
+fn eps64(): f64 {
+    var e: f64 = 0.0000000000000002220446049250313;
+    return e;
+}
+
+# A species list of one (formula, coefficient) record.
+#must_use
+fn sp1(f1, c1: f64): i64 {
+    var b = alloc(16);
+    store64(b, f1);
+    store64(b + 8, c1);
+    return b;
+}
+
+# A species list of two (formula, coefficient) records.
+#must_use
+fn sp2(f1, c1: f64, f2, c2: f64): i64 {
+    var b = alloc(32);
+    store64(b, f1);
+    store64(b + 8, c1);
+    store64(b + 16, f2);
+    store64(b + 24, c2);
+    return b;
+}
+
+# A species list of three (formula, coefficient) records.
+#must_use
+fn sp3(f1, c1: f64, f2, c2: f64, f3, c3: f64): i64 {
+    var b = alloc(48);
+    store64(b, f1);
+    store64(b + 8, c1);
+    store64(b + 16, f2);
+    store64(b + 24, c2);
+    store64(b + 32, f3);
+    store64(b + 40, c3);
+    return b;
+}
+
+# The coefficients of a formula's first Shomate segment (it must have one).
+#must_use
+fn shomate_of(formula): KmShomate {
+    var h = lookup_shomate(formula);
+    assert(h != 0, "lookup_shomate");
+    var s = shomate_data_coeffs(h);
+    return s;
+}
+
+# Segment-aware Cp, J/(mol·K) (the Rust tests' cp_at): lookup_shomate_at, then its cp.
+#must_use
+fn cp_at(formula, t: f64): f64 {
+    var h = lookup_shomate_at(formula, t);
+    assert(h != 0, "no segment at T");
+    var s = shomate_data_coeffs(h);
+    var cp: f64 = s.cp(t);
+    return cp;
+}
+
+# ΔH_f° of a formula that must be in the table.
+#must_use
+fn hf_of(formula): f64 {
+    var h = lookup_thermochem(formula);
+    assert(h != 0, "lookup_thermochem");
+    var x: f64 = thermochem_data_delta_hf_kj(h);
+    return x;
+}
+
+# S° of a formula that must be in the table.
+#must_use
+fn s_of(formula): f64 {
+    var h = lookup_thermochem(formula);
+    assert(h != 0, "lookup_thermochem");
+    var x: f64 = thermochem_data_s_standard_j(h);
+    return x;
+}
+
+# ── data lookup ─────────────────────────────────────────────────────────────────────
+
+fn _t_lookup_water_liquid() {
+    test_group("lookup_water_liquid");
+    var d = lookup_thermochem("H2O(l)");
+    assert(d != 0, "found");
+    var hf: f64 = thermochem_data_delta_hf_kj(d);
+    var gf: f64 = thermochem_data_delta_gf_kj(d);
+    var s0: f64 = thermochem_data_s_standard_j(d);
+    assert(near(hf, -285.83, 0.01), "dHf");
+    assert(near(gf, -237.13, 0.01), "dGf");
+    assert(near(s0, 69.91, 0.01), "S");
+}
+
+fn _t_lookup_co2() {
+    test_group("lookup_co2");
+    var hf: f64 = hf_of("CO2(g)");
+    assert(near(hf, -393.51, 0.01), "dHf");
+}
+
+fn _t_lookup_nonexistent() {
+    test_group("lookup_nonexistent");
+    assert_eq(lookup_thermochem("XeF6(g)"), 0, "XeF6(g) is none");
+}
+
+# One element of elements_have_zero_formation.
+fn _zero_formation(formula) {
+    var d = lookup_thermochem(formula);
+    assert(d != 0, formula);
+    var hf: f64 = thermochem_data_delta_hf_kj(d);
+    var gf: f64 = thermochem_data_delta_gf_kj(d);
+    var ahf: f64 = f64_abs(hf);
+    var agf: f64 = f64_abs(gf);
+    var e: f64 = eps64();
+    assert(ahf < e, "dHf = 0");
+    assert(agf < e, "dGf = 0");
+    return 0;
+}
+
+fn _t_elements_have_zero_formation() {
+    test_group("elements_have_zero_formation");
+    _zero_formation("H2(g)");
+    _zero_formation("O2(g)");
+    _zero_formation("N2(g)");
+    _zero_formation("C(graphite)");
+    _zero_formation("Fe(s)");
+}
+
+fn _t_entropy_always_positive() {
+    test_group("entropy_always_positive");
+    var h = 1;
+    while (h <= KM_THERMOCHEM_COUNT) {
+        var s0: f64 = thermochem_data_s_standard_j(h);
+        assert(s0 > 0.0, thermochem_data_formula(h));
+        h = h + 1;
+    }
+}
+
+# ── reaction calculations ───────────────────────────────────────────────────────────
+
+# ADR 0002 #1: Rust's −890.36 kJ/mol ± 0.1 is −890 360 J/mol ± 100.
+fn _t_combustion_of_methane_enthalpy() {
+    test_group("combustion_of_methane_enthalpy");
+    # CH₄(g) + 2O₂(g) → CO₂(g) + 2H₂O(l): ΔH° = [−393.51 + 2(−285.83)] − [−74.81 + 0] = −890.36 kJ/mol
+    var p = sp2("CO2(g)", 1.0, "H2O(l)", 2.0);
+    var r = sp2("CH4(g)", 1.0, "O2(g)", 2.0);
+    var t, v = reaction_enthalpy(p, 2, r, 2);
+    var dh: f64 = v;
+    assert(is_ok(t) == 1 && near(dh, -890360.0, 100.0), "CH4 combustion ~ -890 kJ/mol, in J/mol");
+}
+
+# ADR 0002 #1: Rust's −817.90 kJ/mol ± 0.1 is −817 900 J/mol ± 100.
+fn _t_combustion_of_methane_gibbs() {
+    test_group("combustion_of_methane_gibbs");
+    var p = sp2("CO2(g)", 1.0, "H2O(l)", 2.0);
+    var r = sp2("CH4(g)", 1.0, "O2(g)", 2.0);
+    var t, v = reaction_gibbs_energy(p, 2, r, 2);
+    var dg: f64 = v;
+    assert(is_ok(t) == 1 && near(dg, -817900.0, 100.0), "CH4 combustion dG ~ -818 kJ/mol, in J/mol");
+}
+
+fn _t_combustion_of_methane_entropy() {
+    test_group("combustion_of_methane_entropy");
+    # ΔS° = [213.79 + 2(69.91)] − [186.26 + 2(205.15)] = −242.95 J/(mol·K)
+    var p = sp2("CO2(g)", 1.0, "H2O(l)", 2.0);
+    var r = sp2("CH4(g)", 1.0, "O2(g)", 2.0);
+    var t, v = reaction_entropy(p, 2, r, 2);
+    var ds: f64 = v;
+    assert(is_ok(t) == 1 && near(ds, -242.95, 0.1), "CH4 combustion dS ~ -243 J/(mol K)");
+}
+
+fn _t_reaction_unknown_formula_is_error() {
+    test_group("reaction_unknown_formula_is_error");
+    var t, v = reaction_enthalpy(sp1("XeF6(g)", 1.0), 1, sp1("H2(g)", 1.0), 1);
+    assert_eq(is_err_result(t), 1, "XeF6(g)");
+}
+
+# ADR 0002 #1: Rust's −92.22 kJ/mol ± 0.1 is −92 220 J/mol ± 100.
+fn _t_haber_process_enthalpy() {
+    test_group("haber_process_enthalpy");
+    # N₂(g) + 3H₂(g) → 2NH₃(g): ΔH° = 2(−46.11) − 0 = −92.22 kJ/mol
+    var t, v = reaction_enthalpy(sp1("NH3(g)", 2.0), 1, sp2("N2(g)", 1.0, "H2(g)", 3.0), 2);
+    var dh: f64 = v;
+    assert(is_ok(t) == 1 && near(dh, -92220.0, 100.0), "Haber ~ -92 kJ/mol, in J/mol");
+}
+
+fn _t_gibbs_enthalpy_entropy_consistency() {
+    test_group("gibbs_enthalpy_entropy_consistency");
+    # ΔG_f° ≈ ΔH_f° − T·ΔS_f°; water: TΔS_f° = −285.83 − (−237.13) = −48.70 kJ,
+    # ΔS_f° = −48700 / 298.15 = −163.3 J/(mol·K) = S°(H2O) − S°(H2) − 0.5·S°(O2)
+    var d = lookup_thermochem("H2O(l)");
+    var t: f64 = 298.15;
+    var hf: f64 = thermochem_data_delta_hf_kj(d);
+    var gf: f64 = thermochem_data_delta_gf_kj(d);
+    var t_delta_s: f64 = hf - gf;
+    var delta_s_f: f64 = (t_delta_s * 1000.0) / t;
+    var s_h2: f64 = s_of("H2(g)");
+    var s_o2: f64 = s_of("O2(g)");
+    var s0: f64 = thermochem_data_s_standard_j(d);
+    var delta_s_calc: f64 = (s0 - s_h2) - (0.5 * s_o2);
+    assert(near(delta_s_f, delta_s_calc, 0.5), "dS_f from dG/dH matches the element entropies");
+}
+
+# ── van 't Hoff ─────────────────────────────────────────────────────────────────────
+
+fn _t_vant_hoff_same_temperature() {
+    test_group("vant_hoff_same_temperature");
+    var t, v = vant_hoff_k(1.0, -50000.0, 298.15, 298.15);
+    var k2: f64 = v;
+    assert(is_ok(t) == 1 && near(k2, 1.0, 0.0000000001), "same temperature, same K");
+}
+
+fn _t_vant_hoff_exothermic_higher_temp_decreases_k() {
+    test_group("vant_hoff_exothermic_higher_temp_decreases_k");
+    var t, v = vant_hoff_k(100.0, -50000.0, 298.15, 400.0);
+    var k2: f64 = v;
+    assert(is_ok(t) == 1 && k2 < 100.0, "exothermic: higher T lowers K");
+}
+
+fn _t_vant_hoff_endothermic_higher_temp_increases_k() {
+    test_group("vant_hoff_endothermic_higher_temp_increases_k");
+    var t, v = vant_hoff_k(0.01, 50000.0, 298.15, 400.0);
+    var k2: f64 = v;
+    assert(is_ok(t) == 1 && k2 > 0.01, "endothermic: higher T raises K");
+}
+
+fn _t_vant_hoff_zero_temp_is_error() {
+    test_group("vant_hoff_zero_temp_is_error");
+    var t1, v1 = vant_hoff_k(1.0, -50000.0, 0.0, 300.0);
+    assert_eq(is_err_result(t1), 1, "T_ref = 0");
+    var t2, v2 = vant_hoff_k(1.0, -50000.0, 300.0, 0.0);
+    assert_eq(is_err_result(t2), 1, "T_new = 0");
+}
+
+fn _t_vant_hoff_zero_k_is_error() {
+    test_group("vant_hoff_zero_k_is_error");
+    var t, v = vant_hoff_k(0.0, -50000.0, 298.15, 400.0);
+    assert_eq(is_err_result(t), 1, "K_ref = 0");
+}
+
+# ── audit-driven ────────────────────────────────────────────────────────────────────
+
+fn _t_empty_reaction_returns_zero() {
+    test_group("empty_reaction_returns_zero");
+    var t, v = reaction_enthalpy(0, 0, 0, 0);
+    var dh: f64 = v;
+    var a: f64 = f64_abs(dh);
+    var e: f64 = eps64();
+    assert(is_ok(t) == 1 && a < e, "empty reaction is 0");
+}
+
+fn _t_vant_hoff_extreme_enthalpy_doesnt_panic() {
+    test_group("vant_hoff_extreme_enthalpy_doesnt_panic");
+    # A very large ΔH overflows to +∞: Ok, never NaN.
+    var t, v = vant_hoff_k(1.0, 100000000.0, 298.15, 1000.0);
+    var k: f64 = v;
+    assert_eq(is_ok(t), 1, "Ok");
+    assert(k == k, "not NaN");
+}
+
+fn _t_thermodynamic_consistency_co2() {
+    test_group("thermodynamic_consistency_co2");
+    # C(graphite) + O2(g) → CO2(g): ΔG ≈ ΔH − TΔS
+    var d = lookup_thermochem("CO2(g)");
+    var s_c: f64 = s_of("C(graphite)");
+    var s_o2: f64 = s_of("O2(g)");
+    var s0: f64 = thermochem_data_s_standard_j(d);
+    var delta_s: f64 = (s0 - s_c) - s_o2;
+    var hf: f64 = thermochem_data_delta_hf_kj(d);
+    var gf: f64 = thermochem_data_delta_gf_kj(d);
+    var dg_calc: f64 = hf - ((298.15 * delta_s) / 1000.0);
+    assert(near(dg_calc, gf, 1.0), "CO2: dG_calc matches the table");
+}
+
+fn _t_unique_formulas() {
+    test_group("unique_formulas");
+    var i = 1;
+    var dup = 0;
+    while (i <= KM_THERMOCHEM_COUNT) {
+        var j = i + 1;
+        while (j <= KM_THERMOCHEM_COUNT) {
+            if (streq(thermochem_data_formula(i), thermochem_data_formula(j)) == 1) { dup = dup + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(dup, 0, "no duplicate formula");
+}
+
+fn _t_water_vaporization_enthalpy() {
+    test_group("water_vaporization_enthalpy");
+    # ΔH_vap = ΔH_f°(H2O, g) − ΔH_f°(H2O, l) ≈ 44.01 kJ/mol at 25 °C
+    var g: f64 = hf_of("H2O(g)");
+    var l: f64 = hf_of("H2O(l)");
+    var dh_vap: f64 = g - l;
+    assert(near(dh_vap, 44.01, 0.1), "water vaporization ~ 44 kJ/mol");
+}
+
+fn _t_gases_have_higher_entropy_than_solids() {
+    test_group("gases_have_higher_entropy_than_solids");
+    var g: f64 = s_of("H2O(g)");
+    var l: f64 = s_of("H2O(l)");
+    assert(g > l, "S(H2O, g) > S(H2O, l)");
+}
+
+# ── Shomate / Cp(T) ─────────────────────────────────────────────────────────────────
+
+fn _t_shomate_co2_cp_at_298() {
+    test_group("shomate_co2_cp_at_298");
+    var s = shomate_of("CO2(g)");
+    var cp: f64 = s.cp(298.15);
+    assert(near(cp, 37.12, 0.1), "CO2 Cp(298.15) ~ 37.12 (NIST)");
+}
+
+fn _t_shomate_n2_cp_at_298() {
+    test_group("shomate_n2_cp_at_298");
+    var s = shomate_of("N2(g)");
+    var cp: f64 = s.cp(298.15);
+    assert(near(cp, 29.12, 0.1), "N2 Cp(298.15) ~ 29.12 (NIST)");
+}
+
+fn _t_shomate_cp_increases_with_temperature() {
+    test_group("shomate_cp_increases_with_temperature");
+    var s = shomate_of("CO2(g)");
+    var cp_300: f64 = s.cp(300.0);
+    var cp_1000: f64 = s.cp(1000.0);
+    assert(cp_1000 > cp_300, "CO2 Cp rises with T");
+}
+
+fn _t_enthalpy_change_co2_heating() {
+    test_group("enthalpy_change_co2_heating");
+    var t, v = enthalpy_change_cp("CO2(g)", 300.0, 600.0);
+    var dh: f64 = v;
+    assert(is_ok(t) == 1 && dh > 10000.0 && dh < 15000.0, "CO2 300 -> 600 K ~ 11-13 kJ/mol");
+}
+
+fn _t_enthalpy_change_zero_range() {
+    test_group("enthalpy_change_zero_range");
+    var t, v = enthalpy_change_cp("CO2(g)", 500.0, 500.0);
+    var dh: f64 = v;
+    var a: f64 = f64_abs(dh);
+    assert(is_ok(t) == 1 && a < 0.01, "same T gives 0");
+}
+
+fn _t_enthalpy_change_cooling_is_negative() {
+    test_group("enthalpy_change_cooling_is_negative");
+    var t, v = enthalpy_change_cp("N2(g)", 600.0, 300.0);
+    var dh: f64 = v;
+    assert(is_ok(t) == 1 && dh < 0.0, "cooling is negative");
+}
+
+fn _t_enthalpy_change_unknown_formula_is_error() {
+    test_group("enthalpy_change_unknown_formula_is_error");
+    var t, v = enthalpy_change_cp("XeF6(g)", 300.0, 600.0);
+    assert_eq(is_err_result(t), 1, "XeF6(g)");
+}
+
+fn _t_enthalpy_change_zero_temp_is_error() {
+    test_group("enthalpy_change_zero_temp_is_error");
+    var t, v = enthalpy_change_cp("CO2(g)", 0.0, 600.0);
+    assert_eq(is_err_result(t), 1, "T1 = 0");
+}
+
+fn _t_shomate_lookup_nonexistent() {
+    test_group("shomate_lookup_nonexistent");
+    assert_eq(lookup_shomate("XeF6(g)"), 0, "XeF6(g) is none");
+}
+
+fn _t_shomate_cp_positive_in_valid_range() {
+    test_group("shomate_cp_positive_in_valid_range");
+    var h = 1;
+    var bad = 0;
+    while (h <= KM_SHOMATE_COUNT) {
+        var s = shomate_data_coeffs(h);
+        var lo: f64 = s.t_min;
+        var hi: f64 = s.t_max;
+        var mid: f64 = (lo + hi) / 2.0;
+        var c1: f64 = s.cp(lo);
+        var c2: f64 = s.cp(mid);
+        var c3: f64 = s.cp(hi);
+        if (c1 > 0.0 && c2 > 0.0 && c3 > 0.0) { } else { bad = bad + 1; }
+        h = h + 1;
+    }
+    assert_eq(bad, 0, "Cp > 0 at t_min, the midpoint and t_max of every segment");
+}
+
+fn _t_enthalpy_change_cp_n2_matches_constant_cp_approx() {
+    test_group("enthalpy_change_cp_n2_matches_constant_cp_approx");
+    # N2's nearly constant Cp ≈ 29.1: 300 → 600 K ≈ 8730 J/mol
+    var t, v = enthalpy_change_cp("N2(g)", 300.0, 600.0);
+    var dh: f64 = v;
+    assert(is_ok(t) == 1 && near(dh, 8730.0, 500.0), "N2 300 -> 600 K ~ 8730 J/mol");
+}
+
+fn _t_all_shomate_data_has_valid_range() {
+    test_group("all_shomate_data_has_valid_range");
+    var h = 1;
+    var bad = 0;
+    while (h <= KM_SHOMATE_COUNT) {
+        var s = shomate_data_coeffs(h);
+        var lo: f64 = s.t_min;
+        var hi: f64 = s.t_max;
+        if (lo < hi && lo > 0.0) { } else { bad = bad + 1; }
+        h = h + 1;
+    }
+    assert_eq(bad, 0, "0 < t_min < t_max");
+}
+
+fn _t_expanded_shomate_h2_cp_at_298() {
+    test_group("expanded_shomate_h2_cp_at_298");
+    var s = shomate_of("H2(g)");
+    var cp: f64 = s.cp(298.15);
+    assert(near(cp, 28.84, 0.1), "H2 Cp(298.15) ~ 28.84 (NIST)");
+}
+
+fn _t_shomate_data_count() {
+    test_group("shomate_data_count");
+    # 24 species; N2 and O2 have 3 segments, CO2 and H2O 2 (and H2 3, CH4 and CO 2).
+    assert_eq(KM_SHOMATE_COUNT, 34, "34 Shomate entries");
+}
+
+# ── adiabatic flame temperature ─────────────────────────────────────────────────────
+
+fn _t_adiabatic_flame_h2_air() {
+    test_group("adiabatic_flame_h2_air");
+    # H₂ + ½O₂ + 1.88 N₂ → H₂O(g) + 1.88 N₂; ΔH = −241 820 J/mol; literature ≈ 2520 K, this data 2524.7 K
+    var p = sp2("H2O(g)", 1.0, "N2(g)", 1.88);
+    var t, v = adiabatic_flame_temperature(-241820.0, p, 2, 298.15);
+    var tf: f64 = v;
+    assert_eq(is_ok(t), 1, "Ok");
+    assert(near(tf, 2520.0, 30.0), "H2/air vs literature");
+    assert(near(tf, 2524.7, 10.0), "H2/air flame");
+}
+
+fn _t_adiabatic_flame_ch4_air() {
+    test_group("adiabatic_flame_ch4_air");
+    # CH₄ + 2O₂ → CO₂ + 2H₂O(g) with 7.52 N₂; ΔH = −802 300 J/mol; literature ≈ 2325 K, this data 2327.2 K
+    var p = sp3("CO2(g)", 1.0, "H2O(g)", 2.0, "N2(g)", 7.52);
+    var t, v = adiabatic_flame_temperature(-802300.0, p, 3, 298.15);
+    var tf: f64 = v;
+    assert_eq(is_ok(t), 1, "Ok");
+    assert(near(tf, 2325.0, 30.0), "CH4/air vs literature");
+    assert(near(tf, 2327.2, 10.0), "CH4/air flame");
+}
+
+fn _t_adiabatic_flame_unknown_product_is_error() {
+    test_group("adiabatic_flame_unknown_product_is_error");
+    var t, v = adiabatic_flame_temperature(-100000.0, sp1("XeF6(g)", 1.0), 1, 298.15);
+    assert_eq(is_err_result(t), 1, "XeF6(g)");
+}
+
+fn _t_adiabatic_flame_zero_temp_is_error() {
+    test_group("adiabatic_flame_zero_temp_is_error");
+    var t, v = adiabatic_flame_temperature(-100000.0, sp1("CO2(g)", 1.0), 1, 0.0);
+    assert_eq(is_err_result(t), 1, "T0 = 0");
+}
+
+# ── multi-segment Shomate data ──────────────────────────────────────────────────────
+
+# One case of cp_matches_reference_at_298_1000_2000 / high_temperature_segments_match_janaf.
+fn _cp_case(formula, t: f64, expected: f64) {
+    var cp: f64 = cp_at(formula, t);
+    assert(near(cp, expected, 0.1), formula);
+    return 0;
+}
+
+fn _t_cp_matches_reference_at_298_1000_2000() {
+    test_group("cp_matches_reference_at_298_1000_2000");
+    # JANAF / NIST WebBook Cp, J/(mol·K).
+    _cp_case("N2(g)", 298.15, 29.12);
+    _cp_case("N2(g)", 1000.0, 32.70);
+    _cp_case("N2(g)", 2000.0, 35.97);
+    _cp_case("O2(g)", 298.15, 29.38);
+    _cp_case("O2(g)", 1000.0, 34.87);
+    _cp_case("O2(g)", 2000.0, 37.78);
+    _cp_case("CO2(g)", 298.15, 37.12);
+    _cp_case("CO2(g)", 1000.0, 54.31);
+    _cp_case("CO2(g)", 2000.0, 60.35);
+    _cp_case("H2O(g)", 298.15, 33.59);
+    _cp_case("H2O(g)", 1000.0, 41.27);
+    _cp_case("H2O(g)", 2000.0, 51.18);
+}
+
+fn _t_shomate_segments_are_adjacent_ordered_and_contiguous() {
+    test_group("shomate_segments_are_adjacent_ordered_and_contiguous");
+    var i = 0;
+    var bad = 0;
+    while (i < KM_SHOMATE_COUNT) {
+        var fo = shomate_data_formula(i + 1);
+        # All segments of a formula form one adjacent run.
+        var first = 0;
+        while (streq(shomate_data_formula(first + 1), fo) != 1) { first = first + 1; }
+        var run = 0;
+        while (first + run < KM_SHOMATE_COUNT && streq(shomate_data_formula(first + run + 1), fo) == 1) {
+            run = run + 1;
+        }
+        if (i >= first + run) { bad = bad + 1; }
+        if (i + 1 < KM_SHOMATE_COUNT && streq(shomate_data_formula(i + 2), fo) == 1) {
+            var s = shomate_data_coeffs(i + 1);
+            var next = shomate_data_coeffs(i + 2);
+            var hi: f64 = s.t_max;
+            var lo: f64 = next.t_min;
+            var gap: f64 = f64_abs(hi - lo);
+            var e: f64 = eps64();
+            if (gap < e) { } else { bad = bad + 1; }
+        }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "adjacent, ordered and contiguous");
+}
+
+fn _t_shomate_segment_continuity() {
+    test_group("shomate_segment_continuity");
+    var boundaries = 0;
+    var bad = 0;
+    var k = 0;
+    while (k + 1 < KM_SHOMATE_COUNT) {
+        if (streq(shomate_data_formula(k + 1), shomate_data_formula(k + 2)) == 1) {
+            boundaries = boundaries + 1;
+            var a = shomate_data_coeffs(k + 1);
+            var b = shomate_data_coeffs(k + 2);
+            var t: f64 = a.t_max;
+            var ca: f64 = a.cp(t);
+            var cb: f64 = b.cp(t);
+            var dcp: f64 = f64_abs(ca - cb);
+            if (dcp < 0.5) { } else { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "Cp jumps < 0.5 J/(mol K) at every boundary");
+    assert_eq(boundaries, 10, "N2 x2, O2 x2, CO2 x1, H2O x1, CH4 x1, CO x1, H2 x2");
+}
+
+fn _t_lookup_shomate_at_selects_covering_segment() {
+    test_group("lookup_shomate_at_selects_covering_segment");
+    var s1 = shomate_data_coeffs(lookup_shomate_at("N2(g)", 300.0));
+    var x1: f64 = s1.t_max;
+    assert(x1 == 500.0, "N2 300 K: the 100-500 K segment");
+    var s2 = shomate_data_coeffs(lookup_shomate_at("N2(g)", 1000.0));
+    var x2: f64 = s2.t_min;
+    assert(x2 == 500.0, "N2 1000 K: the 500-2000 K segment");
+    var s3 = shomate_data_coeffs(lookup_shomate_at("N2(g)", 3000.0));
+    var x3: f64 = s3.t_min;
+    assert(x3 == 2000.0, "N2 3000 K: the 2000-6000 K segment");
+    # Shared boundary → lower segment.
+    var s4 = shomate_data_coeffs(lookup_shomate_at("CO2(g)", 1200.0));
+    var x4: f64 = s4.t_max;
+    assert(x4 == 1200.0, "CO2 at 1200 K: the lower segment");
+    var nan: f64 = _km_nan();
+    assert_eq(lookup_shomate_at("N2(g)", 50.0), 0, "50 K");
+    assert_eq(lookup_shomate_at("N2(g)", 7000.0), 0, "7000 K");
+    assert_eq(lookup_shomate_at("N2(g)", nan), 0, "NaN");
+    assert_eq(lookup_shomate_at("XeF6(g)", 500.0), 0, "unknown formula");
+    # lookup_shomate keeps returning the first segment.
+    var s5 = shomate_of("N2(g)");
+    var x5: f64 = s5.t_min;
+    assert(x5 == 100.0, "lookup_shomate: the first segment");
+}
+
+fn _t_enthalpy_antiderivative_differentiates_to_cp() {
+    test_group("enthalpy_antiderivative_differentiates_to_cp");
+    var hh = 1;
+    var bad = 0;
+    while (hh <= KM_SHOMATE_COUNT) {
+        var s = shomate_data_coeffs(hh);
+        var lo: f64 = s.t_min;
+        var hi: f64 = s.t_max;
+        var t: f64 = 0.5 * (lo + hi);
+        var h: f64 = 0.001;
+        var up: f64 = s.enthalpy_antiderivative(t + h);
+        var down: f64 = s.enthalpy_antiderivative(t - h);
+        var numeric: f64 = (up - down) / (2.0 * h);
+        var cp: f64 = s.cp(t);
+        if (near(numeric, cp, 0.0001) != 1) { bad = bad + 1; }
+        hh = hh + 1;
+    }
+    assert_eq(bad, 0, "d/dT antiderivative = Cp at every segment's midpoint");
+}
+
+# One case of enthalpy_change_matches_janaf: H(T) − H(298.15) in kJ/mol within 0.05.
+fn _janaf_case(formula, t: f64, expected_kj: f64) {
+    var tt, v = enthalpy_change_cp(formula, 298.15, t);
+    var dh: f64 = v;
+    var kj: f64 = dh / 1000.0;
+    assert(is_ok(tt) == 1 && near(kj, expected_kj, 0.05), formula);
+    return 0;
+}
+
+fn _t_enthalpy_change_matches_janaf() {
+    test_group("enthalpy_change_matches_janaf");
+    # JANAF H°(T) − H°(298.15), kJ/mol.
+    _janaf_case("N2(g)", 1000.0, 21.463);
+    _janaf_case("N2(g)", 2000.0, 56.137);
+    _janaf_case("N2(g)", 3000.0, 92.715);
+    _janaf_case("O2(g)", 1000.0, 22.707);
+    _janaf_case("O2(g)", 2000.0, 59.199);
+    _janaf_case("CO2(g)", 1000.0, 33.397);
+    _janaf_case("CO2(g)", 2000.0, 91.439);
+    _janaf_case("CO2(g)", 3000.0, 152.852);
+    _janaf_case("H2O(g)", 1000.0, 26.000);
+    _janaf_case("H2O(g)", 2000.0, 72.790);
+    _janaf_case("H2O(g)", 3000.0, 126.549);
+}
+
+# One case of enthalpy_change_across_segments_matches_numeric_integral: the analytic ΔH against a
+# 20 000-step composite midpoint rule on the segment-aware Cp, and antisymmetry.
+fn _integral_case(formula, t1: f64, t2: f64) {
+    var ta, va = enthalpy_change_cp(formula, t1, t2);
+    var analytic: f64 = va;
+    var steps = 20000;
+    var fs: f64 = f64_from(steps);
+    var h: f64 = (t2 - t1) / fs;
+    var numeric: f64 = -0.0;
+    var missing = 0;
+    var i = 0;
+    while (i < steps) {
+        var fi: f64 = f64_from(i);
+        var t: f64 = t1 + ((fi + 0.5) * h);
+        var hs = lookup_shomate_at(formula, t);
+        if (hs == 0) { missing = missing + 1; }
+        var s = shomate_data_coeffs(hs);
+        var cp: f64 = s.cp(t);
+        numeric = numeric + (h * cp);
+        i = i + 1;
+    }
+    assert_eq(missing, 0, "a segment at every midpoint");
+    assert(is_ok(ta) == 1 && near(analytic, numeric, 0.5), formula);
+    var tr, vr = enthalpy_change_cp(formula, t2, t1);
+    var reverse: f64 = vr;
+    var sum: f64 = analytic + reverse;
+    assert(is_ok(tr) == 1 && near(sum, 0.0, 0.000001), "antisymmetric");
+    return 0;
+}
+
+fn _t_enthalpy_change_across_segments_matches_numeric_integral() {
+    test_group("enthalpy_change_across_segments_matches_numeric_integral");
+    # CO2 crosses 1200 K; N2 crosses 500 and 2000 K; O2 crosses 700 and 2000 K.
+    _integral_case("CO2(g)", 1000.0, 1500.0);
+    _integral_case("N2(g)", 400.0, 2500.0);
+    _integral_case("O2(g)", 298.15, 3000.0);
+    _integral_case("H2O(g)", 298.15, 2500.0);
+}
+
+fn _t_enthalpy_change_outside_data_range_is_error() {
+    test_group("enthalpy_change_outside_data_range_is_error");
+    var t1, v1 = enthalpy_change_cp("CO2(g)", 250.0, 600.0);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_TEMPERATURE), "CO2 below 298 K");
+    var t2, v2 = enthalpy_change_cp("NH3(g)", 300.0, 1500.0);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_TEMPERATURE), "NH3 above 1400 K");
+    var t3, v3 = enthalpy_change_cp("N2(g)", 300.0, 6500.0);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_TEMPERATURE), "N2 above 6000 K");
+    var t4, v4 = enthalpy_change_cp("Br2(g)", 298.15, 400.0);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_TEMPERATURE), "Br2 below 332.5 K");
+    var t5, v5 = enthalpy_change_cp("N2(g)", 100.0, 6000.0);
+    assert_eq(is_ok(t5), 1, "N2 100 -> 6000 K is in range");
+}
+
+fn _t_enthalpy_change_nan_inf_is_error() {
+    test_group("enthalpy_change_nan_inf_is_error");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var t1, v1 = enthalpy_change_cp("N2(g)", nan, 600.0);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_TEMPERATURE), "NaN -> 600");
+    var t2, v2 = enthalpy_change_cp("N2(g)", 300.0, nan);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_TEMPERATURE), "300 -> NaN");
+    var t3, v3 = enthalpy_change_cp("N2(g)", inf, 600.0);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_TEMPERATURE), "inf -> 600");
+    var t4, v4 = enthalpy_change_cp("N2(g)", 300.0, inf);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_TEMPERATURE), "300 -> inf");
+    var t5, v5 = enthalpy_change_cp("N2(g)", -300.0, 600.0);
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_TEMPERATURE), "-300 -> 600");
+}
+
+fn _t_c2h4_cp_matches_nist() {
+    test_group("c2h4_cp_matches_nist");
+    # NIST: Cp(C2H4, 298.15 K) = 42.90 J/(mol·K)
+    var s = shomate_of("C2H4(g)");
+    var cp: f64 = s.cp(298.15);
+    assert(near(cp, 42.90, 0.1), "C2H4 Cp(298.15)");
+}
+
+fn _t_br2_cp_at_lower_bound() {
+    test_group("br2_cp_at_lower_bound");
+    # JANAF Cp(Br2, g, 298.15 K) = 36.06 J/(mol·K), rising with T: Cp(332.5) ≥ 36.06
+    var s = shomate_of("Br2(g)");
+    var lo: f64 = s.t_min;
+    var e: f64 = eps64();
+    assert(near(lo, 332.5, e), "t_min = 332.5 K");
+    var cp: f64 = s.cp(332.5);
+    assert(cp > 36.06 && cp < 36.6, "Br2 Cp(332.5)");
+}
+
+fn _t_vant_hoff_nan_inf_is_error() {
+    test_group("vant_hoff_nan_inf_is_error");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var ninf: f64 = -inf;
+    var t1, v1 = vant_hoff_k(1.0, -50000.0, nan, 400.0);
+    assert_eq(is_err_result(t1), 1, "NaN T_ref");
+    var t2, v2 = vant_hoff_k(1.0, -50000.0, 298.15, nan);
+    assert_eq(is_err_result(t2), 1, "NaN T_new");
+    var t3, v3 = vant_hoff_k(1.0, -50000.0, inf, 400.0);
+    assert_eq(is_err_result(t3), 1, "inf T_ref");
+    var t4, v4 = vant_hoff_k(1.0, -50000.0, 298.15, inf);
+    assert_eq(is_err_result(t4), 1, "inf T_new");
+    var t5, v5 = vant_hoff_k(nan, -50000.0, 298.15, 400.0);
+    assert_eq(is_err_result(t5), 1, "NaN K_ref");
+    var t6, v6 = vant_hoff_k(inf, -50000.0, 298.15, 400.0);
+    assert_eq(is_err_result(t6), 1, "inf K_ref");
+    var t7, v7 = vant_hoff_k(1.0, nan, 298.15, 400.0);
+    assert_eq(is_err_result(t7), 1, "NaN dH");
+    var t8, v8 = vant_hoff_k(1.0, ninf, 298.15, 400.0);
+    assert_eq(is_err_result(t8), 1, "-inf dH");
+}
+
+# Σ n·ΔH(298.15 → t) over a species list (the energy-balance checks).
+#must_use
+fn absorbed(p, n, t: f64): f64 {
+    var total: f64 = -0.0;
+    var k = 0;
+    while (k < n) {
+        var tt, v = enthalpy_change_cp(load64(p + k * 16), 298.15, t);
+        var dh: f64 = v;
+        if (is_ok(tt) != 1) { dh = _km_nan(); }
+        var moles: f64 = load64(p + k * 16 + 8);
+        total = total + (moles * dh);
+        k = k + 1;
+    }
+    return total;
+}
+
+fn _t_adiabatic_flame_satisfies_energy_balance() {
+    test_group("adiabatic_flame_satisfies_energy_balance");
+    var p = sp3("CO2(g)", 1.0, "H2O(g)", 2.0, "N2(g)", 7.52);
+    var t, v = adiabatic_flame_temperature(-802300.0, p, 3, 298.15);
+    var tf: f64 = v;
+    assert_eq(is_ok(t), 1, "Ok");
+    var a: f64 = absorbed(p, 3, tf);
+    assert(near(a, 802300.0, 1.0), "the residual is below 1 J/mol");
+}
+
+fn _t_adiabatic_flame_nan_enthalpy_is_error() {
+    test_group("adiabatic_flame_nan_enthalpy_is_error");
+    # 1.1 returned Ok(≈299.5 K) here: NaN.signum() == NaN.signum() is false.
+    var p = sp2("CO2(g)", 1.0, "N2(g)", 3.76);
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var ninf: f64 = -inf;
+    var t1, v1 = adiabatic_flame_temperature(nan, p, 2, 298.15);
+    assert_eq(is_err_result(t1), 1, "NaN dH");
+    var t2, v2 = adiabatic_flame_temperature(ninf, p, 2, 298.15);
+    assert_eq(is_err_result(t2), 1, "-inf dH");
+}
+
+fn _t_adiabatic_flame_invalid_inputs_are_errors() {
+    test_group("adiabatic_flame_invalid_inputs_are_errors");
+    var p = sp1("CO2(g)", 1.0);
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var t1, v1 = adiabatic_flame_temperature(-100000.0, p, 1, nan);
+    assert_eq(is_err_result(t1), 1, "NaN T0");
+    var t2, v2 = adiabatic_flame_temperature(-100000.0, p, 1, inf);
+    assert_eq(is_err_result(t2), 1, "inf T0");
+    var t3, v3 = adiabatic_flame_temperature(-100000.0, 0, 0, 298.15);
+    assert_eq(is_err_result(t3), 1, "no products");
+    var t4, v4 = adiabatic_flame_temperature(-100000.0, sp1("CO2(g)", 0.0), 1, 298.15);
+    assert_eq(is_err_result(t4), 1, "moles = 0");
+    var t5, v5 = adiabatic_flame_temperature(-100000.0, sp1("CO2(g)", -1.0), 1, 298.15);
+    assert_eq(is_err_result(t5), 1, "moles = -1");
+    var t6, v6 = adiabatic_flame_temperature(-100000.0, sp1("CO2(g)", nan), 1, 298.15);
+    assert_eq(is_err_result(t6), 1, "moles = NaN");
+    var t7, v7 = adiabatic_flame_temperature(-100000.0, sp1("CO2(g)", inf), 1, 298.15);
+    assert_eq(is_err_result(t7), 1, "moles = inf");
+    # Endothermic / zero ΔH: no flame temperature above T₀.
+    var t8, v8 = adiabatic_flame_temperature(100000.0, p, 1, 298.15);
+    assert_eq(is_err_result(t8), 1, "dH > 0");
+    var t9, v9 = adiabatic_flame_temperature(0.0, p, 1, 298.15);
+    assert_eq(is_err_result(t9), 1, "dH = 0");
+}
+
+fn _t_adiabatic_flame_root_outside_data_range_is_error() {
+    test_group("adiabatic_flame_root_outside_data_range_is_error");
+    # NH3(g) data end at 1400 K; the root lies far above.
+    var t1, v1 = adiabatic_flame_temperature(-200000.0, sp1("NH3(g)", 1.0), 1, 298.15);
+    assert_eq(is_err_result(t1), 1, "NH3 past 1400 K");
+    # Mixed products: the common range ends at SO2's 1200 K.
+    var t2, v2 = adiabatic_flame_temperature(-241820.0, sp2("H2O(g)", 1.0, "SO2(g)", 1.0), 2, 298.15);
+    assert_eq(is_err_result(t2), 1, "H2O + SO2 past 1200 K");
+    # Below the products' data range (CO2 starts at 298 K).
+    var t3, v3 = adiabatic_flame_temperature(-100000.0, sp1("CO2(g)", 1.0), 1, 250.0);
+    assert_eq(is_err_result(t3), 1, "T0 = 250 K");
+}
+
+# ── table data ──────────────────────────────────────────────────────────────────────
+
+fn _t_k2o_entropy_matches_crc() {
+    test_group("k2o_entropy_matches_crc");
+    var s0: f64 = s_of("K2O(s)");
+    assert(near(s0, 94.1, 0.05), "K2O S");
+}
+
+fn _t_butane_row_is_self_consistent() {
+    test_group("butane_row_is_self_consistent");
+    # NBS: ΔHf −126.15, ΔGf −17.03, S° 310.23.
+    var d = lookup_thermochem("C4H10(g)");
+    var s_c: f64 = s_of("C(graphite)");
+    var s_h2: f64 = s_of("H2(g)");
+    var elements: f64 = (4.0 * s_c) + (5.0 * s_h2);
+    var hf: f64 = thermochem_data_delta_hf_kj(d);
+    var gf: f64 = thermochem_data_delta_gf_kj(d);
+    var s0: f64 = thermochem_data_s_standard_j(d);
+    var dg_calc: f64 = hf - ((298.15 * (s0 - elements)) / 1000.0);
+    assert(near(dg_calc, gf, 0.2), "butane: dG_calc matches the table");
+}
+
+# One standard-state element of added_standard_state_elements.
+fn _element_row(formula, s: f64) {
+    var d = lookup_thermochem(formula);
+    assert(d != 0, formula);
+    var hf: f64 = thermochem_data_delta_hf_kj(d);
+    var gf: f64 = thermochem_data_delta_gf_kj(d);
+    var s0: f64 = thermochem_data_s_standard_j(d);
+    var ahf: f64 = f64_abs(hf);
+    var agf: f64 = f64_abs(gf);
+    var e: f64 = eps64();
+    assert(ahf < e && agf < e, "dHf = dGf = 0");
+    assert(near(s0, s, 0.01), formula);
+    return 0;
+}
+
+# ADR 0002 #1: Rust's ΔG = −320.48 kJ/mol ± 0.01 is −320 480 J/mol ± 10.
+fn _t_added_standard_state_elements() {
+    test_group("added_standard_state_elements");
+    _element_row("Zn(s)", 41.63);
+    _element_row("Ti(s)", 30.72);
+    _element_row("Ba(s)", 62.5);
+    _element_row("Ag(s)", 42.55);
+    _element_row("F2(g)", 202.79);
+    # Formation reactions that needed them now resolve.
+    var t, v = reaction_gibbs_energy(sp1("ZnO(s)", 1.0), 1, sp2("Zn(s)", 1.0, "O2(g)", 0.5), 2);
+    var dg: f64 = v;
+    assert(is_ok(t) == 1 && near(dg, -320480.0, 10.0), "ZnO formation dG, in J/mol");
+}
+
+# The two-byte code of an element symbol (its first two bytes; one-letter symbols end in NUL).
+#must_use
+fn sym_code(s): i64 {
+    var c1 = load8(s + 1);
+    return load8(s) + c1 * 256;
+}
+
+# The reference standard state of an element symbol code: (formula, atoms per formula unit), or
+# (0, 0) — the Rust test's reference_state.
+#must_use
+fn reference_state(code): (i64, f64) {
+    if (code == sym_code("H")) { return ("H2(g)", 2.0); }
+    if (code == sym_code("O")) { return ("O2(g)", 2.0); }
+    if (code == sym_code("N")) { return ("N2(g)", 2.0); }
+    if (code == sym_code("F")) { return ("F2(g)", 2.0); }
+    if (code == sym_code("Cl")) { return ("Cl2(g)", 2.0); }
+    if (code == sym_code("Br")) { return ("Br2(l)", 2.0); }
+    if (code == sym_code("I")) { return ("I2(s)", 2.0); }
+    if (code == sym_code("C")) { return ("C(graphite)", 1.0); }
+    if (code == sym_code("S")) { return ("S(rhombic)", 1.0); }
+    if (code == sym_code("P")) { return ("P(white)", 1.0); }
+    if (code == sym_code("Fe")) { return ("Fe(s)", 1.0); }
+    if (code == sym_code("Cu")) { return ("Cu(s)", 1.0); }
+    if (code == sym_code("Al")) { return ("Al(s)", 1.0); }
+    if (code == sym_code("Na")) { return ("Na(s)", 1.0); }
+    if (code == sym_code("K")) { return ("K(s)", 1.0); }
+    if (code == sym_code("Ca")) { return ("Ca(s)", 1.0); }
+    if (code == sym_code("Mg")) { return ("Mg(s)", 1.0); }
+    if (code == sym_code("Si")) { return ("Si(s)", 1.0); }
+    if (code == sym_code("Zn")) { return ("Zn(s)", 1.0); }
+    if (code == sym_code("Ti")) { return ("Ti(s)", 1.0); }
+    if (code == sym_code("Ba")) { return ("Ba(s)", 1.0); }
+    if (code == sym_code("Ag")) { return ("Ag(s)", 1.0); }
+    return (0, 0.0);
+}
+
+# Parses a parenthesis-free formula ("CH3COOH(l)") into (symbol code, count) pairs, merged per
+# symbol in first-appearance order, the phase suffix ignored (the Rust test's parse_simple_formula):
+# codes into `codes` (i64[8]), counts into `counts` (f64[8]). Returns the number of symbols.
+fn parse_simple_formula(formula, codes, counts): i64 {
+    var n = 0;
+    var i = 0;
+    var c = load8(formula);
+    while (c != 0 && c != 40) {
+        var code = c;
+        i = i + 1;
+        c = load8(formula + i);
+        if (c >= 97 && c <= 122) {
+            code = code + c * 256;
+            i = i + 1;
+            c = load8(formula + i);
+        }
+        var digits = 0;
+        var have = 0;
+        while (c >= 48 && c <= 57) {
+            digits = digits * 10 + (c - 48);
+            have = 1;
+            i = i + 1;
+            c = load8(formula + i);
+        }
+        if (have == 0) { digits = 1; }
+        var cnt: f64 = f64_from(digits);
+        var k = 0;
+        var found = 0;
+        while (k < n) {
+            if (load64(codes + k * 8) == code) {
+                var old: f64 = load64(counts + k * 8);
+                var sum: f64 = old + cnt;
+                store64(counts + k * 8, sum);
+                found = 1;
+            }
+            k = k + 1;
+        }
+        if (found == 0) {
+            store64(codes + n * 8, code);
+            store64(counts + n * 8, cnt);
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+fn _t_table_gibbs_enthalpy_entropy_consistency() {
+    test_group("table_gibbs_enthalpy_entropy_consistency");
+    # ΔG_f° ≈ ΔH_f° − 298.15·ΔS_f°, ΔS_f° = S°(compound) − Σ S°(elements). Na2CO3(s)'s source values are
+    # themselves inconsistent: its deviation is pinned at −2.55 kJ/mol (Rust's KNOWN_INCONSISTENT).
+    var codes: i64[8];
+    var counts: f64[8];
+    var checked = 0;
+    var h = 1;
+    while (h <= KM_THERMOCHEM_COUNT) {
+        var fo = thermochem_data_formula(h);
+        var n = parse_simple_formula(fo, &codes, &counts);
+        var skip = 0;
+        if (n == 1) {
+            var rf, ra = reference_state(codes[0]);
+            if (rf != 0 && streq(rf, fo) == 1) { skip = 1; }
+        }
+        var s_elements: f64 = 0.0;
+        var all_present = 1;
+        var k = 0;
+        while (k < n && skip == 0) {
+            var ref, atoms = reference_state(codes[k]);
+            var rh = 0;
+            if (ref != 0) { rh = lookup_thermochem(ref); }
+            if (rh == 0) {
+                all_present = 0;
+            } else {
+                var cnt: f64 = counts[k];
+                var at: f64 = atoms;
+                var rs: f64 = thermochem_data_s_standard_j(rh);
+                s_elements = s_elements + ((cnt / at) * rs);
+            }
+            k = k + 1;
+        }
+        if (skip == 0 && all_present == 1) {
+            checked = checked + 1;
+            var hf: f64 = thermochem_data_delta_hf_kj(h);
+            var gf: f64 = thermochem_data_delta_gf_kj(h);
+            var s0: f64 = thermochem_data_s_standard_j(h);
+            var dg_calc: f64 = hf - ((298.15 * (s0 - s_elements)) / 1000.0);
+            var diff: f64 = dg_calc - gf;
+            if (streq(fo, "Na2CO3(s)") == 1) {
+                assert(near(diff, -2.55, 0.05), "Na2CO3(s): the pinned deviation");
+            } else {
+                assert(near(diff, 0.0, 2.0), fo);
+            }
+        }
+        h = h + 1;
+    }
+    # Every non-element row has all its elements in the table.
+    assert_eq(checked, KM_THERMOCHEM_COUNT - 22, "rows checked");
+}
+
+fn _t_high_temperature_segments_match_janaf() {
+    test_group("high_temperature_segments_match_janaf");
+    # JANAF Cp° at 2000 K: H2 34.280, CO 36.250, CH4 94.399; H2 at 3000 K 37.087.
+    _cp_case("H2(g)", 2000.0, 34.280);
+    _cp_case("H2(g)", 3000.0, 37.087);
+    _cp_case("CO(g)", 2000.0, 36.250);
+    _cp_case("CH4(g)", 2000.0, 94.399);
+}
+
+fn _t_adiabatic_flame_rich_methane_with_co_product() {
+    test_group("adiabatic_flame_rich_methane_with_co_product");
+    # CH4 + 1.5 O2 (+ 5.64 N2) → CO + 2 H2O (+ 5.64 N2): ΔH = −519.32 kJ/mol; CO must be usable above 1300 K.
+    var p = sp3("CO(g)", 1.0, "H2O(g)", 2.0, "N2(g)", 5.64);
+    var t, v = adiabatic_flame_temperature(-519320.0, p, 3, 298.15);
+    var tf: f64 = v;
+    assert(is_ok(t) == 1 && tf > 1300.0 && tf < 3000.0, "rich CH4 flame T");
+    var a: f64 = absorbed(p, 3, tf);
+    assert(near(a, 519320.0, 1.0), "energy balance");
+}
+
+# ── Cyrius-only ─────────────────────────────────────────────────────────────────────
+
+# Species lists are a pointer and a count: a negative count, or a null pointer with values, is
+# Err(INVALID_INPUT); null with 0 values is the empty list; a null formula is unknown; the products are
+# read before the reactants; an empty sum is +0.0 (Rust's `total = 0.0`); a NaN coefficient gives Ok(NaN)
+# (no guard, as Rust).
+fn _t_cyrius_species_lists() {
+    test_group("cyrius_species_lists");
+    var good = sp1("CO2(g)", 1.0);
+    var t1, v1 = reaction_enthalpy(good, 0 - 1, 0, 0);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT), "products count -1");
+    var t2, v2 = reaction_entropy(good, 1, 0, 2);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT), "null reactants with 2 values");
+    var t3, v3 = reaction_gibbs_energy(0, 0, good, 1);
+    var g: f64 = v3;
+    assert(is_ok(t3) == 1 && near(g, 394360.0, 0.001), "null products with 0 values: 0 - (-394.36) kJ, in J");
+    var t4, v4 = reaction_enthalpy(sp1(0, 1.0), 1, good, 1);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_REACTION), "a null formula is unknown");
+    var t5, v5 = reaction_enthalpy(sp1("XeF6(g)", 1.0), 1, good, 0 - 1);
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_REACTION), "the products' error comes first");
+    var t6, v6 = reaction_entropy(0, 0, 0, 0);
+    assert(is_ok(t6) == 1 && v6 == 0, "an empty reaction is +0.0");
+    var nan: f64 = _km_nan();
+    var t7, v7 = reaction_enthalpy(sp1("CO2(g)", nan), 1, 0, 0);
+    assert(is_ok(t7) == 1 && ulp_is_nan(v7) == 1, "a NaN coefficient is Ok(NaN)");
+    var t8, v8 = adiabatic_flame_temperature(-100000.0, 0, 3, 298.15);
+    assert(is_err_code(t8, v8, KM_ERR_INVALID_INPUT), "flame: null products with 3 values");
+    var t9, v9 = adiabatic_flame_temperature(-100000.0, good, 0 - 1, 298.15);
+    assert(is_err_code(t9, v9, KM_ERR_INVALID_INPUT), "flame: count -1");
+    var t10, v10 = adiabatic_flame_temperature(-100000.0, sp1(0, 1.0), 1, 298.15);
+    assert(is_err_code(t10, v10, KM_ERR_INVALID_REACTION), "flame: a null formula is unknown");
+    # The error codes, in Rust's order of checks.
+    var t11, v11 = adiabatic_flame_temperature(nan, 0, 0, nan);
+    assert(is_err_code(t11, v11, KM_ERR_INVALID_TEMPERATURE), "T0 is checked first");
+    var t12, v12 = adiabatic_flame_temperature(-1000.0, sp2("XeF6(g)", 1.0, "CO2(g)", -1.0), 2, 298.15);
+    assert(is_err_code(t12, v12, KM_ERR_INVALID_REACTION), "the first bad product decides: unknown");
+    var t13, v13 = adiabatic_flame_temperature(-1000.0, sp2("CO2(g)", -1.0, "XeF6(g)", 1.0), 2, 298.15);
+    assert(is_err_code(t13, v13, KM_ERR_INVALID_INPUT), "the first bad product decides: moles");
+    var t14, v14 = adiabatic_flame_temperature(100000.0, good, 1, 298.15);
+    assert(is_err_code(t14, v14, KM_ERR_COMPUTATION_ERROR), "not bracketable");
+    var t15, v15 = adiabatic_flame_temperature(-100000.0, good, 1, 6000.0);
+    assert(is_err_code(t15, v15, KM_ERR_INVALID_TEMPERATURE), "T0 = range_max");
+}
+
+# THERMOCHEM_DATA and SHOMATE_DATA handles run 1 .. KM_*_COUNT; 0 and past the end are no handle ("" and
+# NaN); lookups are exact and case-sensitive; a long string matches nothing.
+fn _t_cyrius_handles() {
+    test_group("cyrius_handles");
+    assert_eq(KM_THERMOCHEM_COUNT, 76, "76 rows");
+    assert_eq(lookup_thermochem("H2(g)"), 1, "H2(g) is row 0");
+    assert_eq(lookup_thermochem("HCHO(g)"), 76, "HCHO(g) is row 75");
+    assert_eq(lookup_thermochem("h2o(l)"), 0, "case-sensitive");
+    assert_eq(lookup_thermochem("H2O"), 0, "the phase is part of the key");
+    assert_eq(lookup_thermochem(""), 0, "empty");
+    assert_eq(lookup_thermochem(0), 0, "null");
+    assert(streq(thermochem_data_name(8), "Water (liquid)") == 1, "row 7's name");
+    assert(streq(thermochem_data_formula(0), "") == 1, "handle 0 has no formula");
+    assert(streq(thermochem_data_name(77), "") == 1, "handle 77 has no name");
+    var x: f64 = thermochem_data_delta_hf_kj(77);
+    assert_eq(ulp_is_nan(x), 1, "handle 77: NaN");
+    var y: f64 = thermochem_data_s_standard_j(0);
+    assert_eq(ulp_is_nan(y), 1, "handle 0: NaN");
+    assert_eq(lookup_shomate("H2O(g)"), 1, "H2O(g) is segment 0");
+    assert_eq(lookup_shomate("Ne(g)"), 34, "Ne(g) is segment 33");
+    assert_eq(lookup_shomate_at("H2(g)", 2500.0), 16, "H2 at 2500 K: the 1000-2500 K segment (row 15)");
+    assert_eq(lookup_shomate_at("H2(g)", 2500.0000000000005), 17, "one ulp above: the next segment");
+    assert_eq(lookup_shomate_at(0, 300.0), 0, "null formula");
+    assert(streq(shomate_data_formula(35), "") == 1, "handle 35 has no formula");
+    var none = shomate_data_coeffs(0);
+    var na: f64 = none.a;
+    var nt: f64 = none.t_max;
+    assert(ulp_is_nan(na) == 1 && ulp_is_nan(nt) == 1, "handle 0: NaN fields");
+    var cpn: f64 = none.cp(500.0);
+    assert_eq(ulp_is_nan(cpn), 1, "and a NaN Cp");
+}
+
+# ADR 0002 #1: reaction_enthalpy / reaction_gibbs_energy are Rust's kJ/mol difference × 1000.0 (one multiply,
+# so bit-identical to the oracle's value × 1000), and pass straight to the J/mol functions; reaction_entropy
+# is unchanged.
+fn _t_cyrius_adr_0002_1_joules() {
+    test_group("cyrius_adr_0002_1_joules");
+    var p = sp2("CO2(g)", 1.0, "H2O(g)", 2.0);
+    var r = sp2("CH4(g)", 1.0, "O2(g)", 2.0);
+    var co2: f64 = hf_of("CO2(g)");
+    var h2o: f64 = hf_of("H2O(g)");
+    var ch4: f64 = hf_of("CH4(g)");
+    var o2: f64 = hf_of("O2(g)");
+    var sp: f64 = (0.0 + (1.0 * co2)) + (2.0 * h2o);
+    var sr: f64 = (0.0 + (1.0 * ch4)) + (2.0 * o2);
+    var kj: f64 = sp - sr;
+    var want: f64 = kj * 1000.0;
+    var t, v = reaction_enthalpy(p, 2, r, 2);
+    var j: f64 = v;
+    assert_eq(is_ok(t), 1, "Ok");
+    assert_bits_eq(j, want, "(sum products - sum reactants) kJ x 1000.0, bit for bit");
+    var tf, vf = adiabatic_flame_temperature(j, sp3("CO2(g)", 1.0, "H2O(g)", 2.0, "N2(g)", 7.52), 3, 298.15);
+    var tflame: f64 = vf;
+    assert(is_ok(tf) == 1 && near(tflame, 2327.0, 10.0), "the J/mol result feeds the flame directly");
+    var ts, vs = reaction_entropy(p, 2, r, 2);
+    var ds: f64 = vs;
+    assert(is_ok(ts) == 1 && near(ds, -5.11, 0.01), "entropy stays J/(mol K)");
+}
+
+# The products' resolved segments for the private solver helpers (as adiabatic_flame_temperature
+# fills its stack table).
+fn fill_cache(p, n, cache) {
+    var k = 0;
+    while (k < n) {
+        var start, count = _km_segments_lookup(load64(p + k * 16));
+        store64(cache + k * 16, start);
+        store64(cache + k * 16 + 8, count);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# The transcribed hisab 1.4.0 loops pin Rust's typed constants: Newton stops when |f| < 1e-3 exactly
+# (f(T₀) = −ΔH exactly, so ΔH = −(1e-3 − 1 ulp) stops at x0 and ΔH = −1e-3 steps); it fails when
+# |f′| < 10⁻¹² (EPSILON_F64); bisection stops when |hi − lo| < 1e-6; it fails without a sign change.
+fn _t_cyrius_flame_solver() {
+    test_group("cyrius_flame_solver");
+    var cache: i64[64];
+    var p = sp1("N2(g)", 1.0);
+    fill_cache(p, 1, &cache);
+    var t0: f64 = 298.15;
+    var below: f64 = 0x3F50624DD2F1A9FB;    # 1e-3, one ulp down
+    var nb: f64 = -below;
+    var e1, x1 = _km_flame_newton(nb, p, 1, &cache, t0, t0);
+    var r1: f64 = x1;
+    assert(e1 == KM_ERR_NONE && r1 == t0, "|f| = 1e-3 - 1 ulp: accepted at x0");
+    var e2, x2 = _km_flame_newton(-0.001, p, 1, &cache, t0, t0);
+    var r2: f64 = x2;
+    assert(e2 == KM_ERR_NONE && r2 != t0, "|f| = 1e-3: Newton steps");
+    # |f'| = n·Cp(298.15) ≈ 29.1·n against EPSILON_F64 = 1e-12.
+    var lo_n: f64 = 0.99 / 29.124;
+    var hi_n: f64 = 1.01 / 29.124;
+    var tiny: f64 = 0.000000000001;
+    var m_lo: f64 = lo_n * tiny;
+    var m_hi: f64 = hi_n * tiny;
+    var e3, x3 = _km_flame_newton(-1.0, sp1("N2(g)", m_lo), 1, &cache, t0, t0);
+    assert_eq(e3, KM_ERR_INVALID_INPUT, "|f'| = 0.99e-12: derivative is zero");
+    var e4, x4 = _km_flame_newton(-1.0, sp1("N2(g)", m_hi), 1, &cache, t0, t0);
+    assert(e4 != KM_ERR_INVALID_INPUT, "|f'| = 1.01e-12: Newton steps");
+    # Bisection on a CH4/air flame scaled by 10¹² (|f′| ≈ 4·10¹⁴, so f's sign is sure 10⁻⁷ K away).
+    var big = sp3("CO2(g)", 1000000000000.0, "H2O(g)", 2000000000000.0, "N2(g)", 7520000000000.0);
+    var cb: i64[64];
+    fill_cache(big, 3, &cb);
+    var dh: f64 = -802300000000000000.0;
+    var tr, vr = adiabatic_flame_temperature(dh, big, 3, t0);
+    var root: f64 = vr;
+    assert_eq(is_ok(tr), 1, "scaled flame is Ok");
+    var a: f64 = root - 0.0000005;
+    var b1: f64 = a + 0.000000999;
+    var b2: f64 = a + 0.000001001;
+    var fa: f64 = _km_flame_f(dh, big, 3, &cb, t0, a);
+    var fb: f64 = _km_flame_f(dh, big, 3, &cb, t0, b1);
+    assert(fa > 0.0 && fb < 0.0, "the bracket straddles the root");
+    var e5, x5 = _km_flame_bisection(dh, big, 3, &cb, t0, a, b1);
+    var r5: f64 = x5;
+    var mid1: f64 = (a + b1) * 0.5;
+    assert(e5 == KM_ERR_NONE && r5 == mid1, "|hi - lo| = 0.999e-6: the first midpoint");
+    var e6, x6 = _km_flame_bisection(dh, big, 3, &cb, t0, a, b2);
+    var r6: f64 = x6;
+    var mid2: f64 = (a + b2) * 0.5;
+    assert(e6 == KM_ERR_NONE && r6 != mid2, "|hi - lo| = 1.001e-6: bisects on");
+    var c: f64 = root - 1.0;
+    var e7, x7 = _km_flame_bisection(dh, big, 3, &cb, t0, a, c);
+    assert_eq(e7, KM_ERR_INVALID_INPUT, "no sign change: hisab's opposite-signs error");
+    # Bisection over the whole range lands within its 1e-6 K tolerance of the flame's root.
+    var e8, x8 = _km_flame_bisection(dh, big, 3, &cb, t0, t0, 6000.0);
+    var r8: f64 = x8;
+    assert(e8 == KM_ERR_NONE && near(r8, root, 0.000001), "bisection's root");
+}
+
+# More products than the stack table holds (_KM_FLAME_CACHED = 32): the rest are resolved again at each
+# evaluation, checked in the same first pass.
+fn _t_cyrius_long_product_list() {
+    test_group("cyrius_long_product_list");
+    var n = 40;
+    var p = alloc(n * 16);
+    var k = 0;
+    while (k < n) {
+        store64(p + k * 16, "N2(g)");
+        var m: f64 = 0.25;
+        store64(p + k * 16 + 8, m);
+        k = k + 1;
+    }
+    var t, v = adiabatic_flame_temperature(-200000.0, p, n, 298.15);
+    var tf: f64 = v;
+    assert_eq(is_ok(t), 1, "40 products: Ok");
+    var a: f64 = absorbed(p, n, tf);
+    assert(near(a, 200000.0, 1.0), "40 products: energy balance");
+    store64(p + 35 * 16, "XeF6(g)");
+    var t2, v2 = adiabatic_flame_temperature(-200000.0, p, n, 298.15);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_REACTION), "an unknown product past the table");
+    store64(p + 35 * 16, "N2(g)");
+    var neg: f64 = -1.0;
+    store64(p + 39 * 16 + 8, neg);
+    var t3, v3 = adiabatic_flame_temperature(-200000.0, p, n, 298.15);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT), "bad moles past the table");
+}
+
+# KmShomate's methods take the struct by value (port plan §6.4): s.cp(t) is KmShomate_cp(s, t); a custom
+# set works; there is no range check (extrapolation, T = 0 gives ±inf or NaN as Rust).
+fn _t_cyrius_shomate_struct() {
+    test_group("cyrius_shomate_struct");
+    var s = shomate_of("CO2(g)");
+    var a: f64 = s.cp(500.0);
+    var b: f64 = KmShomate_cp(s, 500.0);
+    assert_bits_eq(a, b, "s.cp(t) is KmShomate_cp(s, t)");
+    var ar = KmShomate { a: 20.786, b: 0.0, c: 0.0, d: 0.0, e: 0.0, t_min: 298.0, t_max: 6000.0 };
+    var c: f64 = ar.cp(10000.0);
+    assert(c == 20.786, "a monatomic gas, extrapolated");
+    var h1: f64 = ar.enthalpy_antiderivative(1000.0);
+    var h0: f64 = ar.enthalpy_antiderivative(0.0);
+    assert(near(h1, 20786.0, 0.000000001), "1000 x 20.786 x 1");
+    assert_eq(ulp_is_nan(h0), 1, "T = 0: 0 - 0/0 is NaN");
+    var cp0: f64 = s.cp(0.0);
+    assert_eq(ulp_is_inf(cp0), 1, "CO2 at T = 0: E/0 is infinite");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_lookup_water_liquid();
+    _t_lookup_co2();
+    _t_lookup_nonexistent();
+    _t_elements_have_zero_formation();
+    _t_entropy_always_positive();
+    _t_combustion_of_methane_enthalpy();
+    _t_combustion_of_methane_gibbs();
+    _t_combustion_of_methane_entropy();
+    _t_reaction_unknown_formula_is_error();
+    _t_haber_process_enthalpy();
+    _t_gibbs_enthalpy_entropy_consistency();
+    _t_vant_hoff_same_temperature();
+    _t_vant_hoff_exothermic_higher_temp_decreases_k();
+    _t_vant_hoff_endothermic_higher_temp_increases_k();
+    _t_vant_hoff_zero_temp_is_error();
+    _t_vant_hoff_zero_k_is_error();
+    _t_empty_reaction_returns_zero();
+    _t_vant_hoff_extreme_enthalpy_doesnt_panic();
+    _t_thermodynamic_consistency_co2();
+    _t_unique_formulas();
+    _t_water_vaporization_enthalpy();
+    _t_gases_have_higher_entropy_than_solids();
+    _t_shomate_co2_cp_at_298();
+    _t_shomate_n2_cp_at_298();
+    _t_shomate_cp_increases_with_temperature();
+    _t_enthalpy_change_co2_heating();
+    _t_enthalpy_change_zero_range();
+    _t_enthalpy_change_cooling_is_negative();
+    _t_enthalpy_change_unknown_formula_is_error();
+    _t_enthalpy_change_zero_temp_is_error();
+    _t_shomate_lookup_nonexistent();
+    _t_shomate_cp_positive_in_valid_range();
+    _t_enthalpy_change_cp_n2_matches_constant_cp_approx();
+    _t_all_shomate_data_has_valid_range();
+    _t_expanded_shomate_h2_cp_at_298();
+    _t_shomate_data_count();
+    _t_adiabatic_flame_h2_air();
+    _t_adiabatic_flame_ch4_air();
+    _t_adiabatic_flame_unknown_product_is_error();
+    _t_adiabatic_flame_zero_temp_is_error();
+    _t_cp_matches_reference_at_298_1000_2000();
+    _t_shomate_segments_are_adjacent_ordered_and_contiguous();
+    _t_shomate_segment_continuity();
+    _t_lookup_shomate_at_selects_covering_segment();
+    _t_enthalpy_antiderivative_differentiates_to_cp();
+    _t_enthalpy_change_matches_janaf();
+    _t_enthalpy_change_across_segments_matches_numeric_integral();
+    _t_enthalpy_change_outside_data_range_is_error();
+    _t_enthalpy_change_nan_inf_is_error();
+    _t_c2h4_cp_matches_nist();
+    _t_br2_cp_at_lower_bound();
+    _t_vant_hoff_nan_inf_is_error();
+    _t_adiabatic_flame_satisfies_energy_balance();
+    _t_adiabatic_flame_nan_enthalpy_is_error();
+    _t_adiabatic_flame_invalid_inputs_are_errors();
+    _t_adiabatic_flame_root_outside_data_range_is_error();
+    _t_k2o_entropy_matches_crc();
+    _t_butane_row_is_self_consistent();
+    _t_added_standard_state_elements();
+    _t_table_gibbs_enthalpy_entropy_consistency();
+    _t_high_temperature_segments_match_janaf();
+    _t_adiabatic_flame_rich_methane_with_co_product();
+    _t_cyrius_species_lists();
+    _t_cyrius_handles();
+    _t_cyrius_adr_0002_1_joules();
+    _t_cyrius_flame_solver();
+    _t_cyrius_long_product_list();
+    _t_cyrius_shomate_struct();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

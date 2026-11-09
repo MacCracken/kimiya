@@ -15,6 +15,9 @@
 # FreeBSD msun / fdlibm, documented < 1 ulp) operation for operation: the same bits on every
 # target, within 2 ulp of glibc (class C, K = 2; port-parity.md). The coefficients are the
 # Rust source's decimal literals as bit patterns in typed f64 locals (never a hex `const`).
+# lib/math.cyr is included for f64_cos, the out-of-domain fallback of _km_cos (M2a).
+
+include "lib/math.cyr"
 
 # +∞ (0x7FF0000000000000), a compile-time constant.
 const _KM_INF = 1.0 / 0.0;
@@ -39,11 +42,14 @@ fn _km_is_nan(x: f64): i64 {
     return 0;
 }
 
-# 1 if x is finite: neither ±∞ nor NaN. Mirrors `f64::is_finite`.
+# 1 if x is finite: neither ±∞ nor NaN (x − x is 0 exactly for finite x, NaN otherwise; one
+# subtract and compare, no call: the M2a guards make several per function). Mirrors
+# `f64::is_finite`.
 #must_use
 fn _km_is_finite(x: f64): i64 {
-    if ((_km_bits(x) & 0x7FF0000000000000) == 0x7FF0000000000000) { return 0; }
-    return 1;
+    var d: f64 = x - x;
+    if (d == 0.0) { return 1; }
+    return 0;
 }
 
 # The larger of x and y, ignoring a NaN operand (NaN only when both are). Equal operands,
@@ -300,4 +306,342 @@ fn _km_expm1(xa: f64): f64 {
         y2 = ((x - (e + uf)) + 1.0) * twopk;
     }
     return y2;
+}
+
+# ── correctly rounded acos, cos, ln and x^2.5 (M2a, ADR 0005) ─────────────────────────
+#
+# The Peng–Robinson cubic (gas.cyr) is ill-conditioned near a double root and at the critical
+# point, its fugacity coefficient goes as exp(ln φ) with |ln φ| up to hundreds at extreme states,
+# and Redlich–Kwong cancels near P = 0: a 1-ulp change in one glibc acos, cos, log or pow result
+# moved those outputs by up to 2²⁶ ulp over the golden grid, so no class-C bound is meaningful
+# (docs/development/port-parity.md §5). glibc 2.44's code can't be transcribed (it is not in the
+# oracle's dependency graph, and x86_64 picks FMA variants at load time), so these four are
+# correctly rounded instead: double-double evaluation (about 2⁻¹⁰⁰ relative) and one final
+# rounding. glibc is within 1 ulp and correctly rounded on all but 0.04–0.16 % of arguments, so
+# the port's result is the oracle's bit for bit wherever glibc's is correctly rounded;
+# scripts/oracle/validate.py decides that per golden argument with a 60-digit reference, and only
+# the calls where it isn't count toward a function's sensitivity S (ADR 0005).
+# Only + − × ÷ and f64_sqrt are used (no x87, no polyfill), so the bits are the same on every
+# target. The constants are their exact double-double splits, as bit patterns in typed locals.
+
+# a + b = s + e exactly (Knuth's TwoSum).
+#must_use
+fn _km_two_sum(a: f64, b: f64): (f64, f64) {
+    var s: f64 = a + b;
+    var bb: f64 = s - a;
+    var e: f64 = (a - (s - bb)) + (b - bb);
+    return (s, e);
+}
+
+# a + b = s + e exactly, for |a| ≥ |b| or a = 0 (Dekker's FastTwoSum): s = RN(a + b).
+#must_use
+fn _km_fast_two_sum(a: f64, b: f64): (f64, f64) {
+    var s: f64 = a + b;
+    var e: f64 = b - (s - a);
+    return (s, e);
+}
+
+# a·b = p + e exactly (Dekker's TwoProduct with Veltkamp's 2²⁷ + 1 split), for |a|, |b| < 2⁹⁹⁶
+# and no underflow in e.
+#must_use
+fn _km_two_prod(a: f64, b: f64): (f64, f64) {
+    var p: f64 = a * b;
+    var split: f64 = 134217729.0;
+    var ca: f64 = split * a;
+    var ah: f64 = ca - (ca - a);
+    var al: f64 = a - ah;
+    var cb: f64 = split * b;
+    var bh: f64 = cb - (cb - b);
+    var bl: f64 = b - bh;
+    var e: f64 = (al * bl) - (((p - (ah * bh)) - (al * bh)) - (ah * bl));
+    return (p, e);
+}
+
+# Double-double sum (ah + al) + (bh + bl), renormalised (the accurate two-TwoSum form).
+#must_use
+fn _km_dd_add(ah: f64, al: f64, bh: f64, bl: f64): (f64, f64) {
+    var s, e = _km_two_sum(ah, bh);
+    var t, f = _km_two_sum(al, bl);
+    var e1: f64 = e + t;
+    var s1, e2 = _km_fast_two_sum(s, e1);
+    var e3: f64 = e2 + f;
+    var s2, e4 = _km_fast_two_sum(s1, e3);
+    return (s2, e4);
+}
+
+# Double-double product (ah + al)·(bh + bl), renormalised.
+#must_use
+fn _km_dd_mul(ah: f64, al: f64, bh: f64, bl: f64): (f64, f64) {
+    var p, e = _km_two_prod(ah, bh);
+    var cross: f64 = (ah * bl) + (al * bh);
+    var e1: f64 = e + cross;
+    var s, t = _km_fast_two_sum(p, e1);
+    return (s, t);
+}
+
+# Double-double quotient (ah + al) / d for a double d ≠ 0.
+#must_use
+fn _km_dd_div_d(ah: f64, al: f64, d: f64): (f64, f64) {
+    var q1: f64 = ah / d;
+    var p, e = _km_two_prod(q1, d);
+    var r: f64 = ((ah - p) - e) + al;
+    var q2: f64 = r / d;
+    var s, t = _km_fast_two_sum(q1, q2);
+    return (s, t);
+}
+
+# Double-double quotient (ah + al) / (bh + bl): three correction steps.
+#must_use
+fn _km_dd_div(ah: f64, al: f64, bh: f64, bl: f64): (f64, f64) {
+    var q1: f64 = ah / bh;
+    var ph, pl = _km_dd_mul(q1, 0.0, bh, bl);
+    var rh, rl = _km_dd_add(ah, al, -ph, -pl);
+    var q2: f64 = rh / bh;
+    var qh, ql = _km_dd_mul(q2, 0.0, bh, bl);
+    var sh, sl = _km_dd_add(rh, rl, -qh, -ql);
+    var q3: f64 = sh / bh;
+    var uh, ul = _km_fast_two_sum(q1, q2);
+    var vh, vl = _km_dd_add(uh, ul, q3, 0.0);
+    return (vh, vl);
+}
+
+# √y as a double-double, y > 0 finite: one Newton correction of the correctly rounded √y.
+#must_use
+fn _km_dd_sqrt(y: f64): (f64, f64) {
+    var s: f64 = f64_sqrt(y);
+    var p, e = _km_two_prod(s, s);
+    var r: f64 = ((y - p) - e) / (2.0 * s);
+    var h, l = _km_fast_two_sum(s, r);
+    return (h, l);
+}
+
+# cos(r) (sin = 0) or sin(r) (sin = 1) of a double-double |r| ≤ π/4 (+ a rounding), by its Taylor
+# series: 16 terms, the last below 2⁻¹²⁸ of the sum.
+#must_use
+fn _km_dd_cos_sin(rh: f64, rl: f64, sin): (f64, f64) {
+    var r2h, r2l = _km_dd_mul(rh, rl, rh, rl);
+    var th: f64 = 1.0;
+    var tl: f64 = 0.0;
+    var k = 0;
+    if (sin == 1) { th = rh; tl = rl; k = 1; }
+    var sh: f64 = th;
+    var sl: f64 = tl;
+    var n = 1;
+    while (n <= 16) {
+        var mh, ml = _km_dd_mul(th, tl, r2h, r2l);
+        var d: f64 = f64_from((k + 1) * (k + 2));
+        var qh, ql = _km_dd_div_d(mh, ml, d);
+        th = -qh;
+        tl = -ql;
+        var ah, al = _km_dd_add(sh, sl, th, tl);
+        sh = ah;
+        sl = al;
+        k = k + 2;
+        n = n + 1;
+    }
+    return (sh, sl);
+}
+
+# cos(x), correctly rounded, for |x| ≤ 8 (x − kπ/2 reduced in double-double against a
+# triple-double π/2; the Peng–Robinson arguments are in [−2π/3, π]). Outside that it is f64_cos
+# (within 1 ulp, not correctly rounded); NaN and ±∞ give NaN. Mirrors `f64::cos`.
+#must_use
+fn _km_cos(x: f64): f64 {
+    if (_km_is_finite(x) != 1) {
+        var nan: f64 = x - x;
+        return nan;
+    }
+    var ax: f64 = f64_abs(x);
+    if (ax > 8.0) {
+        var c: f64 = f64_cos(x);
+        return c;
+    }
+    var twobypi: f64 = 0x3FE45F306DC9C883;
+    var p1: f64 = 0x3FF921FB54442D18;   # π/2 = p1 + p2 + p3 + O(2⁻¹⁶³)
+    var p2: f64 = 0x3C91A62633145C07;
+    var p3: f64 = 0xB91F1976B7ED8FBC;
+    var kf: f64 = _km_round_half_away(x * twobypi);
+    var k = f64_to(kf);
+    var h1, l1 = _km_two_prod(kf, p1);
+    var h2, l2 = _km_two_prod(kf, p2);
+    var h3: f64 = kf * p3;
+    var ah, al = _km_two_sum(x, -h1);
+    var bh, bl = _km_dd_add(ah, al, -l1, 0.0);
+    var ch, cl = _km_dd_add(bh, bl, -h2, -l2);
+    var rh, rl = _km_dd_add(ch, cl, -h3, 0.0);
+    var q = k & 3;
+    var sin = 0;
+    if (q == 1 || q == 3) { sin = 1; }
+    var vh, vl = _km_dd_cos_sin(rh, rl, sin);
+    if (q == 1 || q == 2) { vh = -vh; }
+    return vh;
+}
+
+# asin(s) of a double-double |s| ≤ 1/2, by its series Σ cₙ s²ⁿ⁺¹/(2n + 1),
+# cₙ = cₙ₋₁·(2n − 1)/(2n), until a term is below 2⁻¹¹⁵ of the sum (at most 60 terms).
+#must_use
+fn _km_dd_asin(sh: f64, sl: f64): (f64, f64) {
+    var s2h, s2l = _km_dd_mul(sh, sl, sh, sl);
+    var ph: f64 = sh;
+    var pl: f64 = sl;
+    var uh: f64 = sh;
+    var ul: f64 = sl;
+    var tiny: f64 = 0x38C0000000000000;   # 2⁻¹¹⁵
+    var n = 1;
+    while (n <= 60) {
+        var mh, ml = _km_dd_mul(ph, pl, s2h, s2l);
+        var odd: f64 = f64_from(2 * n - 1);
+        var ah, al = _km_dd_mul(mh, ml, odd, 0.0);
+        var even: f64 = f64_from(2 * n);
+        var bh, bl = _km_dd_div_d(ah, al, even);
+        ph = bh;
+        pl = bl;
+        var next: f64 = f64_from(2 * n + 1);
+        var th, tl = _km_dd_div_d(ph, pl, next);
+        var vh, vl = _km_dd_add(uh, ul, th, tl);
+        uh = vh;
+        ul = vl;
+        var at: f64 = f64_abs(th);
+        var au: f64 = f64_abs(uh);
+        if (at < (au * tiny)) { break; }
+        n = n + 1;
+    }
+    return (uh, ul);
+}
+
+# acos(x), correctly rounded: π/2 − asin(x) for |x| ≤ 1/2; 2·asin(√((1 − x)/2)) above;
+# π − 2·asin(√((1 + x)/2)) below. acos(1) = +0, acos(−1) = π rounded; NaN for NaN and |x| > 1.
+# Mirrors `f64::acos`.
+#must_use
+fn _km_acos(x: f64): f64 {
+    if (x != x) { return x; }
+    var ax: f64 = f64_abs(x);
+    if (ax > 1.0) {
+        var nan: f64 = (x - x) / 0.0;
+        return nan;
+    }
+    var p1: f64 = 0x3FF921FB54442D18;   # π/2 = p1 + p2 + O(2⁻¹⁰⁹)
+    var p2: f64 = 0x3C91A62633145C07;
+    if (x == 1.0) { return 0.0; }
+    if (x == -1.0) {
+        var pi: f64 = 0x400921FB54442D18;
+        return pi;
+    }
+    if (ax <= 0.5) {
+        var sh, sl = _km_dd_asin(x, 0.0);
+        var rh, rl = _km_dd_add(p1, p2, -sh, -sl);
+        return rh;
+    }
+    var y: f64 = (1.0 - ax) * 0.5;      # exact for 1/2 < |x| < 1
+    var qh, ql = _km_dd_sqrt(y);
+    var ah, al = _km_dd_asin(qh, ql);
+    var th: f64 = 2.0 * ah;
+    var tl: f64 = 2.0 * al;
+    if (x > 0.0) { return th; }
+    var p1x2: f64 = 2.0 * p1;
+    var p2x2: f64 = 2.0 * p2;
+    var vh, vl = _km_dd_add(p1x2, p2x2, -th, -tl);
+    return vh;
+}
+
+# ln(x), correctly rounded: x = 2ᵏ·m with √2/2 < m ≤ √2, ln m = 2·atanh((m − 1)/(m + 1)) by its
+# series (at most 30 terms), plus k·ln 2 in triple-double. ln(1) = +0, ln(±0) = −∞, ln(+∞) = +∞,
+# NaN for NaN and x < 0. Mirrors `f64::ln`.
+#must_use
+fn _km_ln(xa: f64): f64 {
+    var x: f64 = xa;
+    if (x != x) { return x; }
+    if (x < 0.0) {
+        var nan: f64 = (x - x) / 0.0;
+        return nan;
+    }
+    if (x == 0.0) {
+        var m1: f64 = -1.0;
+        var ninf: f64 = m1 / 0.0;
+        return ninf;
+    }
+    if (_km_is_finite(x) != 1) { return x; }
+    if (x == 1.0) { return 0.0; }
+    var k = 0;
+    var ui = _km_bits(x);
+    if ((ui >> 52) == 0) {                  # subnormal: scale by 2⁵⁴
+        var p54: f64 = 0x4350000000000000;
+        x = x * p54;
+        k = 0 - 54;
+        ui = _km_bits(x);
+    }
+    k = k + (((ui >> 52) & 0x7FF) - 1023);
+    var mb = (ui & 0x000FFFFFFFFFFFFF) | 0x3FF0000000000000;
+    var m: f64 = mb;                        # [1, 2)
+    var sqrt2: f64 = 0x3FF6A09E667F3BCD;
+    if (m > sqrt2) {
+        m = m * 0.5;
+        k = k + 1;
+    }
+    var num: f64 = m - 1.0;                 # exact
+    var dh, dl = _km_two_sum(m, 1.0);
+    var fh, fl = _km_dd_div(num, 0.0, dh, dl);
+    var f2h, f2l = _km_dd_mul(fh, fl, fh, fl);
+    var ph: f64 = fh;
+    var pl: f64 = fl;
+    var uh: f64 = fh;
+    var ul: f64 = fl;
+    var tiny: f64 = 0x38C0000000000000;   # 2⁻¹¹⁵
+    var n = 1;
+    while (n <= 30) {
+        var qh, ql = _km_dd_mul(ph, pl, f2h, f2l);
+        ph = qh;
+        pl = ql;
+        var odd: f64 = f64_from(2 * n + 1);
+        var th, tl = _km_dd_div_d(ph, pl, odd);
+        var vh, vl = _km_dd_add(uh, ul, th, tl);
+        uh = vh;
+        ul = vl;
+        var at: f64 = f64_abs(th);
+        var au: f64 = f64_abs(uh);
+        if (at < (au * tiny)) { break; }
+        n = n + 1;
+    }
+    var lh: f64 = 2.0 * uh;
+    var ll: f64 = 2.0 * ul;
+    if (k == 0) { return lh; }
+    var ln2h: f64 = 0x3FE62E42FEFA39EF;   # ln 2 = ln2h + ln2l + ln2t + O(2⁻¹⁶⁰)
+    var ln2l: f64 = 0x3C7ABC9E3B39803F;
+    var ln2t: f64 = 0x3907B57A079A1934;
+    var kf: f64 = f64_from(k);
+    var kh, ke = _km_two_prod(kf, ln2h);
+    var kl: f64 = kf * ln2l;
+    var kt: f64 = kf * ln2t;
+    var ah, al = _km_dd_add(kh, ke, kl, kt);
+    var rh, rl = _km_dd_add(ah, al, lh, ll);
+    return rh;
+}
+
+# x^2.5 = x²·√x, correctly rounded for x from 2⁻³⁸⁷ to overflow at 2⁴⁰⁹·⁶: x² is exact as a
+# double-double and √x is one. Below 2⁻³⁸⁷ (x^2.5 < 2⁻⁹⁶⁷) the product's error term underflows and the
+# result can be 1 ulp off, normal results just above DBL_MIN included (an independent sweep found 33 such
+# among 2,000 arguments below 2⁻⁴⁰⁷); below 2⁻⁴³⁰ it is +0.
+# pow(±0, 2.5) = +0, pow(+∞, 2.5) = +∞, NaN for NaN and x < 0. Mirrors `x.powf(2.5)`.
+#must_use
+fn _km_pow_2_5(x: f64): f64 {
+    if (x != x) { return x; }
+    if (x == 0.0) { return 0.0; }
+    if (x < 0.0) {
+        var nan: f64 = (x - x) / 0.0;
+        return nan;
+    }
+    if (_km_is_finite(x) != 1) { return x; }
+    var big: f64 = 0x5990000000000000;     # 2⁴¹⁰: x^2.5 ≥ 2¹⁰²⁵ overflows
+    var small: f64 = 0x2510000000000000;   # 2⁻⁴³⁰: x^2.5 < 2⁻¹⁰⁷⁵ rounds to +0
+    if (x >= big) {
+        var inf: f64 = 1.0 / 0.0;
+        return inf;
+    }
+    if (x < small) { return 0.0; }
+    var x2h, x2l = _km_two_prod(x, x);
+    var sh, sl = _km_dd_sqrt(x);
+    var p0: f64 = x2h * sh;
+    if (_km_is_finite(p0) != 1) { return p0; }
+    var rh, rl = _km_dd_mul(x2h, x2l, sh, sl);
+    return rh;
 }

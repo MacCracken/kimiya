@@ -12,7 +12,18 @@ generated value with no golden row. The probe reads the baked arrays directly, n
 src/element.cyr, so it tests the data and the harness tests the accessors. Adapted from
 tanmatra's probe_tables.py; extend `checks` as the data modules arrive.
 
-- src/constants.cyr: every `const KM_X` against its constants.tsv row.
+- src/constants.cyr: every `const KM_X` against its constants.tsv row (thermo::WATER_SPECIFIC_HEAT
+  included, M2a).
+- src/phase_data.cyr (M2a): the K_b / K_f constants against constants.tsv; KM_ANTOINE_COUNT, and
+  for every ANTOINE_DATA row the name (read through the blob offsets) and the five coefficient
+  columns, against the golden `phase::ANTOINE_DATA[]` rows; _KM_PA_PER_MMHG against the golden
+  class-A `phase::antoine_pressure_pa` row of the unit set (A = B = 0, C = 1 at T = 0).
+- src/gas_data.cyr (M2a): the STP constants against constants.tsv; each KM_PR_* preset's tc, pc
+  and omega, read through the struct, against its golden `gas::PR_*` row.
+- src/thermochem_data.cyr (M2b): KM_THERMOCHEM_COUNT and KM_SHOMATE_COUNT; for every THERMOCHEM_DATA row
+  the formula and name (through the blob offsets) and ΔH_f°, ΔG_f°, S°, against the golden
+  `thermochem::THERMOCHEM_DATA[]` rows; for every SHOMATE_DATA segment the formula and the seven
+  coefficient / range columns, against the golden `thermochem::SHOMATE_DATA[]` rows.
 - src/element_data.cyr (M1): for every row of ELEMENTS, the atomic number, symbol, name,
   atomic mass, electronegativity (presence flag and value) and category, against the golden
   `element::lookup_by_number` row of that Z; for every row of ELEMENT_PROPERTIES, the atomic
@@ -128,8 +139,117 @@ if tables != covered:
     fail(f"src/element_data.cyr tables not probed: {sorted(tables - covered)}; probed but gone: {sorted(covered - tables)}")
 nelem = len(checks) - nconst
 
+# ── src/phase_data.cyr, src/gas_data.cyr (M2a) ──────────────────────────────────────
+for rel in ("src/phase_data.cyr", "src/gas_data.cyr"):
+    text = (root / rel).read_text()
+    for m in re.finditer(r"^# Rust: kimiya::(\S+)\nconst (KM_[A-Z0-9_]+) = ", text, re.M):
+        path, name = m.groups()
+        if path not in golden:
+            fail(f"{rel}: {name}: kimiya::{path} has no golden row")
+            continue
+        checks.append((f"x = {name}; fmt_hex(x);", "f", golden[path][2:], f"const {path}"))
+        nconst += 1
+nm2a_before = len(checks)
+pdata = (root / "src/phase_data.cyr").read_text()
+ant = {}
+ant_len = None
+unit_pa = None
+for fn, cls, ins, outs in rows("phase"):
+    if fn == "phase::ANTOINE_DATA[]":
+        ant[int(ins[0][2:])] = outs
+    elif fn == "phase::ANTOINE_DATA":
+        ant_len = int(outs[0][2:])
+    elif fn == "phase::antoine_pressure_pa" and cls == "A":
+        unit_pa = outs[0]
+acount = int(re.search(r"^const KM_ANTOINE_COUNT = (\d+);", pdata, re.M).group(1))
+if ant_len != acount or sorted(ant) != list(range(acount)):
+    fail(f"golden ANTOINE_DATA has {ant_len} rows ({sorted(ant)}); KM_ANTOINE_COUNT is {acount}")
+checks.append(("fmt_int(KM_ANTOINE_COUNT);", "i", str(ant_len), "KM_ANTOINE_COUNT"))
+for k in range(acount):
+    name, a, b, c, lo, hi = ant[k]
+    lab = f"ANTOINE_DATA[{k}]"
+    checks.append((f"p = &_KM_ANTOINE_NAME_BYTES + _KM_ANTOINE_NAME_OFF[{k}]; print(p, strlen(p));",
+                   "s", unpct(name[2:]), f"{lab}.name"))
+    for col, want in (("A", a), ("B", b), ("C", c), ("T_MIN_C", lo), ("T_MAX_C", hi)):
+        checks.append((f"x = KM_ANTOINE_{col}[{k}]; fmt_hex(x);", "f", want[2:], f"{lab}.{col.lower()}"))
+if unit_pa is None:
+    fail("phase.tsv has no class-A antoine_pressure_pa row (the unit set) to pin _KM_PA_PER_MMHG")
+else:
+    checks.append(("x = _KM_PA_PER_MMHG; fmt_hex(x);", "f", unit_pa[2:], "_KM_PA_PER_MMHG"))
+covered_p = {"_KM_ANTOINE_NAME_OFF", "_KM_ANTOINE_NAME_BYTES", "KM_ANTOINE_A", "KM_ANTOINE_B",
+             "KM_ANTOINE_C", "KM_ANTOINE_T_MIN_C", "KM_ANTOINE_T_MAX_C"}
+tables_p = set(re.findall(r"^var (_?KM_[A-Z0-9_]+):", pdata, re.M))
+if tables_p != covered_p:
+    fail(f"src/phase_data.cyr tables not probed: {sorted(tables_p - covered_p)}; probed but gone: {sorted(covered_p - tables_p)}")
+gdata = (root / "src/gas_data.cyr").read_text()
+presets = {}
+for fn, cls, ins, outs in rows("gas"):
+    if re.fullmatch(r"gas::PR_[A-Z0-9_]+", fn):
+        presets[fn.split("::")[1]] = outs
+declared = re.findall(r"^var KM_(PR_[A-Z0-9_]+) = KmPengRobinsonParams \{", gdata, re.M)
+if sorted(declared) != sorted(presets):
+    fail(f"src/gas_data.cyr presets {sorted(declared)}; golden gas::PR_* rows {sorted(presets)}")
+for name in declared:
+    for field, want in zip(("tc", "pc", "omega"), presets.get(name, [])):
+        checks.append((f"x = KM_{name}.{field}; fmt_hex(x);", "f", want[2:], f"KM_{name}.{field}"))
+other = set(re.findall(r"^var (_?KM_[A-Z0-9_]+)", gdata, re.M)) - {f"KM_{n}" for n in declared}
+if other:
+    fail(f"src/gas_data.cyr globals not probed: {sorted(other)}")
+nm2a = len(checks) - nm2a_before
+
+# ── src/thermochem_data.cyr (M2b) ───────────────────────────────────────────────────
+nm2b_before = len(checks)
+tdata = (root / "src/thermochem_data.cyr").read_text()
+tc_rows, sh_rows, tc_len, sh_len = {}, {}, None, None
+for fn, cls, ins, outs in rows("thermochem"):
+    if fn == "thermochem::THERMOCHEM_DATA[]":
+        tc_rows[int(ins[0][2:])] = outs
+    elif fn == "thermochem::SHOMATE_DATA[]":
+        sh_rows[int(ins[0][2:])] = outs
+    elif fn == "thermochem::THERMOCHEM_DATA":
+        tc_len = int(outs[0][2:])
+    elif fn == "thermochem::SHOMATE_DATA":
+        sh_len = int(outs[0][2:])
+tcount = int(re.search(r"^const KM_THERMOCHEM_COUNT = (\d+);", tdata, re.M).group(1))
+scount = int(re.search(r"^const KM_SHOMATE_COUNT = (\d+);", tdata, re.M).group(1))
+if tc_len != tcount or sorted(tc_rows) != list(range(tcount)):
+    fail(f"golden THERMOCHEM_DATA has {tc_len} rows ({len(tc_rows)} listed); KM_THERMOCHEM_COUNT is {tcount}")
+if sh_len != scount or sorted(sh_rows) != list(range(scount)):
+    fail(f"golden SHOMATE_DATA has {sh_len} rows ({len(sh_rows)} listed); KM_SHOMATE_COUNT is {scount}")
+checks.append(("fmt_int(KM_THERMOCHEM_COUNT);", "i", str(tc_len), "KM_THERMOCHEM_COUNT"))
+checks.append(("fmt_int(KM_SHOMATE_COUNT);", "i", str(sh_len), "KM_SHOMATE_COUNT"))
+for k in range(tcount):
+    formula, name, hf, gf, s0 = tc_rows[k]
+    lab = f"THERMOCHEM_DATA[{k}]"
+    checks.append((f"p = &_KM_THERMOCHEM_FORMULA_BYTES + _KM_THERMOCHEM_FORMULA_OFF[{k}]; print(p, strlen(p));",
+                   "s", unpct(formula[2:]), f"{lab}.formula"))
+    checks.append((f"p = &_KM_THERMOCHEM_NAME_BYTES + _KM_THERMOCHEM_NAME_OFF[{k}]; print(p, strlen(p));",
+                   "s", unpct(name[2:]), f"{lab}.name"))
+    for col, want in (("DELTA_HF_KJ", hf), ("DELTA_GF_KJ", gf), ("S_STANDARD_J", s0)):
+        checks.append((f"x = KM_THERMOCHEM_{col}[{k}]; fmt_hex(x);", "f", want[2:], f"{lab}.{col.lower()}"))
+for k in range(scount):
+    formula, *fields = sh_rows[k]
+    lab = f"SHOMATE_DATA[{k}]"
+    checks.append((f"p = &_KM_SHOMATE_FORMULA_BYTES + _KM_SHOMATE_FORMULA_OFF[{k}]; print(p, strlen(p));",
+                   "s", unpct(formula[2:]), f"{lab}.formula"))
+    for col, want in zip(("A", "B", "C", "D", "E", "T_MIN", "T_MAX"), fields):
+        checks.append((f"x = KM_SHOMATE_{col}[{k}]; fmt_hex(x);", "f", want[2:], f"{lab}.{col.lower()}"))
+covered_t = {"_KM_THERMOCHEM_FORMULA_OFF", "_KM_THERMOCHEM_FORMULA_BYTES", "_KM_THERMOCHEM_NAME_OFF",
+             "_KM_THERMOCHEM_NAME_BYTES", "KM_THERMOCHEM_DELTA_HF_KJ", "KM_THERMOCHEM_DELTA_GF_KJ",
+             "KM_THERMOCHEM_S_STANDARD_J", "_KM_SHOMATE_FORMULA_OFF", "_KM_SHOMATE_FORMULA_BYTES",
+             "KM_SHOMATE_A", "KM_SHOMATE_B", "KM_SHOMATE_C", "KM_SHOMATE_D", "KM_SHOMATE_E", "KM_SHOMATE_T_MIN",
+             "KM_SHOMATE_T_MAX"}
+tables_t = set(re.findall(r"^var (_?KM_[A-Z0-9_]+)", tdata, re.M))
+if tables_t != covered_t:
+    fail(f"src/thermochem_data.cyr tables not probed: {sorted(tables_t - covered_t)}; probed but gone: {sorted(covered_t - tables_t)}")
+consts_t = set(re.findall(r"^const (_?KM_[A-Z0-9_]+)", tdata, re.M))
+if consts_t != {"KM_THERMOCHEM_COUNT", "KM_SHOMATE_COUNT"}:
+    fail(f"src/thermochem_data.cyr constants not probed: {sorted(consts_t)}")
+nm2b = len(checks) - nm2b_before
+
 # ── the probe program ───────────────────────────────────────────────────────────────
-src = ['include "src/constants.cyr"', 'include "src/element_data.cyr"', "",
+src = ['include "src/constants.cyr"', 'include "src/element_data.cyr"', 'include "src/phase_data.cyr"',
+       'include "src/gas_data.cyr"', 'include "src/thermochem_data.cyr"', "",
        "fn main() {", "    var x: f64 = 0.0;", "    var p = 0;"]
 for k, (stmt, kind, want, label) in enumerate(checks):
     src.append(f"    {stmt} println(\" {k}\");")
@@ -158,6 +278,7 @@ for k, (stmt, kind, want, label) in enumerate(checks):
     if not ok:
         fail(f"{label}: {stmt} -> {g!r}, want {want!r}")
 pending = len(golden) - nconst
-print(f"checked {nconst} constants and {nelem} element_data cells through the Cyrius compiler "
-      f"({pending} golden constants are module data, generated at their milestone); failures: {fails}")
+print(f"checked {nconst} constants, {nelem} element_data cells, {nm2a} phase_data / gas_data cells and "
+      f"{nm2b} thermochem_data cells through the Cyrius compiler ({pending} golden constants are module data "
+      f"of later milestones); failures: {fails}")
 sys.exit(1 if fails else 0)

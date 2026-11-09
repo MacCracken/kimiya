@@ -1,0 +1,75 @@
+# thermo.cyr — basic calorimetry and thermochemistry: heat transfer (q = m·c·ΔT), Hess's law,
+# reaction enthalpy from formation enthalpies, and specific heat from calorimetry (port of
+# rust-old/src/thermo.rs).
+#
+# Calorimetry functions use grams and J/(g·°C) (a temperature *difference* in °C equals one in K);
+# enthalpies are in J or J/mol as passed in. Every function is + − × ÷ in Rust's operation order,
+# so every result is bit-identical (class B). WATER_SPECIFIC_HEAT is KM_WATER_SPECIFIC_HEAT in
+# src/constants.cyr (generated; thermo has no data file of its own).
+# - A Rust slice `&[f64]` is a pointer to n f64 values and the count n. Rust's f64 `sum` folds from
+#   −0.0, so the sum of no values is −0.0, as here. A count below 0, or a null pointer with values,
+#   is no slice: the result is NaN (these functions have no error channel).
+# - specific_heat_from_calorimetry's zero-ΔT threshold is hisab's EPSILON_F64 (10⁻¹²), the same
+#   constant as Rust hisab 1.4.0's (port plan §6.2). hisab is included explicitly: `cyrius distlib`
+#   keeps a non-stdlib include in place in dist/kimiya.cyr, so a consumer needs kimiya's
+#   [deps.hisab] (port plan §6.4).
+
+include "lib/hisab.cyr"
+
+# Σ of the n f64 values at xs in order, from −0.0 (Rust's `iter().sum()`); NaN if (xs, n) is no slice.
+#must_use
+fn _km_sum(xs, n): f64 {
+    if (n < 0 || (n > 0 && xs == 0)) { return _km_nan(); }
+    var s: f64 = -0.0;
+    var k = 0;
+    while (k < n) {
+        var x: f64 = load64(xs + k * 8);
+        s = s + x;
+        k = k + 1;
+    }
+    return s;
+}
+
+# Heat transfer q = m × c × ΔT in J, from the mass in g, the specific heat in J/(g·°C) and ΔT in °C.
+# Mirrors `thermo::heat_transfer`.
+#must_use
+fn heat_transfer(mass_g: f64, specific_heat: f64, delta_t: f64): f64 {
+    var q: f64 = (mass_g * specific_heat) * delta_t;
+    return q;
+}
+
+# Hess's law: the total enthalpy change, the sum of the n step enthalpies at `enthalpies_j` in
+# order, in their unit (e.g. J/mol); −0.0 for no steps, NaN if (enthalpies_j, n) is no slice.
+# Mirrors `thermo::hess_law`.
+#must_use
+fn hess_law(enthalpies_j, n): f64 {
+    var s: f64 = _km_sum(enthalpies_j, n);
+    return s;
+}
+
+# Enthalpy of reaction from formation enthalpies, ΔH_rxn = Σ ΔH_f(products) − Σ ΔH_f(reactants):
+# `products_hf` holds np values and `reactants_hf` nr, each ΔH_f already multiplied by its
+# stoichiometric coefficient (e.g. J/mol of reaction); the result is in the same unit. NaN if
+# either is no slice. Mirrors `thermo::enthalpy_from_formation`.
+#must_use
+fn enthalpy_from_formation(products_hf, np, reactants_hf, nr): f64 {
+    var sum_products: f64 = _km_sum(products_hf, np);
+    var sum_reactants: f64 = _km_sum(reactants_hf, nr);
+    var d: f64 = sum_products - sum_reactants;
+    return d;
+}
+
+# Specific heat at constant pressure from calorimetry, c_p = q / (m × ΔT) in J/(g·°C), from q in J,
+# m in g and ΔT in °C (or K): Ok(c_p), or Err(KM_ERR_INVALID_INPUT) if q is not finite, m is not
+# positive and finite, or ΔT is non-finite or zero (|ΔT| < 10⁻¹², hisab's EPSILON_F64). Mirrors
+# `thermo::specific_heat_from_calorimetry`.
+#must_use
+fn specific_heat_from_calorimetry(energy_j: f64, mass_g: f64, delta_t: f64): Result {
+    if (_km_is_finite(energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(mass_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var eps: f64 = EPSILON_F64;
+    var adt: f64 = f64_abs(delta_t);
+    if (_km_is_finite(delta_t) != 1 || adt < eps) { return Err(KM_ERR_INVALID_INPUT); }
+    var c: f64 = energy_j / (mass_g * delta_t);
+    return Ok(c);
+}

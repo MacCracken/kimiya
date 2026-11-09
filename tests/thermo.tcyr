@@ -1,0 +1,152 @@
+# thermo.tcyr — the tests of rust-old/src/thermo.rs, ported one for one (each test_group is the
+# Rust test's name), plus a Cyrius-only test of the slice convention and the zero-ΔT threshold.
+# A Rust `&[f64]` is a pointer and a count here. The golden corpus separately checks every
+# function bit for bit (tests/parity.tcyr: class B, 0 ulp).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/thermo.cyr"
+
+alloc_init();
+
+# 1 if |a - b| < eps.
+#must_use
+fn near(a: f64, b: f64, eps: f64): i64 {
+    var d: f64 = f64_abs(a - b);
+    if (d < eps) { return 1; }
+    return 0;
+}
+
+fn _t_heat_1kg_water_1c() {
+    test_group("heat_1kg_water_1c");
+    var q: f64 = heat_transfer(1000.0, KM_WATER_SPECIFIC_HEAT, 1.0);
+    assert(near(q, 4184.0, 0.000000001), "1kg water +1C = 4184 J");
+}
+
+fn _t_heat_100g_water_10c() {
+    test_group("heat_100g_water_10c");
+    var q: f64 = heat_transfer(100.0, KM_WATER_SPECIFIC_HEAT, 10.0);
+    assert(near(q, 4184.0, 0.000000001), "100g water +10C = 4184 J");
+}
+
+fn _t_heat_cooling_is_negative() {
+    test_group("heat_cooling_is_negative");
+    var q: f64 = heat_transfer(100.0, KM_WATER_SPECIFIC_HEAT, -5.0);
+    assert(q < 0.0, "cooling should give negative heat");
+}
+
+fn _t_hess_law_basic() {
+    test_group("hess_law_basic");
+    var steps: f64[3];
+    steps[0] = -100.0;
+    steps[1] = 50.0;
+    steps[2] = -30.0;
+    var total: f64 = hess_law(&steps, 3);
+    assert(near(total, -80.0, 0.0000000000000002220446049250313), "-100 + 50 - 30 = -80");
+}
+
+fn _t_formation_enthalpy() {
+    test_group("formation_enthalpy");
+    var products: f64[1];
+    products[0] = -400.0;
+    var reactants: f64[2];
+    reactants[0] = -200.0;
+    reactants[1] = -100.0;
+    var dh: f64 = enthalpy_from_formation(&products, 1, &reactants, 2);
+    assert(near(dh, -100.0, 0.0000000000000002220446049250313), "-400 - (-300) = -100");
+}
+
+fn _t_specific_heat_roundtrip() {
+    test_group("specific_heat_roundtrip");
+    var t, v = specific_heat_from_calorimetry(4184.0, 1000.0, 1.0);
+    assert_eq(is_ok(t), 1, "Ok");
+    var c: f64 = v;
+    assert(near(c, KM_WATER_SPECIFIC_HEAT, 0.000000000001), "c = 4.184");
+}
+
+fn _t_water_specific_heat_value() {
+    test_group("water_specific_heat_value");
+    var c: f64 = KM_WATER_SPECIFIC_HEAT;
+    assert(near(c, 4.184, 0.001), "4.184 J/(g C)");
+}
+
+fn _t_zero_mass_calorimetry_is_error() {
+    test_group("zero_mass_calorimetry_is_error");
+    var t, v = specific_heat_from_calorimetry(100.0, 0.0, 1.0);
+    assert_eq(is_err_result(t), 1, "m = 0 is Err");
+}
+
+fn _t_zero_delta_t_calorimetry_is_error() {
+    test_group("zero_delta_t_calorimetry_is_error");
+    var t, v = specific_heat_from_calorimetry(100.0, 100.0, 0.0);
+    assert_eq(is_err_result(t), 1, "dT = 0 is Err");
+}
+
+fn _t_nan_calorimetry_is_error() {
+    test_group("nan_calorimetry_is_error");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var t1, v1 = specific_heat_from_calorimetry(100.0, nan, 1.0);
+    assert_eq(is_err_result(t1), 1, "NaN m");
+    var t2, v2 = specific_heat_from_calorimetry(100.0, 100.0, nan);
+    assert_eq(is_err_result(t2), 1, "NaN dT");
+    var t3, v3 = specific_heat_from_calorimetry(nan, 100.0, 1.0);
+    assert_eq(is_err_result(t3), 1, "NaN q");
+    var t4, v4 = specific_heat_from_calorimetry(100.0, inf, 1.0);
+    assert_eq(is_err_result(t4), 1, "inf m");
+    var t5, v5 = specific_heat_from_calorimetry(100.0, 100.0, inf);
+    assert_eq(is_err_result(t5), 1, "inf dT");
+}
+
+# Cyrius-only: the empty sum is Rust's −0.0; a negative count or a null pointer with values is no
+# slice (NaN); the zero-ΔT threshold is hisab's EPSILON_F64 = 1e-12 exactly (|ΔT| below it is Err,
+# at it is Ok, both signs); every guard's error is InvalidInput.
+fn _t_cyrius_slices_and_threshold() {
+    test_group("cyrius_slices_and_threshold");
+    var empty: f64 = hess_law(0, 0);
+    var mz: f64 = -0.0;
+    assert_bits_eq(empty, mz, "hess_law of no steps is -0.0");
+    var e2: f64 = enthalpy_from_formation(0, 0, 0, 0);
+    assert_bits_eq(e2, 0.0, "(-0.0) - (-0.0) = +0.0");
+    var bad: f64 = hess_law(0, 2);
+    assert_eq(ulp_is_nan(bad), 1, "null pointer with 2 values is NaN");
+    var steps: f64[1];
+    steps[0] = 5.0;
+    var neg: f64 = hess_law(&steps, 0 - 1);
+    assert_eq(ulp_is_nan(neg), 1, "count -1 is NaN");
+    var e3: f64 = enthalpy_from_formation(&steps, 1, &steps, 0 - 1);
+    assert_eq(ulp_is_nan(e3), 1, "a bad reactant slice is NaN");
+    var eps: f64 = 0.000000000001;
+    var below: f64 = 0.0000000000009999999999999998;   # nextafter(1e-12, 0)
+    var t1, v1 = specific_heat_from_calorimetry(1.0, 1.0, eps);
+    assert_eq(is_ok(t1), 1, "|dT| = 1e-12 is Ok");
+    var t2, v2 = specific_heat_from_calorimetry(1.0, 1.0, below);
+    assert(is_err_result(t2) == 1 && v2 == KM_ERR_INVALID_INPUT, "|dT| just below 1e-12 is InvalidInput");
+    var t3, v3 = specific_heat_from_calorimetry(1.0, 1.0, -eps);
+    assert_eq(is_ok(t3), 1, "dT = -1e-12 is Ok");
+    var t4, v4 = specific_heat_from_calorimetry(1.0, -1.0, 1.0);
+    assert(is_err_result(t4) == 1 && v4 == KM_ERR_INVALID_INPUT, "negative mass is InvalidInput");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_heat_1kg_water_1c();
+    _t_heat_100g_water_10c();
+    _t_heat_cooling_is_negative();
+    _t_hess_law_basic();
+    _t_formation_enthalpy();
+    _t_specific_heat_roundtrip();
+    _t_water_specific_heat_value();
+    _t_zero_mass_calorimetry_is_error();
+    _t_zero_delta_t_calorimetry_is_error();
+    _t_nan_calorimetry_is_error();
+    _t_cyrius_slices_and_threshold();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

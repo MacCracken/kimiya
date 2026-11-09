@@ -186,10 +186,11 @@ expect the same repairs here unless a newer pin fixed it.
    modules = ["src/error.cyr", ...]   # dependency order, below
    ```
    - `[lib]` order: error → constants → mathx → validate → element_data → element → molecule →
-     reaction → thermo → thermochem_data → thermochem → phase_data → phase → gas → solution →
-     electrochemistry_data → electrochemistry → kinetics → stoichiometry → organic →
+     reaction → thermo → thermochem_data → thermochem → phase_data → phase → gas_data → gas →
+     solution → electrochemistry_data → electrochemistry → kinetics → stoichiometry → organic →
      inorganic_data → inorganic → potential → nuclear_data → nuclear → spectroscopy → numerics →
-     reaction_dynamics → network → fitting → sensitivity.
+     reaction_dynamics → network → fitting → sensitivity. (`gas_data` was added in M2a: the
+     `PengRobinsonParams` struct and the `PR_*` presets are generated, so they precede `gas`.)
    - `constants.cyr` comes first because 14 Rust modules reach into other modules for
      constants (`ELEMENTARY_CHARGE`, `COULOMB_CONSTANT`, `BOLTZMANN`, `PLANCK`, …).
    - `[lib] modules = []` is invalid; `src/error.cyr` is the first entry in M1.
@@ -310,7 +311,7 @@ Every std f64 method in `src/` (non-test), 1.2.0:
 
 | Rust hisab 1.4.0 (used by) | hisab 3.4.1 Cyrius | Plan |
 |---|---|---|
-| `num::newton_raphson`, `num::bisection` (thermochem flame) | `num_newton`, `num_bisection` — semantics changed in 3.x (subnormal derivatives, NaN refusals, exact endpoint roots) | use hisab; rows class D. Transcribe 1.4.0's ~15-line loops only if D fails |
+| `num::newton_raphson`, `num::bisection` (thermochem flame) | `num_newton`, `num_bisection` — semantics changed in 3.x (subnormal derivatives, NaN refusals, exact endpoint roots, a `lo + (hi − lo)·0.5` midpoint, `Err` on exhaustion), and their `fncall1` callbacks carry no context | **transcribed in M2b** (ADR 0003 amendment): `_km_flame_newton` / `_km_flame_bisection` in `src/thermochem.cyr`, 1.4.0's loops specialised to the flame balance; rows class B, 0 ulp |
 | `num::rk4_trajectory` — **systems** (dynamics) | `num_rk4` — **scalar** single step only | **gap** → transcribe into `numerics.cyr` |
 | `num::dopri45` — **systems** (`simulate_adaptive`) | `ode_dopri45`, `ode_dopri45_trajectory` — **scalar** | **gap** → transcribe |
 | `num::euler_maruyama`, `num::Pcg32` (`simulate_stochastic`) | `ode_euler_maruyama` (scalar step), `pcg32_new` (stream 1, as Rust) | PCG32 from hisab; system SDE step local (trivial) |
@@ -385,6 +386,79 @@ Settled while implementing M1 (2026-11-09), all within the decisions above:
   reaches, and a bundle reaches none, so without them `dist/kimiya.deps` listed only `tagged` and a
   consumer's build failed on `str_builder_*` (probed). No `src/` file includes another.
 
+Decided in M2a (2026-11-09; reaction, thermo, phase, gas):
+- **Struct values** — `PengRobinsonParams` is `struct KmPengRobinsonParams { tc: f64; pc: f64; omega: f64; }`,
+  passed by value (as tanmatra's `TmFourMomentum`); `AntoineCoeffs` is `struct KmAntoineCoeffs` (five f64).
+  Both are generated with their Rust field docs (`src/gas_data.cyr`, `src/phase_data.cyr`). A `PR_*` preset
+  is a top-level struct value, `var KM_PR_WATER = KmPengRobinsonParams { tc: 647.1, … };` (probed: initialised
+  data, passes to a by-value parameter). Rust's `{ field: x, ..p }` is a copy and a field store. Struct arrays
+  can't be subscripted (6.7.18), so tests loop over per-case helper calls.
+- **Generated module data** — K_b/K_f and the ANTOINE_DATA columns (name blob + offsets, A, B, C, t_min_c,
+  t_max_c) in `src/phase_data.cyr`; STP and the presets in `src/gas_data.cyr`; `thermo::WATER_SPECIFIC_HEAT` in
+  `src/constants.cyr` (thermo has no data file, and constants.cyr precedes it). Rust's *private* `PA_PER_MMHG`
+  is generated too, through the API: `antoine_pressure_pa` of A = B = 0, C = 1 at T = 0 is 10⁰ × the factor
+  (checked to be exactly 1.0 first), pinned by a class-A golden row and cross-checked against the source
+  literal. Typed formula coefficients (PR's 0.45724, …) stay inline in the code, as in Rust.
+- **ANTOINE_DATA handles** — `lookup_antoine(name)` returns row + 1 (0 for none); `antoine_data_name(h)` and
+  `antoine_data_coeffs(h)` read a row (`""` and NaN fields for an invalid handle, which the Antoine functions
+  reject). `KM_ANTOINE_COUNT` is the table's length.
+- **ADR 0002 #4 error codes** — `antoine_pressure_mmhg` / `_pa`: a non-finite A, B, C, t_min_c or t_max_c is
+  `Err(KM_ERR_INVALID_INPUT)`; T outside `t_min_c ..= t_max_c` (NaN included) or at/below the pole (C + T ≤ 0)
+  is `Err(KM_ERR_INVALID_TEMPERATURE)`, the code kimiya uses for a bad temperature elsewhere; in range the value
+  is Rust's (10^x may overflow to `Ok(+∞)` for a custom set, as in Rust). The harness maps the golden rows:
+  oracle finite and T in range (with finite range ends) ↔ `Ok`, class C; oracle NaN or T out of range ↔ `Err`,
+  counted as accepted under ADR 2 and summarised, not printed row by row.
+- **Slices and the root vector** — a Rust `&[f64]` is a pointer and a count (`hess_law(xs, n)`,
+  `enthalpy_from_formation(p, np, r, nr)`); Rust's f64 `sum` folds from −0.0, so an empty sum is −0.0; a negative
+  count or a null pointer with values is NaN (no error channel). `peng_robinson_z_roots(params, t, p, out)` fills
+  the caller's three-f64 buffer (`var roots[24];`) and returns `Ok(n)`.
+- **`phase_rule`** takes Rust's u32 counts as words; one outside 0 ..= u32::MAX is `Err(KM_ERR_INVALID_INPUT)`,
+  never wrapped (as M1 refuses an out-of-range atomic number).
+- **Private Rust helpers** (`pr_coefficients`, `pr_dimensionless`, `pr_physical_roots`, `cubic_real_roots`,
+  `validate_pr_params`) are `_km_*` functions in the same operation order; multi-value returns carry
+  (code, A, B) and the double-double pairs.
+- **Math** — `thermo` uses hisab's `EPSILON_F64` (1e-12, the value of hisab 1.4.0's) and includes
+  `lib/hisab.cyr` explicitly: `cyrius distlib` keeps a non-stdlib include in place, so a consumer needs kimiya's
+  `[deps.hisab]`. Modules include `lib/math.cyr` (f64_exp / f64_cos polyfills, f64_clamp) and `lib/ganita.cyr`
+  (pow, cbrt) where they call them, so `dist/kimiya.deps` lists them. The Peng–Robinson and Redlich–Kwong
+  functions use correctly rounded acos, cos, ln and x^2.5 (`src/mathx.cyr`, ADR 0005); see port-parity.md §5.
+- **Faster guards** — `_km_is_finite(x)` is `x − x == 0`, `_km_is_positive` / `_km_is_non_negative` compare
+  against +∞ directly (no nested calls): `gibbs_free_energy` 23.3 → 17.0 ns, `ideal_gas_pressure` 26.7 →
+  16.7 ns; the `is_finite` corpus rows and every M1 row are unchanged.
+
+Decided in M2b (2026-11-09; thermochem):
+- **Struct methods by value** — `Shomate` is `struct KmShomate` (seven f64, generated with its Rust field docs in
+  `src/thermochem_data.cyr`), and `Shomate::cp` / `Shomate::enthalpy_antiderivative` are methods of `impl KmShomate`
+  taking `self` by value (probed on 6.7.18: `s.cp(t)` and `KmShomate_cp(s, t)` both work, as `KmMolecule`'s impl),
+  so no free-function names were needed. One evaluation each (`_km_shomate_cp5` / `_km_shomate_h5`) serves the
+  method and the table-row path (inlining it in the row path saved 2 of 22 ns; not worth a second copy).
+- **Generated module data** — `THERMOCHEM_DATA` (formula and name blobs + offsets, ΔH_f°, ΔG_f°, S° columns,
+  `KM_THERMOCHEM_COUNT`) and `SHOMATE_DATA` (formula blob, a … t_max columns, `KM_SHOMATE_COUNT`). The `//` comments
+  inside both literals (sections, sources, the C₂H₆ / C₃H₈ / HF caveats) travel into each table's comment block.
+  `cyr::string_column` now splits a blob line past 120 columns ("Phosphorus pentachloride") over 16-byte lines;
+  the M1/M2a files are unchanged by it. thermochem has no `pub const` f64.
+- **Handles** — `lookup_thermochem(formula)` → THERMOCHEM_DATA row + 1 (0 for none), read with
+  `thermochem_data_formula` / `_name` (`""` for an invalid handle) and `thermochem_data_delta_hf_kj` / `_delta_gf_kj` /
+  `_s_standard_j` (NaN); `lookup_shomate` / `lookup_shomate_at` → SHOMATE_DATA row + 1, read with
+  `shomate_data_formula` and `shomate_data_coeffs` (a `KmShomate`, NaN fields for an invalid handle).
+- **Species lists** — `&[(&str, f64)]` is a pointer to n 16-byte records (C-string pointer, f64 bits) and n, as
+  `KmMolecule_new`'s pairs. A negative n or a null pointer with n > 0 is `Err(KM_ERR_INVALID_INPUT)`; a null formula
+  pointer is an unknown formula. `reaction_*(products, np, reactants, nr)`, `adiabatic_flame_temperature(dh, products,
+  n, t0)`.
+- **ADR 0002 #1** — `reaction_enthalpy` / `reaction_gibbs_energy` return J/mol, computed as Rust's kJ difference then
+  `× 1000.0` (one multiply); the golden rows hold the oracle's kJ result × 1000.0 (the generator multiplies; the row
+  note says so), class B. `reaction_entropy` and the table fields are unchanged.
+- **Rust's semantics kept** — `sum_property` from +0.0 with `+=` (the empty sum is +0.0, unlike `.sum()`'s −0.0), no
+  coefficient guard (a NaN coefficient gives Ok(NaN)); the flame closures and the total moles fold from −0.0 (Rust's
+  `.sum()`); `Segments` is a (first row, count) pair with `_km_segments_lookup` / `_cp` / `_enthalpy_change` in Rust's
+  order (`_km_max` / `_km_min`, ±∞ bounds).
+- **The flame solver** — hisab 1.4.0's `newton_raphson` and `bisection` transcribed as `_km_flame_newton` /
+  `_km_flame_bisection` (ADR 0003 amendment, §6.2): class B, 0 ulp. `FLAME_NEWTON_TOL_J` (10⁻³), `FLAME_BISECTION_TOL`
+  (10⁻⁶) and the 40 J/(mol·K) guess are typed formula constants inline, pinned by golden rows (`validate.py`'s
+  pinning check) and by `tests/thermochem.tcyr` on the private helpers. Rust's `resolved` Vec is a stack table of 32
+  products' segments (the bump allocator can't free, and the function is called in loops); a longer list resolves
+  the rest again per evaluation (same values; golden rows with 40 products).
+
 Language traps already probed on 6.7.18 by tanmatra (its plan §0, §5): no exponent literals;
 `(0 - x)` on an f64 is wrong; a hex literal in a `const` is an integer; `f64_round` ties to
 even; `+?` aborts the process; `cyrius test` must be warning-free.
@@ -397,7 +471,7 @@ even; `+?` aborts the process; `cyrius test` must be warning-free.
 |---|---|---|---|---|---|
 | M0 Initialize | ✅ done 2026-11-09 | constants 45 + math 18,647 (2.0 MB): 13,340 ok, 0 failed, 5,351 pending (M1 helpers, module-data constants), 1 accepted (ADR 0004) — identical on x86_64 ELF, x86_64 PE, aarch64 | — | scaffold only | Oracle frozen at tag `1.2.0`; scaffold + repairs; hisab 3.4.1; generator + `constants.cyr` (14 `KM_`) + harness; K = 2 ulp for the math primitives ([`port-parity.md`](port-parity.md)); ADRs 0001–0004 |
 | M1 Foundation | ✅ done 2026-11-09 | element 975 + molecule 2,472 + constants 14 (of 45) + math 18,647 (now 0 pending): 22,107 ok, 0 failed, 31 pending (module-data constants), 1 accepted (ADR 0004) — identical on x86_64 ELF, x86_64 PE, aarch64; `molecular_weight` 0 ulp; log10 K = 2 (max 1), exp_m1 K = 2 (max 0) | 38 Rust tests ported (error 2, validate 3, element 22, molecule 11; molecule's `serde_roundtrip` doesn't port), plus 4 Cyrius-only groups: 179 assertions | 3 (`lookup_by_symbol` 1.5× Rust, `lookup_by_number` 5.4×, `molecular_weight_glucose` 7.4×; [benchmarks](../benchmarks-rust-v-cyrius.md)) | `error`, `mathx`, `validate`, generated `element_data` + `element`, `molecule`; `[lib]` + `dist/kimiya.cyr`; surface parity 55/55; settled points in §6.4 |
-| M2 Thermochemistry & gases | ☐ | | | | |
+| M2 Thermochemistry & gases | ✅ **done 2026-11-09** (M2a: reaction, thermo, phase, gas; M2b: thermochem) | reaction 1,188 + thermo 1,107 + thermochem 9,487 + phase 3,276 + gas 19,717 + math 26,147 (7,500 new in M2a) + constants 25 of 45: 63,953 ok, 0 failed, 0 measured, 20 pending (M3–M4 constants), 441 accepted (ADR 0004 + 440 ADR 0002 #4 mapped Antoine rows) — identical on x86_64 ELF, x86_64 PE, aarch64; class B all 0 ulp (the flame temperature too: 1,682 Newton + 154 bisection rows); class C K = 2–10 by the rule (ADR 0005; vant_hoff_k 6) | 152 Rust tests ported (reaction 10, thermo 10, thermochem 62, phase 31, gas 39; none skipped; 4 thermochem tests assert J/mol for ADR 0002 #1, `antoine_pole_and_non_finite_give_nan` asserts Err for #4), plus 12 Cyrius-only groups: 729 assertions | 9 (M2a: `gibbs_free_energy` 9.7× Rust, `heat_transfer` 5.4×, `ideal_gas_pressure` 7.7×, `peng_robinson_z_n2_1mpa` 4.4×; M2b: `reaction_enthalpy_ch4` 6.5×, `vant_hoff_k` 6.2×, `enthalpy_change_cp` 6.9×, `shomate_cp` 6.2×, `adiabatic_flame_ch4_air` 10.7×) | generated `thermochem_data`, `phase_data`, `gas_data`; ADR 0005 (correctly rounded acos/cos/ln/x^2.5); ADR 0003 amendment (flame solver transcribed); ADR 0002 #1 (J/mol); surface parity 140/140; settled points in §6.4 |
 | M3 Solutions & electrochemistry | ☐ | | | | |
 | M4 Structure, nuclear & spectroscopy | ☐ | | | | |
 | M5 Numerics | ☐ | | | | ADR 0003 decides the hisab gaps |

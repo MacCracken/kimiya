@@ -6,6 +6,9 @@
 # - `_par_dispatch(mp, ml, fp, fl)`: fill the got list for one row (1 handled, 0 pending, -1 unusable);
 # - `_par_c_bound(fp, fl)`: a class-C function's ulp bound, or -1;
 # - `_par_accepted(fp, fl, ip, il)`: the ADR accepting a divergent row, or 0;
+# - `_par_accepted_quiet(adr)`: 1 when that ADR's accepted rows are counted (on their function's
+#   line, as "accepted") but not printed one by one — a mapped divergence with many rows;
+# - `_par_module_done(mp, ml)`: called after a module's report, for module-specific summary lines;
 # - `_par_skip(mp, ml)`: 1 for a module another harness replays;
 # - `_par_shadows(mp, ml, fp, fl, cls)`: optional extra, ungated comparisons of the same row
 #   against another Cyrius candidate, each recorded with `_par_shadow_record`.
@@ -517,6 +520,9 @@ fn _par_module(mp, ml): i64 {
                 if (h == 0) { outcome = 3; }
                 elif (h == 1) { outcome = _par_compare(slot, cls, fp, fl); }
             }
+            # The ADR accepting this row, asked only of a row that failed its comparison.
+            var adr = 0;
+            if (bad == 0 && outcome == 0) { adr = _par_accepted(fp, fl, buf + t2 + 1, t3 - t2 - 1); }
             if (outcome == 1) { _par_bump(_par_fn_ok, slot); _par_rows_ok = _par_rows_ok + 1; }
             elif (outcome == 2) {
                 _par_bump(_par_fn_meas, slot);
@@ -530,11 +536,15 @@ fn _par_module(mp, ml): i64 {
                 }
             }
             elif (outcome == 3) { _par_bump(_par_fn_pend, slot); _par_rows_pend = _par_rows_pend + 1; }
-            elif (bad == 0 && _par_accepted(fp, fl, buf + t2 + 1, t3 - t2 - 1) > 0) {
+            elif (adr > 0 && _par_accepted_quiet(adr) == 1) {
+                _par_bump(_par_fn_acc, slot);
+                _par_rows_acc = _par_rows_acc + 1;
+            }
+            elif (adr > 0) {
                 _par_bump(_par_fn_acc, slot);
                 _par_rows_acc = _par_rows_acc + 1;
                 print("  accepted (ADR ", 16);
-                fmt_int(_par_accepted(fp, fl, buf + t2 + 1, t3 - t2 - 1));
+                fmt_int(adr);
                 print("): ", 3);
                 print(buf + t4 + 1, eol - t4 - 1);
                 println("");
@@ -564,6 +574,7 @@ fn _par_module(mp, ml): i64 {
         line = eol + 1;
     }
     _par_report_fns();
+    _par_module_done(mp, ml);
     return mod_fail;
 }
 

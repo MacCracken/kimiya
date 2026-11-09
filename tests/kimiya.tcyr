@@ -3,8 +3,8 @@
 #
 # It includes dist/kimiya.cyr (written by `cyrius distlib --all`; `cyrius distlib --check` proves it
 # current), not src/, so the bundle compiles warning-free as one unit and its modules work
-# together. The reference tests are tests/{error,validate,element,molecule}.tcyr; the golden
-# corpus is tests/parity.tcyr.
+# together. The reference tests are tests/{error,validate,element,molecule,reaction,thermo,thermochem,
+# phase,gas}.tcyr; the golden corpus is tests/parity.tcyr.
 
 include "dist/kimiya.cyr"
 
@@ -22,6 +22,45 @@ fn main() {
     assert_eq(element_lookup_by_symbol("Og"), 118, "element");
     var t, v = KmMolecule_glucose().formula();
     assert(is_ok(t) == 1 && str_eq_cstr(v, "C6H12O6") == 1, "molecule");
+    var tg, vg = gibbs_free_energy(-100000.0, 298.0, -200.0);
+    var g: f64 = vg;
+    assert(is_ok(tg) == 1 && g == -40400.0, "reaction");
+    var tc, vc = specific_heat_from_calorimetry(4184.0, 1000.0, 1.0);
+    var c: f64 = vc;
+    assert(is_ok(tc) == 1 && c == KM_WATER_SPECIFIC_HEAT, "thermo (hisab EPSILON_F64)");
+    var pp: i64[6];
+    store64(&pp, "CO2(g)");
+    var one: f64 = 1.0;
+    var two: f64 = 2.0;
+    var n2: f64 = 7.52;
+    store64(&pp + 8, one);
+    store64(&pp + 16, "H2O(g)");
+    store64(&pp + 24, two);
+    store64(&pp + 32, "N2(g)");
+    store64(&pp + 40, n2);
+    var rr: i64[4];
+    store64(&rr, "CH4(g)");
+    store64(&rr + 8, one);
+    store64(&rr + 16, "O2(g)");
+    store64(&rr + 24, two);
+    var th, vh = reaction_enthalpy(&pp, 2, &rr, 2);
+    var dh: f64 = vh;
+    assert(is_ok(th) == 1 && dh > -802400.0 && dh < -802300.0, "thermochem (J/mol, ADR 0002 #1)");
+    var tf, vf = adiabatic_flame_temperature(dh, &pp, 3, 298.15);
+    var tflame: f64 = vf;
+    assert(is_ok(tf) == 1 && tflame > 2317.0 && tflame < 2337.0, "thermochem (flame, hisab EPSILON_F64)");
+    var hs: f64 = shomate_data_coeffs(lookup_shomate("N2(g)")).t_min;
+    assert(hs == 100.0 && KM_THERMOCHEM_COUNT == 76, "thermochem_data");
+    var kb: f64 = KM_KB_WATER;
+    assert(kb == 0.512 && KM_ANTOINE_COUNT == 8, "phase_data");
+    var ta, va = antoine_pressure_mmhg(antoine_data_coeffs(lookup_antoine("water")), 100.0);
+    var p: f64 = va;
+    assert(is_ok(ta) == 1 && p > 750.0 && p < 770.0, "phase");
+    var tcn: f64 = KM_PR_NITROGEN.tc;
+    assert(tcn == 126.2, "gas_data");
+    var tz, vz = peng_robinson_z(KM_PR_NITROGEN, 300.0, 1000000.0);
+    var z: f64 = vz;
+    assert(is_ok(tz) == 1 && z > 0.996 && z < 0.997, "gas");
     return assert_summary();
 }
 

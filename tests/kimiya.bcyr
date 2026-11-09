@@ -14,13 +14,27 @@ include "src/validate.cyr"
 include "src/element_data.cyr"
 include "src/element.cyr"
 include "src/molecule.cyr"
+include "src/reaction.cyr"
+include "src/thermo.cyr"
+include "src/thermochem_data.cyr"
+include "src/thermochem.cyr"
+include "src/phase_data.cyr"
+include "src/phase.cyr"
+include "src/gas_data.cyr"
+include "src/gas.cyr"
 
 # A sink the timed loops write to, so their results are used.
 var _bench_sink = 0;
 
-# The inputs, read at run time (Rust black-boxes them).
+# The inputs, read at run time (Rust black-boxes them). f64 inputs are stored as their bits and
+# read back into typed locals, so no call sees a compile-time constant.
 var _bench_fe = 0;
 var _bench_z = 0;
+var _bench_f = 0;   # 17 f64 input slots, filled by main()
+var _bench_co2 = 0;     # "CO2(g)"
+var _bench_products = 0;    # [("CO2(g)", 1), ("H2O(l)", 2)]: 2 species records
+var _bench_reactants = 0;   # [("CH4(g)", 1), ("O2(g)", 2)]
+var _bench_flame = 0;       # [("CO2(g)", 1), ("H2O(g)", 2), ("N2(g)", 7.52)]
 
 # element/lookup_by_symbol: `lookup_by_symbol(black_box("Fe"))`, a linear scan to row 26.
 fn bench_lookup_by_symbol(per_batch, batches) {
@@ -70,6 +84,220 @@ fn bench_molecular_weight_glucose(per_batch, batches) {
     bench_report(b);
 }
 
+# The f64 input slot k.
+#must_use
+fn _bench_in(k): f64 {
+    var x: f64 = load64(_bench_f + k * 8);
+    return x;
+}
+
+# reaction/gibbs_free_energy: `gibbs_free_energy(black_box(-100_000.0), black_box(298.0),
+# black_box(-200.0)).unwrap()`.
+fn bench_gibbs_free_energy(per_batch, batches) {
+    var h: f64 = _bench_in(0);
+    var t: f64 = _bench_in(1);
+    var s: f64 = _bench_in(2);
+    var b = bench_new("reaction/gibbs_free_energy");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var tg, vg = gibbs_free_energy(h, t, s);
+            _bench_sink = vg;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# thermo/heat_transfer: `heat_transfer(black_box(1000.0), black_box(4.184), black_box(10.0))`.
+fn bench_heat_transfer(per_batch, batches) {
+    var m: f64 = _bench_in(3);
+    var c: f64 = _bench_in(4);
+    var dt: f64 = _bench_in(5);
+    var b = bench_new("thermo/heat_transfer");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var q: f64 = heat_transfer(m, c, dt);
+            _bench_sink = q;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# gas/ideal_gas_pressure: `ideal_gas_pressure(black_box(1.0), black_box(300.0),
+# black_box(0.025)).unwrap()`.
+fn bench_ideal_gas_pressure(per_batch, batches) {
+    var n: f64 = _bench_in(9);
+    var t: f64 = _bench_in(6);
+    var v: f64 = _bench_in(7);
+    var b = bench_new("gas/ideal_gas_pressure");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var tp, vp = ideal_gas_pressure(n, t, v);
+            _bench_sink = vp;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# gas/peng_robinson_z_n2_1mpa: `peng_robinson_z(black_box(&PR_NITROGEN), black_box(300.0),
+# black_box(1.0e6)).unwrap()`: N₂ at 300 K and 1 MPa, the one-root (Cardano) branch.
+fn bench_peng_robinson_z_n2_1mpa(per_batch, batches) {
+    var t: f64 = _bench_in(6);
+    var p: f64 = _bench_in(8);
+    var params: KmPengRobinsonParams = KM_PR_NITROGEN;
+    var b = bench_new("gas/peng_robinson_z_n2_1mpa");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var tz, vz = peng_robinson_z(params, t, p);
+            _bench_sink = vz;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# thermochem/reaction_enthalpy_ch4: `reaction_enthalpy(black_box(&[("CO2(g)", 1.0), ("H2O(l)", 2.0)]),
+# black_box(&[("CH4(g)", 1.0), ("O2(g)", 2.0)])).unwrap()`: four table scans, two sums (and, ADR 0002 #1,
+# one × 1000).
+fn bench_reaction_enthalpy_ch4(per_batch, batches) {
+    var b = bench_new("thermochem/reaction_enthalpy_ch4");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = reaction_enthalpy(_bench_products, 2, _bench_reactants, 2);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# thermochem/vant_hoff_k: `vant_hoff_k(black_box(100.0), black_box(-50_000.0), black_box(298.15),
+# black_box(400.0)).unwrap()`: four guards, one exp.
+fn bench_vant_hoff_k(per_batch, batches) {
+    var kr: f64 = _bench_in(10);
+    var dh: f64 = _bench_in(11);
+    var t1: f64 = _bench_in(12);
+    var t2: f64 = _bench_in(13);
+    var b = bench_new("thermochem/vant_hoff_k");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = vant_hoff_k(kr, dh, t1, t2);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# thermochem/enthalpy_change_cp: `enthalpy_change_cp(black_box("CO2(g)"), black_box(300.0),
+# black_box(600.0)).unwrap()`: the segment lookup, the guards, one segment's antiderivative twice.
+fn bench_enthalpy_change_cp(per_batch, batches) {
+    var t1: f64 = _bench_in(3);
+    var t2: f64 = _bench_in(14);
+    var b = bench_new("thermochem/enthalpy_change_cp");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = enthalpy_change_cp(_bench_co2, t1, t2);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# thermochem/shomate_cp: `black_box(s).cp(black_box(500.0))` with s = lookup_shomate("CO2(g)") once,
+# outside the loop.
+fn bench_shomate_cp(per_batch, batches) {
+    var s = shomate_data_coeffs(lookup_shomate(_bench_co2));
+    var temp: f64 = _bench_in(15);
+    var b = bench_new("thermochem/shomate_cp");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var cp: f64 = s.cp(temp);
+            _bench_sink = cp;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# thermochem/adiabatic_flame_ch4_air: `adiabatic_flame_temperature(black_box(-802_300.0),
+# black_box(&products), black_box(298.15)).unwrap()`, products [("CO2(g)", 1.0), ("H2O(g)", 2.0),
+# ("N2(g)", 7.52)]: three segment lookups, the bracket, Newton (3 steps on this input).
+fn bench_adiabatic_flame_ch4_air(per_batch, batches) {
+    var dh_flame: f64 = _bench_in(16);
+    var t0: f64 = _bench_in(12);
+    var b = bench_new("thermochem/adiabatic_flame_ch4_air");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = adiabatic_flame_temperature(dh_flame, _bench_flame, 3, t0);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# A species list of up to three records (formula, coefficient), on the heap.
+#must_use
+fn _bench_species(f1, c1: f64, f2, c2: f64, f3, c3: f64): i64 {
+    var buf = alloc(48);
+    store64(buf, f1);
+    store64(buf + 8, c1);
+    store64(buf + 16, f2);
+    store64(buf + 24, c2);
+    store64(buf + 32, f3);
+    store64(buf + 40, c3);
+    return buf;
+}
+
 # Runs every bench.
 fn main(): i64 {
     alloc_init();
@@ -78,6 +306,39 @@ fn main(): i64 {
     bench_lookup_by_symbol(100000, 20);
     bench_lookup_by_number(1000000, 20);
     bench_molecular_weight_glucose(100000, 20);
+    _bench_f = alloc(17 * 8);
+    var ins: f64[17];
+    ins[0] = -100000.0;
+    ins[1] = 298.0;
+    ins[2] = -200.0;
+    ins[3] = 1000.0;
+    ins[4] = 4.184;
+    ins[5] = 10.0;
+    ins[6] = 300.0;
+    ins[7] = 0.025;
+    ins[8] = 1000000.0;
+    ins[9] = 1.0;
+    ins[10] = 100.0;
+    ins[11] = -50000.0;
+    ins[12] = 298.15;
+    ins[13] = 400.0;
+    ins[14] = 600.0;
+    ins[15] = 500.0;
+    ins[16] = -802300.0;
+    memcpy(_bench_f, &ins, 17 * 8);
+    bench_gibbs_free_energy(1000000, 20);
+    bench_heat_transfer(1000000, 20);
+    bench_ideal_gas_pressure(1000000, 20);
+    bench_peng_robinson_z_n2_1mpa(100000, 20);
+    _bench_co2 = "CO2(g)";
+    _bench_products = _bench_species("CO2(g)", 1.0, "H2O(l)", 2.0, 0, 0.0);
+    _bench_reactants = _bench_species("CH4(g)", 1.0, "O2(g)", 2.0, 0, 0.0);
+    _bench_flame = _bench_species("CO2(g)", 1.0, "H2O(g)", 2.0, "N2(g)", 7.52);
+    bench_reaction_enthalpy_ch4(100000, 20);
+    bench_vant_hoff_k(1000000, 20);
+    bench_enthalpy_change_cp(100000, 20);
+    bench_shomate_cp(1000000, 20);
+    bench_adiabatic_flame_ch4_air(10000, 20);
     return 0;
 }
 

@@ -4,9 +4,11 @@
 # Do not edit -- rebuild with: cyrius distlib
 
 # Requires (compile-verified; the leaves of dist/kimiya.deps):
+include "lib/math.cyr"
 include "lib/string.cyr"
 include "lib/vec.cyr"
 include "lib/str.cyr"
+include "lib/ganita.cyr"
 include "lib/tagged.cyr"
 
 # --- error.cyr ---
@@ -70,8 +72,10 @@ fn km_error_message(code): i64 {
 # positionally: the Cyrius lexer has no exponent notation, and decimal literals are
 # correctly rounded (6.6.10+). tests/golden/constants.tsv pins every bit.
 #
-# Module data constants (K_b/K_f, Madelung, Born exponents, Λ°, Debye–Hückel, K_w, STP,
-# water's specific heat) are generated with their module at its milestone, not here.
+# Module data constants are generated with their module's data, not here: K_b/K_f in
+# src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung, Born exponents, Λ°,
+# Debye–Hückel and K_w at M3–M4. The exception is thermo::WATER_SPECIFIC_HEAT (M2a), at
+# the end: thermo has no data file, and this file precedes it in [lib].
 
 # Faraday constant (C/mol) — charge of one mole of electrons.
 #
@@ -140,6 +144,10 @@ const KM_RYDBERG = 10973731.56816;
 # Rust: kimiya::spectroscopy::RYDBERG_EV
 const KM_RYDBERG_EV = 13.605693122994;
 
+# Specific heat capacity of water in J/(g·°C).
+# Rust: kimiya::thermo::WATER_SPECIFIC_HEAT
+const KM_WATER_SPECIFIC_HEAT = 4.184;
+
 # --- mathx.cyr ---
 
 # mathx.cyr — kimiya's private floating-point helpers (port plan §6.1, §6.4).
@@ -159,6 +167,9 @@ const KM_RYDBERG_EV = 13.605693122994;
 # FreeBSD msun / fdlibm, documented < 1 ulp) operation for operation: the same bits on every
 # target, within 2 ulp of glibc (class C, K = 2; port-parity.md). The coefficients are the
 # Rust source's decimal literals as bit patterns in typed f64 locals (never a hex `const`).
+# lib/math.cyr is included for f64_cos, the out-of-domain fallback of _km_cos (M2a).
+
+include "lib/math.cyr"
 
 # +∞ (0x7FF0000000000000), a compile-time constant.
 const _KM_INF = 1.0 / 0.0;
@@ -183,11 +194,14 @@ fn _km_is_nan(x: f64): i64 {
     return 0;
 }
 
-# 1 if x is finite: neither ±∞ nor NaN. Mirrors `f64::is_finite`.
+# 1 if x is finite: neither ±∞ nor NaN (x − x is 0 exactly for finite x, NaN otherwise; one
+# subtract and compare, no call: the M2a guards make several per function). Mirrors
+# `f64::is_finite`.
 #must_use
 fn _km_is_finite(x: f64): i64 {
-    if ((_km_bits(x) & 0x7FF0000000000000) == 0x7FF0000000000000) { return 0; }
-    return 1;
+    var d: f64 = x - x;
+    if (d == 0.0) { return 1; }
+    return 0;
 }
 
 # The larger of x and y, ignoring a NaN operand (NaN only when both are). Equal operands,
@@ -446,6 +460,344 @@ fn _km_expm1(xa: f64): f64 {
     return y2;
 }
 
+# ── correctly rounded acos, cos, ln and x^2.5 (M2a, ADR 0005) ─────────────────────────
+#
+# The Peng–Robinson cubic (gas.cyr) is ill-conditioned near a double root and at the critical
+# point, its fugacity coefficient goes as exp(ln φ) with |ln φ| up to hundreds at extreme states,
+# and Redlich–Kwong cancels near P = 0: a 1-ulp change in one glibc acos, cos, log or pow result
+# moved those outputs by up to 2²⁶ ulp over the golden grid, so no class-C bound is meaningful
+# (docs/development/port-parity.md §5). glibc 2.44's code can't be transcribed (it is not in the
+# oracle's dependency graph, and x86_64 picks FMA variants at load time), so these four are
+# correctly rounded instead: double-double evaluation (about 2⁻¹⁰⁰ relative) and one final
+# rounding. glibc is within 1 ulp and correctly rounded on all but 0.04–0.16 % of arguments, so
+# the port's result is the oracle's bit for bit wherever glibc's is correctly rounded;
+# scripts/oracle/validate.py decides that per golden argument with a 60-digit reference, and only
+# the calls where it isn't count toward a function's sensitivity S (ADR 0005).
+# Only + − × ÷ and f64_sqrt are used (no x87, no polyfill), so the bits are the same on every
+# target. The constants are their exact double-double splits, as bit patterns in typed locals.
+
+# a + b = s + e exactly (Knuth's TwoSum).
+#must_use
+fn _km_two_sum(a: f64, b: f64): (f64, f64) {
+    var s: f64 = a + b;
+    var bb: f64 = s - a;
+    var e: f64 = (a - (s - bb)) + (b - bb);
+    return (s, e);
+}
+
+# a + b = s + e exactly, for |a| ≥ |b| or a = 0 (Dekker's FastTwoSum): s = RN(a + b).
+#must_use
+fn _km_fast_two_sum(a: f64, b: f64): (f64, f64) {
+    var s: f64 = a + b;
+    var e: f64 = b - (s - a);
+    return (s, e);
+}
+
+# a·b = p + e exactly (Dekker's TwoProduct with Veltkamp's 2²⁷ + 1 split), for |a|, |b| < 2⁹⁹⁶
+# and no underflow in e.
+#must_use
+fn _km_two_prod(a: f64, b: f64): (f64, f64) {
+    var p: f64 = a * b;
+    var split: f64 = 134217729.0;
+    var ca: f64 = split * a;
+    var ah: f64 = ca - (ca - a);
+    var al: f64 = a - ah;
+    var cb: f64 = split * b;
+    var bh: f64 = cb - (cb - b);
+    var bl: f64 = b - bh;
+    var e: f64 = (al * bl) - (((p - (ah * bh)) - (al * bh)) - (ah * bl));
+    return (p, e);
+}
+
+# Double-double sum (ah + al) + (bh + bl), renormalised (the accurate two-TwoSum form).
+#must_use
+fn _km_dd_add(ah: f64, al: f64, bh: f64, bl: f64): (f64, f64) {
+    var s, e = _km_two_sum(ah, bh);
+    var t, f = _km_two_sum(al, bl);
+    var e1: f64 = e + t;
+    var s1, e2 = _km_fast_two_sum(s, e1);
+    var e3: f64 = e2 + f;
+    var s2, e4 = _km_fast_two_sum(s1, e3);
+    return (s2, e4);
+}
+
+# Double-double product (ah + al)·(bh + bl), renormalised.
+#must_use
+fn _km_dd_mul(ah: f64, al: f64, bh: f64, bl: f64): (f64, f64) {
+    var p, e = _km_two_prod(ah, bh);
+    var cross: f64 = (ah * bl) + (al * bh);
+    var e1: f64 = e + cross;
+    var s, t = _km_fast_two_sum(p, e1);
+    return (s, t);
+}
+
+# Double-double quotient (ah + al) / d for a double d ≠ 0.
+#must_use
+fn _km_dd_div_d(ah: f64, al: f64, d: f64): (f64, f64) {
+    var q1: f64 = ah / d;
+    var p, e = _km_two_prod(q1, d);
+    var r: f64 = ((ah - p) - e) + al;
+    var q2: f64 = r / d;
+    var s, t = _km_fast_two_sum(q1, q2);
+    return (s, t);
+}
+
+# Double-double quotient (ah + al) / (bh + bl): three correction steps.
+#must_use
+fn _km_dd_div(ah: f64, al: f64, bh: f64, bl: f64): (f64, f64) {
+    var q1: f64 = ah / bh;
+    var ph, pl = _km_dd_mul(q1, 0.0, bh, bl);
+    var rh, rl = _km_dd_add(ah, al, -ph, -pl);
+    var q2: f64 = rh / bh;
+    var qh, ql = _km_dd_mul(q2, 0.0, bh, bl);
+    var sh, sl = _km_dd_add(rh, rl, -qh, -ql);
+    var q3: f64 = sh / bh;
+    var uh, ul = _km_fast_two_sum(q1, q2);
+    var vh, vl = _km_dd_add(uh, ul, q3, 0.0);
+    return (vh, vl);
+}
+
+# √y as a double-double, y > 0 finite: one Newton correction of the correctly rounded √y.
+#must_use
+fn _km_dd_sqrt(y: f64): (f64, f64) {
+    var s: f64 = f64_sqrt(y);
+    var p, e = _km_two_prod(s, s);
+    var r: f64 = ((y - p) - e) / (2.0 * s);
+    var h, l = _km_fast_two_sum(s, r);
+    return (h, l);
+}
+
+# cos(r) (sin = 0) or sin(r) (sin = 1) of a double-double |r| ≤ π/4 (+ a rounding), by its Taylor
+# series: 16 terms, the last below 2⁻¹²⁸ of the sum.
+#must_use
+fn _km_dd_cos_sin(rh: f64, rl: f64, sin): (f64, f64) {
+    var r2h, r2l = _km_dd_mul(rh, rl, rh, rl);
+    var th: f64 = 1.0;
+    var tl: f64 = 0.0;
+    var k = 0;
+    if (sin == 1) { th = rh; tl = rl; k = 1; }
+    var sh: f64 = th;
+    var sl: f64 = tl;
+    var n = 1;
+    while (n <= 16) {
+        var mh, ml = _km_dd_mul(th, tl, r2h, r2l);
+        var d: f64 = f64_from((k + 1) * (k + 2));
+        var qh, ql = _km_dd_div_d(mh, ml, d);
+        th = -qh;
+        tl = -ql;
+        var ah, al = _km_dd_add(sh, sl, th, tl);
+        sh = ah;
+        sl = al;
+        k = k + 2;
+        n = n + 1;
+    }
+    return (sh, sl);
+}
+
+# cos(x), correctly rounded, for |x| ≤ 8 (x − kπ/2 reduced in double-double against a
+# triple-double π/2; the Peng–Robinson arguments are in [−2π/3, π]). Outside that it is f64_cos
+# (within 1 ulp, not correctly rounded); NaN and ±∞ give NaN. Mirrors `f64::cos`.
+#must_use
+fn _km_cos(x: f64): f64 {
+    if (_km_is_finite(x) != 1) {
+        var nan: f64 = x - x;
+        return nan;
+    }
+    var ax: f64 = f64_abs(x);
+    if (ax > 8.0) {
+        var c: f64 = f64_cos(x);
+        return c;
+    }
+    var twobypi: f64 = 0x3FE45F306DC9C883;
+    var p1: f64 = 0x3FF921FB54442D18;   # π/2 = p1 + p2 + p3 + O(2⁻¹⁶³)
+    var p2: f64 = 0x3C91A62633145C07;
+    var p3: f64 = 0xB91F1976B7ED8FBC;
+    var kf: f64 = _km_round_half_away(x * twobypi);
+    var k = f64_to(kf);
+    var h1, l1 = _km_two_prod(kf, p1);
+    var h2, l2 = _km_two_prod(kf, p2);
+    var h3: f64 = kf * p3;
+    var ah, al = _km_two_sum(x, -h1);
+    var bh, bl = _km_dd_add(ah, al, -l1, 0.0);
+    var ch, cl = _km_dd_add(bh, bl, -h2, -l2);
+    var rh, rl = _km_dd_add(ch, cl, -h3, 0.0);
+    var q = k & 3;
+    var sin = 0;
+    if (q == 1 || q == 3) { sin = 1; }
+    var vh, vl = _km_dd_cos_sin(rh, rl, sin);
+    if (q == 1 || q == 2) { vh = -vh; }
+    return vh;
+}
+
+# asin(s) of a double-double |s| ≤ 1/2, by its series Σ cₙ s²ⁿ⁺¹/(2n + 1),
+# cₙ = cₙ₋₁·(2n − 1)/(2n), until a term is below 2⁻¹¹⁵ of the sum (at most 60 terms).
+#must_use
+fn _km_dd_asin(sh: f64, sl: f64): (f64, f64) {
+    var s2h, s2l = _km_dd_mul(sh, sl, sh, sl);
+    var ph: f64 = sh;
+    var pl: f64 = sl;
+    var uh: f64 = sh;
+    var ul: f64 = sl;
+    var tiny: f64 = 0x38C0000000000000;   # 2⁻¹¹⁵
+    var n = 1;
+    while (n <= 60) {
+        var mh, ml = _km_dd_mul(ph, pl, s2h, s2l);
+        var odd: f64 = f64_from(2 * n - 1);
+        var ah, al = _km_dd_mul(mh, ml, odd, 0.0);
+        var even: f64 = f64_from(2 * n);
+        var bh, bl = _km_dd_div_d(ah, al, even);
+        ph = bh;
+        pl = bl;
+        var next: f64 = f64_from(2 * n + 1);
+        var th, tl = _km_dd_div_d(ph, pl, next);
+        var vh, vl = _km_dd_add(uh, ul, th, tl);
+        uh = vh;
+        ul = vl;
+        var at: f64 = f64_abs(th);
+        var au: f64 = f64_abs(uh);
+        if (at < (au * tiny)) { break; }
+        n = n + 1;
+    }
+    return (uh, ul);
+}
+
+# acos(x), correctly rounded: π/2 − asin(x) for |x| ≤ 1/2; 2·asin(√((1 − x)/2)) above;
+# π − 2·asin(√((1 + x)/2)) below. acos(1) = +0, acos(−1) = π rounded; NaN for NaN and |x| > 1.
+# Mirrors `f64::acos`.
+#must_use
+fn _km_acos(x: f64): f64 {
+    if (x != x) { return x; }
+    var ax: f64 = f64_abs(x);
+    if (ax > 1.0) {
+        var nan: f64 = (x - x) / 0.0;
+        return nan;
+    }
+    var p1: f64 = 0x3FF921FB54442D18;   # π/2 = p1 + p2 + O(2⁻¹⁰⁹)
+    var p2: f64 = 0x3C91A62633145C07;
+    if (x == 1.0) { return 0.0; }
+    if (x == -1.0) {
+        var pi: f64 = 0x400921FB54442D18;
+        return pi;
+    }
+    if (ax <= 0.5) {
+        var sh, sl = _km_dd_asin(x, 0.0);
+        var rh, rl = _km_dd_add(p1, p2, -sh, -sl);
+        return rh;
+    }
+    var y: f64 = (1.0 - ax) * 0.5;      # exact for 1/2 < |x| < 1
+    var qh, ql = _km_dd_sqrt(y);
+    var ah, al = _km_dd_asin(qh, ql);
+    var th: f64 = 2.0 * ah;
+    var tl: f64 = 2.0 * al;
+    if (x > 0.0) { return th; }
+    var p1x2: f64 = 2.0 * p1;
+    var p2x2: f64 = 2.0 * p2;
+    var vh, vl = _km_dd_add(p1x2, p2x2, -th, -tl);
+    return vh;
+}
+
+# ln(x), correctly rounded: x = 2ᵏ·m with √2/2 < m ≤ √2, ln m = 2·atanh((m − 1)/(m + 1)) by its
+# series (at most 30 terms), plus k·ln 2 in triple-double. ln(1) = +0, ln(±0) = −∞, ln(+∞) = +∞,
+# NaN for NaN and x < 0. Mirrors `f64::ln`.
+#must_use
+fn _km_ln(xa: f64): f64 {
+    var x: f64 = xa;
+    if (x != x) { return x; }
+    if (x < 0.0) {
+        var nan: f64 = (x - x) / 0.0;
+        return nan;
+    }
+    if (x == 0.0) {
+        var m1: f64 = -1.0;
+        var ninf: f64 = m1 / 0.0;
+        return ninf;
+    }
+    if (_km_is_finite(x) != 1) { return x; }
+    if (x == 1.0) { return 0.0; }
+    var k = 0;
+    var ui = _km_bits(x);
+    if ((ui >> 52) == 0) {                  # subnormal: scale by 2⁵⁴
+        var p54: f64 = 0x4350000000000000;
+        x = x * p54;
+        k = 0 - 54;
+        ui = _km_bits(x);
+    }
+    k = k + (((ui >> 52) & 0x7FF) - 1023);
+    var mb = (ui & 0x000FFFFFFFFFFFFF) | 0x3FF0000000000000;
+    var m: f64 = mb;                        # [1, 2)
+    var sqrt2: f64 = 0x3FF6A09E667F3BCD;
+    if (m > sqrt2) {
+        m = m * 0.5;
+        k = k + 1;
+    }
+    var num: f64 = m - 1.0;                 # exact
+    var dh, dl = _km_two_sum(m, 1.0);
+    var fh, fl = _km_dd_div(num, 0.0, dh, dl);
+    var f2h, f2l = _km_dd_mul(fh, fl, fh, fl);
+    var ph: f64 = fh;
+    var pl: f64 = fl;
+    var uh: f64 = fh;
+    var ul: f64 = fl;
+    var tiny: f64 = 0x38C0000000000000;   # 2⁻¹¹⁵
+    var n = 1;
+    while (n <= 30) {
+        var qh, ql = _km_dd_mul(ph, pl, f2h, f2l);
+        ph = qh;
+        pl = ql;
+        var odd: f64 = f64_from(2 * n + 1);
+        var th, tl = _km_dd_div_d(ph, pl, odd);
+        var vh, vl = _km_dd_add(uh, ul, th, tl);
+        uh = vh;
+        ul = vl;
+        var at: f64 = f64_abs(th);
+        var au: f64 = f64_abs(uh);
+        if (at < (au * tiny)) { break; }
+        n = n + 1;
+    }
+    var lh: f64 = 2.0 * uh;
+    var ll: f64 = 2.0 * ul;
+    if (k == 0) { return lh; }
+    var ln2h: f64 = 0x3FE62E42FEFA39EF;   # ln 2 = ln2h + ln2l + ln2t + O(2⁻¹⁶⁰)
+    var ln2l: f64 = 0x3C7ABC9E3B39803F;
+    var ln2t: f64 = 0x3907B57A079A1934;
+    var kf: f64 = f64_from(k);
+    var kh, ke = _km_two_prod(kf, ln2h);
+    var kl: f64 = kf * ln2l;
+    var kt: f64 = kf * ln2t;
+    var ah, al = _km_dd_add(kh, ke, kl, kt);
+    var rh, rl = _km_dd_add(ah, al, lh, ll);
+    return rh;
+}
+
+# x^2.5 = x²·√x, correctly rounded for x from 2⁻³⁸⁷ to overflow at 2⁴⁰⁹·⁶: x² is exact as a
+# double-double and √x is one. Below 2⁻³⁸⁷ (x^2.5 < 2⁻⁹⁶⁷) the product's error term underflows and the
+# result can be 1 ulp off, normal results just above DBL_MIN included (an independent sweep found 33 such
+# among 2,000 arguments below 2⁻⁴⁰⁷); below 2⁻⁴³⁰ it is +0.
+# pow(±0, 2.5) = +0, pow(+∞, 2.5) = +∞, NaN for NaN and x < 0. Mirrors `x.powf(2.5)`.
+#must_use
+fn _km_pow_2_5(x: f64): f64 {
+    if (x != x) { return x; }
+    if (x == 0.0) { return 0.0; }
+    if (x < 0.0) {
+        var nan: f64 = (x - x) / 0.0;
+        return nan;
+    }
+    if (_km_is_finite(x) != 1) { return x; }
+    var big: f64 = 0x5990000000000000;     # 2⁴¹⁰: x^2.5 ≥ 2¹⁰²⁵ overflows
+    var small: f64 = 0x2510000000000000;   # 2⁻⁴³⁰: x^2.5 < 2⁻¹⁰⁷⁵ rounds to +0
+    if (x >= big) {
+        var inf: f64 = 1.0 / 0.0;
+        return inf;
+    }
+    if (x < small) { return 0.0; }
+    var x2h, x2l = _km_two_prod(x, x);
+    var sh, sl = _km_dd_sqrt(x);
+    var p0: f64 = x2h * sh;
+    if (_km_is_finite(p0) != 1) { return p0; }
+    var rh, rl = _km_dd_mul(x2h, x2l, sh, sl);
+    return rh;
+}
+
 # --- validate.cyr ---
 
 # validate.cyr — input-validation predicates (port of rust-old/src/validate.rs).
@@ -456,18 +808,19 @@ fn _km_expm1(xa: f64): f64 {
 # `if (_km_is_positive(x) != 1) { return Err(..); }`. Crate-private in Rust (`pub(crate)`),
 # so private here; `_km_is_finite` is src/mathx.cyr's.
 
-# 1 if x is finite and strictly greater than zero. Mirrors `validate::is_positive`.
+# 1 if x is finite and strictly greater than zero: 0 < x < +∞, both comparisons false for NaN.
+# Mirrors `validate::is_positive`.
 #must_use
 fn _km_is_positive(x: f64): i64 {
-    if (x > 0.0 && _km_is_finite(x) == 1) { return 1; }
+    if (x > 0.0 && x < _KM_INF) { return 1; }
     return 0;
 }
 
-# 1 if x is finite and greater than or equal to zero (−0 included). Mirrors
+# 1 if x is finite and greater than or equal to zero (−0 included): 0 ≤ x < +∞. Mirrors
 # `validate::is_non_negative`.
 #must_use
 fn _km_is_non_negative(x: f64): i64 {
-    if (x >= 0.0 && _km_is_finite(x) == 1) { return 1; }
+    if (x >= 0.0 && x < _KM_INF) { return 1; }
     return 0;
 }
 
@@ -2300,4 +2653,2660 @@ impl KmMolecule {
         }
         return total;
     }
+}
+
+# --- reaction.cyr ---
+
+# reaction.cyr — reaction thermodynamics: Gibbs free energy (ΔG = ΔH − TΔS), the equilibrium
+# constant K = exp(−ΔG/RT) and spontaneity (port of rust-old/src/reaction.rs).
+#
+# SI units throughout: J/mol, J/(mol·K), K. Fallible functions return a value-form Result whose
+# Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs instead of returning Ok(NaN).
+# Every expression keeps Rust's operation order: gibbs_free_energy is bit-identical (class B);
+# equilibrium_constant's one exp is f64_exp (class C, docs/development/port-parity.md), which
+# lib/math.cyr supplies on aarch64 (its polyfill).
+
+include "lib/math.cyr"
+
+# Gibbs free energy ΔG = ΔH − T·ΔS in J/mol, from ΔH in J/mol, T in K and ΔS in J/(mol·K):
+# Ok(ΔG), Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite, or
+# Err(KM_ERR_INVALID_INPUT) if ΔH or ΔS is not finite. Mirrors `reaction::gibbs_free_energy`.
+#must_use
+fn gibbs_free_energy(enthalpy_j: f64, temperature_k: f64, entropy_j_per_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(enthalpy_j) != 1 || _km_is_finite(entropy_j_per_k) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    var g: f64 = enthalpy_j - (temperature_k * entropy_j_per_k);
+    return Ok(g);
+}
+
+# Equilibrium constant K = exp(−ΔG / (R·T)), dimensionless, from ΔG in J/mol and T in K. For
+# ΔG/RT above ≈ 745 it underflows to 0.0. Ok(K), Err(KM_ERR_INVALID_TEMPERATURE) if T is not
+# positive and finite, Err(KM_ERR_INVALID_INPUT) if ΔG is not finite, or
+# Err(KM_ERR_COMPUTATION_ERROR) if K overflows f64 (−ΔG/RT > ≈ 709.8, e.g. ΔG = −2 MJ/mol at
+# 298 K); work with ln K = −ΔG/RT instead. Mirrors `reaction::equilibrium_constant`.
+#must_use
+fn equilibrium_constant(delta_g_j: f64, temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(delta_g_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var x: f64 = -delta_g_j / (KM_GAS_CONSTANT * temperature_k);
+    var k: f64 = f64_exp(x);
+    if (_km_is_finite(k) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    return Ok(k);
+}
+
+# 1 if a reaction with this ΔG (any energy unit) is spontaneous, ΔG < 0; 0 otherwise, NaN
+# included. Mirrors `reaction::is_spontaneous`.
+#must_use
+fn is_spontaneous(delta_g: f64): i64 {
+    if (delta_g < 0.0) { return 1; }
+    return 0;
+}
+
+# --- thermo.cyr ---
+
+# thermo.cyr — basic calorimetry and thermochemistry: heat transfer (q = m·c·ΔT), Hess's law,
+# reaction enthalpy from formation enthalpies, and specific heat from calorimetry (port of
+# rust-old/src/thermo.rs).
+#
+# Calorimetry functions use grams and J/(g·°C) (a temperature *difference* in °C equals one in K);
+# enthalpies are in J or J/mol as passed in. Every function is + − × ÷ in Rust's operation order,
+# so every result is bit-identical (class B). WATER_SPECIFIC_HEAT is KM_WATER_SPECIFIC_HEAT in
+# src/constants.cyr (generated; thermo has no data file of its own).
+# - A Rust slice `&[f64]` is a pointer to n f64 values and the count n. Rust's f64 `sum` folds from
+#   −0.0, so the sum of no values is −0.0, as here. A count below 0, or a null pointer with values,
+#   is no slice: the result is NaN (these functions have no error channel).
+# - specific_heat_from_calorimetry's zero-ΔT threshold is hisab's EPSILON_F64 (10⁻¹²), the same
+#   constant as Rust hisab 1.4.0's (port plan §6.2). hisab is included explicitly: `cyrius distlib`
+#   keeps a non-stdlib include in place in dist/kimiya.cyr, so a consumer needs kimiya's
+#   [deps.hisab] (port plan §6.4).
+
+include "lib/hisab.cyr"
+
+# Σ of the n f64 values at xs in order, from −0.0 (Rust's `iter().sum()`); NaN if (xs, n) is no slice.
+#must_use
+fn _km_sum(xs, n): f64 {
+    if (n < 0 || (n > 0 && xs == 0)) { return _km_nan(); }
+    var s: f64 = -0.0;
+    var k = 0;
+    while (k < n) {
+        var x: f64 = load64(xs + k * 8);
+        s = s + x;
+        k = k + 1;
+    }
+    return s;
+}
+
+# Heat transfer q = m × c × ΔT in J, from the mass in g, the specific heat in J/(g·°C) and ΔT in °C.
+# Mirrors `thermo::heat_transfer`.
+#must_use
+fn heat_transfer(mass_g: f64, specific_heat: f64, delta_t: f64): f64 {
+    var q: f64 = (mass_g * specific_heat) * delta_t;
+    return q;
+}
+
+# Hess's law: the total enthalpy change, the sum of the n step enthalpies at `enthalpies_j` in
+# order, in their unit (e.g. J/mol); −0.0 for no steps, NaN if (enthalpies_j, n) is no slice.
+# Mirrors `thermo::hess_law`.
+#must_use
+fn hess_law(enthalpies_j, n): f64 {
+    var s: f64 = _km_sum(enthalpies_j, n);
+    return s;
+}
+
+# Enthalpy of reaction from formation enthalpies, ΔH_rxn = Σ ΔH_f(products) − Σ ΔH_f(reactants):
+# `products_hf` holds np values and `reactants_hf` nr, each ΔH_f already multiplied by its
+# stoichiometric coefficient (e.g. J/mol of reaction); the result is in the same unit. NaN if
+# either is no slice. Mirrors `thermo::enthalpy_from_formation`.
+#must_use
+fn enthalpy_from_formation(products_hf, np, reactants_hf, nr): f64 {
+    var sum_products: f64 = _km_sum(products_hf, np);
+    var sum_reactants: f64 = _km_sum(reactants_hf, nr);
+    var d: f64 = sum_products - sum_reactants;
+    return d;
+}
+
+# Specific heat at constant pressure from calorimetry, c_p = q / (m × ΔT) in J/(g·°C), from q in J,
+# m in g and ΔT in °C (or K): Ok(c_p), or Err(KM_ERR_INVALID_INPUT) if q is not finite, m is not
+# positive and finite, or ΔT is non-finite or zero (|ΔT| < 10⁻¹², hisab's EPSILON_F64). Mirrors
+# `thermo::specific_heat_from_calorimetry`.
+#must_use
+fn specific_heat_from_calorimetry(energy_j: f64, mass_g: f64, delta_t: f64): Result {
+    if (_km_is_finite(energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(mass_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var eps: f64 = EPSILON_F64;
+    var adt: f64 = f64_abs(delta_t);
+    if (_km_is_finite(delta_t) != 1 || adt < eps) { return Err(KM_ERR_INVALID_INPUT); }
+    var c: f64 = energy_j / (mass_g * delta_t);
+    return Ok(c);
+}
+
+# --- thermochem_data.cyr ---
+
+# kimiya — thermochemical data: formation enthalpies, Gibbs energies, entropies, Shomate segments
+#
+# GENERATED by scripts/oracle from kimiya 1.2.0 (rust-old/), hisab 1.4.0. Do not edit.
+# Regenerate: cargo run --release --locked --manifest-path scripts/oracle/Cargo.toml
+#
+# THERMOCHEM_DATA and SHOMATE_DATA rows are in Rust's order; a handle (src/thermochem.cyr)
+# is row + 1, and 0 is None. f64 cells are the oracle's values as round-trip decimals;
+# tests/golden/thermochem.tsv pins every cell (the `thermochem::THERMOCHEM_DATA[]` and
+# `thermochem::SHOMATE_DATA[]` rows).
+
+# Shomate equation coefficients for one temperature segment.
+#
+# Cp(T) = A + B·t + C·t² + D·t³ + E/t²  in J/(mol·K), where t = T(K) / 1000.
+#
+# The fit is valid only for `t_min ≤ T ≤ t_max`.
+struct KmShomate {
+    # Coefficient A, J/(mol·K).
+    a: f64;
+    # Coefficient B (multiplies t), J/(mol·K) per kK.
+    b: f64;
+    # Coefficient C (multiplies t²), J/(mol·K) per kK².
+    c: f64;
+    # Coefficient D (multiplies t³), J/(mol·K) per kK³.
+    d: f64;
+    # Coefficient E (multiplies 1/t²), J/(mol·K)·kK².
+    e: f64;
+    # Lower bound of the fit's valid temperature range (K).
+    t_min: f64;
+    # Upper bound of the fit's valid temperature range (K).
+    t_max: f64;
+}
+
+# Built-in thermochemical data for common substances at 298.15 K, 1 bar.
+#
+# ΔH_f° and ΔG_f° in kJ/mol, S° in J/(mol·K). Values from the NBS tables
+# (Wagman et al. 1982), NIST/JANAF, CODATA, and the CRC Handbook.
+# Elements in standard state have ΔH_f° = 0 and ΔG_f° = 0.
+#
+# Sections of the Rust literal:
+# - rows 0–6 (H2(g) … Al(s)): Elements in standard state
+# - rows 7–30 (H2O(l) … NaOH(s)): Common compounds
+# - rows 31–45 (S(rhombic) … F2(g)): Elements in standard state (additional)
+# - rows 46–68 (MgO(s) … PCl5(g)): Inorganic compounds (additional)
+# - rows 69–75 (CH3OH(l) … HCHO(g)): Organic compounds (additional)
+#
+# Notes on rows, from the Rust literal:
+# - row 41, Zn(s): S° from CODATA key values (Zn, Ti, Ag, F2) and the CRC Handbook (Ba).
+# - row 48, K2O(s): CRC Handbook / NBS (94.14); 102.00 was not a tabulated value.
+# - row 73, C4H10(g): n-Butane: all three values from the NBS tables (Wagman et al. 1982), which
+#   are mutually consistent (ΔG = ΔH − TΔS within 0.05 kJ/mol).
+# Rust: kimiya::thermochem::THERMOCHEM_DATA (its length).
+const KM_THERMOCHEM_COUNT = 76;
+
+# Chemical formula (e.g., "H2O(l)").
+# Indexed by THERMOCHEM_DATA row; mirrors `ThermochemData::formula`.
+# Offset of row i's C string in _KM_THERMOCHEM_FORMULA_BYTES.
+var _KM_THERMOCHEM_FORMULA_OFF: u16[76] = {
+    0,  # H2(g)
+    6,  # O2(g)
+    12,  # N2(g)
+    18,  # C(graphite)
+    30,  # Fe(s)
+    36,  # Cu(s)
+    42,  # Al(s)
+    48,  # H2O(l)
+    55,  # H2O(g)
+    62,  # CO2(g)
+    69,  # CO(g)
+    75,  # CH4(g)
+    82,  # C2H6(g)
+    90,  # C2H4(g)
+    98,  # C2H2(g)
+    106,  # C6H12O6(s)
+    117,  # C2H5OH(l)
+    127,  # NH3(g)
+    134,  # NO(g)
+    140,  # NO2(g)
+    147,  # SO2(g)
+    154,  # SO3(g)
+    161,  # HCl(g)
+    168,  # NaCl(s)
+    176,  # CaCO3(s)
+    185,  # Fe2O3(s)
+    194,  # Al2O3(s)
+    203,  # CaO(s)
+    210,  # H2SO4(l)
+    219,  # HNO3(l)
+    227,  # NaOH(s)
+    235,  # S(rhombic)
+    246,  # Cl2(g)
+    253,  # Br2(l)
+    260,  # I2(s)
+    266,  # Na(s)
+    272,  # K(s)
+    277,  # Ca(s)
+    283,  # Mg(s)
+    289,  # P(white)
+    298,  # Si(s)
+    304,  # Zn(s)
+    310,  # Ti(s)
+    316,  # Ba(s)
+    322,  # Ag(s)
+    328,  # F2(g)
+    334,  # MgO(s)
+    341,  # Na2O(s)
+    349,  # K2O(s)
+    356,  # ZnO(s)
+    363,  # CuO(s)
+    370,  # TiO2(s)
+    378,  # SiO2(s)
+    386,  # MgCO3(s)
+    395,  # BaCO3(s)
+    404,  # AgCl(s)
+    412,  # BaSO4(s)
+    421,  # KCl(s)
+    428,  # NaHCO3(s)
+    438,  # Na2CO3(s)
+    448,  # KNO3(s)
+    456,  # NH4Cl(s)
+    465,  # NH4NO3(s)
+    475,  # HF(g)
+    481,  # HBr(g)
+    488,  # HI(g)
+    494,  # H2S(g)
+    501,  # PCl3(g)
+    509,  # PCl5(g)
+    517,  # CH3OH(l)
+    526,  # CH3COOH(l)
+    537,  # C6H6(l)
+    545,  # C3H8(g)
+    553,  # C4H10(g)
+    562,  # C8H18(l)
+    571,  # HCHO(g)
+};
+
+# Every string, NUL-terminated, in row order (ASCII).
+var _KM_THERMOCHEM_FORMULA_BYTES: u8[579] = {
+    72, 50, 40, 103, 41, 0,  # H2(g)
+    79, 50, 40, 103, 41, 0,  # O2(g)
+    78, 50, 40, 103, 41, 0,  # N2(g)
+    67, 40, 103, 114, 97, 112, 104, 105, 116, 101, 41, 0,  # C(graphite)
+    70, 101, 40, 115, 41, 0,  # Fe(s)
+    67, 117, 40, 115, 41, 0,  # Cu(s)
+    65, 108, 40, 115, 41, 0,  # Al(s)
+    72, 50, 79, 40, 108, 41, 0,  # H2O(l)
+    72, 50, 79, 40, 103, 41, 0,  # H2O(g)
+    67, 79, 50, 40, 103, 41, 0,  # CO2(g)
+    67, 79, 40, 103, 41, 0,  # CO(g)
+    67, 72, 52, 40, 103, 41, 0,  # CH4(g)
+    67, 50, 72, 54, 40, 103, 41, 0,  # C2H6(g)
+    67, 50, 72, 52, 40, 103, 41, 0,  # C2H4(g)
+    67, 50, 72, 50, 40, 103, 41, 0,  # C2H2(g)
+    67, 54, 72, 49, 50, 79, 54, 40, 115, 41, 0,  # C6H12O6(s)
+    67, 50, 72, 53, 79, 72, 40, 108, 41, 0,  # C2H5OH(l)
+    78, 72, 51, 40, 103, 41, 0,  # NH3(g)
+    78, 79, 40, 103, 41, 0,  # NO(g)
+    78, 79, 50, 40, 103, 41, 0,  # NO2(g)
+    83, 79, 50, 40, 103, 41, 0,  # SO2(g)
+    83, 79, 51, 40, 103, 41, 0,  # SO3(g)
+    72, 67, 108, 40, 103, 41, 0,  # HCl(g)
+    78, 97, 67, 108, 40, 115, 41, 0,  # NaCl(s)
+    67, 97, 67, 79, 51, 40, 115, 41, 0,  # CaCO3(s)
+    70, 101, 50, 79, 51, 40, 115, 41, 0,  # Fe2O3(s)
+    65, 108, 50, 79, 51, 40, 115, 41, 0,  # Al2O3(s)
+    67, 97, 79, 40, 115, 41, 0,  # CaO(s)
+    72, 50, 83, 79, 52, 40, 108, 41, 0,  # H2SO4(l)
+    72, 78, 79, 51, 40, 108, 41, 0,  # HNO3(l)
+    78, 97, 79, 72, 40, 115, 41, 0,  # NaOH(s)
+    83, 40, 114, 104, 111, 109, 98, 105, 99, 41, 0,  # S(rhombic)
+    67, 108, 50, 40, 103, 41, 0,  # Cl2(g)
+    66, 114, 50, 40, 108, 41, 0,  # Br2(l)
+    73, 50, 40, 115, 41, 0,  # I2(s)
+    78, 97, 40, 115, 41, 0,  # Na(s)
+    75, 40, 115, 41, 0,  # K(s)
+    67, 97, 40, 115, 41, 0,  # Ca(s)
+    77, 103, 40, 115, 41, 0,  # Mg(s)
+    80, 40, 119, 104, 105, 116, 101, 41, 0,  # P(white)
+    83, 105, 40, 115, 41, 0,  # Si(s)
+    90, 110, 40, 115, 41, 0,  # Zn(s)
+    84, 105, 40, 115, 41, 0,  # Ti(s)
+    66, 97, 40, 115, 41, 0,  # Ba(s)
+    65, 103, 40, 115, 41, 0,  # Ag(s)
+    70, 50, 40, 103, 41, 0,  # F2(g)
+    77, 103, 79, 40, 115, 41, 0,  # MgO(s)
+    78, 97, 50, 79, 40, 115, 41, 0,  # Na2O(s)
+    75, 50, 79, 40, 115, 41, 0,  # K2O(s)
+    90, 110, 79, 40, 115, 41, 0,  # ZnO(s)
+    67, 117, 79, 40, 115, 41, 0,  # CuO(s)
+    84, 105, 79, 50, 40, 115, 41, 0,  # TiO2(s)
+    83, 105, 79, 50, 40, 115, 41, 0,  # SiO2(s)
+    77, 103, 67, 79, 51, 40, 115, 41, 0,  # MgCO3(s)
+    66, 97, 67, 79, 51, 40, 115, 41, 0,  # BaCO3(s)
+    65, 103, 67, 108, 40, 115, 41, 0,  # AgCl(s)
+    66, 97, 83, 79, 52, 40, 115, 41, 0,  # BaSO4(s)
+    75, 67, 108, 40, 115, 41, 0,  # KCl(s)
+    78, 97, 72, 67, 79, 51, 40, 115, 41, 0,  # NaHCO3(s)
+    78, 97, 50, 67, 79, 51, 40, 115, 41, 0,  # Na2CO3(s)
+    75, 78, 79, 51, 40, 115, 41, 0,  # KNO3(s)
+    78, 72, 52, 67, 108, 40, 115, 41, 0,  # NH4Cl(s)
+    78, 72, 52, 78, 79, 51, 40, 115, 41, 0,  # NH4NO3(s)
+    72, 70, 40, 103, 41, 0,  # HF(g)
+    72, 66, 114, 40, 103, 41, 0,  # HBr(g)
+    72, 73, 40, 103, 41, 0,  # HI(g)
+    72, 50, 83, 40, 103, 41, 0,  # H2S(g)
+    80, 67, 108, 51, 40, 103, 41, 0,  # PCl3(g)
+    80, 67, 108, 53, 40, 103, 41, 0,  # PCl5(g)
+    67, 72, 51, 79, 72, 40, 108, 41, 0,  # CH3OH(l)
+    67, 72, 51, 67, 79, 79, 72, 40, 108, 41, 0,  # CH3COOH(l)
+    67, 54, 72, 54, 40, 108, 41, 0,  # C6H6(l)
+    67, 51, 72, 56, 40, 103, 41, 0,  # C3H8(g)
+    67, 52, 72, 49, 48, 40, 103, 41, 0,  # C4H10(g)
+    67, 56, 72, 49, 56, 40, 108, 41, 0,  # C8H18(l)
+    72, 67, 72, 79, 40, 103, 41, 0,  # HCHO(g)
+};
+
+# Common name.
+# Indexed by THERMOCHEM_DATA row; mirrors `ThermochemData::name`.
+# Offset of row i's C string in _KM_THERMOCHEM_NAME_BYTES.
+var _KM_THERMOCHEM_NAME_OFF: u16[76] = {
+    0,  # Hydrogen gas
+    13,  # Oxygen gas
+    24,  # Nitrogen gas
+    37,  # Graphite
+    46,  # Iron
+    51,  # Copper
+    58,  # Aluminum
+    67,  # Water (liquid)
+    82,  # Water (gas)
+    94,  # Carbon dioxide
+    109,  # Carbon monoxide
+    125,  # Methane
+    133,  # Ethane
+    140,  # Ethylene
+    149,  # Acetylene
+    159,  # Glucose
+    167,  # Ethanol (liquid)
+    184,  # Ammonia
+    192,  # Nitric oxide
+    205,  # Nitrogen dioxide
+    222,  # Sulfur dioxide
+    237,  # Sulfur trioxide
+    253,  # Hydrogen chloride
+    271,  # Sodium chloride
+    287,  # Calcium carbonate
+    305,  # Iron(III) oxide
+    321,  # Aluminum oxide
+    336,  # Calcium oxide
+    350,  # Sulfuric acid
+    364,  # Nitric acid
+    376,  # Sodium hydroxide
+    393,  # Sulfur (rhombic)
+    410,  # Chlorine gas
+    423,  # Bromine liquid
+    438,  # Iodine solid
+    451,  # Sodium
+    458,  # Potassium
+    468,  # Calcium
+    476,  # Magnesium
+    486,  # Phosphorus (white)
+    505,  # Silicon
+    513,  # Zinc
+    518,  # Titanium
+    527,  # Barium
+    534,  # Silver
+    541,  # Fluorine gas
+    554,  # Magnesium oxide
+    570,  # Sodium oxide
+    583,  # Potassium oxide
+    599,  # Zinc oxide
+    610,  # Copper(II) oxide
+    627,  # Titanium dioxide (rutile)
+    653,  # Silicon dioxide (quartz)
+    678,  # Magnesium carbonate
+    698,  # Barium carbonate
+    715,  # Silver chloride
+    731,  # Barium sulfate
+    746,  # Potassium chloride
+    765,  # Sodium bicarbonate
+    784,  # Sodium carbonate
+    801,  # Potassium nitrate
+    819,  # Ammonium chloride
+    837,  # Ammonium nitrate
+    854,  # Hydrogen fluoride
+    872,  # Hydrogen bromide
+    889,  # Hydrogen iodide
+    905,  # Hydrogen sulfide
+    922,  # Phosphorus trichloride
+    945,  # Phosphorus pentachloride
+    970,  # Methanol
+    979,  # Acetic acid
+    991,  # Benzene
+    999,  # Propane
+    1007,  # Butane
+    1014,  # Octane
+    1021,  # Formaldehyde
+};
+
+# Every string, NUL-terminated, in row order (ASCII).
+var _KM_THERMOCHEM_NAME_BYTES: u8[1034] = {
+    72, 121, 100, 114, 111, 103, 101, 110, 32, 103, 97, 115, 0,  # Hydrogen gas
+    79, 120, 121, 103, 101, 110, 32, 103, 97, 115, 0,  # Oxygen gas
+    78, 105, 116, 114, 111, 103, 101, 110, 32, 103, 97, 115, 0,  # Nitrogen gas
+    71, 114, 97, 112, 104, 105, 116, 101, 0,  # Graphite
+    73, 114, 111, 110, 0,  # Iron
+    67, 111, 112, 112, 101, 114, 0,  # Copper
+    65, 108, 117, 109, 105, 110, 117, 109, 0,  # Aluminum
+    87, 97, 116, 101, 114, 32, 40, 108, 105, 113, 117, 105, 100, 41, 0,  # Water (liquid)
+    87, 97, 116, 101, 114, 32, 40, 103, 97, 115, 41, 0,  # Water (gas)
+    67, 97, 114, 98, 111, 110, 32, 100, 105, 111, 120, 105, 100, 101, 0,  # Carbon dioxide
+    67, 97, 114, 98, 111, 110, 32, 109, 111, 110, 111, 120, 105, 100, 101, 0,  # Carbon monoxide
+    77, 101, 116, 104, 97, 110, 101, 0,  # Methane
+    69, 116, 104, 97, 110, 101, 0,  # Ethane
+    69, 116, 104, 121, 108, 101, 110, 101, 0,  # Ethylene
+    65, 99, 101, 116, 121, 108, 101, 110, 101, 0,  # Acetylene
+    71, 108, 117, 99, 111, 115, 101, 0,  # Glucose
+    69, 116, 104, 97, 110, 111, 108, 32, 40, 108, 105, 113, 117, 105, 100, 41, 0,  # Ethanol (liquid)
+    65, 109, 109, 111, 110, 105, 97, 0,  # Ammonia
+    78, 105, 116, 114, 105, 99, 32, 111, 120, 105, 100, 101, 0,  # Nitric oxide
+    78, 105, 116, 114, 111, 103, 101, 110, 32, 100, 105, 111, 120, 105, 100, 101, 0,  # Nitrogen dioxide
+    83, 117, 108, 102, 117, 114, 32, 100, 105, 111, 120, 105, 100, 101, 0,  # Sulfur dioxide
+    83, 117, 108, 102, 117, 114, 32, 116, 114, 105, 111, 120, 105, 100, 101, 0,  # Sulfur trioxide
+    72, 121, 100, 114, 111, 103, 101, 110, 32, 99, 104, 108, 111, 114, 105, 100, 101, 0,  # Hydrogen chloride
+    83, 111, 100, 105, 117, 109, 32, 99, 104, 108, 111, 114, 105, 100, 101, 0,  # Sodium chloride
+    67, 97, 108, 99, 105, 117, 109, 32, 99, 97, 114, 98, 111, 110, 97, 116, 101, 0,  # Calcium carbonate
+    73, 114, 111, 110, 40, 73, 73, 73, 41, 32, 111, 120, 105, 100, 101, 0,  # Iron(III) oxide
+    65, 108, 117, 109, 105, 110, 117, 109, 32, 111, 120, 105, 100, 101, 0,  # Aluminum oxide
+    67, 97, 108, 99, 105, 117, 109, 32, 111, 120, 105, 100, 101, 0,  # Calcium oxide
+    83, 117, 108, 102, 117, 114, 105, 99, 32, 97, 99, 105, 100, 0,  # Sulfuric acid
+    78, 105, 116, 114, 105, 99, 32, 97, 99, 105, 100, 0,  # Nitric acid
+    83, 111, 100, 105, 117, 109, 32, 104, 121, 100, 114, 111, 120, 105, 100, 101, 0,  # Sodium hydroxide
+    83, 117, 108, 102, 117, 114, 32, 40, 114, 104, 111, 109, 98, 105, 99, 41, 0,  # Sulfur (rhombic)
+    67, 104, 108, 111, 114, 105, 110, 101, 32, 103, 97, 115, 0,  # Chlorine gas
+    66, 114, 111, 109, 105, 110, 101, 32, 108, 105, 113, 117, 105, 100, 0,  # Bromine liquid
+    73, 111, 100, 105, 110, 101, 32, 115, 111, 108, 105, 100, 0,  # Iodine solid
+    83, 111, 100, 105, 117, 109, 0,  # Sodium
+    80, 111, 116, 97, 115, 115, 105, 117, 109, 0,  # Potassium
+    67, 97, 108, 99, 105, 117, 109, 0,  # Calcium
+    77, 97, 103, 110, 101, 115, 105, 117, 109, 0,  # Magnesium
+    80, 104, 111, 115, 112, 104, 111, 114, 117, 115, 32, 40, 119, 104, 105, 116, 101, 41, 0,  # Phosphorus (white)
+    83, 105, 108, 105, 99, 111, 110, 0,  # Silicon
+    90, 105, 110, 99, 0,  # Zinc
+    84, 105, 116, 97, 110, 105, 117, 109, 0,  # Titanium
+    66, 97, 114, 105, 117, 109, 0,  # Barium
+    83, 105, 108, 118, 101, 114, 0,  # Silver
+    70, 108, 117, 111, 114, 105, 110, 101, 32, 103, 97, 115, 0,  # Fluorine gas
+    77, 97, 103, 110, 101, 115, 105, 117, 109, 32, 111, 120, 105, 100, 101, 0,  # Magnesium oxide
+    83, 111, 100, 105, 117, 109, 32, 111, 120, 105, 100, 101, 0,  # Sodium oxide
+    80, 111, 116, 97, 115, 115, 105, 117, 109, 32, 111, 120, 105, 100, 101, 0,  # Potassium oxide
+    90, 105, 110, 99, 32, 111, 120, 105, 100, 101, 0,  # Zinc oxide
+    67, 111, 112, 112, 101, 114, 40, 73, 73, 41, 32, 111, 120, 105, 100, 101, 0,  # Copper(II) oxide
+    84, 105, 116, 97, 110, 105, 117, 109, 32, 100, 105, 111, 120, 105, 100, 101,  # Titanium dioxide (rutile)
+    32, 40, 114, 117, 116, 105, 108, 101, 41, 0,
+    83, 105, 108, 105, 99, 111, 110, 32, 100, 105, 111, 120, 105, 100, 101, 32,  # Silicon dioxide (quartz)
+    40, 113, 117, 97, 114, 116, 122, 41, 0,
+    77, 97, 103, 110, 101, 115, 105, 117, 109, 32, 99, 97, 114, 98, 111, 110, 97, 116, 101, 0,  # Magnesium carbonate
+    66, 97, 114, 105, 117, 109, 32, 99, 97, 114, 98, 111, 110, 97, 116, 101, 0,  # Barium carbonate
+    83, 105, 108, 118, 101, 114, 32, 99, 104, 108, 111, 114, 105, 100, 101, 0,  # Silver chloride
+    66, 97, 114, 105, 117, 109, 32, 115, 117, 108, 102, 97, 116, 101, 0,  # Barium sulfate
+    80, 111, 116, 97, 115, 115, 105, 117, 109, 32, 99, 104, 108, 111, 114, 105, 100, 101, 0,  # Potassium chloride
+    83, 111, 100, 105, 117, 109, 32, 98, 105, 99, 97, 114, 98, 111, 110, 97, 116, 101, 0,  # Sodium bicarbonate
+    83, 111, 100, 105, 117, 109, 32, 99, 97, 114, 98, 111, 110, 97, 116, 101, 0,  # Sodium carbonate
+    80, 111, 116, 97, 115, 115, 105, 117, 109, 32, 110, 105, 116, 114, 97, 116, 101, 0,  # Potassium nitrate
+    65, 109, 109, 111, 110, 105, 117, 109, 32, 99, 104, 108, 111, 114, 105, 100, 101, 0,  # Ammonium chloride
+    65, 109, 109, 111, 110, 105, 117, 109, 32, 110, 105, 116, 114, 97, 116, 101, 0,  # Ammonium nitrate
+    72, 121, 100, 114, 111, 103, 101, 110, 32, 102, 108, 117, 111, 114, 105, 100, 101, 0,  # Hydrogen fluoride
+    72, 121, 100, 114, 111, 103, 101, 110, 32, 98, 114, 111, 109, 105, 100, 101, 0,  # Hydrogen bromide
+    72, 121, 100, 114, 111, 103, 101, 110, 32, 105, 111, 100, 105, 100, 101, 0,  # Hydrogen iodide
+    72, 121, 100, 114, 111, 103, 101, 110, 32, 115, 117, 108, 102, 105, 100, 101, 0,  # Hydrogen sulfide
+    80, 104, 111, 115, 112, 104, 111, 114, 117, 115, 32, 116, 114, 105, 99, 104,  # Phosphorus trichloride
+    108, 111, 114, 105, 100, 101, 0,
+    80, 104, 111, 115, 112, 104, 111, 114, 117, 115, 32, 112, 101, 110, 116, 97,  # Phosphorus pentachloride
+    99, 104, 108, 111, 114, 105, 100, 101, 0,
+    77, 101, 116, 104, 97, 110, 111, 108, 0,  # Methanol
+    65, 99, 101, 116, 105, 99, 32, 97, 99, 105, 100, 0,  # Acetic acid
+    66, 101, 110, 122, 101, 110, 101, 0,  # Benzene
+    80, 114, 111, 112, 97, 110, 101, 0,  # Propane
+    66, 117, 116, 97, 110, 101, 0,  # Butane
+    79, 99, 116, 97, 110, 101, 0,  # Octane
+    70, 111, 114, 109, 97, 108, 100, 101, 104, 121, 100, 101, 0,  # Formaldehyde
+};
+
+# Standard enthalpy of formation ΔH_f° (kJ/mol).
+# Indexed by THERMOCHEM_DATA row; mirrors `ThermochemData::delta_hf_kj`.
+var KM_THERMOCHEM_DELTA_HF_KJ: f64[76] = {
+    0.0,  # H2(g)
+    0.0,  # O2(g)
+    0.0,  # N2(g)
+    0.0,  # C(graphite)
+    0.0,  # Fe(s)
+    0.0,  # Cu(s)
+    0.0,  # Al(s)
+    -285.83,  # H2O(l)
+    -241.82,  # H2O(g)
+    -393.51,  # CO2(g)
+    -110.53,  # CO(g)
+    -74.81,  # CH4(g)
+    -84.68,  # C2H6(g)
+    52.26,  # C2H4(g)
+    226.73,  # C2H2(g)
+    -1274.4,  # C6H12O6(s)
+    -277.69,  # C2H5OH(l)
+    -46.11,  # NH3(g)
+    90.25,  # NO(g)
+    33.18,  # NO2(g)
+    -296.83,  # SO2(g)
+    -395.72,  # SO3(g)
+    -92.31,  # HCl(g)
+    -411.15,  # NaCl(s)
+    -1206.9,  # CaCO3(s)
+    -824.2,  # Fe2O3(s)
+    -1675.7,  # Al2O3(s)
+    -635.09,  # CaO(s)
+    -813.99,  # H2SO4(l)
+    -174.1,  # HNO3(l)
+    -425.61,  # NaOH(s)
+    0.0,  # S(rhombic)
+    0.0,  # Cl2(g)
+    0.0,  # Br2(l)
+    0.0,  # I2(s)
+    0.0,  # Na(s)
+    0.0,  # K(s)
+    0.0,  # Ca(s)
+    0.0,  # Mg(s)
+    0.0,  # P(white)
+    0.0,  # Si(s)
+    0.0,  # Zn(s)
+    0.0,  # Ti(s)
+    0.0,  # Ba(s)
+    0.0,  # Ag(s)
+    0.0,  # F2(g)
+    -601.6,  # MgO(s)
+    -414.22,  # Na2O(s)
+    -361.5,  # K2O(s)
+    -350.46,  # ZnO(s)
+    -157.3,  # CuO(s)
+    -944.0,  # TiO2(s)
+    -910.7,  # SiO2(s)
+    -1095.8,  # MgCO3(s)
+    -1216.3,  # BaCO3(s)
+    -127.01,  # AgCl(s)
+    -1473.2,  # BaSO4(s)
+    -436.75,  # KCl(s)
+    -950.81,  # NaHCO3(s)
+    -1130.7,  # Na2CO3(s)
+    -494.63,  # KNO3(s)
+    -314.43,  # NH4Cl(s)
+    -365.56,  # NH4NO3(s)
+    -273.3,  # HF(g)
+    -36.29,  # HBr(g)
+    26.48,  # HI(g)
+    -20.6,  # H2S(g)
+    -287.0,  # PCl3(g)
+    -374.9,  # PCl5(g)
+    -238.4,  # CH3OH(l)
+    -484.5,  # CH3COOH(l)
+    49.04,  # C6H6(l)
+    -103.85,  # C3H8(g)
+    -126.15,  # C4H10(g)
+    -250.1,  # C8H18(l)
+    -108.57,  # HCHO(g)
+};
+
+# Standard Gibbs free energy of formation ΔG_f° (kJ/mol).
+# Indexed by THERMOCHEM_DATA row; mirrors `ThermochemData::delta_gf_kj`.
+var KM_THERMOCHEM_DELTA_GF_KJ: f64[76] = {
+    0.0,  # H2(g)
+    0.0,  # O2(g)
+    0.0,  # N2(g)
+    0.0,  # C(graphite)
+    0.0,  # Fe(s)
+    0.0,  # Cu(s)
+    0.0,  # Al(s)
+    -237.13,  # H2O(l)
+    -228.57,  # H2O(g)
+    -394.36,  # CO2(g)
+    -137.17,  # CO(g)
+    -50.72,  # CH4(g)
+    -32.82,  # C2H6(g)
+    68.15,  # C2H4(g)
+    209.2,  # C2H2(g)
+    -910.3,  # C6H12O6(s)
+    -174.78,  # C2H5OH(l)
+    -16.45,  # NH3(g)
+    86.55,  # NO(g)
+    51.31,  # NO2(g)
+    -300.19,  # SO2(g)
+    -371.06,  # SO3(g)
+    -95.3,  # HCl(g)
+    -384.14,  # NaCl(s)
+    -1128.8,  # CaCO3(s)
+    -742.2,  # Fe2O3(s)
+    -1582.3,  # Al2O3(s)
+    -604.03,  # CaO(s)
+    -690.0,  # H2SO4(l)
+    -80.71,  # HNO3(l)
+    -379.49,  # NaOH(s)
+    0.0,  # S(rhombic)
+    0.0,  # Cl2(g)
+    0.0,  # Br2(l)
+    0.0,  # I2(s)
+    0.0,  # Na(s)
+    0.0,  # K(s)
+    0.0,  # Ca(s)
+    0.0,  # Mg(s)
+    0.0,  # P(white)
+    0.0,  # Si(s)
+    0.0,  # Zn(s)
+    0.0,  # Ti(s)
+    0.0,  # Ba(s)
+    0.0,  # Ag(s)
+    0.0,  # F2(g)
+    -569.31,  # MgO(s)
+    -375.46,  # Na2O(s)
+    -322.09,  # K2O(s)
+    -320.48,  # ZnO(s)
+    -129.7,  # CuO(s)
+    -888.8,  # TiO2(s)
+    -856.3,  # SiO2(s)
+    -1012.1,  # MgCO3(s)
+    -1137.6,  # BaCO3(s)
+    -109.79,  # AgCl(s)
+    -1362.2,  # BaSO4(s)
+    -409.14,  # KCl(s)
+    -851.0,  # NaHCO3(s)
+    -1044.4,  # Na2CO3(s)
+    -394.86,  # KNO3(s)
+    -202.87,  # NH4Cl(s)
+    -183.87,  # NH4NO3(s)
+    -275.4,  # HF(g)
+    -53.45,  # HBr(g)
+    1.7,  # HI(g)
+    -33.4,  # H2S(g)
+    -267.8,  # PCl3(g)
+    -305.0,  # PCl5(g)
+    -166.27,  # CH3OH(l)
+    -389.9,  # CH3COOH(l)
+    124.5,  # C6H6(l)
+    -23.4,  # C3H8(g)
+    -17.03,  # C4H10(g)
+    6.4,  # C8H18(l)
+    -102.53,  # HCHO(g)
+};
+
+# Standard molar entropy S° (J/(mol·K)).
+# Indexed by THERMOCHEM_DATA row; mirrors `ThermochemData::s_standard_j`.
+var KM_THERMOCHEM_S_STANDARD_J: f64[76] = {
+    130.68,  # H2(g)
+    205.15,  # O2(g)
+    191.61,  # N2(g)
+    5.74,  # C(graphite)
+    27.28,  # Fe(s)
+    33.15,  # Cu(s)
+    28.3,  # Al(s)
+    69.91,  # H2O(l)
+    188.83,  # H2O(g)
+    213.79,  # CO2(g)
+    197.67,  # CO(g)
+    186.26,  # CH4(g)
+    229.6,  # C2H6(g)
+    219.56,  # C2H4(g)
+    200.94,  # C2H2(g)
+    212.1,  # C6H12O6(s)
+    160.7,  # C2H5OH(l)
+    192.45,  # NH3(g)
+    210.76,  # NO(g)
+    240.06,  # NO2(g)
+    248.22,  # SO2(g)
+    256.76,  # SO3(g)
+    186.91,  # HCl(g)
+    72.13,  # NaCl(s)
+    92.9,  # CaCO3(s)
+    87.4,  # Fe2O3(s)
+    50.92,  # Al2O3(s)
+    39.75,  # CaO(s)
+    156.9,  # H2SO4(l)
+    155.6,  # HNO3(l)
+    64.46,  # NaOH(s)
+    31.8,  # S(rhombic)
+    223.08,  # Cl2(g)
+    152.23,  # Br2(l)
+    116.14,  # I2(s)
+    51.21,  # Na(s)
+    64.18,  # K(s)
+    41.42,  # Ca(s)
+    32.68,  # Mg(s)
+    41.09,  # P(white)
+    18.83,  # Si(s)
+    41.63,  # Zn(s)
+    30.72,  # Ti(s)
+    62.5,  # Ba(s)
+    42.55,  # Ag(s)
+    202.79,  # F2(g)
+    26.95,  # MgO(s)
+    75.06,  # Na2O(s)
+    94.1,  # K2O(s)
+    43.64,  # ZnO(s)
+    42.63,  # CuO(s)
+    50.33,  # TiO2(s)
+    41.46,  # SiO2(s)
+    65.7,  # MgCO3(s)
+    112.1,  # BaCO3(s)
+    96.25,  # AgCl(s)
+    132.2,  # BaSO4(s)
+    82.59,  # KCl(s)
+    101.7,  # NaHCO3(s)
+    135.0,  # Na2CO3(s)
+    133.1,  # KNO3(s)
+    94.6,  # NH4Cl(s)
+    151.08,  # NH4NO3(s)
+    173.78,  # HF(g)
+    198.7,  # HBr(g)
+    206.59,  # HI(g)
+    205.79,  # H2S(g)
+    311.78,  # PCl3(g)
+    364.58,  # PCl5(g)
+    126.8,  # CH3OH(l)
+    159.8,  # CH3COOH(l)
+    173.4,  # C6H6(l)
+    270.02,  # C3H8(g)
+    310.23,  # C4H10(g)
+    361.2,  # C8H18(l)
+    218.77,  # HCHO(g)
+};
+
+# Built-in Shomate coefficients for common gases.
+#
+# Coefficients give Cp in J/(mol·K) with t = T(K)/1000. Source is the NIST
+# Chemistry WebBook unless an entry says otherwise. Valid ranges differ per
+# entry: read each entry's `t_min`/`t_max`.
+#
+# Species that need several fits to cover their range (N₂, O₂, CO₂, H₂O)
+# appear once per temperature segment under the same formula string. The
+# segments of one species are adjacent, in increasing temperature order,
+# and contiguous (each `t_max` equals the next segment's `t_min`). Use
+# [`lookup_shomate_at`] to select the segment for a temperature;
+# [`lookup_shomate`] returns the lowest-temperature segment.
+#
+# Sections of the Rust literal:
+# - rows 25–33 (C3H8(g) 298–1200 K … Ne(g) 298–6000 K): Additional Shomate data
+#
+# Notes on rows, from the Rust literal:
+# - row 0, H2O(g) 298–1700 K: NIST WebBook gives no gas-phase set below 500 K. Its 500–1700 K
+#   set is used down to 298 K as a documented extrapolation so flame calculations can start at
+#   298.15 K: Cp(298.15) = 33.59 and Cp(400) = 34.26 J/(mol·K), matching JANAF (33.590, 34.262)
+#   to < 0.1 %.
+# - row 1, H2O(g) 1700–6000 K: NIST WebBook Shomate, 1700–6000 K.
+# - row 2, CO2(g) 298–1200 K: NIST WebBook Shomate, 298–1200 K.
+# - row 3, CO2(g) 1200–6000 K: NIST WebBook Shomate, 1200–6000 K.
+# - row 4, N2(g) 100–500 K: NIST WebBook Shomate, 100–500 K.
+# - row 5, N2(g) 500–2000 K: NIST WebBook Shomate, 500–2000 K.
+# - row 6, N2(g) 2000–6000 K: NIST WebBook Shomate, 2000–6000 K.
+# - row 7, O2(g) 100–700 K: NIST WebBook Shomate, 100–700 K.
+# - row 8, O2(g) 700–2000 K: NIST WebBook Shomate, 700–2000 K.
+# - row 9, O2(g) 2000–6000 K: NIST WebBook Shomate, 2000–6000 K.
+# - row 11, CH4(g) 1300–6000 K: NIST WebBook Shomate, 1300–6000 K
+# - row 13, CO(g) 1300–6000 K: NIST WebBook Shomate, 1300–6000 K
+# - row 15, H2(g) 1000–2500 K: NIST WebBook Shomate, 1000–2500 K
+# - row 16, H2(g) 2500–6000 K: NIST WebBook Shomate, 2500–6000 K
+# - row 22, C2H6(g) 298–1200 K: Approximate: not a NIST WebBook Shomate set (NIST publishes none
+#   for ethane) and the source is unknown. Known error: Cp(298.15) = 54.3 vs reference 52.5
+#   J/(mol·K) (+3.4 %). Use with caution.
+# - row 23, C2H4(g) 298–1200 K: NIST WebBook Shomate, 298–1200 K (Cp(298.15) = 42.85 J/(mol·K)).
+# - row 25, C3H8(g) 298–1200 K: Approximate: not a NIST WebBook Shomate set (NIST publishes none
+#   for propane) and the source is unknown. Known error: Cp(298.15) = 79.8 vs reference 73.6
+#   J/(mol·K) (+8.4 %). Use with caution.
+# - row 28, Br2(g) 332.5–3400 K: NIST WebBook Shomate, 332.5–3400 K.
+# - row 29, HF(g) 298–1200 K: KNOWN DEFECT — not the NIST set and of unknown source. This fit
+#   gives Cp(298.15) = 28.77 J/(mol·K) (JANAF: 29.14), falls to ~27.8 near 700 K, and stays
+#   below the 7R/2 = 29.10 floor of a diatomic gas across its whole range, which is physically
+#   impossible. Do not rely on HF heat capacities until this is replaced with a sourced fit.
+# Rust: kimiya::thermochem::SHOMATE_DATA (its length).
+const KM_SHOMATE_COUNT = 34;
+
+# The formula of each SHOMATE_DATA segment (`"H2O(g)"`, once per segment); mirrors the tuple's `&str`.
+# Offset of row i's C string in _KM_SHOMATE_FORMULA_BYTES.
+var _KM_SHOMATE_FORMULA_OFF: u16[34] = {
+    0,  # H2O(g)
+    7,  # H2O(g)
+    14,  # CO2(g)
+    21,  # CO2(g)
+    28,  # N2(g)
+    34,  # N2(g)
+    40,  # N2(g)
+    46,  # O2(g)
+    52,  # O2(g)
+    58,  # O2(g)
+    64,  # CH4(g)
+    71,  # CH4(g)
+    78,  # CO(g)
+    84,  # CO(g)
+    90,  # H2(g)
+    96,  # H2(g)
+    102,  # H2(g)
+    108,  # NH3(g)
+    115,  # SO2(g)
+    122,  # HCl(g)
+    129,  # NO(g)
+    135,  # NO2(g)
+    142,  # C2H6(g)
+    150,  # C2H4(g)
+    158,  # C2H2(g)
+    166,  # C3H8(g)
+    174,  # H2S(g)
+    181,  # Cl2(g)
+    188,  # Br2(g)
+    195,  # HF(g)
+    201,  # HBr(g)
+    208,  # Ar(g)
+    214,  # He(g)
+    220,  # Ne(g)
+};
+
+# Every string, NUL-terminated, in row order (ASCII).
+var _KM_SHOMATE_FORMULA_BYTES: u8[226] = {
+    72, 50, 79, 40, 103, 41, 0,  # H2O(g)
+    72, 50, 79, 40, 103, 41, 0,  # H2O(g)
+    67, 79, 50, 40, 103, 41, 0,  # CO2(g)
+    67, 79, 50, 40, 103, 41, 0,  # CO2(g)
+    78, 50, 40, 103, 41, 0,  # N2(g)
+    78, 50, 40, 103, 41, 0,  # N2(g)
+    78, 50, 40, 103, 41, 0,  # N2(g)
+    79, 50, 40, 103, 41, 0,  # O2(g)
+    79, 50, 40, 103, 41, 0,  # O2(g)
+    79, 50, 40, 103, 41, 0,  # O2(g)
+    67, 72, 52, 40, 103, 41, 0,  # CH4(g)
+    67, 72, 52, 40, 103, 41, 0,  # CH4(g)
+    67, 79, 40, 103, 41, 0,  # CO(g)
+    67, 79, 40, 103, 41, 0,  # CO(g)
+    72, 50, 40, 103, 41, 0,  # H2(g)
+    72, 50, 40, 103, 41, 0,  # H2(g)
+    72, 50, 40, 103, 41, 0,  # H2(g)
+    78, 72, 51, 40, 103, 41, 0,  # NH3(g)
+    83, 79, 50, 40, 103, 41, 0,  # SO2(g)
+    72, 67, 108, 40, 103, 41, 0,  # HCl(g)
+    78, 79, 40, 103, 41, 0,  # NO(g)
+    78, 79, 50, 40, 103, 41, 0,  # NO2(g)
+    67, 50, 72, 54, 40, 103, 41, 0,  # C2H6(g)
+    67, 50, 72, 52, 40, 103, 41, 0,  # C2H4(g)
+    67, 50, 72, 50, 40, 103, 41, 0,  # C2H2(g)
+    67, 51, 72, 56, 40, 103, 41, 0,  # C3H8(g)
+    72, 50, 83, 40, 103, 41, 0,  # H2S(g)
+    67, 108, 50, 40, 103, 41, 0,  # Cl2(g)
+    66, 114, 50, 40, 103, 41, 0,  # Br2(g)
+    72, 70, 40, 103, 41, 0,  # HF(g)
+    72, 66, 114, 40, 103, 41, 0,  # HBr(g)
+    65, 114, 40, 103, 41, 0,  # Ar(g)
+    72, 101, 40, 103, 41, 0,  # He(g)
+    78, 101, 40, 103, 41, 0,  # Ne(g)
+};
+
+# Coefficient A, J/(mol·K).
+# Indexed by SHOMATE_DATA row; mirrors `Shomate::a`.
+var KM_SHOMATE_A: f64[34] = {
+    30.092,  # H2O(g) 298–1700 K
+    41.96426,  # H2O(g) 1700–6000 K
+    24.99735,  # CO2(g) 298–1200 K
+    58.16639,  # CO2(g) 1200–6000 K
+    28.98641,  # N2(g) 100–500 K
+    19.50583,  # N2(g) 500–2000 K
+    35.51872,  # N2(g) 2000–6000 K
+    31.32234,  # O2(g) 100–700 K
+    30.03235,  # O2(g) 700–2000 K
+    20.91111,  # O2(g) 2000–6000 K
+    -0.703029,  # CH4(g) 298–1300 K
+    85.81217,  # CH4(g) 1300–6000 K
+    25.56759,  # CO(g) 298–1300 K
+    35.1507,  # CO(g) 1300–6000 K
+    33.066178,  # H2(g) 298–1000 K
+    18.563083,  # H2(g) 1000–2500 K
+    43.41356,  # H2(g) 2500–6000 K
+    19.99563,  # NH3(g) 298–1400 K
+    21.43049,  # SO2(g) 298–1200 K
+    32.12392,  # HCl(g) 298–1200 K
+    23.83491,  # NO(g) 298–1200 K
+    16.10857,  # NO2(g) 298–1200 K
+    6.16331,  # C2H6(g) 298–1200 K
+    -6.38788,  # C2H4(g) 298–1200 K
+    40.68697,  # C2H2(g) 298–1100 K
+    -4.224394,  # C3H8(g) 298–1200 K
+    26.88412,  # H2S(g) 298–1400 K
+    33.0506,  # Cl2(g) 298–1000 K
+    38.52723,  # Br2(g) 332.5–3400 K
+    29.14,  # HF(g) 298–1200 K
+    29.141,  # HBr(g) 298–1200 K
+    20.786,  # Ar(g) 298–6000 K
+    20.786,  # He(g) 298–6000 K
+    20.786,  # Ne(g) 298–6000 K
+};
+
+# Coefficient B (multiplies t), J/(mol·K) per kK.
+# Indexed by SHOMATE_DATA row; mirrors `Shomate::b`.
+var KM_SHOMATE_B: f64[34] = {
+    6.832514,  # H2O(g) 298–1700 K
+    8.622053,  # H2O(g) 1700–6000 K
+    55.18696,  # CO2(g) 298–1200 K
+    2.720074,  # CO2(g) 1200–6000 K
+    1.853978,  # N2(g) 100–500 K
+    19.88705,  # N2(g) 500–2000 K
+    1.128728,  # N2(g) 2000–6000 K
+    -20.23531,  # O2(g) 100–700 K
+    8.772972,  # O2(g) 700–2000 K
+    10.72071,  # O2(g) 2000–6000 K
+    108.4773,  # CH4(g) 298–1300 K
+    11.26467,  # CH4(g) 1300–6000 K
+    6.09613,  # CO(g) 298–1300 K
+    1.300095,  # CO(g) 1300–6000 K
+    -11.363417,  # H2(g) 298–1000 K
+    12.257357,  # H2(g) 1000–2500 K
+    -4.293079,  # H2(g) 2500–6000 K
+    49.77119,  # NH3(g) 298–1400 K
+    74.35094,  # SO2(g) 298–1200 K
+    -13.45805,  # HCl(g) 298–1200 K
+    12.58878,  # NO(g) 298–1200 K
+    75.89525,  # NO2(g) 298–1200 K
+    173.5507,  # C2H6(g) 298–1200 K
+    184.4019,  # C2H4(g) 298–1200 K
+    40.73279,  # C2H2(g) 298–1100 K
+    306.0191,  # C3H8(g) 298–1200 K
+    18.67809,  # H2S(g) 298–1400 K
+    12.2294,  # Cl2(g) 298–1000 K
+    -1.976835,  # Br2(g) 332.5–3400 K
+    -6.56728,  # HF(g) 298–1200 K
+    -3.42838,  # HBr(g) 298–1200 K
+    0.0,  # Ar(g) 298–6000 K
+    0.0,  # He(g) 298–6000 K
+    0.0,  # Ne(g) 298–6000 K
+};
+
+# Coefficient C (multiplies t²), J/(mol·K) per kK².
+# Indexed by SHOMATE_DATA row; mirrors `Shomate::c`.
+var KM_SHOMATE_C: f64[34] = {
+    6.793435,  # H2O(g) 298–1700 K
+    -1.49978,  # H2O(g) 1700–6000 K
+    -33.69137,  # CO2(g) 298–1200 K
+    -0.492289,  # CO2(g) 1200–6000 K
+    -9.647459,  # N2(g) 100–500 K
+    -8.598535,  # N2(g) 500–2000 K
+    -0.196103,  # N2(g) 2000–6000 K
+    57.86644,  # O2(g) 100–700 K
+    -3.988133,  # O2(g) 700–2000 K
+    -2.020498,  # O2(g) 2000–6000 K
+    -42.52157,  # CH4(g) 298–1300 K
+    -2.114146,  # CH4(g) 1300–6000 K
+    4.054656,  # CO(g) 298–1300 K
+    -0.205921,  # CO(g) 1300–6000 K
+    11.432816,  # H2(g) 298–1000 K
+    -2.859786,  # H2(g) 1000–2500 K
+    1.272428,  # H2(g) 2500–6000 K
+    -15.37599,  # NH3(g) 298–1400 K
+    -57.75217,  # SO2(g) 298–1200 K
+    19.86852,  # HCl(g) 298–1200 K
+    -1.139011,  # NO(g) 298–1200 K
+    -54.3874,  # NO2(g) 298–1200 K
+    -64.14486,  # C2H6(g) 298–1200 K
+    -112.9718,  # C2H4(g) 298–1200 K
+    -16.1784,  # C2H2(g) 298–1100 K
+    -158.5991,  # C3H8(g) 298–1200 K
+    3.434203,  # H2S(g) 298–1400 K
+    -12.0651,  # Cl2(g) 298–1000 K
+    1.526107,  # Br2(g) 332.5–3400 K
+    8.27622,  # HF(g) 298–1200 K
+    8.1649,  # HBr(g) 298–1200 K
+    0.0,  # Ar(g) 298–6000 K
+    0.0,  # He(g) 298–6000 K
+    0.0,  # Ne(g) 298–6000 K
+};
+
+# Coefficient D (multiplies t³), J/(mol·K) per kK³.
+# Indexed by SHOMATE_DATA row; mirrors `Shomate::d`.
+var KM_SHOMATE_D: f64[34] = {
+    -2.53448,  # H2O(g) 298–1700 K
+    0.098119,  # H2O(g) 1700–6000 K
+    7.948387,  # CO2(g) 298–1200 K
+    0.038844,  # CO2(g) 1200–6000 K
+    16.63537,  # N2(g) 100–500 K
+    1.369784,  # N2(g) 500–2000 K
+    0.014662,  # N2(g) 2000–6000 K
+    -36.50624,  # O2(g) 100–700 K
+    0.788313,  # O2(g) 700–2000 K
+    0.146449,  # O2(g) 2000–6000 K
+    5.862788,  # CH4(g) 298–1300 K
+    0.13819,  # CH4(g) 1300–6000 K
+    -2.671301,  # CO(g) 298–1300 K
+    0.01355,  # CO(g) 1300–6000 K
+    -2.772874,  # H2(g) 298–1000 K
+    0.268238,  # H2(g) 1000–2500 K
+    -0.096876,  # H2(g) 2500–6000 K
+    1.921168,  # NH3(g) 298–1400 K
+    16.35534,  # SO2(g) 298–1200 K
+    -6.853936,  # HCl(g) 298–1200 K
+    -1.497459,  # NO(g) 298–1200 K
+    14.30777,  # NO2(g) 298–1200 K
+    7.523975,  # C2H6(g) 298–1200 K
+    28.49593,  # C2H4(g) 298–1200 K
+    3.669741,  # C2H2(g) 298–1100 K
+    32.13038,  # C3H8(g) 298–1200 K
+    -3.378702,  # H2S(g) 298–1400 K
+    4.38533,  # Cl2(g) 298–1000 K
+    -0.198398,  # Br2(g) 332.5–3400 K
+    -2.91489,  # HF(g) 298–1200 K
+    -3.05563,  # HBr(g) 298–1200 K
+    0.0,  # Ar(g) 298–6000 K
+    0.0,  # He(g) 298–6000 K
+    0.0,  # Ne(g) 298–6000 K
+};
+
+# Coefficient E (multiplies 1/t²), J/(mol·K)·kK².
+# Indexed by SHOMATE_DATA row; mirrors `Shomate::e`.
+var KM_SHOMATE_E: f64[34] = {
+    0.082139,  # H2O(g) 298–1700 K
+    -11.15764,  # H2O(g) 1700–6000 K
+    -0.136638,  # CO2(g) 298–1200 K
+    -6.447293,  # CO2(g) 1200–6000 K
+    0.000117,  # N2(g) 100–500 K
+    0.527601,  # N2(g) 500–2000 K
+    -4.55376,  # N2(g) 2000–6000 K
+    -0.007374,  # O2(g) 100–700 K
+    -0.741599,  # O2(g) 700–2000 K
+    9.245722,  # O2(g) 2000–6000 K
+    0.678565,  # CH4(g) 298–1300 K
+    -26.42221,  # CH4(g) 1300–6000 K
+    0.131021,  # CO(g) 298–1300 K
+    -3.28278,  # CO(g) 1300–6000 K
+    -0.158558,  # H2(g) 298–1000 K
+    1.97799,  # H2(g) 1000–2500 K
+    -20.533862,  # H2(g) 2500–6000 K
+    0.189174,  # NH3(g) 298–1400 K
+    0.086731,  # SO2(g) 298–1200 K
+    -0.049672,  # HCl(g) 298–1200 K
+    0.214194,  # NO(g) 298–1200 K
+    0.239423,  # NO2(g) 298–1200 K
+    0.168137,  # C2H6(g) 298–1200 K
+    0.31554,  # C2H4(g) 298–1200 K
+    -0.658411,  # C2H2(g) 298–1100 K
+    0.534834,  # C3H8(g) 298–1200 K
+    0.135882,  # H2S(g) 298–1400 K
+    -0.159494,  # Cl2(g) 298–1000 K
+    -0.185815,  # Br2(g) 332.5–3400 K
+    0.08296,  # HF(g) 298–1200 K
+    0.02633,  # HBr(g) 298–1200 K
+    0.0,  # Ar(g) 298–6000 K
+    0.0,  # He(g) 298–6000 K
+    0.0,  # Ne(g) 298–6000 K
+};
+
+# Lower bound of the fit's valid temperature range (K).
+# Indexed by SHOMATE_DATA row; mirrors `Shomate::t_min`.
+var KM_SHOMATE_T_MIN: f64[34] = {
+    298.0,  # H2O(g) 298–1700 K
+    1700.0,  # H2O(g) 1700–6000 K
+    298.0,  # CO2(g) 298–1200 K
+    1200.0,  # CO2(g) 1200–6000 K
+    100.0,  # N2(g) 100–500 K
+    500.0,  # N2(g) 500–2000 K
+    2000.0,  # N2(g) 2000–6000 K
+    100.0,  # O2(g) 100–700 K
+    700.0,  # O2(g) 700–2000 K
+    2000.0,  # O2(g) 2000–6000 K
+    298.0,  # CH4(g) 298–1300 K
+    1300.0,  # CH4(g) 1300–6000 K
+    298.0,  # CO(g) 298–1300 K
+    1300.0,  # CO(g) 1300–6000 K
+    298.0,  # H2(g) 298–1000 K
+    1000.0,  # H2(g) 1000–2500 K
+    2500.0,  # H2(g) 2500–6000 K
+    298.0,  # NH3(g) 298–1400 K
+    298.0,  # SO2(g) 298–1200 K
+    298.0,  # HCl(g) 298–1200 K
+    298.0,  # NO(g) 298–1200 K
+    298.0,  # NO2(g) 298–1200 K
+    298.0,  # C2H6(g) 298–1200 K
+    298.0,  # C2H4(g) 298–1200 K
+    298.0,  # C2H2(g) 298–1100 K
+    298.0,  # C3H8(g) 298–1200 K
+    298.0,  # H2S(g) 298–1400 K
+    298.0,  # Cl2(g) 298–1000 K
+    332.5,  # Br2(g) 332.5–3400 K
+    298.0,  # HF(g) 298–1200 K
+    298.0,  # HBr(g) 298–1200 K
+    298.0,  # Ar(g) 298–6000 K
+    298.0,  # He(g) 298–6000 K
+    298.0,  # Ne(g) 298–6000 K
+};
+
+# Upper bound of the fit's valid temperature range (K).
+# Indexed by SHOMATE_DATA row; mirrors `Shomate::t_max`.
+var KM_SHOMATE_T_MAX: f64[34] = {
+    1700.0,  # H2O(g) 298–1700 K
+    6000.0,  # H2O(g) 1700–6000 K
+    1200.0,  # CO2(g) 298–1200 K
+    6000.0,  # CO2(g) 1200–6000 K
+    500.0,  # N2(g) 100–500 K
+    2000.0,  # N2(g) 500–2000 K
+    6000.0,  # N2(g) 2000–6000 K
+    700.0,  # O2(g) 100–700 K
+    2000.0,  # O2(g) 700–2000 K
+    6000.0,  # O2(g) 2000–6000 K
+    1300.0,  # CH4(g) 298–1300 K
+    6000.0,  # CH4(g) 1300–6000 K
+    1300.0,  # CO(g) 298–1300 K
+    6000.0,  # CO(g) 1300–6000 K
+    1000.0,  # H2(g) 298–1000 K
+    2500.0,  # H2(g) 1000–2500 K
+    6000.0,  # H2(g) 2500–6000 K
+    1400.0,  # NH3(g) 298–1400 K
+    1200.0,  # SO2(g) 298–1200 K
+    1200.0,  # HCl(g) 298–1200 K
+    1200.0,  # NO(g) 298–1200 K
+    1200.0,  # NO2(g) 298–1200 K
+    1200.0,  # C2H6(g) 298–1200 K
+    1200.0,  # C2H4(g) 298–1200 K
+    1100.0,  # C2H2(g) 298–1100 K
+    1200.0,  # C3H8(g) 298–1200 K
+    1400.0,  # H2S(g) 298–1400 K
+    1000.0,  # Cl2(g) 298–1000 K
+    3400.0,  # Br2(g) 332.5–3400 K
+    1200.0,  # HF(g) 298–1200 K
+    1200.0,  # HBr(g) 298–1200 K
+    6000.0,  # Ar(g) 298–6000 K
+    6000.0,  # He(g) 298–6000 K
+    6000.0,  # Ne(g) 298–6000 K
+};
+
+# --- thermochem.cyr ---
+
+# thermochem.cyr — thermochemical data and the functions over it: reaction enthalpy, Gibbs energy
+# and entropy from the formation table, the van 't Hoff equation, Shomate heat capacities and
+# enthalpies, and the adiabatic flame temperature (port of rust-old/src/thermochem.rs).
+#
+# The data — struct KmShomate, the 76 THERMOCHEM_DATA rows and the 34 SHOMATE_DATA segments — is
+# src/thermochem_data.cyr (generated). Fallible functions return a value-form Result whose Err
+# payload is a KM_ERR_* code. Every expression keeps Rust's operation order, so everything but
+# vant_hoff_k is + − × ÷ and bit-identical (class B); vant_hoff_k's one exp is f64_exp (class C,
+# docs/development/port-parity.md §6).
+#
+# Units: reaction_enthalpy and reaction_gibbs_energy return **J/mol** (ADR 0002 #1: Rust 1.2 returns
+# kJ/mol; here Rust's kJ difference is multiplied by 1000.0 once, so the value is the oracle's × 1000
+# exactly); reaction_entropy returns J/(mol·K); enthalpy_change_cp returns J/mol; vant_hoff_k and
+# adiabatic_flame_temperature take J/mol. The table fields stay as tabulated (ΔH_f°, ΔG_f° in kJ/mol).
+#
+# - Rows are reached by handle (port plan §6.4): THERMOCHEM_DATA and SHOMATE_DATA row + 1, 0 for
+#   None. thermochem_data_<field>(h) reads a THERMOCHEM_DATA row ("" or NaN for an invalid handle);
+#   shomate_data_formula(h) / shomate_data_coeffs(h) a segment (NaN fields for an invalid handle).
+# - A species list `&[(&str, f64)]` is a pointer to n 16-byte records — a C-string pointer, then the
+#   f64's bits — and the count n, as KmMolecule_new's pairs. A negative n, or a null pointer with
+#   n > 0, is no list: Err(KM_ERR_INVALID_INPUT).
+# - Rust's private Segments (one species' run of adjacent SHOMATE_DATA rows) is a (start row, count)
+#   pair, and its lookup / cp / enthalpy_change are _km_segments_* helpers in Rust's operation order.
+# - adiabatic_flame_temperature transcribes hisab 1.4.0's newton_raphson and bisection operation for
+#   operation (ADR 0003, amendment M2b), specialised to the flame balance: _km_flame_newton and
+#   _km_flame_bisection call _km_flame_f / _km_flame_df directly. The derivative threshold is hisab's
+#   EPSILON_F64 (10⁻¹², the value of hisab 1.4.0's), which thermo.cyr's include of lib/hisab.cyr
+#   supplies too.
+
+include "lib/string.cyr"
+include "lib/math.cyr"
+include "lib/hisab.cyr"
+
+# ── THERMOCHEM_DATA ─────────────────────────────────────────────────────────────────
+
+# The THERMOCHEM_DATA row of handle h (h − 1), or -1 if h is no handle.
+#must_use
+fn _km_thermochem_row(h): i64 {
+    if (h >= 1 && h <= KM_THERMOCHEM_COUNT) { return h - 1; }
+    return 0 - 1;
+}
+
+# The standard thermochemical data of the substance whose formula is the C string `formula`,
+# exactly and case-sensitively ("H2O(l)", "CO2(g)"), as a handle (its THERMOCHEM_DATA row + 1); 0 when
+# none matches (or `formula` is 0). The first match in table order, as Rust's linear `find`. Mirrors
+# `thermochem::lookup_thermochem`.
+#must_use
+fn lookup_thermochem(formula): i64 {
+    if (formula == 0) { return 0; }
+    var c0 = load8(formula);
+    if (c0 == 0) { return 0; }
+    var n = strlen(formula);
+    var row = 0;
+    while (row < KM_THERMOCHEM_COUNT) {
+        var p = &_KM_THERMOCHEM_FORMULA_BYTES + _KM_THERMOCHEM_FORMULA_OFF[row];
+        # The first byte decides most rows; memeq stops at p's NUL, which differs from formula's byte.
+        if (load8(p) == c0) {
+            if (memeq(p, formula, n) == 1 && load8(p + n) == 0) { return row + 1; }
+        }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The chemical formula of THERMOCHEM_DATA handle h ("H2O(l)") as a C string in the baked table; ""
+# for an invalid handle. Mirrors `ThermochemData::formula`.
+#must_use
+fn thermochem_data_formula(h): i64 {
+    var row = _km_thermochem_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_THERMOCHEM_FORMULA_BYTES + _KM_THERMOCHEM_FORMULA_OFF[row];
+}
+
+# The common name of THERMOCHEM_DATA handle h ("Water (liquid)"); "" for an invalid handle. Mirrors
+# `ThermochemData::name`.
+#must_use
+fn thermochem_data_name(h): i64 {
+    var row = _km_thermochem_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_THERMOCHEM_NAME_BYTES + _KM_THERMOCHEM_NAME_OFF[row];
+}
+
+# The standard enthalpy of formation ΔH_f° (kJ/mol, as tabulated) of handle h; NaN for an invalid
+# handle. Mirrors `ThermochemData::delta_hf_kj`.
+#must_use
+fn thermochem_data_delta_hf_kj(h): f64 {
+    var row = _km_thermochem_row(h);
+    if (row < 0) { return _km_nan(); }
+    var x: f64 = KM_THERMOCHEM_DELTA_HF_KJ[row];
+    return x;
+}
+
+# The standard Gibbs energy of formation ΔG_f° (kJ/mol, as tabulated) of handle h; NaN for an
+# invalid handle. Mirrors `ThermochemData::delta_gf_kj`.
+#must_use
+fn thermochem_data_delta_gf_kj(h): f64 {
+    var row = _km_thermochem_row(h);
+    if (row < 0) { return _km_nan(); }
+    var x: f64 = KM_THERMOCHEM_DELTA_GF_KJ[row];
+    return x;
+}
+
+# The standard molar entropy S° (J/(mol·K)) of handle h; NaN for an invalid handle. Mirrors
+# `ThermochemData::s_standard_j`.
+#must_use
+fn thermochem_data_s_standard_j(h): f64 {
+    var row = _km_thermochem_row(h);
+    if (row < 0) { return _km_nan(); }
+    var x: f64 = KM_THERMOCHEM_S_STANDARD_J[row];
+    return x;
+}
+
+# ── reaction thermochemistry from the table ─────────────────────────────────────────
+
+# Σ coefficient × property over the n (formula, coefficient) records at `species`, in list order,
+# reading the property from the THERMOCHEM_DATA f64 column `col` (Rust's private sum_property): from
+# +0.0 with `total += coeff * prop`, as Rust (not `.sum()`), and no coefficient guard (a NaN
+# coefficient gives NaN, as Rust). (code, Σ): KM_ERR_INVALID_REACTION for the first formula with no
+# row, KM_ERR_INVALID_INPUT if (species, n) is no list.
+#must_use
+fn _km_sum_property(species, n, col): (i64, f64) {
+    if (n < 0 || (n > 0 && species == 0)) { return (KM_ERR_INVALID_INPUT, 0.0); }
+    var total: f64 = 0.0;
+    var k = 0;
+    while (k < n) {
+        var h = lookup_thermochem(load64(species + k * 16));
+        if (h == 0) { return (KM_ERR_INVALID_REACTION, 0.0); }
+        var coeff: f64 = load64(species + k * 16 + 8);
+        var prop: f64 = load64(col + (h - 1) * 8);
+        total = total + (coeff * prop);
+        k = k + 1;
+    }
+    return (KM_ERR_NONE, total);
+}
+
+# Σ over the products minus Σ over the reactants of the column `col`: (code, difference).
+#must_use
+fn _km_reaction_property(products, np, reactants, nr, col): (i64, f64) {
+    var ep, sum_products = _km_sum_property(products, np, col);
+    if (ep != KM_ERR_NONE) { return (ep, 0.0); }
+    var er, sum_reactants = _km_sum_property(reactants, nr, col);
+    if (er != KM_ERR_NONE) { return (er, 0.0); }
+    var d: f64 = sum_products - sum_reactants;
+    return (KM_ERR_NONE, d);
+}
+
+# The standard reaction enthalpy at 298.15 K from formation enthalpies,
+# ΔH°_rxn = Σ n_i·ΔH_f°(products) − Σ n_j·ΔH_f°(reactants), in **J/mol** (per mole of reaction as
+# written), from np product and nr reactant (formula, coefficient) records. Ok(ΔH);
+# Err(KM_ERR_INVALID_REACTION) if a formula has no THERMOCHEM_DATA row (the products are read
+# first); Err(KM_ERR_INVALID_INPUT) if either list is no list. Mirrors
+# `thermochem::reaction_enthalpy` with ADR 0002 #1: Rust returns the kJ/mol difference; this
+# returns it × 1000.0, the one multiply after Rust's subtraction (so vant_hoff_k and
+# adiabatic_flame_temperature take it as it is).
+#must_use
+fn reaction_enthalpy(products, np, reactants, nr): Result {
+    var e, d = _km_reaction_property(products, np, reactants, nr, &KM_THERMOCHEM_DELTA_HF_KJ);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var kj: f64 = d;
+    var j: f64 = kj * 1000.0;
+    return Ok(j);
+}
+
+# The standard reaction Gibbs energy at 298.15 K,
+# ΔG°_rxn = Σ n_i·ΔG_f°(products) − Σ n_j·ΔG_f°(reactants), in **J/mol**; arguments and errors as
+# reaction_enthalpy. Mirrors `thermochem::reaction_gibbs_energy` with ADR 0002 #1 (Rust's kJ/mol
+# difference × 1000.0).
+#must_use
+fn reaction_gibbs_energy(products, np, reactants, nr): Result {
+    var e, d = _km_reaction_property(products, np, reactants, nr, &KM_THERMOCHEM_DELTA_GF_KJ);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var kj: f64 = d;
+    var j: f64 = kj * 1000.0;
+    return Ok(j);
+}
+
+# The standard reaction entropy change at 298.15 K,
+# ΔS°_rxn = Σ n_i·S°(products) − Σ n_j·S°(reactants), in J/(mol·K) (unchanged from Rust; with the
+# J/mol reaction_enthalpy, ΔG = ΔH − TΔS needs no unit factor); arguments and errors as
+# reaction_enthalpy. Mirrors `thermochem::reaction_entropy`.
+#must_use
+fn reaction_entropy(products, np, reactants, nr): Result {
+    var e, d = _km_reaction_property(products, np, reactants, nr, &KM_THERMOCHEM_S_STANDARD_J);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var ds: f64 = d;
+    return Ok(ds);
+}
+
+# ── van 't Hoff equation ────────────────────────────────────────────────────────────
+
+# The van 't Hoff equation ln(K₂/K₁) = −(ΔH°/R)(1/T₂ − 1/T₁): the equilibrium constant at t_new_k
+# (K), dimensionless, from K₁ = k_ref at t_ref_k (K) and ΔH° in J/mol (reaction_enthalpy's unit),
+# assumed constant over the range. It may overflow to Ok(+∞) for extreme ΔH°, as Rust. Ok(K₂),
+# Err(KM_ERR_INVALID_TEMPERATURE) if a temperature is not positive and finite, or
+# Err(KM_ERR_INVALID_INPUT) if k_ref is not positive and finite or ΔH° is not finite. Mirrors
+# `thermochem::vant_hoff_k`.
+#must_use
+fn vant_hoff_k(k_ref: f64, delta_h_j: f64, t_ref_k: f64, t_new_k: f64): Result {
+    if (_km_is_positive(t_ref_k) != 1 || _km_is_positive(t_new_k) != 1) {
+        return Err(KM_ERR_INVALID_TEMPERATURE);
+    }
+    if (_km_is_positive(k_ref) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(delta_h_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var h: f64 = delta_h_j / KM_GAS_CONSTANT;
+    var exponent: f64 = -h * ((1.0 / t_new_k) - (1.0 / t_ref_k));
+    var e: f64 = f64_exp(exponent);
+    var k: f64 = k_ref * e;
+    return Ok(k);
+}
+
+# ── Shomate heat capacities ─────────────────────────────────────────────────────────
+
+# Cp = A + B·t + C·t² + D·t³ + E/t² in J/(mol·K), t = T/1000, in Rust's order: the one evaluation
+# behind KmShomate.cp and the table-row path.
+#must_use
+fn _km_shomate_cp5(a: f64, b: f64, c: f64, d: f64, e: f64, temperature_k: f64): f64 {
+    var t: f64 = temperature_k / 1000.0;
+    var r: f64 = (((a + (b * t)) + ((c * t) * t)) + (((d * t) * t) * t)) + (e / (t * t));
+    return r;
+}
+
+# ∫Cp dT = 1000·(A·t + B·t²/2 + C·t³/3 + D·t⁴/4 − E/t) in J/mol, t = T/1000, in Rust's nested
+# order: the one evaluation behind KmShomate.enthalpy_antiderivative and the table-row path.
+#must_use
+fn _km_shomate_h5(a: f64, b: f64, c: f64, d: f64, e: f64, temperature_k: f64): f64 {
+    var t: f64 = temperature_k / 1000.0;
+    var inner: f64 = t * (a + (t * ((b / 2.0) + (t * ((c / 3.0) + (t * (d / 4.0)))))));
+    var r: f64 = 1000.0 * (inner - (e / t));
+    return r;
+}
+
+impl KmShomate {
+    # Cp at temperature_k (K) in J/(mol·K). The range t_min ..= t_max is not checked: outside it the
+    # polynomial is an extrapolation (lookup_shomate_at picks the right segment). Mirrors
+    # `Shomate::cp`.
+    #must_use
+    fn cp(self, temperature_k: f64): f64 {
+        var r: f64 = _km_shomate_cp5(self.a, self.b, self.c, self.d, self.e, temperature_k);
+        return r;
+    }
+
+    # The antiderivative of cp with respect to T, in J/mol, without NIST's integration constant:
+    # only differences within one segment are meaningful (enthalpy_change_cp spans segments).
+    # Mirrors `Shomate::enthalpy_antiderivative`.
+    #must_use
+    fn enthalpy_antiderivative(self, temperature_k: f64): f64 {
+        var r: f64 = _km_shomate_h5(self.a, self.b, self.c, self.d, self.e, temperature_k);
+        return r;
+    }
+}
+
+# Cp of SHOMATE_DATA row `row` at temperature_k (the row's KmShomate.cp, read from the columns).
+#must_use
+fn _km_shomate_row_cp(row, temperature_k: f64): f64 {
+    var r: f64 = _km_shomate_cp5(KM_SHOMATE_A[row], KM_SHOMATE_B[row], KM_SHOMATE_C[row], KM_SHOMATE_D[row],
+        KM_SHOMATE_E[row], temperature_k);
+    return r;
+}
+
+# The antiderivative of SHOMATE_DATA row `row` at temperature_k (its enthalpy_antiderivative).
+#must_use
+fn _km_shomate_row_h(row, temperature_k: f64): f64 {
+    var r: f64 = _km_shomate_h5(KM_SHOMATE_A[row], KM_SHOMATE_B[row], KM_SHOMATE_C[row], KM_SHOMATE_D[row],
+        KM_SHOMATE_E[row], temperature_k);
+    return r;
+}
+
+# 1 if SHOMATE_DATA row `row`'s formula is the C string `formula` of length n, whose first byte is c0.
+#must_use
+fn _km_shomate_formula_is(row, formula, c0, n): i64 {
+    var p = &_KM_SHOMATE_FORMULA_BYTES + _KM_SHOMATE_FORMULA_OFF[row];
+    if (load8(p) != c0) { return 0; }
+    if (memeq(p, formula, n) == 1 && load8(p + n) == 0) { return 1; }
+    return 0;
+}
+
+# The SHOMATE_DATA row of handle h (h − 1), or -1 if h is no handle.
+#must_use
+fn _km_shomate_row(h): i64 {
+    if (h >= 1 && h <= KM_SHOMATE_COUNT) { return h - 1; }
+    return 0 - 1;
+}
+
+# The Shomate coefficients of the species whose formula is the C string `formula` (exact,
+# case-sensitive), as a handle (its SHOMATE_DATA row + 1): the first, lowest-temperature segment; 0
+# when there is none (or `formula` is 0). For a species with several segments use lookup_shomate_at.
+# Mirrors `thermochem::lookup_shomate`.
+#must_use
+fn lookup_shomate(formula): i64 {
+    if (formula == 0) { return 0; }
+    var c0 = load8(formula);
+    if (c0 == 0) { return 0; }
+    var n = strlen(formula);
+    var row = 0;
+    while (row < KM_SHOMATE_COUNT) {
+        if (_km_shomate_formula_is(row, formula, c0, n) == 1) { return row + 1; }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The Shomate segment of `formula` whose range covers temperature_k, t_min ≤ T ≤ t_max, as a handle;
+# at a boundary two segments share, the lower-temperature one (the first in table order). 0 if the
+# formula is unknown or no segment covers T (NaN included). Mirrors `thermochem::lookup_shomate_at`.
+#must_use
+fn lookup_shomate_at(formula, temperature_k: f64): i64 {
+    if (formula == 0) { return 0; }
+    var c0 = load8(formula);
+    if (c0 == 0) { return 0; }
+    var n = strlen(formula);
+    var row = 0;
+    while (row < KM_SHOMATE_COUNT) {
+        if (_km_shomate_formula_is(row, formula, c0, n) == 1) {
+            var lo: f64 = KM_SHOMATE_T_MIN[row];
+            var hi: f64 = KM_SHOMATE_T_MAX[row];
+            if (temperature_k >= lo && temperature_k <= hi) { return row + 1; }
+        }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The formula of SHOMATE_DATA handle h ("H2O(g)") as a C string in the baked table; "" for an invalid
+# handle. With shomate_data_coeffs and KM_SHOMATE_COUNT, this mirrors iterating
+# `thermochem::SHOMATE_DATA`.
+#must_use
+fn shomate_data_formula(h): i64 {
+    var row = _km_shomate_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_SHOMATE_FORMULA_BYTES + _KM_SHOMATE_FORMULA_OFF[row];
+}
+
+# The coefficients of SHOMATE_DATA handle h, by value; every field NaN for an invalid handle. Mirrors
+# `thermochem::SHOMATE_DATA[h − 1].1` (and the `&Shomate` lookup_shomate / lookup_shomate_at return).
+#must_use
+fn shomate_data_coeffs(h): KmShomate {
+    var s: KmShomate;
+    var row = _km_shomate_row(h);
+    if (row < 0) {
+        var x: f64 = _km_nan();
+        s.a = x;
+        s.b = x;
+        s.c = x;
+        s.d = x;
+        s.e = x;
+        s.t_min = x;
+        s.t_max = x;
+        return s;
+    }
+    s.a = KM_SHOMATE_A[row];
+    s.b = KM_SHOMATE_B[row];
+    s.c = KM_SHOMATE_C[row];
+    s.d = KM_SHOMATE_D[row];
+    s.e = KM_SHOMATE_E[row];
+    s.t_min = KM_SHOMATE_T_MIN[row];
+    s.t_max = KM_SHOMATE_T_MAX[row];
+    return s;
+}
+
+# ── one species' segments (Rust's private Segments) ─────────────────────────────────
+
+# The run of SHOMATE_DATA rows of `formula` (adjacent in the table): (first row, count), or (-1, 0)
+# if it has none. Its covered range is KM_SHOMATE_T_MIN[first] ..= KM_SHOMATE_T_MAX[first + count − 1].
+# Rust's Segments::lookup.
+#must_use
+fn _km_segments_lookup(formula): (i64, i64) {
+    if (formula == 0) { return (0 - 1, 0); }
+    var c0 = load8(formula);
+    if (c0 == 0) { return (0 - 1, 0); }
+    var n = strlen(formula);
+    var start = 0;
+    while (start < KM_SHOMATE_COUNT) {
+        if (_km_shomate_formula_is(start, formula, c0, n) == 1) {
+            var count = 1;
+            while (start + count < KM_SHOMATE_COUNT && _km_shomate_formula_is(start + count, formula, c0, n) == 1) {
+                count = count + 1;
+            }
+            return (start, count);
+        }
+        start = start + 1;
+    }
+    return (0 - 1, 0);
+}
+
+# Cp(T) in J/(mol·K) from the first segment of the run (start, count) whose t_max ≥ T, else the last
+# (extrapolated below the first and above the last; NaN T reaches the last). Rust's Segments::cp.
+#must_use
+fn _km_segments_cp(start, count, temperature_k: f64): f64 {
+    var k = 0;
+    while (k < count) {
+        var hi: f64 = KM_SHOMATE_T_MAX[start + k];
+        if (temperature_k <= hi) {
+            var r: f64 = _km_shomate_row_cp(start + k, temperature_k);
+            return r;
+        }
+        k = k + 1;
+    }
+    var last: f64 = _km_shomate_row_cp(start + count - 1, temperature_k);
+    return last;
+}
+
+# ∫[T₁→T₂] Cp dT in J/mol over the run (start, count), analytically and segment by segment: the
+# boundaries are the interior t_max values, the first and last segments extrapolate beyond the covered
+# range. From +0.0 with `total +=`, then × ±1, as Rust's Segments::enthalpy_change.
+#must_use
+fn _km_segments_enthalpy_change(start, count, t1_k: f64, t2_k: f64): f64 {
+    var lo: f64 = t2_k;
+    var hi: f64 = t1_k;
+    var sign: f64 = -1.0;
+    if (t1_k <= t2_k) {
+        lo = t1_k;
+        hi = t2_k;
+        sign = 1.0;
+    }
+    var inf: f64 = _KM_INF;
+    var total: f64 = 0.0;
+    var lower: f64 = -inf;
+    var k = 0;
+    while (k < count) {
+        var row = start + k;
+        var upper: f64 = KM_SHOMATE_T_MAX[row];
+        if (k + 1 == count) { upper = inf; }
+        var a: f64 = _km_max(lo, lower);
+        var b: f64 = _km_min(hi, upper);
+        if (b > a) {
+            var hb: f64 = _km_shomate_row_h(row, b);
+            var ha: f64 = _km_shomate_row_h(row, a);
+            total = total + (hb - ha);
+        }
+        if (upper >= hi) { break; }
+        lower = upper;
+        k = k + 1;
+    }
+    var r: f64 = sign * total;
+    return r;
+}
+
+# The sensible-enthalpy change of one species from T₁ to T₂ (K), ΔH = ∫[T₁→T₂] Cp(T) dT in **J/mol**,
+# integrating the Shomate polynomials analytically and piecewise across the species' segments
+# (negative when T₂ < T₁). Ok(ΔH); Err(KM_ERR_INVALID_REACTION) if the formula has no Shomate data
+# (checked first); Err(KM_ERR_INVALID_TEMPERATURE) if a temperature is not positive and finite, or any
+# part of [T₁, T₂] lies outside the range the segments cover. Mirrors `thermochem::enthalpy_change_cp`.
+#must_use
+fn enthalpy_change_cp(formula, t1_k: f64, t2_k: f64): Result {
+    var start, count = _km_segments_lookup(formula);
+    if (count == 0) { return Err(KM_ERR_INVALID_REACTION); }
+    if (_km_is_positive(t1_k) != 1 || _km_is_positive(t2_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    var lo: f64 = _km_min(t1_k, t2_k);
+    var hi: f64 = _km_max(t1_k, t2_k);
+    var t_min: f64 = KM_SHOMATE_T_MIN[start];
+    var t_max: f64 = KM_SHOMATE_T_MAX[start + count - 1];
+    if (lo < t_min || hi > t_max) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    var dh: f64 = _km_segments_enthalpy_change(start, count, t1_k, t2_k);
+    return Ok(dh);
+}
+
+# ── adiabatic flame temperature ─────────────────────────────────────────────────────
+
+# How many products' resolved segments adiabatic_flame_temperature keeps in its stack table (2 words
+# each); a longer list resolves the rest again at each evaluation (same values, slower). Rust keeps a
+# Vec; the port doesn't allocate (the bump allocator can't free, and this is called in loops).
+const _KM_FLAME_CACHED = 32;
+
+# The segments (start, count) of product k: from the stack table `cache` for k < _KM_FLAME_CACHED,
+# else resolved from its formula (already checked to have segments).
+#must_use
+fn _km_flame_segments(products, cache, k): (i64, i64) {
+    if (k < _KM_FLAME_CACHED) { return (load64(cache + k * 16), load64(cache + k * 16 + 8)); }
+    var start, count = _km_segments_lookup(load64(products + k * 16));
+    return (start, count);
+}
+
+# The flame's energy balance f(T) = −ΔH_rxn − Σ nᵢ·∫[T₀→T] Cpᵢ dT (J/mol): Rust's closure `f`, the sum
+# folded from −0.0 (Rust's `.sum()`) in product order.
+#must_use
+fn _km_flame_f(dh: f64, products, n, cache, t0: f64, t: f64): f64 {
+    var heat: f64 = -0.0;
+    var k = 0;
+    while (k < n) {
+        var start, count = _km_flame_segments(products, cache, k);
+        var moles: f64 = load64(products + k * 16 + 8);
+        var d: f64 = _km_segments_enthalpy_change(start, count, t0, t);
+        heat = heat + (moles * d);
+        k = k + 1;
+    }
+    var ndh: f64 = -dh;
+    var r: f64 = ndh - heat;
+    return r;
+}
+
+# Its derivative f′(T) = −Σ nᵢ·Cpᵢ(T): Rust's closure `df`, the sum folded from −0.0.
+#must_use
+fn _km_flame_df(products, n, cache, t: f64): f64 {
+    var cp: f64 = -0.0;
+    var k = 0;
+    while (k < n) {
+        var start, count = _km_flame_segments(products, cache, k);
+        var moles: f64 = load64(products + k * 16 + 8);
+        var c: f64 = _km_segments_cp(start, count, t);
+        cp = cp + (moles * c);
+        k = k + 1;
+    }
+    var r: f64 = -cp;
+    return r;
+}
+
+# hisab 1.4.0 `num::newton_raphson(f, df, x0, tol, max_iter)` on the flame balance, operation for
+# operation, with Rust's FLAME_NEWTON_TOL_J = 1e-3 J/mol and max_iter = 50: per iteration, stop with
+# x if |f(x)| < tol; fail if |f′(x)| < EPSILON_F64 (10⁻¹²); else x −= f(x)/f′(x). (KM_ERR_NONE, x), or
+# (KM_ERR_INVALID_INPUT, x) for hisab's "derivative is zero" and (KM_ERR_COMPUTATION_ERROR, x) for its
+# NoConvergence; the caller only tells Ok from Err, as Rust's `if let Ok`.
+#must_use
+fn _km_flame_newton(dh: f64, products, n, cache, t0: f64, x0: f64): (i64, f64) {
+    var tol: f64 = 0.001;
+    var eps: f64 = EPSILON_F64;
+    var x: f64 = x0;
+    var it = 0;
+    while (it < 50) {
+        var fx: f64 = _km_flame_f(dh, products, n, cache, t0, x);
+        var afx: f64 = f64_abs(fx);
+        if (afx < tol) { return (KM_ERR_NONE, x); }
+        var dfx: f64 = _km_flame_df(products, n, cache, x);
+        var adfx: f64 = f64_abs(dfx);
+        if (adfx < eps) { return (KM_ERR_INVALID_INPUT, x); }
+        x = x - (fx / dfx);
+        it = it + 1;
+    }
+    return (KM_ERR_COMPUTATION_ERROR, x);
+}
+
+# hisab 1.4.0 `num::bisection(f, a, b, tol, max_iter)` on the flame balance, operation for operation,
+# with Rust's FLAME_BISECTION_TOL = 1e-6 and max_iter = 200: fail if f(a)·f(b) > 0; orient so f(lo) < 0
+# (swap when f(a) > 0); per iteration mid = (lo + hi)·0.5, stop with mid if |f(mid)| < tol or
+# |hi − lo| < tol, else move the end whose sign f(mid) shares; after max_iter, (lo + hi)·0.5.
+# (KM_ERR_NONE, T) or (KM_ERR_INVALID_INPUT, 0.0) for hisab's opposite-signs error.
+#must_use
+fn _km_flame_bisection(dh: f64, products, n, cache, t0: f64, a: f64, b: f64): (i64, f64) {
+    var tol: f64 = 0.000001;
+    var lo: f64 = a;
+    var hi: f64 = b;
+    var f_lo: f64 = _km_flame_f(dh, products, n, cache, t0, lo);
+    var f_hi: f64 = _km_flame_f(dh, products, n, cache, t0, hi);
+    var pr: f64 = f_lo * f_hi;
+    if (pr > 0.0) { return (KM_ERR_INVALID_INPUT, 0.0); }
+    if (f_lo > 0.0) {
+        var sw: f64 = lo;
+        lo = hi;
+        hi = sw;
+    }
+    var it = 0;
+    while (it < 200) {
+        var mid: f64 = (lo + hi) * 0.5;
+        var f_mid: f64 = _km_flame_f(dh, products, n, cache, t0, mid);
+        var am: f64 = f64_abs(f_mid);
+        var w: f64 = hi - lo;
+        var aw: f64 = f64_abs(w);
+        if (am < tol || aw < tol) { return (KM_ERR_NONE, mid); }
+        if (f_mid < 0.0) { lo = mid; } else { hi = mid; }
+        it = it + 1;
+    }
+    var r: f64 = (lo + hi) * 0.5;
+    return (KM_ERR_NONE, r);
+}
+
+# The adiabatic flame temperature in K (no dissociation, constant pressure): T where
+# ΔH_rxn + Σ nᵢ·∫[T₀→T] Cpᵢ dT = 0, the sensible enthalpies integrated analytically and piecewise
+# across each product's Shomate segments. From reaction_enthalpy_j, ΔH_rxn in **J/mol** (exothermic
+# negative) at T₀ (reaction_enthalpy's value, corrected to T₀ if T₀ ≠ 298.15 K), the n product
+# (formula, moles) records at `products` (per mole of reaction; each needs Shomate data) and T₀ =
+# t_initial_k. The search is restricted to the range every product's data covers: Newton–Raphson from
+# T₀ − ΔH/(40·Σn) (an average Cp of 40 J/(mol·K) per mole of product) clamped to [T₀, T_max], accepted
+# only inside it, else bisection on [T₀, T_max] (hisab 1.4.0's loops, transcribed). Ok(T);
+# Err(KM_ERR_INVALID_TEMPERATURE) if T₀ is not positive and finite or lies outside the products' common
+# range [T_min, T_max); Err(KM_ERR_INVALID_INPUT) if ΔH is not finite, the list is empty (or no list),
+# or a product's moles are not positive and finite; Err(KM_ERR_INVALID_REACTION) for a product with no
+# Shomate data (the first bad product in list order decides); Err(KM_ERR_COMPUTATION_ERROR) if the root
+# can't be bracketed (ΔH ≥ 0, or the flame temperature is past T_max; the test is the product
+# f(T₀)·f(T_max) < 0, so NaN fails it) or the bisection fails. Mirrors
+# `thermochem::adiabatic_flame_temperature`, in Rust's order of checks.
+#must_use
+fn adiabatic_flame_temperature(reaction_enthalpy_j: f64, products, n, t_initial_k: f64): Result {
+    if (_km_is_positive(t_initial_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(reaction_enthalpy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n <= 0 || products == 0) { return Err(KM_ERR_INVALID_INPUT); }
+
+    # Resolve each product's segments once (Rust's `resolved`, one pass in list order) and the range
+    # every product covers.
+    var cache: i64[64];
+    var inf: f64 = _KM_INF;
+    var range_min: f64 = -inf;
+    var range_max: f64 = inf;
+    var k = 0;
+    while (k < n) {
+        var start, count = _km_segments_lookup(load64(products + k * 16));
+        if (count == 0) { return Err(KM_ERR_INVALID_REACTION); }
+        var moles: f64 = load64(products + k * 16 + 8);
+        if (_km_is_positive(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        var smin: f64 = KM_SHOMATE_T_MIN[start];
+        var smax: f64 = KM_SHOMATE_T_MAX[start + count - 1];
+        range_min = _km_max(range_min, smin);
+        range_max = _km_min(range_max, smax);
+        if (k < _KM_FLAME_CACHED) {
+            store64(&cache + k * 16, start);
+            store64(&cache + k * 16 + 8, count);
+        }
+        k = k + 1;
+    }
+    if (t_initial_k < range_min || t_initial_k >= range_max) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+
+    # f(T₀) = −ΔH_rxn and f decreases, so a sign change on [T₀, T_max] means an exothermic reaction
+    # whose root lies in the data range. A product test, so NaN fails it.
+    var t_lo: f64 = t_initial_k;
+    var t_hi: f64 = range_max;
+    var f_lo: f64 = _km_flame_f(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_lo);
+    var f_hi: f64 = _km_flame_f(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_hi);
+    var pr: f64 = f_lo * f_hi;
+    var bracketed = 0;
+    if (pr < 0.0) { bracketed = 1; }
+    if (bracketed != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+
+    # The initial guess: an average Cp of 40 J/(mol·K) per mole of product (Rust's typed constant).
+    var total_moles: f64 = -0.0;
+    k = 0;
+    while (k < n) {
+        var m: f64 = load64(products + k * 16 + 8);
+        total_moles = total_moles + m;
+        k = k + 1;
+    }
+    var g0: f64 = t_initial_k - (reaction_enthalpy_j / (total_moles * 40.0));
+    var g1: f64 = _km_max(g0, t_lo);
+    var t_guess: f64 = _km_min(g1, t_hi);
+
+    # Newton first; accept only a root in t_lo ..= t_hi.
+    var en, tn = _km_flame_newton(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_guess);
+    var t_newton: f64 = tn;
+    if (en == KM_ERR_NONE && t_newton >= t_lo && t_newton <= t_hi) { return Ok(t_newton); }
+
+    # Fallback: bisection on the verified bracket.
+    var eb, tb = _km_flame_bisection(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_lo, t_hi);
+    if (eb != KM_ERR_NONE) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var t_bis: f64 = tb;
+    return Ok(t_bis);
+}
+
+# --- phase_data.cyr ---
+
+# kimiya — phase-equilibrium data: Antoine coefficients, the mmHg → Pa factor, K_b and K_f
+#
+# GENERATED by scripts/oracle from kimiya 1.2.0 (rust-old/), hisab 1.4.0. Do not edit.
+# Regenerate: cargo run --release --locked --manifest-path scripts/oracle/Cargo.toml
+#
+# ANTOINE_DATA rows are in Rust's order; a handle (src/phase.cyr) is row + 1, and 0 is None.
+# f64 cells are the oracle's values as round-trip decimals; tests/golden/phase.tsv pins
+# every cell (the `phase::ANTOINE_DATA[]` rows) and tests/golden/constants.tsv the K_b / K_f
+# constants.
+
+# Antoine equation coefficients: log₁₀(P) = A - B/(C + T)
+#
+# P in mmHg, T in °C (traditional Antoine convention).
+struct KmAntoineCoeffs {
+    # A (dimensionless; log₁₀ of pressure in mmHg).
+    a: f64;
+    # B (°C; log₁₀ mmHg × °C).
+    b: f64;
+    # C (°C). The equation has a pole at T = −C.
+    c: f64;
+    # Lower end of the temperature range the coefficients were fitted
+    # over (°C).
+    t_min_c: f64;
+    # Upper end of the temperature range the coefficients were fitted
+    # over (°C).
+    t_max_c: f64;
+}
+
+# Pascals per conventional millimetre of mercury (13.5951 g/cm³ ×
+# 9.80665 m/s² × 1 mm; NIST SP 811). The torr (101 325/760 =
+# 133.322 368 Pa) differs by 1.4 × 10⁻⁷ relative.
+# Rust: kimiya::phase::PA_PER_MMHG (private), read as antoine_pressure_pa(A = B = 0, C = 1, T = 0):
+# 10⁰ × the factor, the factor itself.
+const _KM_PA_PER_MMHG = 133.322387415;
+
+# Built-in Antoine coefficients for common solvents (P in mmHg, T in °C).
+#
+# Notes on rows, from the Rust literal:
+# - methanol: Lange's Handbook, 15–84 °C set (consistent with NIST WebBook, Ambrose & Sprake
+#   1970, 288.1–356.8 K). The −14 to 65 °C range belongs to a different set (7.89750 / 1474.08 /
+#   229.13).
+# Rust: kimiya::phase::ANTOINE_DATA (its length).
+const KM_ANTOINE_COUNT = 8;
+
+# The solvent name of each ANTOINE_DATA row (`"water"`); mirrors the tuple's `&str`.
+# Offset of row i's C string in _KM_ANTOINE_NAME_BYTES.
+var _KM_ANTOINE_NAME_OFF: u16[8] = {
+    0,  # water
+    6,  # ethanol
+    14,  # methanol
+    23,  # benzene
+    31,  # acetone
+    39,  # toluene
+    47,  # diethyl_ether
+    61,  # chloroform
+};
+
+# Every string, NUL-terminated, in row order (ASCII).
+var _KM_ANTOINE_NAME_BYTES: u8[72] = {
+    119, 97, 116, 101, 114, 0,  # water
+    101, 116, 104, 97, 110, 111, 108, 0,  # ethanol
+    109, 101, 116, 104, 97, 110, 111, 108, 0,  # methanol
+    98, 101, 110, 122, 101, 110, 101, 0,  # benzene
+    97, 99, 101, 116, 111, 110, 101, 0,  # acetone
+    116, 111, 108, 117, 101, 110, 101, 0,  # toluene
+    100, 105, 101, 116, 104, 121, 108, 95, 101, 116, 104, 101, 114, 0,  # diethyl_ether
+    99, 104, 108, 111, 114, 111, 102, 111, 114, 109, 0,  # chloroform
+};
+
+# A (dimensionless; log₁₀ of pressure in mmHg).
+# Indexed by ANTOINE_DATA row; mirrors `AntoineCoeffs::a`.
+var KM_ANTOINE_A: f64[8] = {
+    8.07131,  # water
+    8.20417,  # ethanol
+    8.08097,  # methanol
+    6.90565,  # benzene
+    7.02447,  # acetone
+    6.95464,  # toluene
+    6.92032,  # diethyl_ether
+    6.95465,  # chloroform
+};
+
+# B (°C; log₁₀ mmHg × °C).
+# Indexed by ANTOINE_DATA row; mirrors `AntoineCoeffs::b`.
+var KM_ANTOINE_B: f64[8] = {
+    1730.63,  # water
+    1642.89,  # ethanol
+    1582.271,  # methanol
+    1211.03,  # benzene
+    1161.0,  # acetone
+    1344.8,  # toluene
+    1064.07,  # diethyl_ether
+    1170.97,  # chloroform
+};
+
+# C (°C). The equation has a pole at T = −C.
+# Indexed by ANTOINE_DATA row; mirrors `AntoineCoeffs::c`.
+var KM_ANTOINE_C: f64[8] = {
+    233.426,  # water
+    230.3,  # ethanol
+    239.726,  # methanol
+    220.79,  # benzene
+    224.0,  # acetone
+    219.48,  # toluene
+    228.8,  # diethyl_ether
+    226.232,  # chloroform
+};
+
+# Lower end of the temperature range the coefficients were fitted
+# over (°C).
+# Indexed by ANTOINE_DATA row; mirrors `AntoineCoeffs::t_min_c`.
+var KM_ANTOINE_T_MIN_C: f64[8] = {
+    1.0,  # water
+    -57.0,  # ethanol
+    15.0,  # methanol
+    8.0,  # benzene
+    -20.0,  # acetone
+    6.0,  # toluene
+    -60.0,  # diethyl_ether
+    -10.0,  # chloroform
+};
+
+# Upper end of the temperature range the coefficients were fitted
+# over (°C).
+# Indexed by ANTOINE_DATA row; mirrors `AntoineCoeffs::t_max_c`.
+var KM_ANTOINE_T_MAX_C: f64[8] = {
+    100.0,  # water
+    80.0,  # ethanol
+    84.0,  # methanol
+    80.0,  # benzene
+    77.0,  # acetone
+    137.0,  # toluene
+    35.0,  # diethyl_ether
+    60.0,  # chloroform
+};
+
+# Common ebullioscopic constants K_b and cryoscopic constants K_f (K·kg/mol).
+
+# Ebullioscopic constant K_b of water (K·kg/mol).
+# Rust: kimiya::phase::KB_WATER
+const KM_KB_WATER = 0.512;
+
+# Ebullioscopic constant K_b of benzene (K·kg/mol).
+# Rust: kimiya::phase::KB_BENZENE
+const KM_KB_BENZENE = 2.53;
+
+# Ebullioscopic constant K_b of ethanol (K·kg/mol).
+# Rust: kimiya::phase::KB_ETHANOL
+const KM_KB_ETHANOL = 1.22;
+
+# Ebullioscopic constant K_b of chloroform (K·kg/mol).
+# Rust: kimiya::phase::KB_CHLOROFORM
+const KM_KB_CHLOROFORM = 3.63;
+
+# Cryoscopic constant K_f of water (K·kg/mol).
+# Rust: kimiya::phase::KF_WATER
+const KM_KF_WATER = 1.86;
+
+# Cryoscopic constant K_f of benzene (K·kg/mol).
+# Rust: kimiya::phase::KF_BENZENE
+const KM_KF_BENZENE = 5.12;
+
+# Cryoscopic constant K_f of cyclohexane (K·kg/mol).
+# Rust: kimiya::phase::KF_CYCLOHEXANE
+const KM_KF_CYCLOHEXANE = 20.0;
+
+# Cryoscopic constant K_f of camphor (K·kg/mol).
+# Rust: kimiya::phase::KF_CAMPHOR
+const KM_KF_CAMPHOR = 40.0;
+
+# --- phase.cyr ---
+
+# phase.cyr — phase equilibria: Raoult's law, Henry's law, colligative properties,
+# Clausius–Clapeyron, the Antoine equation and the Gibbs phase rule (port of rust-old/src/phase.rs).
+#
+# Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and reject NaN
+# and ±∞ inputs. Every expression keeps Rust's operation order, so the arithmetic functions are
+# bit-identical (class B); clausius_clapeyron (one exp) and the Antoine functions (one pow) are
+# class C (docs/development/port-parity.md). The data — struct KmAntoineCoeffs, the 8 ANTOINE_DATA
+# sets, the mmHg → Pa factor and the KM_KB_* / KM_KF_* constants — is src/phase_data.cyr
+# (generated).
+#
+# ADR 0002 #4 (the one API change here): antoine_pressure_mmhg / antoine_pressure_pa return a
+# Result, Err outside the coefficient set's fitted range t_min_c ..= t_max_c, at or below the pole
+# (C + T ≤ 0) and for any non-finite input, where Rust 1.2 extrapolates silently or returns NaN.
+# There is no extrapolating variant. In range the value is Rust's, operation for operation.
+#
+# ANTOINE_DATA rows are reached by handle (port plan §6.4): row + 1, and 0 for None.
+# antoine_data_name(h) and antoine_data_coeffs(h) read row h − 1; an invalid handle gives "" and a
+# set of NaN fields (which antoine_pressure_* reject).
+
+include "lib/string.cyr"
+include "lib/math.cyr"
+include "lib/ganita.cyr"
+
+# 1 if 0 ≤ x ≤ 1 (Rust's `(0.0..=1.0).contains(&x)`, false for NaN).
+#must_use
+fn _km_in_unit_interval(x: f64): i64 {
+    if (x >= 0.0 && x <= 1.0) { return 1; }
+    return 0;
+}
+
+# ── Raoult's law ────────────────────────────────────────────────────────────────────
+
+# Raoult's law P = x × P°: the partial vapour pressure of a component of an ideal solution, from its
+# mole fraction x (0 to 1) and the pure component's vapour pressure P° (Pa, or any unit, which the
+# result keeps). Ok(P), or Err(KM_ERR_INVALID_INPUT) if x is not in [0, 1] or P° is negative or
+# non-finite (NaN included). Mirrors `phase::raoult_pressure`.
+#must_use
+fn raoult_pressure(mole_fraction: f64, pure_vapor_pressure: f64): Result {
+    if (_km_in_unit_interval(mole_fraction) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(pure_vapor_pressure) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var p: f64 = mole_fraction * pure_vapor_pressure;
+    return Ok(p);
+}
+
+# Total vapour pressure over a binary ideal solution, P = x_A × P°_A + (1 − x_A) × P°_B, in the
+# pressures' (consistent) unit. Ok(P), or Err(KM_ERR_INVALID_INPUT) if x_A is not in [0, 1] or
+# either pure-component pressure is negative or non-finite. Mirrors `phase::raoult_total_binary`.
+#must_use
+fn raoult_total_binary(x_a: f64, p_pure_a: f64, p_pure_b: f64): Result {
+    if (_km_in_unit_interval(x_a) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(p_pure_a) != 1 || _km_is_non_negative(p_pure_b) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    var p: f64 = (x_a * p_pure_a) + ((1.0 - x_a) * p_pure_b);
+    return Ok(p);
+}
+
+# ── Henry's law ─────────────────────────────────────────────────────────────────────
+
+# Henry's law P = K_H × x: the dissolved gas's partial pressure from Henry's constant K_H (Pa, or the
+# output's unit) and its mole fraction x (0 to 1). Ok(P), or Err(KM_ERR_INVALID_INPUT) if K_H is not
+# positive and finite or x is not in [0, 1] (NaN included). Mirrors `phase::henry_pressure`.
+#must_use
+fn henry_pressure(henry_constant: f64, mole_fraction: f64): Result {
+    if (_km_is_positive(henry_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_in_unit_interval(mole_fraction) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var p: f64 = henry_constant * mole_fraction;
+    return Ok(p);
+}
+
+# A gas's solubility (mole fraction) from Henry's law, x = P / K_H, with P and K_H in the same
+# pressure unit. Henry's law is a dilute-solution limit; results near 1 are outside its range.
+# Ok(x), or Err(KM_ERR_INVALID_INPUT) if K_H is not positive and finite or P is negative or
+# non-finite. Mirrors `phase::henry_solubility`.
+#must_use
+fn henry_solubility(partial_pressure: f64, henry_constant: f64): Result {
+    if (_km_is_positive(henry_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(partial_pressure) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var x: f64 = partial_pressure / henry_constant;
+    return Ok(x);
+}
+
+# ── colligative properties ──────────────────────────────────────────────────────────
+
+# Boiling point elevation ΔT_b = K_b × m × i in K, from the ebullioscopic constant K_b (K·kg/mol,
+# e.g. KM_KB_WATER), the molality m (mol solute / kg solvent) and the van 't Hoff factor i (1 for
+# non-electrolytes). Mirrors `phase::boiling_point_elevation`.
+#must_use
+fn boiling_point_elevation(kb: f64, molality: f64, van_t_hoff_factor: f64): f64 {
+    var dt: f64 = (kb * molality) * van_t_hoff_factor;
+    return dt;
+}
+
+# Freezing point depression ΔT_f = K_f × m × i, the (positive) depression in K, from the cryoscopic
+# constant K_f (K·kg/mol, e.g. KM_KF_WATER), the molality m and the van 't Hoff factor i. Mirrors
+# `phase::freezing_point_depression`.
+#must_use
+fn freezing_point_depression(kf: f64, molality: f64, van_t_hoff_factor: f64): f64 {
+    var dt: f64 = (kf * molality) * van_t_hoff_factor;
+    return dt;
+}
+
+# Osmotic pressure π = i × M × R × T in Pa, from the van 't Hoff factor i, the molarity M (mol/L)
+# and T in K (R in L·Pa/(mol·K) is KM_GAS_CONSTANT × 1000). Ok(π),
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite, or Err(KM_ERR_INVALID_INPUT) if
+# i is not positive and finite or M is negative or non-finite. Mirrors `phase::osmotic_pressure`.
+#must_use
+fn osmotic_pressure(van_t_hoff_factor: f64, molarity: f64, temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_positive(van_t_hoff_factor) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(molarity) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var p: f64 = (((van_t_hoff_factor * molarity) * KM_GAS_CONSTANT) * 1000.0) * temperature_k;
+    return Ok(p);
+}
+
+# ── Clausius–Clapeyron ──────────────────────────────────────────────────────────────
+
+# The Clausius–Clapeyron equation ln(P₂/P₁) = −(ΔH_vap/R)(1/T₂ − 1/T₁): the vapour pressure P₂ at
+# T₂ (K), in p1's unit, from P₁ at T₁ (K) and the enthalpy of vaporization ΔH_vap (J/mol). Ok(P₂),
+# Err(KM_ERR_INVALID_INPUT) if P₁ is not positive and finite or ΔH_vap is not finite, or
+# Err(KM_ERR_INVALID_TEMPERATURE) if either temperature is not positive and finite. Mirrors
+# `phase::clausius_clapeyron`.
+#must_use
+fn clausius_clapeyron(p1: f64, t1_k: f64, t2_k: f64, delta_h_vap_j: f64): Result {
+    if (_km_is_positive(p1) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(t1_k) != 1 || _km_is_positive(t2_k) != 1) {
+        return Err(KM_ERR_INVALID_TEMPERATURE);
+    }
+    if (_km_is_finite(delta_h_vap_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var h: f64 = delta_h_vap_j / KM_GAS_CONSTANT;
+    var exponent: f64 = -h * ((1.0 / t2_k) - (1.0 / t1_k));
+    var e: f64 = f64_exp(exponent);
+    var p2: f64 = p1 * e;
+    return Ok(p2);
+}
+
+# ── Antoine equation ────────────────────────────────────────────────────────────────
+
+# Vapour pressure from the Antoine equation, log₁₀(P) = A − B/(C + T), in mmHg, from a coefficient
+# set (struct KmAntoineCoeffs: a built-in one from antoine_data_coeffs, or your own) and T in °C.
+# Ok(P); Err(KM_ERR_INVALID_INPUT) if A, B, C, t_min_c or t_max_c is not finite;
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is outside t_min_c ..= t_max_c (NaN included) or at or below
+# the pole, C + T ≤ 0. In range, P is Rust's 10^(A − B/(C + T)), which overflows to +∞ for an
+# exponent past 308.25 (no built-in set comes near). Mirrors `phase::antoine_pressure_mmhg`, with
+# ADR 0002 #4's Result.
+#must_use
+fn antoine_pressure_mmhg(coeffs: KmAntoineCoeffs, temperature_c: f64): Result {
+    var a: f64 = coeffs.a;
+    var b: f64 = coeffs.b;
+    var c: f64 = coeffs.c;
+    var lo: f64 = coeffs.t_min_c;
+    var hi: f64 = coeffs.t_max_c;
+    if (_km_is_finite(a) != 1 || _km_is_finite(b) != 1 || _km_is_finite(c) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (_km_is_finite(lo) != 1 || _km_is_finite(hi) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (temperature_c >= lo && temperature_c <= hi) {
+        var denom: f64 = c + temperature_c;
+        if (_km_is_positive(denom) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+        var x: f64 = a - (b / denom);
+        var p: f64 = ganita_f64_pow(10.0, x);
+        return Ok(p);
+    }
+    return Err(KM_ERR_INVALID_TEMPERATURE);
+}
+
+# Vapour pressure from the Antoine equation in Pa: antoine_pressure_mmhg's value (and its Err
+# cases) × 133.322 387 415 Pa/mmHg (_KM_PA_PER_MMHG). Mirrors `phase::antoine_pressure_pa`, with
+# ADR 0002 #4's Result.
+#must_use
+fn antoine_pressure_pa(coeffs: KmAntoineCoeffs, temperature_c: f64): Result {
+    var t, v = antoine_pressure_mmhg(coeffs, temperature_c);
+    if (is_ok(t) != 1) { return Err(v); }
+    var mmhg: f64 = v;
+    var pa: f64 = mmhg * _KM_PA_PER_MMHG;
+    return Ok(pa);
+}
+
+# The ANTOINE_DATA row of handle h (h − 1), or -1 if h is no handle.
+#must_use
+fn _km_antoine_row(h): i64 {
+    if (h >= 1 && h <= KM_ANTOINE_COUNT) { return h - 1; }
+    return 0 - 1;
+}
+
+# The built-in Antoine coefficients (P in mmHg, T in °C) of the solvent named by the C string
+# `name`, exactly and case-sensitively ("water", "diethyl_ether"), as a handle (its ANTOINE_DATA
+# row + 1); 0 when none matches (or `name` is 0). Mirrors `phase::lookup_antoine`.
+#must_use
+fn lookup_antoine(name): i64 {
+    if (name == 0) { return 0; }
+    var row = 0;
+    while (row < KM_ANTOINE_COUNT) {
+        if (streq(&_KM_ANTOINE_NAME_BYTES + _KM_ANTOINE_NAME_OFF[row], name) == 1) { return row + 1; }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The solvent name of ANTOINE_DATA handle h ("water") as a C string in the baked table; "" for an
+# invalid handle. With antoine_data_coeffs and KM_ANTOINE_COUNT, this mirrors iterating
+# `phase::ANTOINE_DATA`.
+#must_use
+fn antoine_data_name(h): i64 {
+    var row = _km_antoine_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_ANTOINE_NAME_BYTES + _KM_ANTOINE_NAME_OFF[row];
+}
+
+# The coefficient set of ANTOINE_DATA handle h, by value; every field NaN for an invalid handle (so
+# antoine_pressure_* give Err(KM_ERR_INVALID_INPUT)). Mirrors `phase::ANTOINE_DATA[h − 1].1`.
+#must_use
+fn antoine_data_coeffs(h): KmAntoineCoeffs {
+    var c: KmAntoineCoeffs;
+    var row = _km_antoine_row(h);
+    if (row < 0) {
+        var n: f64 = _km_nan();
+        c.a = n;
+        c.b = n;
+        c.c = n;
+        c.t_min_c = n;
+        c.t_max_c = n;
+        return c;
+    }
+    c.a = KM_ANTOINE_A[row];
+    c.b = KM_ANTOINE_B[row];
+    c.c = KM_ANTOINE_C[row];
+    c.t_min_c = KM_ANTOINE_T_MIN_C[row];
+    c.t_max_c = KM_ANTOINE_T_MAX_C[row];
+    return c;
+}
+
+# ── Gibbs phase rule ────────────────────────────────────────────────────────────────
+
+# The Gibbs phase rule F = C − P + 2: the degrees of freedom of a system of `components`
+# independent components in `phases` phases, both Rust u32s (0 ..= 4294967295). Ok(F), or
+# Err(KM_ERR_INVALID_INPUT) if phases is 0, phases > components + 2 (F would be negative), F does
+# not fit a u32 (components = u32::MAX with one phase), or either count is outside the u32 range
+# (Rust can't be given one; here it is refused, never wrapped). Mirrors `phase::phase_rule`.
+#must_use
+fn phase_rule(components, phases): Result {
+    if (components < 0 || components > 0xFFFFFFFF || phases < 0 || phases > 0xFFFFFFFF) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (phases == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    var f = (components - phases) + 2;     # |C − P + 2| ≤ 2³² + 1: no i64 overflow
+    if (f < 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (f > 0xFFFFFFFF) { return Err(KM_ERR_INVALID_INPUT); }
+    return Ok(f);
+}
+
+# --- gas_data.cyr ---
+
+# kimiya — gas data: STP and the Peng–Robinson parameters of five gases
+#
+# GENERATED by scripts/oracle from kimiya 1.2.0 (rust-old/), hisab 1.4.0. Do not edit.
+# Regenerate: cargo run --release --locked --manifest-path scripts/oracle/Cargo.toml
+#
+# f64 values are the oracle's as round-trip decimals; tests/golden/constants.tsv pins the
+# STP constants and tests/golden/gas.tsv every preset field (`gas::PR_*` rows).
+
+# Standard temperature for [`STP_PRESSURE`]: 273.15 K (0 °C).
+# Rust: kimiya::gas::STP_TEMPERATURE
+const KM_STP_TEMPERATURE = 273.15;
+
+# "Standard pressure" of the traditional STP convention: 1 atm = 101 325 Pa.
+#
+# This is the pre-1982 convention (with [`STP_TEMPERATURE`] it gives the
+# familiar 22.414 L/mol ideal-gas molar volume). IUPAC has defined STP as
+# 273.15 K and 100 kPa (1 bar) since 1982, which gives 22.711 L/mol; the
+# 1 atm value is kept here for compatibility.
+# Rust: kimiya::gas::STP_PRESSURE
+const KM_STP_PRESSURE = 101325.0;
+
+# Peng-Robinson EOS parameters for a substance.
+#
+# The α(T) function uses the original 1976 κ polynomial,
+# κ = 0.37464 + 1.54226ω − 0.26992ω², which was fitted for
+# ω ≤ 0.49. Heavier components (ω > 0.49) are accepted but are less
+# accurate; the 1978 cubic κ(ω) correlation is not implemented.
+struct KmPengRobinsonParams {
+    # Critical temperature Tc (K). Must be positive and finite.
+    tc: f64;
+    # Critical pressure Pc (Pa). Must be positive and finite.
+    pc: f64;
+    # Acentric factor ω (dimensionless). Must be finite; the κ polynomial
+    # is valid for ω ≤ 0.49.
+    omega: f64;
+}
+
+# Water (H₂O): Tc = 647.1 K, Pc = 22.064 MPa, ω = 0.3443.
+# Rust: kimiya::gas::PR_WATER
+var KM_PR_WATER = KmPengRobinsonParams { tc: 647.1, pc: 22064000.0, omega: 0.3443 };
+
+# Nitrogen (N₂): Tc = 126.2 K, Pc = 3.394 MPa, ω = 0.0377.
+# Rust: kimiya::gas::PR_NITROGEN
+var KM_PR_NITROGEN = KmPengRobinsonParams { tc: 126.2, pc: 3394000.0, omega: 0.0377 };
+
+# Oxygen (O₂): Tc = 154.6 K, Pc = 5.043 MPa, ω = 0.0222.
+# Rust: kimiya::gas::PR_OXYGEN
+var KM_PR_OXYGEN = KmPengRobinsonParams { tc: 154.6, pc: 5043000.0, omega: 0.0222 };
+
+# Carbon dioxide (CO₂): Tc = 304.1 K, Pc = 7.375 MPa, ω = 0.2236.
+# Rust: kimiya::gas::PR_CO2
+var KM_PR_CO2 = KmPengRobinsonParams { tc: 304.1, pc: 7375000.0, omega: 0.2236 };
+
+# Methane (CH₄): Tc = 190.6 K, Pc = 4.599 MPa, ω = 0.0115.
+# Rust: kimiya::gas::PR_METHANE
+var KM_PR_METHANE = KmPengRobinsonParams { tc: 190.6, pc: 4599000.0, omega: 0.0115 };
+
+# --- gas.cyr ---
+
+# gas.cyr — gas laws: ideal gas, van der Waals, Peng–Robinson and Redlich–Kwong equations of
+# state, Dalton's law, gas density and Peng–Robinson fugacity (port of rust-old/src/gas.rs).
+#
+# SI throughout: pressure in Pa, temperature in K, volume in m³ (molar volume in m³/mol), amount
+# in mol. Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and
+# reject NaN and ±∞ inputs instead of returning Ok(NaN). The data — struct KmPengRobinsonParams,
+# the KM_PR_* presets and KM_STP_* — is src/gas_data.cyr (generated).
+#
+# Every expression keeps Rust's operation order, constant by constant, including the private
+# helpers (pr_coefficients, pr_dimensionless, pr_physical_roots, cubic_real_roots), which are
+# transcribed as _km_* functions. The cubic is Rust's analytic solver: the trigonometric form when
+# there are three real roots (acos, cos), Cardano's in the cancellation-free form of Numerical
+# Recipes §5.6 otherwise (cbrt and sqrt, both correctly rounded on both sides), then two guarded
+# Newton steps per root.
+# - Rust's PengRobinsonParams is passed by value, as a KmPengRobinsonParams; a preset is the global
+#   KM_PR_WATER, … (port plan §6.4).
+# - peng_robinson_z_roots's Vec<f64> of 1–3 roots becomes a caller's buffer of three f64 (24
+#   bytes), `var roots[24];`: the call returns Ok(n) with the n ascending roots in roots[0 .. n − 1].
+# - acos, cos, ln and x^2.5 are src/mathx.cyr's correctly rounded _km_acos, _km_cos, _km_ln and
+#   _km_pow_2_5 (ADR 0005); exp is f64_exp and cbrt ganita_f64_cbrt (correctly rounded, as Rust's).
+
+include "lib/math.cyr"
+include "lib/ganita.cyr"
+
+# Peng–Robinson validation of the critical constants (Rust's validate_pr_params): KM_ERR_NONE, or
+# the error code (NaN and ±∞ rejected).
+#must_use
+fn _km_pr_validate(params: KmPengRobinsonParams): i64 {
+    var tc: f64 = params.tc;
+    var pc: f64 = params.pc;
+    var omega: f64 = params.omega;
+    if (_km_is_positive(tc) != 1) { return KM_ERR_INVALID_TEMPERATURE; }
+    if (_km_is_positive(pc) != 1) { return KM_ERR_INVALID_INPUT; }
+    if (_km_is_finite(omega) != 1) { return KM_ERR_INVALID_INPUT; }
+    return KM_ERR_NONE;
+}
+
+# Peng–Robinson a·α(T) (Pa·m⁶/mol²) and b (m³/mol) from the critical constants, with the original
+# 1976 κ(ω) polynomial (fitted for ω ≤ 0.49). The caller has run _km_pr_validate. Rust's
+# pr_coefficients.
+#must_use
+fn _km_pr_coefficients(params: KmPengRobinsonParams, temperature_k: f64): (f64, f64) {
+    var tc: f64 = params.tc;
+    var pc: f64 = params.pc;
+    var omega: f64 = params.omega;
+    var a: f64 = ((((0.45724 * KM_GAS_CONSTANT) * KM_GAS_CONSTANT) * tc) * tc) / pc;
+    var b: f64 = ((0.07780 * KM_GAS_CONSTANT) * tc) / pc;
+    var kappa: f64 = (0.37464 + (1.54226 * omega)) - ((0.26992 * omega) * omega);
+    var tr: f64 = temperature_k / tc;
+    var sq: f64 = f64_sqrt(tr);
+    var u: f64 = 1.0 + (kappa * (1.0 - sq));
+    var alpha: f64 = _km_powi(u, 2);
+    var a_alpha: f64 = a * alpha;
+    return (a_alpha, b);
+}
+
+# The validated, dimensionless Peng–Robinson parameters A = a·α·P/(RT)² and B = bP/(RT): (code,
+# A, B), the code KM_ERR_NONE or the error (the Rust order of checks: T, P, then the critical
+# constants). Rust's pr_dimensionless.
+#must_use
+fn _km_pr_dimensionless(params: KmPengRobinsonParams, temperature_k: f64, pressure_pa: f64): (i64, f64, f64) {
+    if (_km_is_positive(temperature_k) != 1) { return (KM_ERR_INVALID_TEMPERATURE, 0.0, 0.0); }
+    if (_km_is_positive(pressure_pa) != 1) { return (KM_ERR_INVALID_INPUT, 0.0, 0.0); }
+    var e = _km_pr_validate(params);
+    if (e != KM_ERR_NONE) { return (e, 0.0, 0.0); }
+    var a_alpha, b = _km_pr_coefficients(params, temperature_k);
+    var rt: f64 = KM_GAS_CONSTANT * temperature_k;
+    var cap_a: f64 = (a_alpha * pressure_pa) / (rt * rt);
+    var cap_b: f64 = (b * pressure_pa) / rt;
+    return (KM_ERR_NONE, cap_a, cap_b);
+}
+
+# The cubic z³ + c2·z² + c1·z + c0 at z, Horner's form as Rust's `poly` closure.
+#must_use
+fn _km_cubic_poly(z: f64, c2: f64, c1: f64, c0: f64): f64 {
+    var p: f64 = ((((z + c2) * z) + c1) * z) + c0;
+    return p;
+}
+
+# Up to two Newton steps on the cubic from z, each kept only if it lowers |poly| (Rust's guarded
+# polish); stops at a zero value or a zero derivative.
+#must_use
+fn _km_cubic_polish(z0: f64, c2: f64, c1: f64, c0: f64): f64 {
+    var z: f64 = z0;
+    var it = 0;
+    while (it < 2) {
+        var f: f64 = _km_cubic_poly(z, c2, c1, c0);
+        var df: f64 = (((3.0 * z) + (2.0 * c2)) * z) + c1;
+        if (f == 0.0 || df == 0.0) { break; }
+        var next: f64 = z - (f / df);
+        var fnext: f64 = _km_cubic_poly(next, c2, c1, c0);
+        var an: f64 = f64_abs(fnext);
+        var af: f64 = f64_abs(f);
+        if (an < af) { z = next; } else { break; }
+        it = it + 1;
+    }
+    return z;
+}
+
+# Real roots of z³ + c2·z² + c1·z + c0 = 0, ascending, into `out` (three f64, 24 bytes); returns
+# how many (1 or 3). The trigonometric form when there are three real roots (the discriminant
+# within the 10⁻¹² relative degeneracy tolerance, so a double root lost to rounding is still
+# reported), Cardano's formula otherwise, then each root polished by _km_cubic_polish. Rust's
+# cubic_real_roots, operation for operation.
+fn _km_cubic_real_roots(c2: f64, c1: f64, c0: f64, out): i64 {
+    var shift: f64 = c2 / 3.0;
+    var q: f64 = ((c2 * c2) - (3.0 * c1)) / 9.0;
+    var r: f64 = ((c2 * (((2.0 * c2) * c2) - (9.0 * c1))) + (27.0 * c0)) / 54.0;
+    var q3: f64 = (q * q) * q;
+    var r2: f64 = r * r;
+    var tol: f64 = 1.0 + 0.000000000001;   # 1.0 + CUBIC_DEGENERACY_TOL, folded in Rust
+    var z0: f64 = 0.0;
+    var z1: f64 = 0.0;
+    var z2: f64 = 0.0;
+    var n = 1;
+    if (q > 0.0 && r2 <= (q3 * tol)) {
+        # Three real roots (possibly coincident). Clamp: rounding can push |r|/√q³ slightly
+        # above 1 near a double root.
+        var sqrt_q: f64 = f64_sqrt(q);
+        var ratio: f64 = r / (sqrt_q * q);
+        var cl: f64 = f64_clamp(ratio, -1.0, 1.0);
+        var theta: f64 = _km_acos(cl);
+        var m: f64 = -2.0 * sqrt_q;
+        var tau: f64 = 0x401921FB54442D18;  # std::f64::consts::TAU
+        var k0: f64 = _km_cos(theta / 3.0);
+        var k1: f64 = _km_cos((theta - tau) / 3.0);
+        var k2: f64 = _km_cos((theta + tau) / 3.0);
+        z0 = (m * k0) - shift;
+        z1 = (m * k1) - shift;
+        z2 = (m * k2) - shift;
+        n = 3;
+    } else {
+        # One real root.
+        var sg: f64 = _km_signum(r);
+        var d: f64 = _km_max(r2 - q3, 0.0);
+        var sd: f64 = f64_sqrt(d);
+        var ar: f64 = f64_abs(r);
+        var cb: f64 = ganita_f64_cbrt(ar + sd);
+        var big_a: f64 = -sg * cb;
+        var big_b: f64 = 0.0;
+        if (big_a != 0.0) { big_b = q / big_a; }
+        z0 = (big_a + big_b) - shift;
+    }
+    z0 = _km_cubic_polish(z0, c2, c1, c0);
+    if (n == 3) {
+        z1 = _km_cubic_polish(z1, c2, c1, c0);
+        z2 = _km_cubic_polish(z2, c2, c1, c0);
+        # Already ascending by construction; re-sort in case polishing swapped two nearly
+        # coincident roots (Rust's three compare-and-swaps).
+        var t: f64 = 0.0;
+        if (z0 > z1) { t = z0; z0 = z1; z1 = t; }
+        if (z1 > z2) { t = z1; z1 = z2; z2 = t; }
+        if (z0 > z1) { t = z0; z0 = z1; z1 = t; }
+    }
+    store64(out, z0);
+    store64(out + 8, z1);
+    store64(out + 16, z2);
+    return n;
+}
+
+# The roots of the Peng–Robinson Z-cubic Z³ − (1−B)Z² + (A−3B²−2B)Z − (AB−B²−B³) = 0 with Z > B
+# and finite, ascending, into `out` (three f64); returns how many (0–3). Rust's pr_physical_roots.
+fn _km_pr_physical_roots(cap_a: f64, cap_b: f64, out): i64 {
+    var c2: f64 = cap_b - 1.0;
+    var c1: f64 = (cap_a - ((3.0 * cap_b) * cap_b)) - (2.0 * cap_b);
+    var c0: f64 = -(((cap_a * cap_b) - (cap_b * cap_b)) - ((cap_b * cap_b) * cap_b));
+    var all[24];
+    var n_real = _km_cubic_real_roots(c2, c1, c0, &all);
+    var n = 0;
+    var k = 0;
+    while (k < n_real) {
+        var z: f64 = load64(&all + k * 8);
+        if (_km_is_finite(z) == 1 && z > cap_b) {
+            store64(out + n * 8, z);
+            n = n + 1;
+        }
+        k = k + 1;
+    }
+    return n;
+}
+
+# ── ideal gas, van der Waals, Dalton, density ───────────────────────────────────────
+
+# Ideal gas law P = nRT/V in Pa, from n in mol, T in K and V in m³. Ok(P),
+# Err(KM_ERR_INVALID_INPUT) if n is not finite or V is not positive and finite, or
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite. Mirrors `gas::ideal_gas_pressure`.
+#must_use
+fn ideal_gas_pressure(moles: f64, temperature_k: f64, volume_m3: f64): Result {
+    if (_km_is_finite(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_positive(volume_m3) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var p: f64 = ((moles * KM_GAS_CONSTANT) * temperature_k) / volume_m3;
+    return Ok(p);
+}
+
+# Ideal gas law V = nRT/P in m³, from n in mol, T in K and P in Pa. Ok(V),
+# Err(KM_ERR_INVALID_INPUT) if n is not finite or P is not positive and finite, or
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite. Mirrors `gas::ideal_gas_volume`.
+#must_use
+fn ideal_gas_volume(moles: f64, temperature_k: f64, pressure_pa: f64): Result {
+    if (_km_is_finite(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_positive(pressure_pa) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var v: f64 = ((moles * KM_GAS_CONSTANT) * temperature_k) / pressure_pa;
+    return Ok(v);
+}
+
+# Van der Waals equation (P + a·n²/V²)(V − n·b) = nRT, solved for P in Pa, from n (mol), T (K),
+# V (m³), the attraction constant a (Pa·m⁶/mol²; 1 L²·bar/mol² = 0.1 Pa·m⁶/mol²) and the excluded
+# volume b (m³/mol; 1 L/mol = 10⁻³ m³/mol). Ok(P), Err(KM_ERR_INVALID_TEMPERATURE) if T is not
+# positive and finite, or Err(KM_ERR_INVALID_INPUT) if n is not finite, a or b is negative or
+# non-finite, V is not positive and finite, or V ≤ n·b. Mirrors `gas::van_der_waals_pressure`.
+#must_use
+fn van_der_waals_pressure(moles: f64, temperature_k: f64, volume_m3: f64, a: f64, b: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(a) != 1 || _km_is_non_negative(b) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (_km_is_positive(volume_m3) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var nb: f64 = moles * b;
+    if (volume_m3 <= nb) { return Err(KM_ERR_INVALID_INPUT); }
+    var n_over_v: f64 = moles / volume_m3;
+    var p: f64 = (((moles * KM_GAS_CONSTANT) * temperature_k) / (volume_m3 - nb)) - ((a * n_over_v) * n_over_v);
+    return Ok(p);
+}
+
+# Dalton's law: the partial pressure, total pressure × mole fraction, in the total's unit. Mirrors
+# `gas::partial_pressure`.
+#must_use
+fn partial_pressure(total_pressure: f64, mole_fraction: f64): f64 {
+    var p: f64 = total_pressure * mole_fraction;
+    return p;
+}
+
+# Gas density ρ = PM/(RT) in kg/m³, from P in Pa, the molar mass M in kg/mol and T in K. Ok(ρ),
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite, or Err(KM_ERR_INVALID_INPUT) if P
+# is negative or non-finite or M is not positive and finite. Mirrors `gas::gas_density`.
+#must_use
+fn gas_density(pressure_pa: f64, molar_mass_kg: f64, temperature_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_non_negative(pressure_pa) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(molar_mass_kg) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var rho: f64 = (pressure_pa * molar_mass_kg) / (KM_GAS_CONSTANT * temperature_k);
+    return Ok(rho);
+}
+
+# ── Peng–Robinson ───────────────────────────────────────────────────────────────────
+
+# Peng–Robinson pressure P = RT/(V − b) − a·α(T)/(V² + 2bV − b²) in Pa, from the critical constants
+# and acentric factor (`params`), T in K and the molar volume V in m³/mol. Ok(P),
+# Err(KM_ERR_INVALID_TEMPERATURE) if T or Tc is not positive and finite, or
+# Err(KM_ERR_INVALID_INPUT) if Pc is not positive and finite, ω is not finite, or V is non-finite or
+# not greater than b. Mirrors `gas::peng_robinson_pressure`.
+#must_use
+fn peng_robinson_pressure(params: KmPengRobinsonParams, temperature_k: f64, molar_volume: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    var e = _km_pr_validate(params);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var a_alpha, b = _km_pr_coefficients(params, temperature_k);
+    if (_km_is_finite(molar_volume) != 1 || molar_volume <= b) { return Err(KM_ERR_INVALID_INPUT); }
+    var v: f64 = molar_volume;
+    var term1: f64 = (KM_GAS_CONSTANT * temperature_k) / (v - b);
+    var term2: f64 = a_alpha / (((v * v) + ((2.0 * b) * v)) - (b * b));
+    var p: f64 = term1 - term2;
+    return Ok(p);
+}
+
+# All physical Peng–Robinson compressibility-factor roots, ascending: the cubic
+# Z³ − (1−B)Z² + (A−3B²−2B)Z − (AB−B²−B³) = 0, A = a·α·P/(RT)², B = bP/(RT), solved analytically
+# (Cardano, or the trigonometric form when there are three real roots), keeping the roots with
+# Z > B (molar volume above the co-volume b). With three roots the smallest is liquid-like, the
+# largest vapour-like and the middle one mechanically unstable; which phase is stable is decided by
+# the fugacities (lower wins): water at 300 K and 1 atm has ≈ [0.00086, 0.0138, 0.985], and the
+# liquid is stable. A repeated root (a spinodal, the critical point) is listed once per
+# multiplicity. `out` is the caller's buffer of three f64 (`var roots[24];`): Ok(n), n = 1–3, with
+# the roots in out[0 .. n − 1]; Err(KM_ERR_INVALID_TEMPERATURE) if T or Tc is not positive and
+# finite, Err(KM_ERR_INVALID_INPUT) if P or Pc is not positive and finite or ω is not finite, or
+# Err(KM_ERR_COMPUTATION_ERROR) if no root has Z > B (only when intermediate values overflow).
+# Mirrors `gas::peng_robinson_z_roots`, whose Vec the buffer and count replace.
+#must_use
+fn peng_robinson_z_roots(params: KmPengRobinsonParams, temperature_k: f64, pressure_pa: f64, out): Result {
+    var e, cap_a, cap_b = _km_pr_dimensionless(params, temperature_k, pressure_pa);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var n = _km_pr_physical_roots(cap_a, cap_b, out);
+    if (n == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    return Ok(n);
+}
+
+# The Peng–Robinson compressibility factor Z: the largest physical root of the cubic (see
+# peng_robinson_z_roots), the vapour-like one. It is not necessarily the stable phase: below Tc the
+# cubic can have a liquid root too, and the stable phase is the one with the lower fugacity (water
+# at 300 K and 1 atm: vapour Z ≈ 0.985, stable liquid Z ≈ 0.00086). Ok(Z), or the errors of
+# peng_robinson_z_roots. Mirrors `gas::peng_robinson_z`.
+#must_use
+fn peng_robinson_z(params: KmPengRobinsonParams, temperature_k: f64, pressure_pa: f64): Result {
+    var e, cap_a, cap_b = _km_pr_dimensionless(params, temperature_k, pressure_pa);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var roots[24];
+    var n = _km_pr_physical_roots(cap_a, cap_b, &roots);
+    if (n == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var z: f64 = load64(&roots + (n - 1) * 8);
+    return Ok(z);
+}
+
+# The Peng–Robinson fugacity coefficient φ (dimensionless) at the vapour (largest) root Z of
+# peng_robinson_z: ln φ = (Z − 1) − ln(Z − B) − A/(2√2·B) × ln((Z + (1+√2)B) / (Z + (1−√2)B)). See
+# peng_robinson_z for why this is not always the stable phase. Ok(φ), the errors of
+# peng_robinson_z, or Err(KM_ERR_COMPUTATION_ERROR) if φ is not finite and positive. Mirrors
+# `gas::fugacity_coefficient_pr`.
+#must_use
+fn fugacity_coefficient_pr(params: KmPengRobinsonParams, temperature_k: f64, pressure_pa: f64): Result {
+    var e, cap_a, cap_b = _km_pr_dimensionless(params, temperature_k, pressure_pa);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var roots[24];
+    var n = _km_pr_physical_roots(cap_a, cap_b, &roots);
+    if (n == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var z: f64 = load64(&roots + (n - 1) * 8);
+    var sqrt2: f64 = 0x3FF6A09E667F3BCD;  # std::f64::consts::SQRT_2
+    var l1: f64 = _km_ln(z - cap_b);
+    var coef: f64 = cap_a / ((2.0 * sqrt2) * cap_b);
+    var num: f64 = z + ((1.0 + sqrt2) * cap_b);
+    var den: f64 = z + ((1.0 - sqrt2) * cap_b);
+    var l2: f64 = _km_ln(num / den);
+    var ln_phi: f64 = ((z - 1.0) - l1) - (coef * l2);
+    var phi: f64 = f64_exp(ln_phi);
+    if (_km_is_positive(phi) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    return Ok(phi);
+}
+
+# The Peng–Robinson fugacity f = φ × P in Pa, with φ from fugacity_coefficient_pr (vapour root).
+# Ok(f), or that function's errors. Mirrors `gas::fugacity_pr`.
+#must_use
+fn fugacity_pr(params: KmPengRobinsonParams, temperature_k: f64, pressure_pa: f64): Result {
+    var t, v = fugacity_coefficient_pr(params, temperature_k, pressure_pa);
+    if (is_ok(t) != 1) { return Err(v); }
+    var phi: f64 = v;
+    var f: f64 = phi * pressure_pa;
+    return Ok(f);
+}
+
+# ── Redlich–Kwong ───────────────────────────────────────────────────────────────────
+
+# Redlich–Kwong pressure P = RT/(V − b) − a/(T^½ × V(V + b)) in Pa, from the critical temperature
+# Tc (K) and pressure Pc (Pa), T in K and the molar volume V in m³/mol. Ok(P),
+# Err(KM_ERR_INVALID_TEMPERATURE) if T or Tc is not positive and finite, or
+# Err(KM_ERR_INVALID_INPUT) if Pc is not positive and finite or V is non-finite or not greater
+# than b. Mirrors `gas::redlich_kwong_pressure`.
+#must_use
+fn redlich_kwong_pressure(tc: f64, pc: f64, temperature_k: f64, molar_volume: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_positive(tc) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_positive(pc) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var tc25: f64 = _km_pow_2_5(tc);
+    var a: f64 = (((0.42748 * KM_GAS_CONSTANT) * KM_GAS_CONSTANT) * tc25) / pc;
+    var b: f64 = ((0.08664 * KM_GAS_CONSTANT) * tc) / pc;
+    if (_km_is_finite(molar_volume) != 1 || molar_volume <= b) { return Err(KM_ERR_INVALID_INPUT); }
+    var v: f64 = molar_volume;
+    var term1: f64 = (KM_GAS_CONSTANT * temperature_k) / (v - b);
+    var st: f64 = f64_sqrt(temperature_k);
+    var term2: f64 = a / ((st * v) * (v + b));
+    var p: f64 = term1 - term2;
+    return Ok(p);
+}
+
+# Joule–Thomson coefficient of an ideal gas: always 0.0 K/Pa. A real gas's needs the derivatives of
+# an equation of state (Peng–Robinson). Mirrors `gas::joule_thomson_ideal`.
+#must_use
+fn joule_thomson_ideal(): f64 {
+    return 0.0;
 }
