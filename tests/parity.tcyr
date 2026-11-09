@@ -10,18 +10,27 @@
 #   both bit patterns;
 # - measured: class C, with no bound set yet for its function. The ulp distance is
 #   recorded but not gated. Bounds are set per function before its comparison
-#   (M0 step 8, docs/development/port-parity.md);
+#   (M0 step 8, docs/development/port-parity.md); since M3c-3 every ported class-C function has one;
 # - accepted: a divergence an ADR accepts, listed by row in _par_accepted;
 # - pending: its function isn't ported yet (no dispatcher entry).
 #
-# Per function it prints the row counts and the ulp histogram, which is the step 8
-# baseline. Shadow lines (`fn ~ candidate`) compare the same rows against another Cyrius
+# ADR 0006: where tests/golden/<module>.cr.tsv corrects a row (the oracle's operations with every primitive
+# result correctly rounded differ from the oracle's outputs, because glibc misrounded a call), the row is
+# compared against the corrected outputs, under its class and bound: a pass is accepted (ADR 6). A row that
+# fails there but matches the oracle's own (misrounded) outputs is "glibc-matching": since M3c-3 a failure,
+# since it means the port's primitive is not correctly rounded on that path (ADR 0006 item 2; from M3c-1 to
+# M3c-3 such rows were measured). parity_core.cyr has the rules.
+#
+# Per function it prints the row counts and the ulp histogram (the distance from each row's reference: the
+# corrected outputs where a row has a correction), which is the step 8 baseline. Shadow lines
+# (`fn ~ candidate`) compare the same rows, against the same reference, through another Cyrius
 # candidate and are never gated. The exit code is the number of modules with a failure, at
 # most a handful, so the 8-bit exit status can't wrap.
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
 include "src/constants.cyr"
+include "src/mathx_data.cyr"
 include "src/mathx.cyr"
 include "src/validate.cyr"
 include "src/element_data.cyr"
@@ -123,8 +132,14 @@ fn _par_constant_pending(np, nl): i64 {
 #   NaN on either side (_km_min / _km_max);
 # - round: f64_round ties to even; Rust rounds half away from zero (_km_round_half_away);
 # - signum: f64_sign gives 0 for ±0 and NaN; Rust gives ±1 and NaN (_km_signum);
-# - log10, exp_m1, powi, total_cmp, is_finite: no stdlib function (_km_log10, _km_expm1,
-#   _km_powi, _km_total_cmp, _km_is_finite).
+# - powi, total_cmp, is_finite: no stdlib function (_km_powi, _km_total_cmp, _km_is_finite).
+# The transcendental primitives are the correctly rounded ones the modules call (ADR 0006, M3c-3):
+# exp, exp_m1, ln, log10 and powf are _km_cr_exp / _km_cr_expm1 / _km_cr_ln / _km_cr_log10 /
+# _km_cr_pow; 10.0.powf(y) is _km_cr_exp10 (the modules' 10^x; a correctly rounded pow(10, y) is the
+# same value, a shadow line shows it) and 2.0.powf(y) (glibc's exp2 in the oracle) _km_cr_pow(2, y);
+# cos and acos are ADR 0005's _km_cos and _km_acos. _km_cos is correctly rounded for |x| ≤ 8 and is
+# f64_cos beyond, so the cos rows past 8 keep the stdlib's bound (_par_c_bound), as sin and atan2,
+# which have no correctly rounded port primitive yet (M4 brings them, ADR 0006 item 1).
 # clamp is dispatched: f64_clamp has Rust's semantics for valid bounds (min ≤ max, no NaN
 # bound, which Rust asserts), so it is compared rather than assumed.
 fn _par_math(fp, fl): i64 {
@@ -137,20 +152,16 @@ fn _par_math(fp, fl): i64 {
     if (_par_eq(fp, fl, "f64::signum") == 1) { var r: f64 = _km_signum(x); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::is_finite") == 1) { _par_got_i(_km_is_finite(x)); return 1; }
     if (_par_eq(fp, fl, "f64::cbrt") == 1) { var r: f64 = ganita_f64_cbrt(x); _par_got_f(r); return 1; }
-    if (_par_eq(fp, fl, "f64::exp") == 1) { var r: f64 = f64_exp(x); _par_got_f(r); return 1; }
-    if (_par_eq(fp, fl, "f64::exp_m1") == 1) { var r: f64 = _km_expm1(x); _par_got_f(r); return 1; }
-    if (_par_eq(fp, fl, "f64::ln") == 1) { var r: f64 = f64_ln(x); _par_got_f(r); return 1; }
-    if (_par_eq(fp, fl, "f64::log10") == 1) { var r: f64 = _km_log10(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::exp") == 1) { var r: f64 = _km_cr_exp(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::exp_m1") == 1) { var r: f64 = _km_cr_expm1(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::ln") == 1) { var r: f64 = _km_cr_ln(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::log10") == 1) { var r: f64 = _km_cr_log10(x); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::sin") == 1) { var r: f64 = f64_sin(x); _par_got_f(r); return 1; }
-    if (_par_eq(fp, fl, "f64::cos") == 1) { var r: f64 = f64_cos(x); _par_got_f(r); return 1; }
-    if (_par_eq(fp, fl, "f64::acos") == 1) { var r: f64 = ganita_f64_acos(x); _par_got_f(r); return 1; }
-    if (_par_eq(fp, fl, "f64::powf_base10") == 1) {
-        var r: f64 = ganita_f64_pow(10.0, x);
-        _par_got_f(r);
-        return 1;
-    }
+    if (_par_eq(fp, fl, "f64::cos") == 1) { var r: f64 = _km_cos(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::acos") == 1) { var r: f64 = _km_acos(x); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::powf_base10") == 1) { var r: f64 = _km_cr_exp10(x); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::powf_base2") == 1) {
-        var r: f64 = ganita_f64_pow(2.0, x);
+        var r: f64 = _km_cr_pow(2.0, x);
         _par_got_f(r);
         return 1;
     }
@@ -160,7 +171,7 @@ fn _par_math(fp, fl): i64 {
     if (_par_eq(fp, fl, "f64::max") == 1) { var r: f64 = _km_max(x, y); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::min") == 1) { var r: f64 = _km_min(x, y); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::total_cmp") == 1) { _par_got_i(_km_total_cmp(x, y)); return 1; }
-    if (_par_eq(fp, fl, "f64::powf") == 1) { var r: f64 = ganita_f64_pow(x, y); _par_got_f(r); return 1; }
+    if (_par_eq(fp, fl, "f64::powf") == 1) { var r: f64 = _km_cr_pow(x, y); _par_got_f(r); return 1; }
     # Rust's y.atan2(x) is the golden f64::atan2(y, x): inputs in C order.
     if (_par_eq(fp, fl, "f64::atan2") == 1) { var r: f64 = ganita_f64_atan2(x, y); _par_got_f(r); return 1; }
     if (_par_eq(fp, fl, "f64::clamp") == 1) {
@@ -1049,68 +1060,53 @@ fn _par_dispatch(mp, ml, fp, fl): i64 {
     return 0;
 }
 
-# Shadow comparisons, never gated: the same golden rows through another Cyrius candidate.
-# - the exp / ln polyfills, which give the same bits on every target (the builtins are x87
-#   on x86_64), as the step-8 alternative if a target's builtin disagrees with glibc;
-# - the stdlib functions the M1 helpers replace, to show where their semantics differ;
-# - (M2a, ADR 0005) the correctly rounded _km_cos / _km_acos / _km_ln / _km_pow_2_5 the
-#   Peng–Robinson and Redlich–Kwong functions use: they differ from glibc exactly where glibc is
-#   not correctly rounded (validate.py's 1-ulp rows for cos, acos, ln and powf(·, 2.5));
-# - (M3a, ADR 0005 amendment) _km_log10_ln, glibc's log10 composition over _km_ln, which
-#   henderson_hasselbalch uses: it differs from glibc only where glibc's log at the reduced
-#   argument is not correctly rounded.
+# Shadow comparisons, never gated: the same golden rows through another Cyrius candidate, against the row's
+# reference (since ADR 0006 the corrected outputs on a corrected row, so a correctly rounded candidate is 0 ulp
+# everywhere and a glibc-like one differs where glibc misrounds).
+# - (M3c-3, ADR 0006) the stdlib primitives the modules called before they moved to the correctly rounded ones:
+#   f64_exp and f64_ln (x87 on x86_64, the fdlibm polyfills on aarch64), ganita_f64_acos and ganita_f64_pow,
+#   whose pow(-1, DBL_MAX) is ADR 0004's +inf (the record of why the port no longer calls them);
+# - 10.0.powf(y) through _km_cr_pow(10, y), the same correctly rounded value as the _km_cr_exp10 the modules
+#   call;
+# - the cos rows past |x| = 8, where _km_cos is f64_cos (not correctly rounded) and the row keeps the stdlib's
+#   bound, on a line of their own;
+# - the stdlib functions the M1 helpers replace, to show where their semantics differ.
 fn _par_shadows(mp, ml, fp, fl, cls) {
     if (_par_eq(mp, ml, "math") != 1) { return 0; }
     var x: f64 = _par_in(0);
-    # _km_cos is correctly rounded for |x| ≤ 8 and falls back to f64_cos beyond (the Peng–Robinson
-    # arguments are in [−2π/3, π]), so only the in-domain rows are compared.
-    var ax: f64 = f64_abs(x);
-    if (_par_eq(fp, fl, "f64::cos") == 1 && ax <= 8.0) {
+    if (_par_eq(fp, fl, "f64::exp") == 1) {
         _par_got_n = 0;
-        var r: f64 = _km_cos(x);
+        var r: f64 = f64_exp(x);
         _par_got_f(r);
-        _par_shadow_record("f64::cos (|x| <= 8) ~ _km_cos", cls);
+        _par_shadow_record("f64::exp ~ f64_exp", cls);
+        return 0;
+    }
+    if (_par_eq(fp, fl, "f64::ln") == 1) {
+        _par_got_n = 0;
+        var r: f64 = f64_ln(x);
+        _par_got_f(r);
+        _par_shadow_record("f64::ln ~ f64_ln", cls);
         return 0;
     }
     if (_par_eq(fp, fl, "f64::acos") == 1) {
         _par_got_n = 0;
-        var r: f64 = _km_acos(x);
+        var r: f64 = ganita_f64_acos(x);
         _par_got_f(r);
-        _par_shadow_record("f64::acos ~ _km_acos", cls);
+        _par_shadow_record("f64::acos ~ ganita_f64_acos", cls);
         return 0;
     }
-    if (_par_eq(fp, fl, "f64::ln") == 1) {
+    if (_par_eq(fp, fl, "f64::cos") == 1 && _par_cos_wide() == 1) {
         _par_got_n = 0;
-        var r: f64 = _km_ln(x);
+        var r: f64 = f64_cos(x);
         _par_got_f(r);
-        _par_shadow_record("f64::ln ~ _km_ln", cls);
-    }
-    if (_par_eq(fp, fl, "f64::log10") == 1) {
-        _par_got_n = 0;
-        var r: f64 = _km_log10_ln(x);
-        _par_got_f(r);
-        _par_shadow_record("f64::log10 ~ _km_log10_ln", cls);
+        _par_shadow_record("f64::cos, |x| > 8 ~ f64_cos (bound 2)", cls);
         return 0;
     }
-    if (_par_eq(fp, fl, "f64::powf") == 1 && _par_in(1) == 0x4004000000000000) {
+    if (_par_eq(fp, fl, "f64::powf_base10") == 1) {
         _par_got_n = 0;
-        var r: f64 = _km_pow_2_5(x);
+        var r: f64 = _km_cr_pow(10.0, x);
         _par_got_f(r);
-        _par_shadow_record("f64::powf(x, 2.5) ~ _km_pow_2_5", cls);
-        return 0;
-    }
-    if (_par_eq(fp, fl, "f64::exp") == 1) {
-        _par_got_n = 0;
-        var r: f64 = _f64_exp_polyfill(x);
-        _par_got_f(r);
-        _par_shadow_record("f64::exp ~ _f64_exp_polyfill", cls);
-        return 0;
-    }
-    if (_par_eq(fp, fl, "f64::ln") == 1) {
-        _par_got_n = 0;
-        var r: f64 = _f64_ln_polyfill(x);
-        _par_got_f(r);
-        _par_shadow_record("f64::ln ~ _f64_ln_polyfill", cls);
+        _par_shadow_record("f64::powf_base10 ~ _km_cr_pow(10, y)", cls);
         return 0;
     }
     if (_par_eq(fp, fl, "f64::round") == 1) {
@@ -1128,6 +1124,13 @@ fn _par_shadows(mp, ml, fp, fl, cls) {
         return 0;
     }
     var y: f64 = _par_in(1);
+    if (_par_eq(fp, fl, "f64::powf") == 1) {
+        _par_got_n = 0;
+        var r: f64 = ganita_f64_pow(x, y);
+        _par_got_f(r);
+        _par_shadow_record("f64::powf ~ ganita_f64_pow", cls);
+        return 0;
+    }
     if (_par_eq(fp, fl, "f64::max") == 1) {
         _par_got_n = 0;
         var r: f64 = f64_max(x, y);
@@ -1145,79 +1148,89 @@ fn _par_shadows(mp, ml, fp, fl, cls) {
     return 0;
 }
 
-# The class-C bound for a function, in ulps; -1 when none is set yet (the rows are measured).
-# Bounds are derived in M0 step 8 (docs/development/port-parity.md) per target against glibc,
-# BEFORE the function's first gated comparison, and never raised to make a row pass.
+# 1 when the current row's first input is a finite x with |x| > 8: past _km_cos's correctly rounded range,
+# where it returns f64_cos (ADR 0005; the Peng–Robinson arguments are in [−2π/3, π]).
+#must_use
+fn _par_cos_wide(): i64 {
+    var x: f64 = _par_in(0);
+    var ax: f64 = f64_abs(x);
+    if (ax > 8.0 && _km_is_finite(x) == 1) { return 1; }
+    return 0;
+}
+
+# The class-C bound for a function, in ulps; -1 when none is set yet (the rows would be measured). A bound is set
+# BEFORE the function's first gated comparison and never raised to make a row pass.
 #
-# The math primitives get 2 ulp: glibc and each Cyrius counterpart (lib/math.cyr, ganita) document
-# < 1 ulp, so two implementations can differ by up to 2. Measured 2026-11-08 on x86_64 ELF, x86_64
-# PE and aarch64: max 1 ulp on every row (port-parity.md §2). log10 and exp_m1 (M1, 2026-11-09):
-# _km_log10 / _km_expm1 transcribe Rust libm 0.2.16 (fdlibm, < 1 ulp) against glibc (< 1 ulp, 2
-# for log10); measured as unbounded rows first, max 1 ulp (log10) and 0 ulp (exp_m1) on all three
-# targets, so the same K = 2 holds.
+# ADR 0006 (M3c-3): every class-C function the port has ported is on correctly rounded primitives (src/mathx.cyr:
+# _km_cr_exp, _km_cr_expm1, _km_cr_exp10, _km_cr_ln, _km_cr_log10, _km_cr_pow, and ADR 0005's _km_cos and
+# _km_acos), in Rust's operation order, and each row's reference is the corrected oracle: the oracle's operations
+# with every primitive result correctly rounded (tests/golden/<module>.cr.tsv where that differs from the
+# oracle's outputs). Both sides then evaluate the same correctly rounded values in the same order, so the bound
+# is 0 and any difference is a port defect (ADR 0006 item 3). The sensitivity rule (K = 2·S·c + 2) that set the
+# M0–M3a bounds retires for them (docs/development/port-parity.md §5–§8 keep its history; §10 the result).
+#
+# The exceptions keep the stdlib's bound of 2 ulp (glibc and the stdlib counterpart each document < 1 ulp;
+# measured max 1 on every target, port-parity.md §2): f64::sin and f64::atan2 (f64_sin, ganita_f64_atan2), for
+# which the port has no correctly rounded primitive yet (M4 adds them with their first callers, ADR 0006
+# item 1), and the f64::cos rows with a finite |x| > 8, outside _km_cos's correctly rounded range.
 #must_use
 fn _par_c_bound(fp, fl): i64 {
-    if (_par_eq(fp, fl, "f64::exp") == 1) { return 2; }
-    if (_par_eq(fp, fl, "f64::exp_m1") == 1) { return 2; }
-    if (_par_eq(fp, fl, "f64::log10") == 1) { return 2; }
-    if (_par_eq(fp, fl, "f64::ln") == 1) { return 2; }
-    if (_par_eq(fp, fl, "f64::powf") == 1) { return 2; }
-    if (_par_eq(fp, fl, "f64::powf_base10") == 1) { return 2; }
-    if (_par_eq(fp, fl, "f64::powf_base2") == 1) { return 2; }
-    if (_par_eq(fp, fl, "f64::cos") == 1) { return 2; }
+    # The math primitives (M0, M1; ADR 0006 since M3c-3).
+    if (_par_eq(fp, fl, "f64::exp") == 1) { return 0; }
+    if (_par_eq(fp, fl, "f64::exp_m1") == 1) { return 0; }
+    if (_par_eq(fp, fl, "f64::log10") == 1) { return 0; }
+    if (_par_eq(fp, fl, "f64::ln") == 1) { return 0; }
+    if (_par_eq(fp, fl, "f64::powf") == 1) { return 0; }
+    if (_par_eq(fp, fl, "f64::powf_base10") == 1) { return 0; }
+    if (_par_eq(fp, fl, "f64::powf_base2") == 1) { return 0; }
+    if (_par_eq(fp, fl, "f64::acos") == 1) { return 0; }
+    if (_par_eq(fp, fl, "f64::cos") == 1) {
+        if (_par_cos_wide() == 1) { return 2; }
+        return 0;
+    }
     if (_par_eq(fp, fl, "f64::sin") == 1) { return 2; }
-    if (_par_eq(fp, fl, "f64::acos") == 1) { return 2; }
     if (_par_eq(fp, fl, "f64::atan2") == 1) { return 2; }
-    # M2a, kimiya's own class-C functions: K_F = 2·S·c + 2 by the port-parity rule, S and c from
-    # `validate.py . --sensitivity` (each primitive result that can differ between the port and the
-    # oracle nudged ±1 ulp on every golden row, ADR 0005), set before the first gated comparison
-    # (docs/development/port-parity.md §5).
-    if (_par_eq(fp, fl, "reaction::equilibrium_constant") == 1) { return 4; }   # S 1 (exp), c 1
-    if (_par_eq(fp, fl, "phase::clausius_clapeyron") == 1) { return 6; }        # S 2 (exp), c 1
-    if (_par_eq(fp, fl, "phase::antoine_pressure_mmhg") == 1) { return 4; }     # S 1 (pow), c 1
-    if (_par_eq(fp, fl, "phase::antoine_pressure_pa") == 1) { return 6; }       # S 2 (pow), c 1
-    # Peng–Robinson / Redlich–Kwong: acos, cos, ln and x^2.5 are correctly rounded in the port
-    # (src/mathx.cyr), so only exp and the calls where glibc is not correctly rounded count.
-    if (_par_eq(fp, fl, "gas::peng_robinson_z") == 1) { return 2; }             # S 0, c 1
-    if (_par_eq(fp, fl, "gas::peng_robinson_z_roots") == 1) { return 6; }       # S 2 (cos), c 1
-    if (_par_eq(fp, fl, "gas::fugacity_coefficient_pr") == 1) { return 6; }     # S 1 (exp), c 2
-    if (_par_eq(fp, fl, "gas::fugacity_pr") == 1) { return 10; }                # S 2 (exp), c 2
-    if (_par_eq(fp, fl, "gas::redlich_kwong_pressure") == 1) { return 2; }      # S 0, c 0
-    # M2b (port-parity.md §6): the one class-C thermochem function, measured the same way first.
-    if (_par_eq(fp, fl, "thermochem::vant_hoff_k") == 1) { return 6; }         # S 2 (exp), c 1
-    # M3a (port-parity.md §7), measured the same way first. solution: one log10 (_km_log10) or one 10^x each;
-    # henderson_hasselbalch's log10 is glibc's composition over the correctly rounded _km_ln (ADR 0005, amendment
-    # M3a), and no golden call reaches an argument where glibc's log is not correctly rounded.
-    if (_par_eq(fp, fl, "solution::ph_from_h_concentration") == 1) { return 4; }    # S 1 (log10), c 1
-    if (_par_eq(fp, fl, "solution::poh_from_oh_concentration") == 1) { return 4; }  # S 1 (log10), c 1
-    if (_par_eq(fp, fl, "solution::henderson_hasselbalch") == 1) { return 2; }      # S 0, c 0
-    if (_par_eq(fp, fl, "solution::h_concentration_from_ph") == 1) { return 4; }    # S 1 (pow10), c 1
-    if (_par_eq(fp, fl, "solution::weak_acid_ph") == 1) { return 4; }               # S 1 (log10), c 1
-    if (_par_eq(fp, fl, "solution::weak_base_ph") == 1) { return 4; }               # S 1 (log10), c 1
-    if (_par_eq(fp, fl, "solution::debye_huckel_limiting") == 1) { return 4; }      # S 1 (pow10), c 1
-    if (_par_eq(fp, fl, "solution::debye_huckel_extended") == 1) { return 4; }      # S 1 (pow10), c 1
-    if (_par_eq(fp, fl, "solution::davies_activity") == 1) { return 4; }            # S 1 (pow10), c 1
-    # electrochemistry: the Nernst functions' one ln is the correctly rounded _km_ln (ADR 0005, amendment M3a), and
-    # no golden call reaches an argument where glibc's log is not correctly rounded.
-    if (_par_eq(fp, fl, "electrochemistry::nernst_potential") == 1) { return 2; }       # S 0, c 0
-    if (_par_eq(fp, fl, "electrochemistry::nernst_potential_25c") == 1) { return 2; }   # S 0, c 0
-    # M3b (port-parity.md §8): kinetics' six class-C functions (arrhenius_rate, first_order_concentration,
-    # nth_order_half_life, collision_theory_rate, eyring_rate, eyring_rate_from_activation) have no bound. A subnormal
-    # exp or pow result scaled into the normal range by a prefactor puts S at 10¹⁴ … 4.5 × 10¹⁸ (K far past 64), so
-    # their rows stay measured, unbounded, until correctly rounded primitives are compared against the oracle's
-    # formula (ADR 0006, after M3b). The rule forbids a wider K or a thinner grid.
+    # kimiya's own class-C functions (M2a reaction, phase, gas; M2b thermochem; M3a solution, electrochemistry; M3b
+    # kinetics), each on correctly rounded primitives only (named per line; cbrt and sqrt are correctly rounded too).
+    # The kinetics six were measured, unbounded, from M3b until M3c-3 (port-parity.md §8).
+    if (_par_eq(fp, fl, "reaction::equilibrium_constant") == 1) { return 0; }          # ADR 0006: exp
+    if (_par_eq(fp, fl, "phase::clausius_clapeyron") == 1) { return 0; }               # ADR 0006: exp
+    if (_par_eq(fp, fl, "phase::antoine_pressure_mmhg") == 1) { return 0; }            # ADR 0006: exp10
+    if (_par_eq(fp, fl, "phase::antoine_pressure_pa") == 1) { return 0; }              # ADR 0006: exp10
+    if (_par_eq(fp, fl, "gas::peng_robinson_z") == 1) { return 0; }                    # ADR 0006: acos, cos
+    if (_par_eq(fp, fl, "gas::peng_robinson_z_roots") == 1) { return 0; }              # ADR 0006: acos, cos
+    if (_par_eq(fp, fl, "gas::fugacity_coefficient_pr") == 1) { return 0; }            # ADR 0006: acos, cos, ln, exp
+    if (_par_eq(fp, fl, "gas::fugacity_pr") == 1) { return 0; }                        # ADR 0006: acos, cos, ln, exp
+    if (_par_eq(fp, fl, "gas::redlich_kwong_pressure") == 1) { return 0; }             # ADR 0006: pow(x, 2.5)
+    if (_par_eq(fp, fl, "thermochem::vant_hoff_k") == 1) { return 0; }                 # ADR 0006: exp
+    if (_par_eq(fp, fl, "solution::ph_from_h_concentration") == 1) { return 0; }       # ADR 0006: log10
+    if (_par_eq(fp, fl, "solution::poh_from_oh_concentration") == 1) { return 0; }     # ADR 0006: log10
+    if (_par_eq(fp, fl, "solution::henderson_hasselbalch") == 1) { return 0; }         # ADR 0006: log10
+    if (_par_eq(fp, fl, "solution::h_concentration_from_ph") == 1) { return 0; }       # ADR 0006: exp10
+    if (_par_eq(fp, fl, "solution::weak_acid_ph") == 1) { return 0; }                  # ADR 0006: log10
+    if (_par_eq(fp, fl, "solution::weak_base_ph") == 1) { return 0; }                  # ADR 0006: log10
+    if (_par_eq(fp, fl, "solution::debye_huckel_limiting") == 1) { return 0; }         # ADR 0006: exp10
+    if (_par_eq(fp, fl, "solution::debye_huckel_extended") == 1) { return 0; }         # ADR 0006: exp10
+    if (_par_eq(fp, fl, "solution::davies_activity") == 1) { return 0; }               # ADR 0006: exp10
+    if (_par_eq(fp, fl, "electrochemistry::nernst_potential") == 1) { return 0; }      # ADR 0006: ln
+    if (_par_eq(fp, fl, "electrochemistry::nernst_potential_25c") == 1) { return 0; }  # ADR 0006: ln
+    if (_par_eq(fp, fl, "kinetics::arrhenius_rate") == 1) { return 0; }                # ADR 0006: exp
+    if (_par_eq(fp, fl, "kinetics::first_order_concentration") == 1) { return 0; }     # ADR 0006: exp
+    if (_par_eq(fp, fl, "kinetics::nth_order_half_life") == 1) { return 0; }           # ADR 0006: expm1, pow
+    if (_par_eq(fp, fl, "kinetics::collision_theory_rate") == 1) { return 0; }         # ADR 0006: exp
+    if (_par_eq(fp, fl, "kinetics::eyring_rate") == 1) { return 0; }                   # ADR 0006: exp
+    if (_par_eq(fp, fl, "kinetics::eyring_rate_from_activation") == 1) { return 0; }   # ADR 0006: exp ×2
     return 0 - 1;
 }
 
 # The ADR accepting a divergent row (function and raw input field), or 0. Each entry names
 # its ADR; an accepted row is reported on every run and doesn't fail its module. The ADR 0002
 # divergences (port plan §2.3) arrive with their modules' golden rows: #4 (Antoine) in M2a.
+# ADR 0004's row, f64::powf(-1, DBL_MAX) (ganita's pow gives +inf for 1), had an entry here until M3c-3:
+# the row now goes through _km_cr_pow, which gives 1, and is a plain ok. The `f64::powf ~ ganita_f64_pow`
+# shadow line keeps the record of ganita's defect (ADR 0004 stays as its record).
 #must_use
 fn _par_accepted(fp, fl, ip, il): i64 {
-    # ADR 0004: ganita pow(-1, DBL_MAX) gives +inf instead of 1 (tanmatra ADR 0007, filed upstream).
-    if (_par_eq(fp, fl, "f64::powf") == 1 && _par_eq(ip, il, "f:bff0000000000000 f:7fefffffffffffff") == 1) {
-        return 4;
-    }
     # ADR 0002 #4: an Antoine row the dispatcher mapped (oracle NaN or T out of range ↔ port Err).
     if (_par_mapped == 2) { return 2; }
     return 0;

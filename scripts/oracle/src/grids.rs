@@ -24,6 +24,22 @@ pub fn specials() -> Vec<f64> {
     ]
 }
 
+/// Exponents x around and through exp's subnormal range (e^x is subnormal for −745.13 < x < −708.40; it rounds
+/// to 0 below −745.1332 and is normal from −708.3964): ADR 0006's hard rows, where an exp result is subnormal
+/// and a prefactor scales it back into the normal range, so one ulp of it is a large relative change and only a
+/// correctly rounded exp matches the corrected oracle (M3c-3). Each module places its exponent on them with
+/// + − × ÷ only.
+pub const EXP_SUBNORMAL_X: [f64; 14] = [
+    -745.2, -745.14, -745.13, -745.1, -745.0, -744.44, -744.0, -740.0, -730.0, -720.25, -710.0, -708.5, -708.4,
+    -708.39,
+];
+
+/// The prefactors that scale a subnormal e^x back into the normal range (and 1, where the result is e^x itself):
+/// DBL_MAX, 10³⁰⁰, 2¹⁰⁰⁰, 10²⁵⁰, 1.
+pub fn subnormal_prefactors() -> [f64; 5] {
+    [f64::MAX, 1e300, pow2(1000), 1e250, 1.0]
+}
+
 /// 2^k exactly, for k in −1074 ..= 1023 (subnormal powers included).
 pub fn pow2(k: i32) -> f64 {
     assert!((-1074..=1023).contains(&k), "pow2({k}) out of range");

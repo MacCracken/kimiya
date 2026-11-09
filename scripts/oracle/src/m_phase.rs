@@ -6,8 +6,9 @@
 //!   `osmotic_pressure`. Each argument over the validation edges (the mole fraction also at 0, 1
 //!   and one ulp outside), the others typical; the Rust tests' values; a seeded sweep.
 //! - Class C: `clausius_clapeyron` (one `exp`) over the edges, the Rust tests' values, exp's
-//!   overflow and underflow, and a seeded sweep; `antoine_pressure_mmhg` / `antoine_pressure_pa`
-//!   (one `pow`), see below.
+//!   overflow and underflow, and a seeded sweep, plus (ADR 0006 item 6, M3c-3) the hard rows where the exp
+//!   result is subnormal and P₁ scales it back into the normal range; `antoine_pressure_mmhg` /
+//!   `antoine_pressure_pa` (one `pow`), see below.
 //! - Class A: `lookup_antoine` (every name, case and spacing variants, unknown names; the coefficient
 //!   set flattened as `f:a f:b f:c f:t_min_c f:t_max_c`, or `n:`), `phase_rule` (every pair of 13
 //!   u32 probes from 0 to u32::MAX and a seeded sweep; `i:F` or `E:InvalidInput`), and the table:
@@ -26,10 +27,11 @@
 
 use std::hint::black_box as bb;
 
-use crate::grids::Rng;
+use crate::grids::{EXP_SUBNORMAL_X, Rng, subnormal_prefactors};
 use crate::m_reaction::{edges, res};
 use crate::t_phase::fields;
 use crate::tsv::{Class, Module, Tok, err, f, i, s};
+use kimiya::element::GAS_CONSTANT;
 use kimiya::phase::{
     ANTOINE_DATA, AntoineCoeffs, KB_BENZENE, KB_CHLOROFORM, KB_ETHANOL, KB_WATER, KF_BENZENE,
     KF_CAMPHOR, KF_CYCLOHEXANE, KF_WATER, antoine_pressure_mmhg, antoine_pressure_pa,
@@ -253,6 +255,24 @@ pub fn emit() -> Module {
         let t2 = rng.uniform(150.0, 700.0);
         let dh = rng.signed_log_uniform(3.0, 5.3);
         cc(&mut m, p1, t1, t2, dh);
+    }
+    // ADR 0006's hard rows (M3c-3): the exponent −(ΔH/R)(1/T₂ − 1/T₁) placed on subnormal-exp targets x
+    // (ΔH = −x·R/(1/T₂ − 1/T₁)) and P₁ scaling e^x back into the normal range.
+    let (t1, t2) = (373.15, 363.15);
+    let d = 1.0 / t2 - 1.0 / t1;
+    for p1 in subnormal_prefactors() {
+        for x in EXP_SUBNORMAL_X {
+            cc(&mut m, p1, t1, t2, -x * GAS_CONSTANT / d);
+        }
+    }
+    let mut hard = Rng::new(0x3131);
+    for _ in 0..300 {
+        let x = hard.uniform(-745.2, -708.0);
+        let p1 = hard.log_uniform(200.0, 308.0);
+        let t1 = hard.uniform(150.0, 700.0);
+        let t2 = hard.uniform(150.0, 700.0);
+        let d = 1.0 / t2 - 1.0 / t1;
+        cc(&mut m, p1, t1, t2, -x * GAS_CONSTANT / d);
     }
 
     // ── Antoine ──

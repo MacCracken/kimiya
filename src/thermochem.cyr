@@ -5,8 +5,9 @@
 # The data — struct KmShomate, the 76 THERMOCHEM_DATA rows and the 34 SHOMATE_DATA segments — is
 # src/thermochem_data.cyr (generated). Fallible functions return a value-form Result whose Err
 # payload is a KM_ERR_* code. Every expression keeps Rust's operation order, so everything but
-# vant_hoff_k is + − × ÷ and bit-identical (class B); vant_hoff_k's one exp is f64_exp (class C,
-# docs/development/port-parity.md §6).
+# vant_hoff_k is + − × ÷ and bit-identical (class B); vant_hoff_k's one exp is the correctly rounded
+# _km_cr_exp (src/mathx.cyr, ADR 0006), so its class-C rows are compared exactly against the corrected
+# oracle (docs/development/port-parity.md §10).
 #
 # Units: reaction_enthalpy and reaction_gibbs_energy return **J/mol** (ADR 0002 #1: Rust 1.2 returns
 # kJ/mol; here Rust's kJ difference is multiplied by 1000.0 once, so the value is the oracle's × 1000
@@ -28,7 +29,6 @@
 #   supplies too.
 
 include "lib/string.cyr"
-include "lib/math.cyr"
 include "lib/hisab.cyr"
 
 # ── THERMOCHEM_DATA ─────────────────────────────────────────────────────────────────
@@ -203,7 +203,7 @@ fn vant_hoff_k(k_ref: f64, delta_h_j: f64, t_ref_k: f64, t_new_k: f64): Result {
     if (_km_is_finite(delta_h_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var h: f64 = delta_h_j / KM_GAS_CONSTANT;
     var exponent: f64 = -h * ((1.0 / t_new_k) - (1.0 / t_ref_k));
-    var e: f64 = f64_exp(exponent);
+    var e: f64 = _km_cr_exp(exponent);
     var k: f64 = k_ref * e;
     return Ok(k);
 }

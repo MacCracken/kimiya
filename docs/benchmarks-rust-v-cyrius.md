@@ -131,3 +131,51 @@ normal, and both bodies return Rust's bits on x86_64 and aarch64.
 **Reading the gap.** As before, Rust inlines each body into a few instructions; Cyrius makes the guard calls and returns
 the `Result` as a pair. The exp is `f64_exp` (x87 on x86_64); `michaelis_menten`'s three guards and arithmetic take
 16.5 ns, so the exp and its call are most of the rest of the Arrhenius and Eyring bodies.
+
+## M3c correct rounding (2026-11-09)
+
+ADR 0006: every transcendental the modules call is now correctly rounded (`_km_cr_exp`, `_km_cr_expm1`, `_km_cr_exp10`,
+`_km_cr_ln`, `_km_cr_log10`, `_km_cr_pow`; `_km_acos` / `_km_cos` unchanged). Every bench, before and after the switch,
+with Rust's alongside. *Doc* is the number recorded at the bench's milestone above; *before* and *after* were measured
+the same day on the same host, `cyrius bench` just before and just after M3c-3's switch (the host ran about 5–10 % slower
+than at the earlier milestones, so compare *before* with *after*). Per-op means; ns unless marked.
+
+| Bench | Rust | Cyrius, doc | Cyrius, before | Cyrius, after | after / Rust | What changed |
+|---|---|---|---|---|---|---|
+| `element/lookup_by_symbol` | 44.73 | 67.0 | 85.9 | 70.2 | 1.6× | nothing (noise) |
+| `element/lookup_by_number` | 0.84 | 4.54 | 4.8 | 4.7 | 5.6× | nothing |
+| `molecule/molecular_weight_glucose` | 3.63 | 26.7 | 28.8 | 29.1 | 8.0× | nothing |
+| `reaction/gibbs_free_energy` | 1.75 | 16.9 | 18.6 | 18.8 | 10.7× | nothing |
+| `thermo/heat_transfer` | 0.95 | 5.12 | 5.6 | 5.6 | 5.9× | nothing |
+| `gas/ideal_gas_pressure` | 2.18 | 16.7 | 18.4 | 18.1 | 8.3× | nothing |
+| `gas/peng_robinson_z_n2_1mpa` | 61.39 | 270 | 297 | 287 | 4.7× | nothing (the one-root branch: cbrt and sqrt) |
+| `thermochem/reaction_enthalpy_ch4` | 38.58 | 250 | 276 | 267 | 6.9× | nothing |
+| `thermochem/vant_hoff_k` | 9.51 | 58.9 | 65.5 | **77.1** | 8.1× | exp: `f64_exp` → `_km_cr_exp` |
+| `thermochem/enthalpy_change_cp` | 24.00 | 166 | 183 | 171 | 7.1× | nothing |
+| `thermochem/shomate_cp` | 2.34 | 14.5 | 15.6 | 15.5 | 6.6× | nothing |
+| `thermochem/adiabatic_flame_ch4_air` | 301.48 | 3.24 µs | 3.49 µs | 3.43 µs | 11.4× | nothing |
+| `solution/ph_from_h` | 9.73 | 66.2 | 69.9 | **87.3** | 9.0× | log10: `_km_log10` (fdlibm) → `_km_cr_log10` |
+| `solution/weak_acid_ph` | 34.85 | 182 | 196 | **219** | 6.3× | the same log10 |
+| `electrochemistry/lookup_half_reaction` | 57.06 | 116 | 124 | 120 | 2.1× | nothing |
+| `electrochemistry/nernst_potential` | 6.42 | 1.94 µs | 86.7 | 83.9 | 13.1× | ln: already `_km_cr_ln` through the `_km_ln` wrapper since M3c-2a (1.94 µs → 87 ns then); now called directly |
+| `kinetics/arrhenius_rate` | 6.78 | 49.4 | 52.0 | **65.5** | 9.7× | exp: `f64_exp` → `_km_cr_exp` |
+| `kinetics/eyring_rate` | 6.73 | 42.4 | 44.6 | **59.0** | 8.8× | the same exp |
+| `kinetics/michaelis_menten` | 2.92 | 16.5 | 17.4 | 17.3 | 5.9× | nothing |
+| `mathx/cr_exp` (−50000/(8.314·300)) | — | — | 39.8 | 38.7 | — | Cyrius-only (M3c-2a) |
+| `mathx/cr_expm1` (ln 2) | — | — | 51.3 | 49.6 | — | |
+| `mathx/cr_exp10` (−4.75) | — | — | 54.4 | 53.5 | — | |
+| `mathx/cr_ln` (0.1) | — | — | 49.0 | 49.1 | — | |
+| `mathx/cr_log10` (10⁻⁴) | — | — | 77.4 | 78.7 | — | |
+| `mathx/cr_pow` (0.1, 1.5) | — | — | 136 | 138 | — | Cyrius-only (M3c-2b) |
+| `mathx/ganita_f64_pow` (0.1, 1.5) | — | — | 192 | 198 | — | what the modules called until M3c-3 |
+| `mathx/cr_pow_1.409e-132` (1.409·10⁻¹³², 2.451) | — | — | 175 | 181 | — | |
+| `mathx/ganita_f64_pow_1.409e-132` | — | — | 204 | 218 | — | |
+
+**The price of correct rounding.** The switch costs 12–15 ns per exp call in a function body (`vant_hoff_k` +11.6,
+`arrhenius_rate` +13.5, `eyring_rate` +14.4) and about 20 ns per log10 (`ph_from_h` +17.4, `weak_acid_ph` +23): measured
+alone, `_km_cr_exp` takes 38–40 ns against about 11 ns for `f64_exp` (x87) and `_km_cr_log10` 77–79 ns against 59 ns for
+`_km_log10` (M3a). pow got faster: `_km_cr_pow` is 136–181 ns against ganita's 192–218 (`nth_order_half_life` is not
+benched). Redlich–Kwong's Tc^2.5 went from `_km_pow_2_5` (85 ns, double-double) to `_km_cr_pow(tc, 2.5)` (130 ns); it is
+not benched in Rust. `nernst_potential`'s 1.94 µs → 84 ns (23× faster) is M3c-2a's, ADR 0005's double-double ln
+replaced by the two-phase one. The benches whose bodies have no transcendental are unchanged within the host's noise.
+ADR 0006 asks the fast paths to stay "within a small factor of the stdlib primitives": exp is 3.5×, log10 1.3×, pow 0.7×.

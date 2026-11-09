@@ -149,6 +149,51 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     for the buffer) plus 4 Cyrius-only groups (the buffer, the inline constants and the tolerance's boundary orders,
     the check order, signed zeros and NaN): 138 assertions; surface parity 203/203; benches `kinetics/arrhenius_rate`,
     `kinetics/eyring_rate`, `kinetics/michaelis_menten`
+- **M3c correct rounding** ([ADR 0006](docs/adr/0006-correct-rounding-is-the-accuracy-target.md): correct rounding is the
+  accuracy target, parity with the oracle is functional; M3 is complete):
+  - **the corrected oracle** (M3c-1) — `scripts/oracle/mpfr_ref.py`, correctly rounded binary64 results from the system
+    MPFR 4.2 through ctypes (exact ties, subnormal results and overflow right; development only). `validate.py` decides
+    "is glibc correctly rounded here" with it everywhere (the 60-digit `decimal` references, which misjudge exact ties,
+    are gone), and evaluates every golden row whose replica calls a transcendental primitive a second time with each
+    primitive result correctly rounded, through the same transcribed code (a changed branch or an Ok ↔ Err flip is
+    followed; none occurs on the corpus). The 665 rows that change are written by `validate.py . --write-corrections` to
+    `tests/golden/<module>.cr.tsv` (`gas` 11, `kinetics` 323, `math` 96, `phase` 4, `reaction` 2, `solution` 229), keyed by
+    the golden row's exact fn and inputs, each note naming the oracle's outputs and the calls glibc misrounded; a plain
+    `validate.py .` fails on a missing, stale or extra correction and rechecks every listed call against MPFR
+  - **correctly rounded primitives** (M3c-2) — `_km_cr_exp`, `_km_cr_expm1`, `_km_cr_exp10`, `_km_cr_ln`, `_km_cr_log10`
+    and `_km_cr_pow` in `src/mathx.cyr`: Ziv's two phases (a fast path with a proven error bound and a rounding test, a
+    triple-double accurate path), the exact and midpoint cases explicit (10⁰ … 10²² and the tie 10²³, log10 of the powers
+    of 10, pow's exact and half-way powers, subnormal ties included), + − × ÷ and integer bit operations only, so the same
+    bits on every target; `_acc` / `_fast` entry points for the tests. Their tables and constants are generated into
+    `src/mathx_data.cyr` by `scripts/oracle/mathx_tables.py` from MPFR (asserting the bit-count properties the error
+    analysis uses); `scripts/oracle/cr_verify.py` checks ≥ 1,000,000 seeded arguments per primitive (≥ 1,300,000 pairs for
+    pow) against MPFR on x86_64 ELF, x86_64 PE and aarch64: 0 mismatches, identical bits and flags on all three;
+    `tests/mathx.tcyr` (11 groups, 518 assertions) pins the special, exact, tie, threshold, subnormal and hard cases
+  - **every module on them** (M3c-3), in Rust's operation order: exp → `_km_cr_exp` (reaction, phase, thermochem, gas,
+    kinetics), exp_m1 → `_km_cr_expm1` and powf → `_km_cr_pow` (`nth_order_half_life`), `10.0.powf(x)` → `_km_cr_exp10`
+    (Antoine, `h_concentration_from_ph`, the activity models), log10 → `_km_cr_log10` (solution, Henderson–Hasselbalch
+    included), ln → `_km_cr_ln` (Nernst, fugacity), `tc.powf(2.5)` → `_km_cr_pow(tc, 2.5)` (Redlich–Kwong); ADR 0005's
+    `_km_acos` / `_km_cos` stay. `phase`, `solution` and `kinetics` no longer include `lib/ganita.cyr` (`gas` keeps it for
+    cbrt); `dist/kimiya.deps` is unchanged
+  - **the harness** — every class-C function at **bound 0** against the corrected oracle (27 kimiya functions, the six
+    kinetics ones gated for the first time, and the `math` primitives through the port's correctly rounded ones); a row
+    that matches only the oracle's misrounded value now **fails** (`glibc-matching`, M3c-1's transitional *measured*
+    category); ADR 0004's `pow(-1, DBL_MAX)` row is a plain ok under `_km_cr_pow`. `f64::sin`, `f64::atan2` and the 247
+    `f64::cos` rows past |x| = 8 stay on the stdlib at 2 ulp until M4 brings correctly rounded sin and atan2. Shadow lines
+    show the retired stdlib primitives (`f64_exp`, `f64_ln`, `ganita_f64_acos`, `ganita_f64_pow`) against the corrected
+    oracle
+  - **hard rows** (ADR 0006 item 6): 2,486 new golden rows where a subnormal exp result is scaled back by a prefactor —
+    `vant_hoff_k`, `clausius_clapeyron`, `equilibrium_constant`'s subnormal end (370 each) and the Peng–Robinson fugacity
+    at a few kelvin (344 states: water near 10 K, CO₂ near 4 K, methane near 1.7 K), hand-picked on
+    `grids::EXP_SUBNORMAL_X` plus seeded sweeps. glibc's exp is correctly rounded on all of them (no new correction);
+    with the stdlib's `f64_exp` instead of `_km_cr_exp` they would be up to 27 ulp off on aarch64 (its polyfill rounds
+    twice); with it they are 0 ulp on every target
+  - **result**, x86_64 ELF, x86_64 PE and aarch64: `143071 ok, 0 failed, 0 measured, 10 pending, 1105 accepted (ADR 6:
+    665), 0 glibc-matching (failed)` — every class-C row 0 ulp from its reference
+    ([`port-parity.md`](docs/development/port-parity.md) §9–§10); 15 test files, 0 warnings; surface parity 203/203
+  - `validate.py --sensitivity` is a diagnostic of conditioning: every primitive result is nudged (S for
+    `peng_robinson_z_roots` 2²⁶, the Nernst functions and `henderson_hasselbalch` ~10¹⁸, the subnormal-prefactor rows
+    4.4 × 10¹⁸), the retired rule's K is printed for comparison, and no bound is derived from it
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -172,6 +217,27 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
+- **Results differ from Rust 1.2.0 in the last bit wherever glibc misrounds** (M3c, ADR 0006). 1.2.0's transcendentals
+  are the host glibc's (2.44 for the oracle), which is not correctly rounded; 2.0's are correctly rounded on every
+  target, so a Rust 1.x user comparing results will see a 1-ulp difference in the primitive on the calls where glibc is
+  off, and whatever the function's conditioning makes of it. Over the golden calls (port-parity.md §9) glibc misrounds
+  expm1 on 4.2 % of the `math` rows (109 of 1,267 distinct arguments in the module rows), log10 on 3.7 % (215 of 11,027;
+  up to 29 % of arguments in [½, 1)), exp on 10 of 12,506 distinct arguments, log on 5, cos on 5 (0.16 % of random
+  arguments), acos 0.07 %, pow(10, y) on 3, pow on 2 — about 0.1–5 % depending on the primitive. Two kinds of example:
+  `10.0_f64.powf(23.0)` is exactly the midpoint 10²³, which 2.0 rounds to even, `1e23` (`h_concentration_from_ph(-23)`),
+  where glibc returns the next double up; and the exact subnormal ties (3·2⁻²¹⁵)⁵ and (9·2⁻⁴³⁰)^2.5 = 121.5·2⁻¹⁰⁷⁴,
+  which 2.0 rounds to 122·2⁻¹⁰⁷⁴ where glibc gives 121·2⁻¹⁰⁷⁴, so `nth_order_half_life` on those inputs differs by
+  4.9 × 10¹³ ulp (2.0 is the correct one). On ill-conditioned rows a 1-ulp primitive difference is amplified: the
+  Henderson–Hasselbalch row with base/acid = 0.8068…/2.6858… gives pH −2⁻⁵³ where 1.2.0 gave +0.0. Results no longer
+  depend on the platform's libm: x86_64 and aarch64 give the same bits
+
+### Removed
+- **mathx** (private, M3c-3): `_km_log10` and `_km_expm1` (M1's Rust libm 0.2.16 / fdlibm transcriptions),
+  `_km_log10_ln` (M3a's glibc log10 composition, ADR 0005 amendment M3a, superseded by ADR 0006), the `_km_ln` wrapper,
+  `_km_pow_2_5` (ADR 0005's double-double x^2.5, correctly rounded only from 2⁻³⁸⁷) and the unused `_km_dd_div`; their
+  Cyrius-only tests now pin the correctly rounded bits (`tests/solution.tcyr`'s Henderson–Hasselbalch group: log10
+  `…69DB`, glibc's `…69DA`)
+- `validate.py`'s `_km_log10_ln` sensitivity model, its "S before" mode and the e_log10.c composition check
 
 ### Performance
 - `molecule/molecular_weight_glucose`: 121 ns → 26.7 ns (−78%; Rust 3.63 ns) by walking the atom buffer and
@@ -191,6 +257,14 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   for `f64_ln`) that its cancellation needs (ADR 0005 amendment M3a)
 - M3b kinetics, first measurement (Rust 1.2.0 → Cyrius): `kinetics/arrhenius_rate` 6.78 → 49.4 ns (7.3×),
   `kinetics/eyring_rate` 6.73 → 42.4 ns (6.3×), `kinetics/michaelis_menten` 2.92 → 16.5 ns (5.7×)
+- M3c correct rounding (Cyrius before → after on the same host and day; Rust 1.2.0 in brackets;
+  [`docs/benchmarks-rust-v-cyrius.md`](docs/benchmarks-rust-v-cyrius.md)): `electrochemistry/nernst_potential`
+  1.94 µs → 84 ns (−96 %, M3c-2a's two-phase `_km_cr_ln` in place of ADR 0005's double-double ln; Rust 6.42 ns);
+  the cost of correct rounding elsewhere: `thermochem/vant_hoff_k` 65.5 → 77.1 ns (Rust 9.51), `kinetics/arrhenius_rate`
+  52.0 → 65.5 ns (Rust 6.78), `kinetics/eyring_rate` 44.6 → 59.0 ns (Rust 6.73) — `_km_cr_exp` 38.7 ns against about
+  11 ns for `f64_exp`; `solution/ph_from_h` 69.9 → 87.3 ns (Rust 9.73), `solution/weak_acid_ph` 196 → 219 ns (Rust
+  34.85) — `_km_cr_log10` 78.7 ns against 59 ns for fdlibm's; pow faster: `_km_cr_pow` 138 / 181 ns against
+  `ganita_f64_pow` 198 / 218 ns on the two benched pairs. Every other bench unchanged within noise
 
 ## [1.2.0] - 2026-11-08
 

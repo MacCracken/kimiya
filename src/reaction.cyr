@@ -4,10 +4,8 @@
 # SI units throughout: J/mol, J/(mol·K), K. Fallible functions return a value-form Result whose
 # Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs instead of returning Ok(NaN).
 # Every expression keeps Rust's operation order: gibbs_free_energy is bit-identical (class B);
-# equilibrium_constant's one exp is f64_exp (class C, docs/development/port-parity.md), which
-# lib/math.cyr supplies on aarch64 (its polyfill).
-
-include "lib/math.cyr"
+# equilibrium_constant's one exp is the correctly rounded _km_cr_exp (src/mathx.cyr, ADR 0006), so its
+# class-C rows are compared exactly against the corrected oracle (docs/development/port-parity.md §10).
 
 # Gibbs free energy ΔG = ΔH − T·ΔS in J/mol, from ΔH in J/mol, T in K and ΔS in J/(mol·K):
 # Ok(ΔG), Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite, or
@@ -32,7 +30,7 @@ fn equilibrium_constant(delta_g_j: f64, temperature_k: f64): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_finite(delta_g_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var x: f64 = -delta_g_j / (KM_GAS_CONSTANT * temperature_k);
-    var k: f64 = f64_exp(x);
+    var k: f64 = _km_cr_exp(x);
     if (_km_is_finite(k) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
     return Ok(k);
 }

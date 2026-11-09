@@ -12,8 +12,9 @@ entry = "src/main.cyr"
 output = "build/kimiya"
 
 # stdlib leaves, vendored into lib/ by `cyrius deps` and prepended to every compile.
-#   math     — f64_sin / f64_cos on every target; exp / ln / atan on aarch64
-#   ganita   — ganita_f64_acos / atan2 / cbrt / pow / hypot (ganita 1.2.15 in the 6.7.18 bundle)
+#   math     — f64_clamp and f64_cos (_km_cos's fallback past |x| = 8); the transcendentals the modules
+#              call are kimiya's own correctly rounded ones (src/mathx.cyr, ADR 0006)
+#   ganita   — ganita_f64_cbrt (gas; ganita 1.2.15 in the 6.7.18 bundle), and hisab's own use
 #   overflow — the saturating `+|` / `-|` / `*|` operators (atom counts, balancing)
 #   tagged / result — the value-form Option and Result
 #   fnptr    — callbacks into the ODE and root-finding code (port plan §6.3)
@@ -53,6 +54,7 @@ stdlib = ["assert", "bench"]
 modules = [
     "src/error.cyr",
     "src/constants.cyr",
+    "src/mathx_data.cyr",
     "src/mathx.cyr",
     "src/validate.cyr",
     "src/element_data.cyr",

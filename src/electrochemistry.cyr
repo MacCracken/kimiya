@@ -7,15 +7,16 @@
 # src/constants.cyr's KM_FARADAY and KM_ELEMENTARY_CHARGE. Fallible functions return a value-form Result whose
 # Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs. Every expression keeps Rust's operation order,
 # so everything but the Nernst equation is + − × ÷ and bit-identical (class B); the Nernst functions are class
-# C through one ln (docs/development/port-parity.md §7).
+# C through one ln (docs/development/port-parity.md §7, §10).
 #
 # - Rows are reached by handle (port plan §6.4): STANDARD_POTENTIALS row + 1, 0 for None. HalfReaction's
 #   fields are half_reaction_equation(h) / half_reaction_couple(h) ("" for an invalid handle),
 #   half_reaction_electrons(h) (0: no row has 0) and half_reaction_standard_potential(h) (NaN).
 # - Rust's `n_electrons: u8` is a word here: one outside 0 ..= 255 is Err(KM_ERR_INVALID_INPUT) at the position
 #   of Rust's `== 0` check (one test, n < 1 || n > 255), never wrapped mod 256.
-# - The Nernst equation's ln is the correctly rounded _km_ln (ADR 0005, amendment M3a): E° − (RT/nF)·ln Q
-#   cancels where E° ≈ (RT/nF)·ln Q, and there one ulp of the log moves E by many.
+# - The Nernst equation's ln is src/mathx.cyr's correctly rounded _km_cr_ln (ADR 0006): E° − (RT/nF)·ln Q
+#   cancels where E° ≈ (RT/nF)·ln Q, and there one ulp of the log moves E by many, so the rows are compared
+#   exactly against the corrected oracle.
 
 include "lib/string.cyr"
 
@@ -99,7 +100,7 @@ fn half_reaction_standard_potential(h): f64 {
 # the standard potential E° (V), the electron count n (a Rust u8, as a word), T in K and the reaction quotient
 # Q (product over reactant activities). Ok(E); Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite;
 # Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, Q is not positive and finite, or E° is not finite
-# (in that order). ln Q is correctly rounded (_km_ln, ADR 0005 amendment M3a). Mirrors
+# (in that order). ln Q is correctly rounded (_km_cr_ln, ADR 0006). Mirrors
 # `electrochemistry::nernst_potential`.
 #must_use
 fn nernst_potential(standard_potential: f64, n_electrons, temperature_k: f64, reaction_quotient: f64): Result {
@@ -111,7 +112,7 @@ fn nernst_potential(standard_potential: f64, n_electrons, temperature_k: f64, re
     var f: f64 = KM_FARADAY;
     var n: f64 = f64_from(n_electrons);
     var factor: f64 = (r * temperature_k) / (n * f);
-    var l: f64 = _km_ln(reaction_quotient);
+    var l: f64 = _km_cr_ln(reaction_quotient);
     var e: f64 = standard_potential - (factor * l);
     return Ok(e);
 }

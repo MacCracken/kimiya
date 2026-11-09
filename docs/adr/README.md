@@ -25,4 +25,5 @@ Decisions about kimiya — what we chose, the context, and the consequences we a
 | [0002](0002-port-api-divergences.md) | Accept the planned API changes in the Cyrius 2.0 API | Accepted |
 | [0003](0003-transcribe-missing-hisab-routines.md) | Transcribe the hisab 1.4.0 routines that hisab 3.4.1 lacks (amended in M2b: the flame solver's Newton and bisection too) | Accepted |
 | [0004](0004-accept-ganita-pow-minus-one-divergence.md) | Accept ganita's pow(−1, DBL_MAX) divergence | Accepted |
-| [0005](0005-correctly-rounded-primitives-for-ill-conditioned-functions.md) | Correctly rounded acos, cos, ln and x^2.5 for the ill-conditioned gas functions | Accepted |
+| [0005](0005-correctly-rounded-primitives-for-ill-conditioned-functions.md) | Correctly rounded acos, cos, ln and x^2.5 for the ill-conditioned gas functions | Accepted; amended by 0006 (its M3a amendment superseded) |
+| [0006](0006-correct-rounding-is-the-accuracy-target.md) | Correct rounding is the accuracy target; parity with the oracle is functional | Accepted |

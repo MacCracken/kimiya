@@ -1,7 +1,18 @@
 # 0005 — Correctly rounded acos, cos, ln and x^2.5 for the ill-conditioned gas functions
 
-**Status**: Accepted
+**Status**: Accepted; amended by [ADR 0006](0006-correct-rounding-is-the-accuracy-target.md) (2026-11-09)
 **Date**: 2026-11-09
+
+> **Status note (2026-11-09, M3c-3).** Amended by ADR 0006: correct rounding is the accuracy target, and a class-C
+> row's reference is the corrected oracle, so the glibc-relative S below (counting only the calls where glibc is not
+> correctly rounded) no longer sets any bound — every function here is gated at 0 ulp (port-parity.md §10). The
+> decision's correctly rounded `_km_acos` and `_km_cos` stay as they are. Its ln is now the two-phase `_km_cr_ln`
+> (M3c-2a; the `_km_ln` wrapper is removed) and its x^2.5 `_km_cr_pow(x, 2.5)` (M3c-3; `_km_pow_2_5`, correctly rounded
+> only from 2⁻³⁸⁷, is removed); exp and 10^x moved to `_km_cr_exp` and `_km_cr_exp10`. **The M3a amendment below is
+> superseded**: `_km_log10_ln` (glibc's log10 composition) is removed and `henderson_hasselbalch` calls the correctly
+> rounded `_km_cr_log10`; its near-cancellation rows where glibc's log10 misrounds are compared against the corrected
+> oracle (`tests/golden/solution.cr.tsv`) and are 0 ulp from it. `_km_log10` (fdlibm) is removed too. The text below is
+> kept as the record.
 
 ## Context
 
@@ -75,7 +86,7 @@ golden rows keep class C; the bounds are gated like every other.
 - **Transcribing Rust libm's fdlibm acos/cos/log/pow**: those are not the oracle's either (ganita's acos,
   similar, differs from glibc on 28 % of the corpus rows).
 
-## Amendment (M3a, 2026-11-09)
+## Amendment (M3a, 2026-11-09) — superseded by ADR 0006 (M3c-3)
 
 **Two more ill-conditioned functions, and log10 is composed, not correctly rounded.** M3a ported `solution` and
 `electrochemistry`. Two of their class-C functions cancel by construction, and the golden grids include

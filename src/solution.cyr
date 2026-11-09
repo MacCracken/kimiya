@@ -6,14 +6,14 @@
 # KM_DH_B_WATER_25C and the seven KM_LAMBDA_* — are src/constants.cyr's (generated; solution has no data file
 # of its own). Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and
 # reject NaN and ±∞ inputs. Every expression keeps Rust's operation order, so the arithmetic functions are
-# bit-identical (class B); the log10, 10^x and Newton functions are class C (docs/development/port-parity.md
-# §7).
+# bit-identical (class B); the log10 and 10^x functions are class C (docs/development/port-parity.md §7,
+# §10).
 #
-# - log10: _km_log10 (src/mathx.cyr, Rust libm's fdlibm log10, within 1 ulp of glibc), except
-#   henderson_hasselbalch, whose pKa + log10(ratio) cancels near pH 0: it calls _km_log10_ln, glibc's own
-#   log10 composition over the correctly rounded _km_ln (ADR 0005, amendment M3a), which gives the oracle's
-#   bits wherever glibc's log is correctly rounded. 10^x is ganita_f64_pow(10, x), as the Antoine
-#   equation's.
+# - log10 is src/mathx.cyr's correctly rounded _km_cr_log10 and 10^x its _km_cr_exp10 (the same value as a
+#   correctly rounded pow(10, x), Rust's 10.0_f64.powf(x)), as the Antoine equation's (ADR 0006). With both
+#   sides on correctly rounded primitives in Rust's operation order the class-C rows are compared exactly
+#   against the corrected oracle (docs/development/port-parity.md §10), henderson_hasselbalch's
+#   near-cancellation rows (pKa + log10(ratio) ≈ 0) included.
 # - weak_acid_ph / weak_base_ph: kimiya's own Newton iteration on the charge-balance cubic, transcribed
 #   operation for operation as _km_charge_balance_root / _km_checked_root. Its iteration cap (Rust's
 #   CHARGE_BALANCE_MAX_ITER = 50) and relative-step tolerance (CHARGE_BALANCE_REL_TOL = 10⁻¹²) are private
@@ -25,8 +25,6 @@
 # - ionic_strength's `&[(f64, i32)]` is a pointer to n 16-byte records — the concentration's f64 bits, then
 #   the charge as an i64 word — and the count n, as thermochem's species lists. It has no error channel (Rust
 #   returns a bare f64): a negative n, a null pointer with n > 0, or a charge outside the i32 range gives NaN.
-
-include "lib/ganita.cyr"
 
 # 1 if the word z is a Rust i32 (−2³¹ ..= 2³¹ − 1).
 #must_use
@@ -78,7 +76,7 @@ fn dilution(m1: f64, v1: f64, v2: f64): Result {
 #must_use
 fn ph_from_h_concentration(h_molar: f64): Result {
     if (_km_is_positive(h_molar) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
-    var l: f64 = _km_log10(h_molar);
+    var l: f64 = _km_cr_log10(h_molar);
     var ph: f64 = -l;
     return Ok(ph);
 }
@@ -89,7 +87,7 @@ fn ph_from_h_concentration(h_molar: f64): Result {
 #must_use
 fn poh_from_oh_concentration(oh_molar: f64): Result {
     if (_km_is_positive(oh_molar) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
-    var l: f64 = _km_log10(oh_molar);
+    var l: f64 = _km_cr_log10(oh_molar);
     var poh: f64 = -l;
     return Ok(poh);
 }
@@ -105,8 +103,8 @@ fn ph_from_poh(poh: f64): f64 {
 # The Henderson–Hasselbalch equation pH = pKa + log₁₀([A⁻]/[HA]), from the acid's pKa = −log₁₀(Ka) and the
 # conjugate base and acid concentrations (mol/L). Ok(pH); Err(KM_ERR_INVALID_CONCENTRATION) if either
 # concentration is not positive and finite (the acid's checked first); Err(KM_ERR_INVALID_INPUT) if pKa is not
-# finite. The log10 is _km_log10_ln (glibc's composition over the correctly rounded ln): pKa + log10(ratio)
-# cancels near pH 0, where one ulp of the log moves the pH by many (ADR 0005, amendment M3a). Mirrors
+# finite. pKa + log10(ratio) cancels near pH 0, where one ulp of the log moves the pH by many: the log10 is the
+# correctly rounded _km_cr_log10, so the pH is the corrected oracle's bit for bit there too (ADR 0006). Mirrors
 # `solution::henderson_hasselbalch`.
 #must_use
 fn henderson_hasselbalch(pka: f64, conjugate_base: f64, acid: f64): Result {
@@ -115,7 +113,7 @@ fn henderson_hasselbalch(pka: f64, conjugate_base: f64, acid: f64): Result {
     }
     if (_km_is_finite(pka) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var ratio: f64 = conjugate_base / acid;
-    var l: f64 = _km_log10_ln(ratio);
+    var l: f64 = _km_cr_log10(ratio);
     var ph: f64 = pka + l;
     return Ok(ph);
 }
@@ -125,7 +123,7 @@ fn henderson_hasselbalch(pka: f64, conjugate_base: f64, acid: f64): Result {
 #must_use
 fn h_concentration_from_ph(ph: f64): f64 {
     var x: f64 = -ph;
-    var h: f64 = ganita_f64_pow(10.0, x);
+    var h: f64 = _km_cr_exp10(x);
     return h;
 }
 
@@ -257,7 +255,7 @@ fn debye_huckel_limiting(charge, ionic_str: f64, a_constant: f64): Result {
     var z: f64 = f64_from(charge);
     var sqrt_i: f64 = f64_sqrt(ionic_str);
     var log_gamma: f64 = (((-a_constant) * z) * z) * sqrt_i;
-    var gamma: f64 = ganita_f64_pow(10.0, log_gamma);
+    var gamma: f64 = _km_cr_exp10(log_gamma);
     return Ok(gamma);
 }
 
@@ -279,7 +277,7 @@ fn debye_huckel_extended(charge, ionic_str: f64, a_constant: f64, b_constant: f6
     var num: f64 = (((-a_constant) * z) * z) * sqrt_i;
     var den: f64 = 1.0 + ((b_constant * ion_size) * sqrt_i);
     var log_gamma: f64 = num / den;
-    var gamma: f64 = ganita_f64_pow(10.0, log_gamma);
+    var gamma: f64 = _km_cr_exp10(log_gamma);
     return Ok(gamma);
 }
 
@@ -296,7 +294,7 @@ fn davies_activity(charge, ionic_str: f64, a_constant: f64): Result {
     var z: f64 = f64_from(charge);
     var bracket: f64 = (sqrt_i / (1.0 + sqrt_i)) - (0.3 * ionic_str);
     var log_gamma: f64 = (((-a_constant) * z) * z) * bracket;
-    var gamma: f64 = ganita_f64_pow(10.0, log_gamma);
+    var gamma: f64 = _km_cr_exp10(log_gamma);
     return Ok(gamma);
 }
 

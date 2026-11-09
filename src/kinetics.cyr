@@ -9,13 +9,15 @@
 # KM_PLANCK are src/constants.cyr's (generated). Fallible functions return a value-form Result whose Err payload
 # is a KM_ERR_* code, and reject NaN and ±∞ inputs where Rust does. Every expression keeps Rust's operation
 # order, so the arithmetic functions are bit-identical (class B); the exp, exp_m1 and pow functions are class C
-# (docs/development/port-parity.md §8).
+# (docs/development/port-parity.md §8, §10).
 #
-# - exp is f64_exp, exp_m1 _km_expm1 (src/mathx.cyr, Rust libm's fdlibm expm1) and powf ganita_f64_pow, each
-#   within 1 ulp. Where an exp or pow result is subnormal and a prefactor scales it back into the normal range
-#   (A·e^x with x below −708, [A]₀^(n−1) in the nth-order denominator), one ulp of it is a large relative change,
-#   so those rows can differ from the oracle by far more than an ulp: the six class-C functions are measured, not
-#   gated, until the primitives are correctly rounded (docs/development/port-parity.md §8).
+# - exp, exp_m1 and powf are src/mathx.cyr's correctly rounded _km_cr_exp, _km_cr_expm1 and _km_cr_pow
+#   (ADR 0006), subnormal results and exact ties included. Where an exp or pow result is subnormal and a prefactor
+#   scales it back into the normal range (A·e^x with x below −708, [A]₀^(n−1) in the nth-order denominator), one
+#   ulp of it is a large relative change, so only correctly rounded primitives can match the reference there:
+#   the six class-C functions are compared exactly against the corrected oracle, the oracle's operations with
+#   every primitive result correctly rounded (glibc's pow misrounds exact ties such as (3·2⁻²¹⁵)⁵, where the
+#   port is right and the oracle is not).
 # - Rust's std::f64::consts::LN_2 and its private FIRST_ORDER_TOLERANCE (10⁻¹²) are typed formula constants
 #   inline (port plan §6.4): LN_2 by its bits, 0x3FE62E42FEFA39EF, as src/mathx.cyr writes ln 2's high part. Both
 #   are pinned by golden rows (half_life_first_order(1) is LN_2 exactly; orders at 1 ± 10⁻¹² and the ulps
@@ -23,9 +25,6 @@
 # - lineweaver_burk's (slope, intercept) tuple becomes the caller's buffer of two f64 (16 bytes,
 #   `var lb[16];`), as peng_robinson_z_roots's Vec: Ok(2), the count written, with the slope at out and the
 #   intercept at out + 8; on Err the buffer is untouched.
-
-include "lib/math.cyr"
-include "lib/ganita.cyr"
 
 # Arrhenius rate constant k = A·exp(−Ea/(R·T)), from the pre-exponential factor A (in the units of the
 # returned rate constant), the activation energy Ea in J/mol and T in K. Ok(k) in the units of A;
@@ -39,7 +38,7 @@ fn arrhenius_rate(pre_exponential: f64, activation_energy_j: f64, temperature_k:
     if (_km_is_finite(activation_energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var nea: f64 = -activation_energy_j;
     var x: f64 = nea / (KM_GAS_CONSTANT * temperature_k);
-    var e: f64 = f64_exp(x);
+    var e: f64 = _km_cr_exp(x);
     var k: f64 = pre_exponential * e;
     return Ok(k);
 }
@@ -61,7 +60,7 @@ fn half_life_first_order(rate_constant: f64): Result {
 fn first_order_concentration(initial: f64, rate_constant: f64, time: f64): f64 {
     var nk: f64 = -rate_constant;
     var x: f64 = nk * time;
-    var e: f64 = f64_exp(x);
+    var e: f64 = _km_cr_exp(x);
     var c: f64 = initial * e;
     return c;
 }
@@ -118,8 +117,8 @@ fn nth_order_half_life(initial: f64, rate_constant: f64, order: f64): Result {
     if (_km_is_positive(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(initial) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
     var ln2: f64 = 0x3FE62E42FEFA39EF;     # std::f64::consts::LN_2
-    var numerator: f64 = _km_expm1(n_minus_1 * ln2);
-    var p: f64 = ganita_f64_pow(initial, n_minus_1);
+    var numerator: f64 = _km_cr_expm1(n_minus_1 * ln2);
+    var p: f64 = _km_cr_pow(initial, n_minus_1);
     var t_half: f64 = numerator / ((n_minus_1 * rate_constant) * p);
     if (_km_is_positive(t_half) == 1) { return Ok(t_half); }
     return Err(KM_ERR_COMPUTATION_ERROR);
@@ -217,7 +216,7 @@ fn collision_theory_rate(collision_frequency: f64, steric_factor: f64, activatio
     if (_km_is_finite(activation_energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var nea: f64 = -activation_energy_j;
     var x: f64 = nea / (KM_GAS_CONSTANT * temperature_k);
-    var e: f64 = f64_exp(x);
+    var e: f64 = _km_cr_exp(x);
     var k: f64 = (collision_frequency * steric_factor) * e;
     return Ok(k);
 }
@@ -234,7 +233,7 @@ fn eyring_rate(delta_g_activation_j: f64, temperature_k: f64): Result {
     var prefactor: f64 = (KM_BOLTZMANN * temperature_k) / KM_PLANCK;
     var ndg: f64 = -delta_g_activation_j;
     var x: f64 = ndg / (KM_GAS_CONSTANT * temperature_k);
-    var e: f64 = f64_exp(x);
+    var e: f64 = _km_cr_exp(x);
     var k: f64 = prefactor * e;
     return Ok(k);
 }
@@ -252,10 +251,10 @@ fn eyring_rate_from_activation(delta_h_activation_j: f64, delta_s_activation_j_p
     if (_km_is_finite(delta_s_activation_j_per_k) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var prefactor: f64 = (KM_BOLTZMANN * temperature_k) / KM_PLANCK;
     var xs: f64 = delta_s_activation_j_per_k / KM_GAS_CONSTANT;
-    var es: f64 = f64_exp(xs);
+    var es: f64 = _km_cr_exp(xs);
     var ndh: f64 = -delta_h_activation_j;
     var xh: f64 = ndh / (KM_GAS_CONSTANT * temperature_k);
-    var eh: f64 = f64_exp(xh);
+    var eh: f64 = _km_cr_exp(xh);
     var k: f64 = (prefactor * es) * eh;
     return Ok(k);
 }

@@ -1,0 +1,523 @@
+# mathx.tcyr — the correctly rounded exp, exp10, expm1, ln, log10 (M3c-2a) and pow (M3c-2b) of src/mathx.cyr
+# (ADR 0006).
+#
+# Special values, the exact and tie cases, the thresholds, subnormal results (rounded once), the known
+# hardest-to-round arguments (Lefèvre–Muller's binary64 worst cases for exp and ln) and arguments on which
+# the fast path's rounding test fails, and a seeded check that the accurate path (_km_cr_<f>_acc) agrees
+# with the full function. Every expected bit pattern is MPFR 4.2.2's correctly rounded value
+# (scripts/oracle/mpfr_ref.py). scripts/oracle/cr_verify.py checks millions of arguments on every target.
+
+include "tests/ulp.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+
+alloc_init();
+
+# The f64 with bit pattern b.
+#must_use
+fn from_bits(b): f64 {
+    var x: f64 = 0.0;
+    store64(&x, b);
+    return x;
+}
+
+# f(x) by the function id: 0 exp, 1 exp10, 2 expm1, 3 ln, 4 log10; acc = 1 for the accurate path alone.
+#must_use
+fn cr(fid, acc, x: f64): f64 {
+    if (acc == 0) {
+        if (fid == 0) { var a: f64 = _km_cr_exp(x); return a; }
+        if (fid == 1) { var b: f64 = _km_cr_exp10(x); return b; }
+        if (fid == 2) { var c: f64 = _km_cr_expm1(x); return c; }
+        if (fid == 3) { var d: f64 = _km_cr_ln(x); return d; }
+        var e: f64 = _km_cr_log10(x);
+        return e;
+    }
+    if (fid == 0) { var f: f64 = _km_cr_exp_acc(x); return f; }
+    if (fid == 1) { var g: f64 = _km_cr_exp10_acc(x); return g; }
+    if (fid == 2) { var h: f64 = _km_cr_expm1_acc(x); return h; }
+    if (fid == 3) { var i: f64 = _km_cr_ln_acc(x); return i; }
+    var j: f64 = _km_cr_log10_acc(x);
+    return j;
+}
+
+# The fast path alone: (its result, 1), or (0, 0) when its rounding test fails.
+#must_use
+fn crf(fid, x: f64): (f64, i64) {
+    if (fid == 0) { var a, oa = _km_cr_exp_fast(x); return (a, oa); }
+    if (fid == 1) { var b, ob = _km_cr_exp10_fast(x); return (b, ob); }
+    if (fid == 2) { var c, oc = _km_cr_expm1_fast(x); return (c, oc); }
+    if (fid == 3) { var d, od = _km_cr_ln_fast(x); return (d, od); }
+    var e, oe = _km_cr_log10_fast(x);
+    return (e, oe);
+}
+
+# Checks f(arg) = want, by the full function and by the accurate path alone, for `n` (function id,
+# argument bits, expected bits) triples at `t`.
+fn check_table(t, n, name) {
+    var k = 0;
+    while (k < n) {
+        var fid = load64(t + 24 * k);
+        var x: f64 = from_bits(load64(t + 24 * k + 8));
+        var want = load64(t + 24 * k + 16);
+        var y: f64 = cr(fid, 0, x);
+        assert_bits_eq(y, want, name);
+        var z: f64 = cr(fid, 1, x);
+        assert_bits_eq(z, want, name);
+        k = k + 1;
+    }
+}
+
+# (function id, argument, expected) for the special values.
+var _T_SPECIAL: i64[105] = {
+    0, 0x0000000000000000, 0x3FF0000000000000,     # exp(+0) = 1
+    0, 0x8000000000000000, 0x3FF0000000000000,     # exp(-0) = 1
+    0, 0x7FF0000000000000, 0x7FF0000000000000,     # exp(+inf) = +inf
+    0, 0xFFF0000000000000, 0x0000000000000000,     # exp(-inf) = +0
+    0, 0x7FF8000000000000, 0x7FF8000000000000,     # exp(NaN) = NaN
+    0, 0x3FF0000000000000, 0x4005BF0A8B145769,     # exp(1) = e
+    0, 0x0000000000000001, 0x3FF0000000000000,     # exp(5e-324) = 1
+    1, 0x0000000000000000, 0x3FF0000000000000,     # exp10(+0) = 1
+    1, 0x8000000000000000, 0x3FF0000000000000,     # exp10(-0) = 1
+    1, 0x7FF0000000000000, 0x7FF0000000000000,     # exp10(+inf) = +inf
+    1, 0xFFF0000000000000, 0x0000000000000000,     # exp10(-inf) = +0
+    1, 0x7FF8000000000000, 0x7FF8000000000000,     # exp10(NaN) = NaN
+    2, 0x0000000000000000, 0x0000000000000000,     # expm1(+0) = +0
+    2, 0x8000000000000000, 0x8000000000000000,     # expm1(-0) = -0
+    2, 0x7FF0000000000000, 0x7FF0000000000000,     # expm1(+inf) = +inf
+    2, 0xFFF0000000000000, 0xBFF0000000000000,     # expm1(-inf) = -1
+    2, 0x7FF8000000000000, 0x7FF8000000000000,     # expm1(NaN) = NaN
+    2, 0x8000000000000001, 0x8000000000000001,     # expm1(-5e-324) = -5e-324
+    2, 0x3C9FFFFFFFFFFFFF, 0x3C9FFFFFFFFFFFFF,     # expm1(2^-53 - ulp) = x
+    2, 0xBC9FFFFFFFFFFFFF, 0xBC9FFFFFFFFFFFFF,     # expm1(-(2^-53 - ulp)) = x
+    3, 0x3FF0000000000000, 0x0000000000000000,     # ln(1) = +0
+    3, 0x0000000000000000, 0xFFF0000000000000,     # ln(+0) = -inf
+    3, 0x8000000000000000, 0xFFF0000000000000,     # ln(-0) = -inf
+    3, 0x7FF0000000000000, 0x7FF0000000000000,     # ln(+inf) = +inf
+    3, 0xBFF0000000000000, 0x7FF8000000000000,     # ln(-1) = NaN
+    3, 0xFFF0000000000000, 0x7FF8000000000000,     # ln(-inf) = NaN
+    3, 0x7FF8000000000000, 0x7FF8000000000000,     # ln(NaN) = NaN
+    3, 0x0000000000000001, 0xC0874385446D71C3,     # ln(5e-324) = -744.44007192138126
+    3, 0x7FEFFFFFFFFFFFFF, 0x40862E42FEFA39EF,     # ln(DBL_MAX) = 709.782712893384
+    4, 0x3FF0000000000000, 0x0000000000000000,     # log10(1) = +0
+    4, 0x0000000000000000, 0xFFF0000000000000,     # log10(+0) = -inf
+    4, 0x7FF0000000000000, 0x7FF0000000000000,     # log10(+inf) = +inf
+    4, 0xC024000000000000, 0x7FF8000000000000,     # log10(-10) = NaN
+    4, 0x7FF8000000000000, 0x7FF8000000000000,     # log10(NaN) = NaN
+    4, 0x0000000000000001, 0xC07434E6420F4374      # log10(5e-324) = -323.3062153431158
+};
+
+fn _t_special_values() {
+    test_group("cr_special_values");
+    check_table(&_T_SPECIAL, 35, "special value");
+}
+
+# exp10 of 0 … 22 is the exact power 10^n (each a double: 5^22 < 2^53), exp10(23) is the tie 10^23 rounded to
+# even (0x44B52D02C7E14AF6, what the literal 1e23 parses to), log10(10^k) = k for k = 0 … 22.
+fn _t_exact_cases() {
+    test_group("cr_exact_cases");
+    var p: f64 = 1.0;
+    var n = 0;
+    while (n <= 22) {
+        var x: f64 = f64_from(n);
+        var y: f64 = _km_cr_exp10(x);
+        assert_bits_eq(y, p, "exp10(n) = 10^n exactly");
+        var ya: f64 = _km_cr_exp10_acc(x);
+        assert_bits_eq(ya, p, "exp10(n) = 10^n exactly (accurate path)");
+        var l: f64 = _km_cr_log10(p);
+        assert_bits_eq(l, x, "log10(10^k) = k");
+        var la: f64 = _km_cr_log10_acc(p);
+        assert_bits_eq(la, x, "log10(10^k) = k (accurate path)");
+        p = p * 10.0;                          # exact through 10^22
+        n = n + 1;
+    }
+    var t23: f64 = 23.0;
+    var e23: f64 = _km_cr_exp10(t23);
+    assert_bits_eq(e23, 0x44B52D02C7E14AF6, "exp10(23) = the tie 10^23 rounded to even");
+    var lit: f64 = 100000000000000000000000.0;
+    assert_bits_eq(e23, lit, "exp10(23) = the literal 1e23");
+    var e23a: f64 = _km_cr_exp10_acc(t23);
+    assert_bits_eq(e23a, 0x44B52D02C7E14AF6, "exp10(23) (accurate path)");
+    var l22: f64 = 10000000000000000000000.0;
+    var r22: f64 = _km_cr_log10(l22);
+    assert_bits_eq(r22, 0x4036000000000000, "log10(1e22) = 22");
+    var m1: f64 = -1.0;
+    var em1: f64 = _km_cr_exp10(m1);
+    assert_bits_eq(em1, 0x3FB999999999999A, "exp10(-1) = 0.1 rounded");
+    var z: f64 = 0.0;
+    var ez: f64 = _km_cr_exp(z);
+    assert_bits_eq(ez, 0x3FF0000000000000, "exp(0) = 1");
+}
+
+# Each threshold and its neighbour (MPFR's correctly rounded function, bisected by the generator).
+var _T_LIMIT: i64[60] = {
+    0, 0x40862E42FEFA39EF, 0x7FEFFFFFFFFFFF2A,     # exp(709.782712893384) finite
+    0, 0x40862E42FEFA39F0, 0x7FF0000000000000,     # and the next double overflows
+    0, 0xC0874910D52D3051, 0x0000000000000001,     # exp(-745.1332191019411) = 2^-1074 (just above the tie 2^-1075)
+    0, 0xC0874910D52D3052, 0x0000000000000000,     # and the next double rounds to +0
+    1, 0x40734413509F79FE, 0x7FEFFFFFFFFFFBA1,     # exp10(308.2547155599167) finite
+    1, 0x40734413509F79FF, 0x7FF0000000000000,     # and the next overflows
+    1, 0xC07439B746E36B52, 0x0000000000000001,     # exp10(-323.60724533877976) = 2^-1074
+    1, 0xC07439B746E36B53, 0x0000000000000000,     # and the next rounds to +0
+    2, 0x40862E42FEFA39EF, 0x7FEFFFFFFFFFFF2A,     # expm1(709.782712893384) finite
+    2, 0x40862E42FEFA39F0, 0x7FF0000000000000,     # and the next overflows
+    2, 0xC042B708872320E1, 0xBFEFFFFFFFFFFFFF,     # expm1(-37.42994775023704) > -1
+    2, 0xC042B708872320E2, 0xBFF0000000000000,     # and the next is -1
+    2, 0x3CA0000000000000, 0x3CA0000000000000,     # expm1(2^-53) = 2^-53 (x²/2 is a quarter ulp)
+    2, 0x3F90000000000000, 0x3F90202AD5778E46,     # expm1(2^-6), the fast path's region edge
+    2, 0x3F8FFFFFFFFFFFFF, 0x3F90202AD5778E45,     # just below it
+    0, 0x3C90000000000000, 0x3FF0000000000000,     # exp(2^-54) = 1
+    0, 0xBC90000000000000, 0x3FF0000000000000,     # exp(-2^-54) = 1 (1 - 2^-54 is the tie below 1; e^x is above it)
+    0, 0xBC90000000000001, 0x3FEFFFFFFFFFFFFF,     # exp(-(2^-54 + ulp)) rounds down
+    0, 0x4086200000000000, 0x7FC586F6BF260CF1,     # exp(708), the inline range's end
+    0, 0xC086200000000000, 0x0017C8AB2288C9AB      # exp(-708)
+};
+
+fn _t_thresholds() {
+    test_group("cr_thresholds");
+    check_table(&_T_LIMIT, 20, "threshold");
+}
+
+# Subnormal results are rounded once, at the subnormal grid. The first three are the double-rounding cases of
+# cyrius issue 2026-11-09-exp-polyfill-double-rounds-subnormal-results (glibc gets them right; rounding to 53
+# bits first and then scaling does not); the exp10 ones are results just below DBL_MIN, where the fast core's
+# hi is 1 and its lo carries the whole reduced argument.
+var _T_SUBNORMAL: i64[33] = {
+    0, 0xC086250178F212E2, 0x000CB8AFE6233A75,     # exp(-708.625718966676)
+    0, 0xC0865722B2145683, 0x0000062F8B5F8669,     # exp(-714.8919412220861)
+    0, 0xC086363BEE5EAF13, 0x00017A02A330FA89,     # exp(-710.7792632481745)
+    0, 0xC086232BDD7ABCD2, 0x001000000000007C,     # exp(-708.3964185322641), just above DBL_MIN
+    1, 0xC0733A7146F72A5C, 0x000FFFFFFFFFC405,     # exp10(-307.65265556859026)
+    1, 0xC0733A7146F72A4D, 0x000FFFFFFFFFE68F,     # exp10(-307.6526555685894)
+    1, 0xC073680000000000, 0x000005D23CCB7DCE,     # exp10(-310.5)
+    0, 0xC0874385446D71C3, 0x0000000000000001,     # exp(-744.4400719213812) = 2^-1074
+    0, 0xC086A00000000000, 0x000000002CE791F3,     # exp(-724)
+    0, 0xC08744C000000000, 0x0000000000000001,     # exp(-744.59375)
+    1, 0xC0743E0000000000, 0x0000000000000000      # exp10(-323.875) rounds to +0
+};
+
+fn _t_subnormal_results() {
+    test_group("cr_subnormal_results");
+    check_table(&_T_SUBNORMAL, 11, "subnormal result");
+}
+
+# Hard-to-round arguments. Lefèvre and Muller's 2003 database (Table 4: exp in each interval; Table 5: ln) and
+# arguments found with the fast path's rounding test failing (the interval around the result holds a midpoint),
+# each sent to the accurate path. The ln and log10 ones found in M3c-2a pass M3c-2b's sharper absolute ln bound;
+# the ln core now fails about once in 14 million arguments (the last row), log10 not once in 14.4 million.
+var _T_HARD: i64[90] = {
+    0, 0xBE4ED318EFB627EA, 0x3FEFFFFFF84B39C5,     # exp, [ln 2^-1074, -2^-30]: 1 1^59
+    0, 0xBD14000000000032, 0x3FEFFFFFFFFFFF60,     # exp, [-2^-30, ln(1 - 2^-46)]: 0 0^84
+    0, 0xBCC0000000000001, 0x3FEFFFFFFFFFFFFC,     # exp, [ln(1 - 2^-46), 0): 0 0^100
+    0, 0x3CAFFFFFFFFFFFFF, 0x3FF0000000000001,     # exp, (0, ln(1 + 2^-45)]: 1 1^104
+    0, 0x3D1FFFFFFFFFFF80, 0x3FF0000000000080,     # exp, [ln(1 + 2^-45), 2^-30]: 1 1^83
+    0, 0x3D21FFFFFFFFFFAF, 0x3FF0000000000090,     # exp, the same interval's other one
+    0, 0x40183D4BCDEBB3F4, 0x407AC50B409C8AEE,     # exp, [2^-30, ln 2^1024]: 0 0^57
+    3, 0x202EA71D85CEE020, 0xC0760296A66B4300,     # ln, [2^-1074, 1): 1 1^60
+    3, 0x27F9476E304CD7C7, 0xC0709B60CAF47B36,     # ln: 1 0^60, just above a midpoint
+    3, 0x31726E9C4D327960, 0xC064156584BCD084,     # ln: 0 0^60
+    3, 0x3DC613955DC802F8, 0xC037F02F9BAF6035,     # ln: 0 1^60, just below a midpoint
+    3, 0x6A562A88613629B6, 0x407D6479EBA7C971,     # ln, (1, 2^1024]: 0 0^64
+    4, 0x27F9476E304CD7C7, 0xC05CD96672F7F3CC,     # log10 at ln's hard arguments
+    4, 0x3DC613955DC802F8, 0xC024CADFEC694FF2,
+    0, 0x407969B2FBED0EA4, 0x6498661E8D709FFF,     # exp(406.60619728661027): the fast test fails
+    0, 0xC074E2321F444E1A, 0x21CEBC75874EC569,     # exp(-334.1372368496101)
+    0, 0xC0657C724708E81C, 0x30702F9635A4B892,     # exp(-171.8889498876532)
+    1, 0xC06E73535E73EB96, 0x0D5B31EDB4D7EC41,     # exp10(-243.60392687454868)
+    1, 0x4063C28E177B231C, 0x60C181D9D5238FB1,     # exp10(158.07984518099045)
+    1, 0xC0718404C88DE256, 0x05C049D3D48A7DB3,     # exp10(-280.25116782592283)
+    2, 0xBFBA89FF02473B00, 0xBFB935B22810B3DD,     # expm1(-0.10366815381642525)
+    2, 0x3F8D4F30074EC926, 0x3F8D85226ABEB5A4,     # expm1(0.014311194632544554)
+    2, 0x3F88F1A748F16D20, 0x3F8918B30AED2F89,     # expm1(0.01217966739039028)
+    3, 0x2A8DAA7804BAA0AD, 0xC06DA439F276FBDB,     # ln(1.0347821840303089e-103)
+    3, 0x09B65E76E1E024A0, 0xC082CA8887D25E07,     # ln(7.103794337389895e-262)
+    4, 0x71E24C2852C3CB5B, 0x406E129980991459,     # log10(3.812747790751892e+240)
+    3, 0x0000000000000003, 0xC0873ABB4F301B42,     # ln(1.5e-323)
+    4, 0x3FEFFFFFFFFFFFFF, 0xBC8BCB7B1526E50F,     # log10(1 - 2^-53)
+    3, 0x3FF0000000000001, 0x3CAFFFFFFFFFFFFF,     # ln(1 + 2^-52)
+    3, 0x3FEFE9360A3A6228, 0xBF66D216F8365EE9      # ln(0.9972181510702898): the fast test fails (1 in 14.4M)
+};
+
+fn _t_hard_cases() {
+    test_group("cr_hard_cases");
+    check_table(&_T_HARD, 30, "hard-to-round argument");
+    # The fast path sends the two midpoint-adjacent ln worst cases and the found arguments to the accurate path.
+    var k = 0;
+    var sent = 0;
+    while (k < 30) {
+        var fid = load64(&_T_HARD + 24 * k);
+        var x: f64 = from_bits(load64(&_T_HARD + 24 * k + 8));
+        var y: f64 = cr(fid, 0, x);
+        var yf, ok = crf(fid, x);
+        if (ok == 0) { sent = sent + 1; }
+        if (ok == 1) { assert_bits_eq(yf, y, "the fast path's result is the function's"); }
+        k = k + 1;
+    }
+    assert_eq(sent, 12, "the fast path's test fails on the 12 hard arguments it should");
+}
+
+# The accurate path alone gives the full function's bits on seeded arguments over each function's working
+# range (xorshift64; the fast path answers almost all of them, so this checks the two against each other).
+fn _t_accurate_path_agrees() {
+    test_group("cr_accurate_path_agrees");
+    var s = 0x2545F4914F6CDD1D;
+    var u53: f64 = 0x3CA0000000000000;          # 2^-53
+    var fid = 0;
+    var bad = 0;
+    while (fid < 5) {
+        var k = 0;
+        while (k < 1500) {
+            s = s ^ (s << 13);
+            s = s ^ (s >> 7);
+            s = s ^ (s << 17);
+            var f: f64 = f64_from(s >> 11) * u53;      # [0, 1)
+            var x: f64 = 0.0;
+            if (fid == 0) { x = (1450.0 * f) - 745.0; }
+            if (fid == 1) { x = (630.0 * f) - 324.0; }
+            if (fid == 2) { x = (80.0 * f) - 40.0; }
+            if (fid == 2 && (k & 1) == 1) { x = (0.04 * f) - 0.02; }
+            if (fid >= 3) {
+                var b = ((s >> 1) % 0x7FE0000000000000) + 1;
+                x = from_bits(b);
+            }
+            var y: f64 = cr(fid, 0, x);
+            var z: f64 = cr(fid, 1, x);
+            if (ulp_bits_match(_km_bits(y), _km_bits(z)) != 1) { bad = bad + 1; }
+            k = k + 1;
+        }
+        fid = fid + 1;
+    }
+    assert_eq(bad, 0, "fast and accurate paths agree on 7,500 seeded arguments");
+}
+
+# pow: (x, y, MPFR's pow) triples, from scripts/oracle/mpfr_ref.py; where glibc 2.44's pow (what Rust's
+# f64::powf calls) differs, the comment gives its bits. Checked by the full function and the accurate path alone.
+var _T_POW_SPECIAL: i64[153] = {
+    0x7FF8000000000000, 0x0000000000000000, 0x3FF0000000000000,   # pow(NaN, +0) = 1
+    0x7FF8000000000000, 0x8000000000000000, 0x3FF0000000000000,   # pow(NaN, -0) = 1
+    0x7FF0000000000000, 0x0000000000000000, 0x3FF0000000000000,   # pow(+inf, 0) = 1
+    0x3FF0000000000000, 0x7FF8000000000000, 0x3FF0000000000000,   # pow(+1, NaN) = 1
+    0x3FF0000000000000, 0x7FF0000000000000, 0x3FF0000000000000,   # pow(+1, +inf) = 1
+    0x3FF0000000000000, 0xFFF0000000000000, 0x3FF0000000000000,   # pow(+1, -inf) = 1
+    0xBFF0000000000000, 0x7FF0000000000000, 0x3FF0000000000000,   # pow(-1, +inf) = 1
+    0xBFF0000000000000, 0xFFF0000000000000, 0x3FF0000000000000,   # pow(-1, -inf) = 1
+    0x7FF8000000000000, 0x3FF0000000000000, 0x7FF8000000000000,   # pow(NaN, 1) = NaN
+    0x4000000000000000, 0x7FF8000000000000, 0x7FF8000000000000,   # pow(2, NaN) = NaN
+    0xBFF0000000000000, 0x7FF8000000000000, 0x7FF8000000000000,   # pow(-1, NaN) = NaN
+    0x3FE0000000000000, 0x7FF0000000000000, 0x0000000000000000,   # pow(0.5, +inf) = +0
+    0x3FE0000000000000, 0xFFF0000000000000, 0x7FF0000000000000,   # pow(0.5, -inf) = +inf
+    0xBFE0000000000000, 0x7FF0000000000000, 0x0000000000000000,   # pow(-0.5, +inf) = +0
+    0x4000000000000000, 0x7FF0000000000000, 0x7FF0000000000000,   # pow(2, +inf) = +inf
+    0x4000000000000000, 0xFFF0000000000000, 0x0000000000000000,   # pow(2, -inf) = +0
+    0xC000000000000000, 0xFFF0000000000000, 0x0000000000000000,   # pow(-2, -inf) = +0
+    0x0000000000000000, 0xC008000000000000, 0x7FF0000000000000,   # pow(+0, -3) = +inf
+    0x8000000000000000, 0xC008000000000000, 0xFFF0000000000000,   # pow(-0, -3) = -inf
+    0x8000000000000000, 0xC000000000000000, 0x7FF0000000000000,   # pow(-0, -2) = +inf
+    0x8000000000000000, 0xBFE0000000000000, 0x7FF0000000000000,   # pow(-0, -0.5) = +inf
+    0x8000000000000000, 0xFFF0000000000000, 0x7FF0000000000000,   # pow(-0, -inf) = +inf
+    0x0000000000000000, 0x4008000000000000, 0x0000000000000000,   # pow(+0, 3) = +0
+    0x8000000000000000, 0x4008000000000000, 0x8000000000000000,   # pow(-0, 3) = -0
+    0x8000000000000000, 0x4000000000000000, 0x0000000000000000,   # pow(-0, 2) = +0
+    0x8000000000000000, 0x3FE0000000000000, 0x0000000000000000,   # pow(-0, 0.5) = +0
+    0x8000000000000000, 0x7FF0000000000000, 0x0000000000000000,   # pow(-0, +inf) = +0
+    0x7FF0000000000000, 0xC000000000000000, 0x0000000000000000,   # pow(+inf, -2) = +0
+    0x7FF0000000000000, 0x3FE0000000000000, 0x7FF0000000000000,   # pow(+inf, 0.5) = +inf
+    0xFFF0000000000000, 0xC008000000000000, 0x8000000000000000,   # pow(-inf, -3) = -0
+    0xFFF0000000000000, 0xC000000000000000, 0x0000000000000000,   # pow(-inf, -2) = +0
+    0xFFF0000000000000, 0x4008000000000000, 0xFFF0000000000000,   # pow(-inf, 3) = -inf
+    0xFFF0000000000000, 0x4000000000000000, 0x7FF0000000000000,   # pow(-inf, 2) = +inf
+    0xFFF0000000000000, 0x3FE0000000000000, 0x7FF0000000000000,   # pow(-inf, 0.5) = +inf
+    0xC000000000000000, 0x4008000000000000, 0xC020000000000000,   # pow(-2, 3) = -8
+    0xC000000000000000, 0xC008000000000000, 0xBFC0000000000000,   # pow(-2, -3) = -0.125
+    0xC000000000000000, 0x3FE0000000000000, 0x7FF8000000000000,   # pow(-2, 0.5) = NaN
+    0xC020000000000000, 0x3FD5555555555555, 0x7FF8000000000000,   # pow(-8, RN(1/3)) = NaN
+    0xBFF0000000000000, 0x7FEFFFFFFFFFFFFF, 0x3FF0000000000000,   # pow(-1, DBL_MAX) = 1 (ADR 0004)
+    0xBFF8000000000000, 0x4340000000000001, 0x7FF0000000000000,   # pow(-1.5, 2^53 + 2): even, +inf
+    0xBFF0000000000000, 0x433FFFFFFFFFFFFF, 0xBFF0000000000000,   # pow(-1, 2^53 - 1) = -1
+    0xBFE0000000000000, 0xC33FFFFFFFFFFFFF, 0xFFF0000000000000,   # pow(-0.5, -(2^53 - 1)) = -inf
+    0x4000000000000000, 0x43F0000000000000, 0x7FF0000000000000,   # pow(2, 2^64) = +inf
+    0x3FE0000000000000, 0x43F0000000000000, 0x0000000000000000,   # pow(0.5, 2^64) = +0
+    0x3FF0000000000001, 0x43F0000000000000, 0x7FF0000000000000,   # pow(1 + 2^-52, 2^64) = +inf
+    0x3FEFFFFFFFFFFFFF, 0xC3F0000000000000, 0x7FF0000000000000,   # pow(1 - 2^-53, -2^64) = +inf
+    0x0000000000000001, 0x3FE0000000000000, 0x1E60000000000000,   # pow(5e-324, 0.5) = 2^-537
+    0x7FEFFFFFFFFFFFFF, 0x4000000000000000, 0x7FF0000000000000,   # pow(DBL_MAX, 2) = +inf
+    0x7FEFFFFFFFFFFFFF, 0xBFF0000000000000, 0x0004000000000000,   # pow(DBL_MAX, -1)
+    0x4000000000000000, 0x01A56E1FC2F8F359, 0x3FF0000000000000,   # pow(2, 1e-300) = 1
+    0x0000000000000001, 0x0000000000000001, 0x3FF0000000000000    # pow(5e-324, 5e-324) = 1
+};
+
+var _T_POW_EXACT: i64[96] = {
+    0x3298000000000000, 0x4014000000000000, 0x000000000000007A,   # 121.5·2^-1074, the tie: to 122 (glibc …79)
+    0x32A4000000000000, 0x4014000000000000, 0x000000000000061A,   # 3125·2^-1075: a subnormal tie
+    0x3D58000000000000, 0x4039000000000000, 0x00000062A32B1552,   # 3^25·2^-1075: a subnormal tie
+    0x2542000000000000, 0x4004000000000000, 0x000000000000007A,   # 3^5·2^-1075, the tie: to 122 (glibc …79)
+    0x3FE0000000000000, 0x4090CC0000000000, 0x0000000000000000,   # 2^-1075: the tie between 0 and 2^-1074, to even +0
+    0x3FE0000000000000, 0x4090C80000000000, 0x0000000000000001,   # 2^-1074 exactly
+    0x4000000000000000, 0xC090CC0000000000, 0x0000000000000000,   # 2^-1075: +0
+    0x4000000000000000, 0xC090C80000000000, 0x0000000000000001,   # 2^-1074
+    0x4010000000000000, 0xC080CC0000000000, 0x0000000000000000,   # 2^-1075: +0
+    0x3FD0000000000000, 0x4080CC0000000000, 0x0000000000000000,   # 2^-1075: +0
+    0x4000000000000000, 0x408FF80000000000, 0x7FE0000000000000,   # 2^1023 exactly
+    0x4000000000000000, 0x4090000000000000, 0x7FF0000000000000,   # 2^1024: +inf
+    0x3FE0000000000000, 0xC090000000000000, 0x7FF0000000000000,   # 2^1024: +inf
+    0x4024000000000000, 0x4036000000000000, 0x4480F0CF064DD592,   # 1e22 exactly
+    0x4024000000000000, 0x4037000000000000, 0x44B52D02C7E14AF6,   # 10^23, a midpoint: to even, 1e23 (glibc …4AF7)
+    0x4014000000000000, 0x4037000000000000, 0x43452D02C7E14AF6,   # 5^23 (54 bits), a midpoint
+    0x419ECA170C000000, 0x4000000000000000, 0x434D9FE779881944,   # 3^34 (54 bits), a midpoint (glibc …1945)
+    0xC19ECA170C000000, 0x4000000000000000, 0x434D9FE779881944,   # (-3^17)^2, the same midpoint (glibc …1945)
+    0xC008000000000000, 0x4040800000000000, 0xC333BFEFA65ABB83,   # -3^33 exactly
+    0xC008000000000000, 0x4041000000000000, 0x434D9FE779881944,   # 3^34, a midpoint (glibc …1945)
+    0x422FFFF000020000, 0x3FF8000000000000, 0x434FFFE800060000,   # 262143^3 (54 bits), a midpoint
+    0x4048800000000000, 0x3FE0000000000000, 0x401C000000000000,   # 7
+    0x4048800000000000, 0x3FF8000000000000, 0x4075700000000000,   # 343
+    0x4030000000000000, 0x4004000000000000, 0x4090000000000000,   # 1024
+    0x0000000000000001, 0x3FE0000000000000, 0x1E60000000000000,   # 2^-537
+    0x431A553F8878FA04, 0x3FA0000000000000, 0x4008000000000000,   # (3^32)^(1/32) = 3
+    0x431A553F8878FA04, 0x3FF0800000000000, 0x4333BFEFA65ABB83,   # 3^33 exactly
+    0x403B000000000000, 0x3FD5555555555555, 0x4008000000000000,   # 27^RN(1/3): not 3 (RN(1/3) < 1/3)
+    0x4020000000000000, 0x3FD5555555555555, 0x4000000000000000,   # 8^RN(1/3)
+    0x4000000000000000, 0x3FE0000000000000, 0x3FF6A09E667F3BCD,   # sqrt(2)
+    0x4010000000000000, 0xBFE0000000000000, 0x3FE0000000000000,   # 0.5 exactly
+    0x40ECD52000000000, 0xC000000000000000, 0x3DF3B563C2478B73    # 3^-20: not dyadic, rounded
+};
+
+var _T_POW_HARD: i64[45] = {
+    0x3FE0FBCD29B56829, 0x3FE57347B643EAC2, 0x3FE4ED9AF3EA18C3,   # ARITH 2023 slide 2
+    0x3FE30B3E414E3D3B, 0x3FEA6C0A38DA8066, 0x3FE4D8D99AC41402,   # slide 2: glibc misrounds (glibc …1403)
+    0x400470574D68E0AF, 0x40002E0706205C0E, 0x401AAA55099C76CA,   # LIBMCR did not terminate
+    0x3FEF80B060553772, 0x40C99C0000000000, 0x2D6A2E7CCA9CFD72,   # LIBMCR misrounded: 49 identical bits
+    0x400524EBAE943097, 0x3FDE000000000000, 0x3FF93BD0CD47EB5F,   # CRLIBM misrounded: 64 identical bits (glibc …EB60)
+    0x40373608108BCCAB, 0x401E3FD27857DA6C, 0x4213CFE8012E1926,   # the fast test fails
+    0x404E3FA9F643DBAA, 0x401E3A158FF5C7DC, 0x42BA7A6EDAAD4874,   # the fast test fails (glibc …4873)
+    0x404A35FDDF84B3CC, 0xC0237D4B0971F176, 0x3C7436BD2EAA3717,   # the fast test fails
+    0x4049F731820E4565, 0x401D9A5B5BF49F4C, 0x42920AE45AC55DE5,   # the fast test fails (glibc …5DE4)
+    0x402A6AD98115DBD0, 0xC0170C9D1F086BC0, 0x3E97560E5747FC1B,   # the fast test fails (glibc …FC1A)
+    0x402BF2306CDCFE37, 0xBFF5FBAE2FB79F20, 0x3F9B55FD9267D6CC,   # the fast test fails
+    0x3FF0000000000001, 0x4330000000000000, 0x4005BF0A8B145769,   # (1 + 2^-52)^(2^52), about e
+    0x3FB999999999999A, 0x3FF8000000000000, 0x3FA030DC4EA03A73,   # the bench argument
+    0x248AC9D37BA4B7F3, 0x40039BA5E353F7CF, 0x0000000000000001,   # a bench argument
+    0x249000768A740CEF, 0x40039BA5E353F7CF, 0x0000000000000001    # the bench argument, a subnormal result
+};
+
+# Checks pow(x, y) = want, by the full function and by the accurate path alone, for n triples at t.
+fn check_pow_table(t, n, name) {
+    var k = 0;
+    while (k < n) {
+        var x: f64 = from_bits(load64(t + 24 * k));
+        var y: f64 = from_bits(load64(t + 24 * k + 8));
+        var want = load64(t + 24 * k + 16);
+        var r: f64 = _km_cr_pow(x, y);
+        assert_bits_eq(r, want, name);
+        var a: f64 = _km_cr_pow_acc(x, y);
+        assert_bits_eq(a, want, name);
+        k = k + 1;
+    }
+}
+
+# C99 Annex F's special values (glibc's and MPFR's agree on every one).
+fn _t_pow_special_values() {
+    test_group("cr_pow_special_values");
+    check_pow_table(&_T_POW_SPECIAL, 51, "pow special value");
+}
+
+# Exact results and exact midpoints: subnormal ties (3·2^-215)^5 = 121.5·2^-1074 to even 122, (9·2^-430)^2.5,
+# 0.5^1075 = 2^-1075 to +0; 54-bit midpoints 10^23, 5^23, 3^34, 262143^3; perfect squares and 32nd powers with
+# dyadic y; y = RN(1/3), never exact. glibc misrounds the midpoints; _km_pow_exact rounds them exactly.
+fn _t_pow_exact_and_midpoint() {
+    test_group("cr_pow_exact_and_midpoint");
+    check_pow_table(&_T_POW_EXACT, 32, "pow exact or midpoint result");
+}
+
+# The published hard cases (ARITH 2023), arguments found with the fast test failing, and the benches' arguments.
+fn _t_pow_hard_cases() {
+    test_group("cr_pow_hard_cases");
+    check_pow_table(&_T_POW_HARD, 15, "pow hard-to-round argument");
+    var k = 0;
+    var sent = 0;
+    while (k < 15) {
+        var x: f64 = from_bits(load64(&_T_POW_HARD + 24 * k));
+        var y: f64 = from_bits(load64(&_T_POW_HARD + 24 * k + 8));
+        var r: f64 = _km_cr_pow(x, y);
+        var rf, ok = _km_cr_pow_fast(x, y);
+        if (ok == 0) { sent = sent + 1; }
+        if (ok == 1) { assert_bits_eq(rf, r, "pow's fast path result is the function's"); }
+        k = k + 1;
+    }
+    assert(sent >= 6, "the fast test fails on the found pow arguments");
+    var tie, tok = _km_cr_pow_fast(from_bits(0x3298000000000000), 5.0);
+    assert_eq(tok, 0, "the fast test fails on the subnormal tie (3·2^-215)^5");
+}
+
+# The accurate path agrees with the full function on seeded (x, y) and on x^2.5 (Redlich–Kwong's Tc^2.5, which
+# gas.cyr calls as _km_cr_pow(x, 2.5) since M3c-3, in place of ADR 0005's double-double _km_pow_2_5), and
+# pow(10, x) is exp10(x).
+fn _t_pow_agreement() {
+    test_group("cr_pow_agreement");
+    var s = 0x5DEECE66D2545F49;
+    var u53: f64 = 0x3CA0000000000000;          # 2^-53
+    var bad = 0;
+    var bad10 = 0;
+    var bad25 = 0;
+    var k = 0;
+    while (k < 2000) {
+        s = s ^ (s << 13);
+        s = s ^ (s >> 7);
+        s = s ^ (s << 17);
+        var f: f64 = f64_from(s >> 11) * u53;
+        var b = ((s >> 1) % 0x7FE0000000000000) + 1;
+        var x: f64 = from_bits(b);
+        var lx: f64 = _km_cr_ln(x);
+        var t: f64 = (1450.0 * f) - 745.0;
+        var y: f64 = t / lx;
+        if ((k & 3) == 1) { y = (20.0 * f) - 10.0; }
+        if ((k & 3) == 2) { y = f64_from((s >> 20) % 61) - 30.0; }
+        var r: f64 = _km_cr_pow(x, y);
+        var a: f64 = _km_cr_pow_acc(x, y);
+        if (ulp_bits_match(_km_bits(r), _km_bits(a)) != 1) { bad = bad + 1; }
+        var z: f64 = (630.0 * f) - 324.0;
+        var ten: f64 = 10.0;
+        var p10: f64 = _km_cr_pow(ten, z);
+        var e10: f64 = _km_cr_exp10(z);
+        if (ulp_bits_match(_km_bits(p10), _km_bits(e10)) != 1) { bad10 = bad10 + 1; }
+        var x25: f64 = from_bits(0x2510000000000000 + ((s >> 4) % 0x3480000000000000));   # 2^-430 … 2^410
+        var two5: f64 = 2.5;
+        var c25: f64 = _km_cr_pow(x25, two5);
+        var a25: f64 = _km_cr_pow_acc(x25, two5);
+        if (ulp_bits_match(_km_bits(c25), _km_bits(a25)) != 1) { bad25 = bad25 + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "pow's fast and accurate paths agree on 2,000 seeded pairs");
+    assert_eq(bad10, 0, "pow(10, x) = exp10(x) on 2,000 seeded x");
+    assert_eq(bad25, 0, "pow(x, 2.5): fast and accurate paths agree on 2,000 seeded x from 2^-430 to 2^410");
+}
+
+# ln at an argument where glibc 2.44 misrounds (…7a; MPFR …79) and at 0.1 (ADR 0005's _km_ln, which gas and
+# electrochemistry called until M3c-3, was a wrapper of _km_cr_ln).
+fn _t_ln_values() {
+    test_group("cr_ln_values");
+    var a: f64 = 1.7602758701689474;
+    var r: f64 = _km_cr_ln(a);
+    assert_bits_eq(r, 0x3FE21855AD272D79, "ln(1.7602758701689474)");
+    var b: f64 = 0.1;
+    var rb: f64 = _km_cr_ln(b);
+    assert_bits_eq(rb, 0xC0026BB1BBB55515, "ln(0.1) (MPFR; 0.1 is not 1/10, so not -ln 10 rounded)");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_special_values();
+    _t_exact_cases();
+    _t_thresholds();
+    _t_subnormal_results();
+    _t_hard_cases();
+    _t_accurate_path_agrees();
+    _t_ln_values();
+    _t_pow_special_values();
+    _t_pow_exact_and_midpoint();
+    _t_pow_hard_cases();
+    _t_pow_agreement();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

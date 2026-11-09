@@ -10,6 +10,15 @@ two kinds of output:
   (step 6). These are the constants and tables the port reads, so no value is ever typed by
   hand.
 
+`validate.py` writes a third kind (M3c-1, [ADR 0006](../../docs/adr/0006-correct-rounding-is-the-accuracy-target.md)):
+- **The corrected oracle, `tests/golden/<module>.cr.tsv`**: the golden rows whose outputs change when the oracle's
+  own operations are evaluated with every primitive result correctly rounded (MPFR, `mpfr_ref.py`). The harness
+  compares those rows against the corrected outputs. See [*The corrected oracle*](#the-corrected-oracle-modulecrtsv-adr-0006).
+
+and `mathx_tables.py` a fourth (M3c-2): **`src/mathx_data.cyr`**, the tables and constants of the port's correctly
+rounded primitives, from MPFR. `cr_verify.py` checks those primitives against MPFR on every target. See
+[*The correctly rounded primitives*](#the-correctly-rounded-primitives-mathx_tablespy-and-cr_verifypy-m3c-2).
+
 The crate, the format and the rules are tanmatra's
 (`/home/macro/Repos/tanmatra/scripts/oracle/`), adapted. The one structural difference is
 the math library: see [*glibc*](#glibc-not-the-libm-crate).
@@ -17,8 +26,12 @@ the math library: see [*glibc*](#glibc-not-the-libm-crate).
 ```sh
 cargo run --release --locked --manifest-path scripts/oracle/Cargo.toml             # write both
 cargo run --release --locked --manifest-path scripts/oracle/Cargo.toml -- --check  # verify; exit 1 on any difference
-python3 -I scripts/oracle/validate.py .                                            # independent re-check of the corpus
+python3 -I scripts/oracle/validate.py .                                            # independent re-check of the corpus and the corrections
+python3 -I scripts/oracle/validate.py . --write-corrections                        # write tests/golden/<module>.cr.tsv
+python3 -I scripts/oracle/mpfr_ref.py                                              # the MPFR reference's self-checks
 python3 -I scripts/oracle/probe_tables.py .                                        # generated .cyr through the Cyrius compiler
+python3 -I scripts/oracle/mathx_tables.py                                          # write src/mathx_data.cyr (--check: verify)
+python3 -I scripts/oracle/cr_verify.py                                             # the correctly rounded primitives vs MPFR, every target
 ```
 
 ## Rules
@@ -35,12 +48,15 @@ python3 -I scripts/oracle/probe_tables.py .                                     
   hash-map order. So the *inputs* are the same on any machine; the *outputs* of the
   transcendental rows are glibc's (next section).
 - **The corpus is regenerated only from Rust 1.2.0.** A wrong oracle value is fixed in
-  Rust: bump to 1.2.x, then regenerate. It is never patched in a `.tsv`.
+  Rust: bump to 1.2.x, then regenerate. It is never patched in a `.tsv`. The corrected oracle doesn't patch it
+  either: the `.cr.tsv` files sit beside it, are generated from it, and keep the oracle's outputs in their notes.
 - **Modules arrive with their milestone.** Each port milestone starts by adding its golden
   emitter (`src/m_<module>.rs`, with the grid from the port plan §4) and its data-module
   emitter (`src/t_<module>.rs`), and registering them in `src/main.rs`.
 - **`--check` flags any `.tsv` in `tests/golden/` without an emitter as stale**, and any
-  corpus file recorded on another libm platform (next section).
+  corpus file recorded on another libm platform (next section). A `<module>.cr.tsv` belongs to its module's
+  emitter: it is stale here only when that module has none (`validate.py` checks its content), and its header
+  records the platform like the corpus's.
 - **`tests/golden/modules.txt`**, also generated, lists every module. `tests/parity.tcyr`
   replays exactly that list, so an emitter added here is replayed at once, as pending until
   its functions get dispatcher entries.
@@ -88,8 +104,9 @@ Two more consequences, both recorded rather than assumed:
 - **`max`/`min` of +0 and −0 return the second operand** (`maxsd`/`minsd`). Rust leaves that
   case unspecified; the rows record what rustc 1.99.1 does, and the port's helpers must match.
 
-`validate.py` checks every glibc row against a correctly rounded reference, so the reference
-is known good on every row (the histogram is below).
+`validate.py` checks every glibc row against its correctly rounded value from MPFR, so the reference
+is known good on every row (the histogram is below), and the rows where glibc misrounds get the
+corrected oracle (ADR 0006).
 
 ## Format 1
 
@@ -147,7 +164,7 @@ one row per element under `fn[]`, whose input is the index `i:k`.
 |---|---|
 | **A** exact | the bits are identical. Any NaN matches any NaN, because NaN payloads and signs differ between implementations |
 | **B** arithmetic | the ulp distance is ≤ 2, measured on the ordered-integer line, where +0 and −0 are the same point. **Expected 0**: a non-zero distance means the operation order differs from Rust |
-| **C** transcendental | the ulp distance is ≤ K, a bound per function (`_par_c_bound` in `tests/parity.tcyr`). K is derived and recorded in `docs/development/port-parity.md` (M0 step 8) before the function's first comparison. A function with no K yet is *measured*: its histogram is reported but not gated |
+| **C** transcendental | the ulp distance from the row's reference (the corrected oracle, ADR 0006) is ≤ K, a bound per function (`_par_c_bound` in `tests/parity.tcyr`), set before the function's first comparison and recorded in `docs/development/port-parity.md`. **K = 0** for every function on the port's correctly rounded primitives (all of them since M3c-3; the stdlib's 2 for `f64::sin`, `f64::atan2` and the cos rows past \|x\| = 8 until M4). A function with no K yet is *measured*: its histogram is reported but not gated |
 | **D** iterative | \|got − want\| ≤ 1e-12 · \|want\| |
 
 In classes B, C and D:
@@ -159,10 +176,94 @@ A tolerance is never widened to make a row pass (port plan §5). A divergence ac
 ADR in `docs/adr/` is listed by its exact function and input field in `_par_accepted`. It is
 reported as `accepted (ADR n)` on every run.
 
+**A row with an ADR 0006 correction** (next section) is compared against the corrected outputs instead of its
+golden outputs, under its class and bound. A pass is counted as *accepted (ADR 6)*, quietly. A row that fails
+against the corrected outputs but matches the golden (misrounded) outputs under the same rule is *glibc-matching*
+and **fails** (since M3c-3; M3c-1 counted it as measured): the port's primitive is not correctly rounded on that
+path. A row that matches neither fails, and so does a correction that no golden row takes. The histograms are the
+distance from each row's reference, the corrected outputs where there is one.
+
 **Shadow lines.** The harness can also replay a row through a second Cyrius candidate
 (`fn ~ candidate`, e.g. `f64::exp ~ _f64_exp_polyfill`, `f64::max ~ f64_max`). A shadow line
 reports match / differ counts and the histogram and is never gated: it is evidence for the
-step-8 and M1 choices, not a test.
+step-8 and M1 choices, not a test. It compares against the row's reference, so since ADR 0006 a correctly
+rounded candidate is 0 ulp on every row.
+
+## The corrected oracle, `<module>.cr.tsv` (ADR 0006)
+
+[ADR 0006](../../docs/adr/0006-correct-rounding-is-the-accuracy-target.md) makes correct rounding the accuracy
+target. A golden row's reference is the oracle's own sequence of operations, as `validate.py` transcribes it from
+Rust 1.2.0, evaluated with every transcendental primitive result replaced by its correctly rounded value:
+`mpfr_ref.py` calls the system MPFR 4.2 through ctypes at 53 bits in binary64's exponent range, subnormalized, so
+exact ties, subnormal results, overflow and the C99 Annex F special cases round as IEEE round-to-nearest-even does.
+The primitives are the oracle's calls: exp, expm1 (`exp_m1`), log (`ln`), log10, pow (`powf`; `10.0.powf(y)` is
+pow(10, y), whose correctly rounded value is exp10(y), checked; `x.powf(2.5)` is pow(x, 2.5)), cos, acos, and on the
+`math` rows also sin, atan2 and exp2 (`powf_base2`, LLVM's rewrite). sqrt is IEEE already, and the oracle's cbrt is
+Rust's correctly rounded one (`validate.py` proves it with rational arithmetic and against MPFR on every golden
+argument; glibc's own cbrt, which the oracle never calls, misrounds about half of them). Following the transcribed
+code, a corrected result may take another branch, change the root count or turn `Ok` into `Err`, and the corrected
+oracle follows it.
+
+Where glibc rounded every call of a row correctly, the corrected outputs are the golden ones and the row has no
+correction. Where they differ, the row gets one, in `tests/golden/<module>.cr.tsv`:
+
+```text
+# kimiya corrected oracle (ADR 0006), format 1: solution
+# oracle: kimiya 1.2.0 (rust-old/), hisab 1.4.0; libm: glibc 2.44 x86_64 fma. Correctly rounded: MPFR 4.2.2. Generated by scripts/oracle/validate.py; do not edit.
+# regenerate: python3 -I scripts/oracle/validate.py . --write-corrections
+# columns: fn<TAB>inputs<TAB>outputs<TAB>note (…)
+# rows: 229
+solution::ph_from_h_concentration	f:3f009147bb80742f	f:401200520787ae65	oracle f:401200520787ae64; log10(f:3f009147bb80742f) glibc f:c01200520787ae64 correctly rounded f:c01200520787ae65
+```
+
+- **Header:** five `#` lines, as the golden files': the format and module; the oracle provenance and libm platform
+  (the golden file's) and the MPFR version (`mpfr_ref.VERSION`); the regenerate command; the columns; the row count.
+- **`fn` and `inputs`** are the golden row's fields, byte for byte. They are the key: the harness finds a row's
+  correction by that exact text.
+- **`outputs`** are the corrected outputs, in the golden tokens (`f:`, `E:`, `v:`, `i:`).
+- **`note`** is `oracle <the golden outputs>`, then `; ` and each call of the oracle's evaluation whose glibc result
+  is not correctly rounded, once each in call order: `<name>(<args>) glibc f:… correctly rounded f:…`, where `name`
+  is MPFR's (`exp`, `expm1`, `log`, `log10`, `pow`, `cos`, `acos`, `sin`, `atan2`, `exp2`) and the arguments are
+  `f:` tokens separated by `, `.
+- **Generated, never edited.** `validate.py . --write-corrections` writes one file per module with at least one
+  correction, rows in golden-file order, deterministically (a module without corrections has no file, and a stale
+  one is removed). It refuses to write off the corpus's recorded libm platform, since the notes hold glibc's
+  results.
+- **Checked on every `validate.py .` run**, which fails when a `.cr.tsv` is missing, stale, has an extra row or a row
+  out of order, or names no golden module. It recomputes every correction: the outputs through the replica, and each
+  listed call against MPFR directly (its correctly rounded value is MPFR's, glibc's differs from it, and on the
+  recorded platform glibc's is this machine's libm result). Off that platform the notes' glibc values aren't
+  compared; the rows and their outputs, which depend only on MPFR, still are.
+
+## The correctly rounded primitives: `mathx_tables.py` and `cr_verify.py` (M3c-2)
+
+Since M3c-3 every transcendental the port calls is correctly rounded (ADR 0006): `_km_cr_exp`, `_km_cr_expm1`,
+`_km_cr_exp10`, `_km_cr_ln`, `_km_cr_log10` and `_km_cr_pow` in `src/mathx.cyr` (Ziv's two phases: a fast path with a
+proven error bound and a rounding test, a triple-double accurate path), plus ADR 0005's double-double `_km_acos` and
+`_km_cos`. Their numbers are never typed:
+
+- **`mathx_tables.py`** writes `src/mathx_data.cyr` — exp's table of 2^(j/512) (each as a short sum of doubles, the
+  first with at most 26 significant bits), ln's table over 512 intervals of the significand (c_j with r = m·c_j − 1
+  exact, and −ln c_j as a multi-word sum), the polynomial and accurate-path coefficients, the split constants (ln 2,
+  ln 10 and 1/ln 10, with their Dekker halves) and exp's overflow / underflow thresholds — each value from MPFR at 400
+  bits (through `mpfr_ref.py`'s binding) or exact rational arithmetic, split into doubles by round-to-nearest. It
+  asserts the properties the error analysis in `src/mathx.cyr` relies on (the bit counts that make products exact, the
+  26 + 27-bit splits, r exactly representable with |r| < 2⁻⁹ on every ln interval, the Fast2Sum preconditions), so a
+  table that would break a proof is never written. The words are bit patterns in typed `var`s with the decimal value as a
+  comment (never a hex `const`). Deterministic; `--check` regenerates in memory and exits 1 if the file is stale.
+- **`cr_verify.py`** builds a probe program that calls each primitive (the full function, its `_km_cr_<f>_fast` entry
+  and its `_km_cr_<f>_acc` accurate path) on seeded argument sets — over 1,000,000 per primitive: binade-uniform over the
+  domain, the dense regions where the code changes path or rounding is delicate (subnormal results, the overflow and
+  underflow ends, thresholds ± a few thousand ulps, reduction boundaries, near 1, powers of 10, the exact and midpoint
+  families of pow), the known hard-to-round cases — runs it on x86_64 ELF, x86_64 PE (wine) and aarch64 (qemu), and
+  compares every result bit for bit with MPFR. It also checks pow(10, x) against exp10(x), x^2.5 through `_km_cr_pow`
+  (300,007 arguments), pow's C99 special values against MPFR and glibc, the fast path's fallback rate per region, and
+  that the three targets agree on every bit and flag. Exit 1 on a mismatch or a cross-target difference. Options:
+  `--targets elf`, `--only pow,exp`, `--big` (10,000,000 more per primitive on ELF), `--work DIR` (default
+  `build/cr-verify`, gitignored).
+
+`tests/mathx.tcyr` is the fast in-tree check of the same functions (special values, exact and tie cases, thresholds,
+subnormal results, hard cases, every expected value MPFR's).
 
 ## Generated Cyrius sources
 
@@ -266,10 +367,11 @@ byte, the mmHg factor and a preset's ω).
 ## `validate.py`
 
 `validate.py` is an independent re-check of the corpus that doesn't use the Rust code. It
-needs only Python 3, with no packages (run it with `-I`).
+needs only Python 3, with no packages (run it with `-I`), and the system MPFR library (`libmpfr.so.6`, 4.x), which
+`mpfr_ref.py` calls through ctypes (development only: the shipped library doesn't use it).
 - **Format:** the five-line header (with the true row count), five fields per row, a known
   class, well-formed tokens (UTF-8 inside `s:`), and `modules.txt` listing exactly the `.tsv`
-  files.
+  files (the `.cr.tsv` files are not modules).
 - **Constants:** `constants.tsv` matches every `pub const NAME: f64` literal in
   `rust-old/src/*.rs` (Python's `float()` is correctly rounded, like rustc), and every
   `const KM_X = <decimal>;` in `src/constants.cyr` is positional and parses to its row's bits.
@@ -278,11 +380,10 @@ needs only Python 3, with no packages (run it with `-I`).
   ignored; for ±0 only the value is checked and the observed operand rule is printed), signum,
   clamp, total_cmp, is_finite, and powi (compiler-builtins' loop). **cbrt is proven correctly
   rounded on every row with exact rational arithmetic**, which is why it is class A.
-- **math, class C** (glibc's bits): the IEEE / C99 Annex F special cases, then every finite row
-  against a **correctly rounded reference** from the `decimal` module at 60+ digits (exp, ln,
-  log10, pow directly; sin, cos by reduction mod 2π with a 450-digit π; acos, atan2 through a
-  halving atan series). Each must be within glibc's documented bound (1 ulp; log10 2 ulp).
-  Measured on glibc 2.44 x86_64 fma (ulp from correctly rounded):
+- **math, class C** (glibc's bits): every row against its **correctly rounded value from MPFR** (`mpfr_ref.py`;
+  ADR 0006 replaced the 60-digit `decimal` references, which misjudge exact ties). Each must be within glibc's
+  documented bound (1 ulp; log10 2 ulp), and a row where glibc is off gets a correction. cbrt's rows must also be
+  MPFR's. Measured on glibc 2.44 x86_64 fma (ulp from correctly rounded; identical to the decimal references' counts):
 
   | Function | rows | 0 ulp | 1 ulp |
   |---|---|---|---|
@@ -328,26 +429,32 @@ needs only Python 3, with no packages (run it with `-I`).
   Rust's order, Rust's `.sum()` from −0.0 for `ionic_strength`, the weak acid / base Newton (`charge_balance_root`,
   `checked_root`) with its exit path checked against each row's note, and `CHARGE_BALANCE_REL_TOL` (10⁻¹²) required to
   change some golden row's bits when halved and when doubled (the 50-iteration cap is reported as unobservable: no row
-  enters more than 7 iterations); `henderson_hasselbalch`'s log10 as glibc's e_log10.c composition over log, checked to
-  be glibc's log10 bit for bit on every golden argument; `STANDARD_POTENTIALS` parsed from the `electrochemistry.rs`
+  enters more than 7 iterations); `STANDARD_POTENTIALS` parsed from the `electrochemistry.rs`
   literal, and the generated `src/electrochemistry_data.cyr` (the UTF-8 equation blob, the couple blob, electrons, E°,
   the two CRC notes) checked against it.
 - **kinetics** (M3b): every row recomputed from Rust 1.2.0's code transcribed in Python (glibc's exp, expm1 and pow via
   Python's `math`), the guards in Rust's order, `lineweaver_burk`'s tuple as two floats; LN_2 (± 1 ulp) and
   `FIRST_ORDER_TOLERANCE` (× ½, × 2) must each change some golden row (± 1 ulp of the tolerance is reported as
   unobservable: near 1 ± 10⁻¹², |n − 1| moves in steps of 2⁻⁵² or 2⁻⁵³).
-- **`--sensitivity`** (M2a; M2b adds `vant_hoff_k`; M3a the solution and Nernst functions; M3b the kinetics functions):
-  `python3 -I scripts/oracle/validate.py . --sensitivity` re-evaluates every class-C row with one primitive result
-  nudged one ulp up and down, one call at a time, and prints each function's S, c and K = 2·S·c + 2 — the port-parity
-  rule's measurement (`docs/development/port-parity.md` §5–§7). Following ADR 0005, only calls whose result can differ
-  between port and oracle are nudged: exp, 10^x and (M3a) `_km_log10` results, and the acos / cos / ln / x^2.5 results
-  where glibc is not correctly rounded (the port's are; the 60-digit references decide). For the functions the M3a
-  remedy changed (`henderson_hasselbalch`, `nernst_potential`, `nernst_potential_25c`) it also prints S "before": every
-  result of the stdlib-like primitive the remedy replaced (`_km_log10`, `f64_ln`) nudged — about 10¹⁸ for each. Every
-  kinetics exp, exp_m1 and pow result is nudged (stdlib-like counterparts). For each function whose K passes 64 (M3b: the
-  six class-C kinetics functions, left measured until ADR 0006) it also lists the rows whose own S puts it there, how
-  many of them nudge a subnormal primitive result, the worst three, and S over the remaining rows and over the rows with
-  no subnormal primitive result (port-parity.md §8).
+- **The corrected oracle** (M3c-1, ADR 0006): every row whose replica calls a primitive is evaluated again with each
+  primitive result correctly rounded (the `math` rows of the primitives are their MPFR values), and the corrections
+  are checked against `tests/golden/<module>.cr.tsv` as [above](#the-corrected-oracle-modulecrtsv-adr-0006).
+  `henderson_hasselbalch`'s oracle call is glibc's log10 itself, so the corrected oracle replaces it whole (M3a's
+  check that glibc's log10 is the e_log10.c composition, the basis of the retired `_km_log10_ln`, went with it in
+  M3c-3). It prints the corrected rows per module
+  and function, the rows whose misrounded calls leave the outputs unchanged, the per-primitive counts of glibc's
+  misroundings over every replica call, and glibc's own cbrt on the golden cbrt arguments
+  (`docs/development/port-parity.md` §9).
+- **`--sensitivity`**, a diagnostic of conditioning since ADR 0006 (M3c-3): `python3 -I scripts/oracle/validate.py .
+  --sensitivity` re-evaluates every class-C row with one primitive result nudged one ulp up and down, one call at a
+  time — every result but 0, ±∞, NaN and acos(±1) — and prints each function's S (the largest output change, in ulp),
+  c (the most nudged calls in one row), the retired port-parity rule's K = 2·S·c + 2 for comparison, the calls where
+  glibc's result is not correctly rounded (MPFR decides) and branch flips. For each function whose K passes 64 it lists
+  the rows that put it there, how many nudge a subnormal primitive result, the worst three, and S over the rest. It sets
+  no bound: the port evaluates the oracle's operations with correctly rounded primitives, as the corrected oracle does,
+  so every class-C row is gated at 0 ulp whatever its S (`docs/development/port-parity.md` §10). Until M3c-3 it nudged
+  only the calls whose result could differ between port and oracle (ADR 0005) and set the bounds of §5–§8; the
+  `_km_log10_ln` port model and the "S before" mode are gone with the primitives they modelled.
 
 Every function in every `.tsv` must have a rule in `validate.py`: a new one fails until it gets one. Extend it
 as modules arrive. A check that recomputes a row independently is worth more than one that re-reads the

@@ -9,6 +9,7 @@
 
 include "src/error.cyr"
 include "src/constants.cyr"
+include "src/mathx_data.cyr"
 include "src/mathx.cyr"
 include "src/validate.cyr"
 include "src/element_data.cyr"
@@ -43,6 +44,7 @@ var _bench_g = 0;           # M3a: 5 f64 input slots, filled by main()
 var _bench_cu = 0;          # "Cu2+/Cu"
 var _bench_n = 0;           # 2 electrons (Rust's black_box(2) u8)
 var _bench_k = 0;           # M3b: 8 f64 input slots, filled by main()
+var _bench_m = 0;           # M3c-2a / M3c-2b: 9 f64 input slots, filled by main()
 
 # element/lookup_by_symbol: `lookup_by_symbol(black_box("Fe"))`, a linear scan to row 26.
 fn bench_lookup_by_symbol(per_batch, batches) {
@@ -293,7 +295,7 @@ fn bench_adiabatic_flame_ch4_air(per_batch, batches) {
     bench_report(b);
 }
 
-# solution/ph_from_h: `ph_from_h_concentration(black_box(1e-4)).unwrap()`: one guard, one log10 (_km_log10).
+# solution/ph_from_h: `ph_from_h_concentration(black_box(1e-4)).unwrap()`: one guard, one log10 (_km_cr_log10).
 fn bench_ph_from_h(per_batch, batches) {
     var h: f64 = load64(_bench_g);
     var b = bench_new("solution/ph_from_h");
@@ -348,7 +350,7 @@ fn bench_lookup_half_reaction(per_batch, batches) {
 }
 
 # electrochemistry/nernst_potential: `nernst_potential(black_box(0.342), black_box(2), black_box(298.15),
-# black_box(0.1)).unwrap()`: four guards, one ln (the correctly rounded _km_ln, ADR 0005 amendment M3a).
+# black_box(0.1)).unwrap()`: four guards, one ln (the correctly rounded _km_cr_ln, ADR 0006).
 fn bench_nernst_potential(per_batch, batches) {
     var e0: f64 = load64(_bench_g + 24);
     var tk: f64 = load64(_bench_g + 32);
@@ -425,6 +427,46 @@ fn bench_michaelis_menten(per_batch, batches) {
             _bench_sink = v;
             i = i + 1;
         }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# mathx/cr_<f> (M3c-2a, Cyrius-only; ADR 0006): the correctly rounded primitives on typical arguments, one
+# call per iteration. cr_exp at the Arrhenius exponent −Ea/(RT) = −50000/(8.314·300) (Rust's
+# kinetics/arrhenius_rate is one glibc exp and a few flops), cr_expm1 at (n − 1)·ln 2 for a second-order
+# nth_order_half_life, cr_exp10 at −4.75 (10^-pKa), cr_ln at 0.1, cr_log10 at 1e-4 (ph_from_h's argument).
+fn bench_cr(name, slot, fid, per_batch, batches) {
+    var x: f64 = load64(_bench_m + slot * 8);
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        if (fid == 0) { while (i < per_batch) { var r0: f64 = _km_cr_exp(x); _bench_sink = r0; i = i + 1; } }
+        if (fid == 1) { while (i < per_batch) { var r1: f64 = _km_cr_expm1(x); _bench_sink = r1; i = i + 1; } }
+        if (fid == 2) { while (i < per_batch) { var r2: f64 = _km_cr_exp10(x); _bench_sink = r2; i = i + 1; } }
+        if (fid == 3) { while (i < per_batch) { var r3: f64 = _km_cr_ln(x); _bench_sink = r3; i = i + 1; } }
+        if (fid == 4) { while (i < per_batch) { var r4: f64 = _km_cr_log10(x); _bench_sink = r4; i = i + 1; } }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# mathx/cr_pow (M3c-2b, Cyrius-only; ADR 0006) beside ganita_f64_pow, what the M2/M3 modules called until M3c-3:
+# pow(0.1, 1.5) and pow(1.409e-132, 2.451) (a result near the subnormal range).
+fn bench_pow(name, sx, sy, fid, per_batch, batches) {
+    var x: f64 = load64(_bench_m + sx * 8);
+    var y: f64 = load64(_bench_m + sy * 8);
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        if (fid == 0) { while (i < per_batch) { var r0: f64 = _km_cr_pow(x, y); _bench_sink = r0; i = i + 1; } }
+        if (fid == 1) { while (i < per_batch) { var r1: f64 = ganita_f64_pow(x, y); _bench_sink = r1; i = i + 1; } }
         bench_batch_stop(b, per_batch);
         k = k + 1;
     }
@@ -513,6 +555,28 @@ fn main(): i64 {
     bench_arrhenius_rate(1000000, 20);
     bench_eyring_rate(1000000, 20);
     bench_michaelis_menten(1000000, 20);
+    _bench_m = alloc(9 * 8);
+    var ins4: f64[9];
+    ins4[0] = -50000.0 / (8.314 * 300.0);
+    ins4[1] = 0.6931471805599453;
+    ins4[2] = -4.75;
+    ins4[3] = 0.1;
+    ins4[4] = 0.0001;
+    ins4[5] = 0.1;
+    ins4[6] = 1.5;
+    ins4[7] = 0.0;
+    ins4[8] = 2.451;
+    memcpy(_bench_m, &ins4, 9 * 8);
+    store64(_bench_m + 56, 0x249000768A740CEF);   # 1.409e-132
+    bench_cr("mathx/cr_exp", 0, 0, 1000000, 20);
+    bench_cr("mathx/cr_expm1", 1, 1, 1000000, 20);
+    bench_cr("mathx/cr_exp10", 2, 2, 1000000, 20);
+    bench_cr("mathx/cr_ln", 3, 3, 1000000, 20);
+    bench_cr("mathx/cr_log10", 4, 4, 1000000, 20);
+    bench_pow("mathx/cr_pow", 5, 6, 0, 1000000, 20);
+    bench_pow("mathx/ganita_f64_pow", 5, 6, 1, 1000000, 20);
+    bench_pow("mathx/cr_pow_1.409e-132", 7, 8, 0, 1000000, 20);
+    bench_pow("mathx/ganita_f64_pow_1.409e-132", 7, 8, 1, 1000000, 20);
     return 0;
 }
 

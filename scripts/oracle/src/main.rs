@@ -13,7 +13,9 @@
 //! committed file. It exits 1 if any output differs or is missing, if a `.tsv` in
 //! `tests/golden/` has no emitter, or if the corpus was recorded on another glibc platform
 //! (`glibc.rs`): the transcendental rows are glibc's bits, so they can only be checked where
-//! they were made.
+//! they were made. A `<module>.cr.tsv` beside a module's file is the corrected oracle (ADR 0006),
+//! which `validate.py --write-corrections` writes and checks: here it is only stale when its module
+//! has no emitter, and its platform is checked like the corpus's.
 //!
 //! Adapted from tanmatra's `scripts/oracle/` (same format, same rules). Modules are added at
 //! the start of their milestone, with the golden grid from the port plan §4: `constants` and
@@ -255,11 +257,15 @@ fn run() -> Result<bool, String> {
         ok &= emit(&root, check, out)?;
     }
 
-    // A .tsv with no emitter is stale: the harness would test rows nobody regenerates.
+    // A .tsv with no emitter is stale: the harness would test rows nobody regenerates. A
+    // `<module>.cr.tsv` (ADR 0006, written by validate.py) belongs to its module's emitter.
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".tsv") && !emitted.contains(&name) {
+            let module_file = name
+                .strip_suffix(".cr.tsv")
+                .map_or_else(|| name.clone(), |m| format!("{m}.tsv"));
+            if name.ends_with(".tsv") && !emitted.contains(&module_file) {
                 println!("STALE    tests/golden/{name} (no emitter)");
                 ok = false;
             }

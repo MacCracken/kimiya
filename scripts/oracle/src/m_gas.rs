@@ -19,7 +19,8 @@
 //! one-root (supercritical, low and very high pressure) and the three-root (subcritical, between the
 //! spinodals: water at 300 K / 1 atm) regions and the critical point. Then (Tc, Pc) and one part in
 //! 10⁶ around it, a seeded sweep, every validation edge for T, P and each parameter (ω = 5 and −0.5
-//! are accepted), and overflow (P up to 10²⁰ Pa and DBL_MAX, T = 10⁻³⁰⁰ K).
+//! are accepted), and overflow (P up to 10²⁰ Pa and DBL_MAX, T = 10⁻³⁰⁰ K). Then (ADR 0006 item 6, M3c-3)
+//! the hard fugacity rows: states a few kelvin above 0 where φ = exp(ln φ) is subnormal and φ·P is normal.
 
 use std::hint::black_box as bb;
 
@@ -29,7 +30,7 @@ use crate::t_gas::PRESETS;
 use crate::tsv::{Class, Module, Tok, err, f};
 use kimiya::element::GAS_CONSTANT;
 use kimiya::gas::{
-    PR_NITROGEN, PengRobinsonParams, fugacity_coefficient_pr, fugacity_pr, gas_density,
+    PR_CO2, PR_METHANE, PR_NITROGEN, PR_WATER, PengRobinsonParams, fugacity_coefficient_pr, fugacity_pr, gas_density,
     ideal_gas_pressure, ideal_gas_volume, joule_thomson_ideal, partial_pressure,
     peng_robinson_pressure, peng_robinson_z, peng_robinson_z_roots, redlich_kwong_pressure,
     van_der_waals_pressure,
@@ -277,6 +278,35 @@ pub fn emit() -> Module {
     for omega in [5.0, -0.5, 0.49, 1.0] {
         pr_state(&mut m, &with(&PR_NITROGEN, 2, omega), 100.0, 1e6);
         pr_state(&mut m, &with(&PR_NITROGEN, 2, omega), 300.0, 1e6);
+    }
+    // ADR 0006's hard rows (M3c-3): liquid-like roots at a few kelvin, where ln φ is between −745.2 and −708, so
+    // φ = exp(ln φ) is subnormal (or rounds to 0: Err) and fugacity_pr's φ·P scales it back into the normal
+    // range: water near 10 K (at 10.25 K and 5·10⁵ Pa, φ ≈ 2.4·10⁻³⁰⁹), CO₂ near 4 K, methane near 1.7 K.
+    // Hand-picked states, then a seeded sweep over the same boxes (about half of its states land in the range).
+    for t in [9.8, 9.85, 9.9, 9.95, 10.0, 10.05, 10.1, 10.15, 10.2, 10.25] {
+        for pr in [1e4, 5e5, 1e7] {
+            pr_state(&mut m, &PR_WATER, t, pr);
+        }
+    }
+    pr_state(&mut m, &PR_WATER, 9.76, 1e3);
+    pr_state(&mut m, &PR_WATER, 9.76, 1e4); // ln φ ≈ −745.2: φ rounds to 0, Err
+    for t in [3.9, 3.95, 4.0, 4.05] {
+        for pr in [1e4, 1e6] {
+            pr_state(&mut m, &PR_CO2, t, pr);
+        }
+    }
+    for t in [1.7, 1.75] {
+        for pr in [1e4, 1e7] {
+            pr_state(&mut m, &PR_METHANE, t, pr);
+        }
+    }
+    let mut hard = Rng::new(0x3203);
+    for (p, lo, hi) in [(&PR_WATER, 9.75, 10.3), (&PR_CO2, 3.85, 4.1), (&PR_METHANE, 1.68, 1.82)] {
+        for _ in 0..100 {
+            let t = hard.uniform(lo, hi);
+            let pr = hard.log_uniform(3.0, 7.5);
+            pr_state(&mut m, p, t, pr);
+        }
     }
 
     // ── Redlich–Kwong ──

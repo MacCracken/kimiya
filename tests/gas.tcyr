@@ -8,6 +8,7 @@
 include "tests/ulp.cyr"
 include "src/error.cyr"
 include "src/constants.cyr"
+include "src/mathx_data.cyr"
 include "src/mathx.cyr"
 include "src/validate.cyr"
 include "src/gas_data.cyr"
@@ -588,10 +589,10 @@ fn _t_cyrius_presets_and_roots() {
     assert(is_err_code(t5, v5, KM_ERR_COMPUTATION_ERROR), "P = DBL_MAX overflows: ComputationError");
 }
 
-# Cyrius-only, ADR 0005: _km_acos, _km_cos, _km_ln and _km_pow_2_5 are correctly rounded. At these
-# arguments glibc 2.44 (the oracle) is 1 ulp off the correctly rounded value (scripts/oracle/
-# validate.py's 60-digit reference); the port returns the correctly rounded bits. Plus the special
-# values each mirrors from Rust.
+# Cyrius-only, ADR 0005 and ADR 0006: the gas functions' acos, cos, ln and x^2.5 (_km_acos, _km_cos, _km_cr_ln
+# and, since M3c-3, _km_cr_pow(x, 2.5) for Redlich–Kwong's Tc^2.5) are correctly rounded. At these arguments glibc
+# 2.44 (the oracle) is 1 ulp off the correctly rounded value (MPFR, scripts/oracle/mpfr_ref.py); the port returns
+# the correctly rounded bits. Plus the special values each mirrors from Rust.
 fn _t_cyrius_correctly_rounded_primitives() {
     test_group("cyrius_correctly_rounded_primitives");
     var a: f64 = 0.9063776739144427;
@@ -601,10 +602,10 @@ fn _t_cyrius_correctly_rounded_primitives() {
     var rc: f64 = _km_cos(c);
     assert_bits_eq(rc, 0xBFE703A1604251B1, "cos(2.3734367101827383)");
     var l: f64 = 1.7602758701689474;
-    var rl: f64 = _km_ln(l);
+    var rl: f64 = _km_cr_ln(l);
     assert_bits_eq(rl, 0x3FE21855AD272D79, "ln(1.7602758701689474)");
     var p: f64 = 443.38094864525084;
-    var rp: f64 = _km_pow_2_5(p);
+    var rp: f64 = _km_cr_pow(p, 2.5);
     assert_bits_eq(rp, 0x414F94DCA9F5C8F0, "443.38094864525084^2.5");
     var one: f64 = 1.0;
     var m1: f64 = -1.0;
@@ -621,22 +622,22 @@ fn _t_cyrius_correctly_rounded_primitives() {
     var inf: f64 = 1.0 / 0.0;
     var r5: f64 = _km_cos(inf);
     assert_eq(ulp_is_nan(r5), 1, "cos(inf) = NaN");
-    var r6: f64 = _km_ln(one);
+    var r6: f64 = _km_cr_ln(one);
     assert_bits_eq(r6, 0, "ln(1) = +0");
-    var r7: f64 = _km_ln(zero);
+    var r7: f64 = _km_cr_ln(zero);
     assert_bits_eq(r7, 0xFFF0000000000000, "ln(0) = -inf");
-    var r8: f64 = _km_ln(m1);
+    var r8: f64 = _km_cr_ln(m1);
     assert_eq(ulp_is_nan(r8), 1, "ln(-1) = NaN");
     var sub: f64 = from_bits(1);   # the smallest subnormal, 5e-324
-    var r9: f64 = _km_ln(sub);
+    var r9: f64 = _km_cr_ln(sub);
     assert_bits_eq(r9, 0xC0874385446D71C3, "ln(5e-324) = -744.44007192138126");
     var four: f64 = 4.0;
-    var r10: f64 = _km_pow_2_5(four);
+    var r10: f64 = _km_cr_pow(four, 2.5);
     assert_bits_eq(r10, 0x4040000000000000, "4^2.5 = 32");
-    var r11: f64 = _km_pow_2_5(m1);
+    var r11: f64 = _km_cr_pow(m1, 2.5);
     assert_eq(ulp_is_nan(r11), 1, "(-1)^2.5 = NaN");
     var big: f64 = 0x7FEFFFFFFFFFFFFF;
-    var r12: f64 = _km_pow_2_5(big);
+    var r12: f64 = _km_cr_pow(big, 2.5);
     assert_bits_eq(r12, 0x7FF0000000000000, "DBL_MAX^2.5 = +inf");
 }
 

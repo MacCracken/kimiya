@@ -15,11 +15,12 @@ and no Python packages. Usage, from the repo root:
    the value is checked and the observed rule printed), signum, clamp, total_cmp, is_finite,
    and powi (compiler-builtins' __powidf2 loop). cbrt is proven correctly rounded with exact
    rational arithmetic, which is why it is class A.
-5. math.tsv, the class-C functions (glibc's bits): the IEEE / C99 Annex F special cases, and
-   every finite row against a correctly rounded reference computed with the decimal module
-   at 60+ digits. Each function must be within glibc's documented bound (1 ulp; log10 2) of
-   it; the histogram is printed. This proves the reference is the function it names, on
-   every row, independently of the platform that recorded it.
+5. math.tsv, the class-C functions (glibc's bits): every row against its correctly rounded value from
+   MPFR (scripts/oracle/mpfr_ref.py: 53 bits, binary64's exponent range, subnormalized, so exact ties,
+   subnormal results and the C99 Annex F special cases are exact). Each function must be within glibc's
+   documented bound (1 ulp; log10 2) of it; the histogram is printed. This proves the reference is the
+   function it names, on every row, independently of the platform that recorded it. A row where glibc is
+   not correctly rounded gets an ADR 0006 correction (item 12).
 6. element.tsv against the ELEMENTS / ELEMENT_PROPERTIES literals parsed from
    rust-old/src/element.rs: every lookup_by_number and lookup_properties row (all 256 u8), every
    lookup_by_symbol row (exact, case-sensitive match), and the generated KmElementCategory order.
@@ -43,37 +44,59 @@ and no Python packages. Usage, from the repo root:
 10. solution.tsv and electrochemistry.tsv (M3a), every row recomputed the same way: the weak acid / base
    charge-balance Newton transcribed (each row's noted exit path checked; CHARGE_BALANCE_REL_TOL must change some
    row when halved and when doubled; the 50-iteration cap is reported unobservable), ionic strength with Rust's
-   .sum() from -0.0, henderson_hasselbalch's log10 as glibc's e_log10.c composition over log (checked to be glibc's
-   log10 on every golden argument), STANDARD_POTENTIALS parsed from rust-old/src/electrochemistry.rs, and
+   .sum() from -0.0, STANDARD_POTENTIALS parsed from rust-old/src/electrochemistry.rs, and
    src/electrochemistry_data.cyr checked against the literal.
 11. kinetics.tsv (M3b), every row recomputed the same way (glibc's exp, expm1 and pow via Python's math;
    lineweaver_burk's tuple as two floats); Rust's LN_2 and private FIRST_ORDER_TOLERANCE (typed inline in
    src/kinetics.cyr) must each change some golden row when perturbed.
+12. The corrected oracle (ADR 0006). Every golden row whose replica calls a transcendental primitive (the
+   M2–M3b modules' rows; the math rows of the primitives themselves) is evaluated a second time with every
+   primitive result replaced by its correctly rounded value from MPFR, through the same transcribed code (so
+   a corrected result may take another branch, or turn Ok into Err). Where the corrected outputs differ from
+   the oracle's, the row gets a correction in tests/golden/<module>.cr.tsv, in golden-file order, with the
+   oracle's outputs and each call glibc misrounded in its note. This run fails when a .cr.tsv is missing,
+   stale or has an extra row; it recomputes every correction (the outputs through the replica, each listed
+   call against MPFR). Per-primitive counts of glibc's misroundings over every golden call are printed, and
+   glibc's cbrt (the oracle's is Rust's correctly rounded one) is measured on the golden cbrt arguments.
 Every function in every .tsv must have a rule here: a new one fails until it gets one.
+
+    python3 -I scripts/oracle/validate.py . --write-corrections
+
+writes the tests/golden/<module>.cr.tsv files (deterministic: one per module with at least one correction,
+rows in golden-file order; a module without corrections has none, and a stale file is removed), then runs
+every check. It refuses to write unless this machine is the corpus's recorded libm platform, since the notes
+hold glibc's results.
 
     python3 -I scripts/oracle/validate.py . --sensitivity
 
-also measures each M2a / M2b / M3a class-C function's sensitivity S (docs/development/port-parity.md, the rule
-for kimiya's own class-C functions, as ADR 0005 refines it): every golden row is re-evaluated with
-each primitive result that can differ between the port and the oracle nudged one ulp up and down,
-one call at a time, and S is the largest change of any output, in ulp. Those are the exp and
-pow(10, y) results (stdlib counterparts) and the cos, acos, ln and x^2.5 results where glibc is not
-correctly rounded (the port's are; the 60-digit references decide it per argument). A result that
-is 0, ±∞ or NaN, or acos(±1), is exact on both sides and is not nudged; a nudge that flips Ok/Err
-or the root count is reported as a branch flip. It prints S, c (the most such calls in one row)
-and K = 2·S·c + 2 per function. For the M3a functions whose primitive the remedy changed (henderson_hasselbalch,
-the Nernst functions) it also prints S "before", every result of the replaced stdlib-like primitive nudged. For each
-function whose K passes 64 (M3b: the six class-C kinetics functions, measured until ADR 0006) it lists the rows that
-put it there (how many nudge a subnormal exp / pow result, the worst three) and S over the other rows.
+also measures the conditioning of each class-C function (M2a–M3b) on its golden grid: every golden row is
+re-evaluated with each primitive result nudged one ulp up and down, one call at a time, and S is the largest
+change of any output, in ulp. A result that is 0, ±∞ or NaN, or acos(±1), is not nudged; a nudge that flips
+Ok/Err or the root count is reported as a branch flip. It prints S, c (the most nudged calls in one row), the
+retired rule's K = 2·S·c + 2 for comparison, and the calls where glibc's result is not correctly rounded (MPFR
+decides it): exactly the calls the corrected oracle changes. For each function whose K passes 64 it lists the
+rows that put it there (how many nudge a subnormal exp / pow result, the worst three) and S over the other rows.
+Since ADR 0006 (M3c-3) it is a diagnostic only: the port evaluates the oracle's operations with correctly rounded
+primitives, as the corrected oracle does, so every class-C row is gated at 0 ulp in tests/parity.tcyr whatever
+its S (port-parity.md §10; §5–§8 hold the bounds the rule set before).
+
+MPFR (libmpfr.so.6, 4.x) is the one system library this needs, through ctypes (scripts/oracle/mpfr_ref.py).
 """
-import math, platform, re, struct, sys
-from decimal import Decimal, localcontext, Overflow, Underflow, InvalidOperation
+import importlib.util, math, platform, re, struct, sys
 from fractions import Fraction
 from pathlib import Path
 
 root = Path(sys.argv[1])
 SENSITIVITY = "--sensitivity" in sys.argv[2:]
+WRITE_CORRECTIONS = "--write-corrections" in sys.argv[2:]
 gold = root / "tests/golden"
+
+# mpfr_ref.py sits beside this script; `-I` keeps the script's directory off sys.path, so load it by path
+# (and leave no __pycache__ behind).
+sys.dont_write_bytecode = True
+_mpfr_spec = importlib.util.spec_from_file_location("mpfr_ref", Path(__file__).resolve().parent / "mpfr_ref.py")
+MPFR = importlib.util.module_from_spec(_mpfr_spec)
+_mpfr_spec.loader.exec_module(MPFR)
 
 def b2f(b): return struct.unpack("<d", struct.pack("<Q", b))[0]
 def f2b(x): return struct.unpack("<Q", struct.pack("<d", x))[0]
@@ -121,6 +144,7 @@ def parse_tok(t, where):
     return (kind, val, None)
 
 NOTES = {}       # "<module>.tsv:<line>" -> the row's note (the flame rows' solver path, M2b)
+RAW = {}         # "<module>.tsv:<line>" -> the row's fn, inputs and outputs fields, verbatim (the .cr.tsv key, ADR 0006)
 def load(name):
     lines = (gold / f"{name}.tsv").read_text().split("\n")
     check(lines[-1] == "", f"{name}.tsv: no final newline")
@@ -147,10 +171,12 @@ def load(name):
         po = [] if outs == "-" else [parse_tok(t, where) for t in outs.split(" ")]
         out.append((fn, cls, pi, po, where))
         NOTES[where] = note
+        RAW[where] = (fn, ins, outs)
     check(head[4] == f"# rows: {len(out)}", f"{name}.tsv: header says {head[4]!r}, has {len(out)} rows")
     return out
 
-tsvs = sorted(p.stem for p in gold.glob("*.tsv"))
+CR_SUFFIX = ".cr.tsv"   # tests/golden/<module>.cr.tsv: the corrected oracle (ADR 0006, item 12), not a module
+tsvs = sorted(p.name[:-4] for p in gold.glob("*.tsv") if not p.name.endswith(CR_SUFFIX))
 index = [l for l in (gold / "modules.txt").read_text().splitlines() if l and not l.startswith("#")]
 check(index == tsvs, f"modules.txt lists {index}, tests/golden has {tsvs}")
 R = {name: load(name) for name in tsvs}
@@ -274,202 +300,50 @@ exact = {
     "f64::powi": lambda a: r_powi(*a),
 }
 
-# ── 5. math.tsv: class C against a correctly rounded decimal reference ──────────────
-def pi_dec(prec):
-    with localcontext() as ctx:  # the decimal module documentation's recipe
-        ctx.prec = prec + 2
-        three = Decimal(3)
-        lasts, t, s, k, na, d, da = 0, three, 3, 1, 0, 0, 24
-        while s != lasts:
-            lasts = s
-            k, na = k + na, na + 8
-            d, da = d + da, da + 32
-            t = (t * k) / d
-            s += t
-    with localcontext() as ctx:
-        ctx.prec = prec
-        return +s
+# ── 5. math.tsv: class C against MPFR (ADR 0006) ───────────────────────────────────────
+# The correctly rounded reference is MPFR (scripts/oracle/mpfr_ref.py): exact, so it decides exact ties and
+# subnormal results as IEEE round-to-nearest-even does, where a fixed-precision decimal reference misjudged ties
+# (port-parity.md §8). The C99 Annex F special cases are MPFR's too.
+def same_f(x, y):
+    """x and y are the same binary64 (any NaN is any NaN)."""
+    if math.isnan(x) or math.isnan(y): return math.isnan(x) and math.isnan(y)
+    return f2b(x) == f2b(y)
 
-PREC = 60
-PI = pi_dec(450)
-def prec_for(x):  # digits needed to reduce x by 2π and keep PREC significant digits
-    return PREC + max(0, int(abs(x)).bit_length() * 31 // 100 if math.isfinite(x) else 0) + 10
+_cr_vals = {}
+def cr_of(name, args):
+    """The correctly rounded binary64 value of MPFR's `name` at `args` (floats), cached by their bits."""
+    key = (name,) + tuple(f2b(x) for x in args)
+    v = _cr_vals.get(key)
+    if v is None:
+        v = MPFR.cr(name, args[0]) if len(args) == 1 else MPFR.cr2(name, args[0], args[1])
+        if name == "pow" and f2b(args[0]) == f2b(10.0):   # 10.0.powf(y) is pow(10, y), correctly rounded exp10(y)
+            check(same_f(v, MPFR.exp10(args[1])), f"MPFR: pow(10, {args[1]!r}) is not exp10")
+        _cr_vals[key] = v
+    return v
 
-def d_sin_cos(x):
-    """(sin x, cos x) as Decimals with PREC good digits (Taylor after reduction mod 2π)."""
-    with localcontext() as ctx:
-        ctx.prec = prec_for(x)
-        two_pi = 2 * PI
-        r = Decimal(x)
-        r = r - two_pi * (r / two_pi).to_integral_value()
-        ctx.prec = PREC + 10
-        r = +r
-        s, c, term_s, term_c, k = r, Decimal(1), r, Decimal(1), 0
-        r2 = r * r
-        while True:
-            k += 2
-            term_s = -term_s * r2 / (k * (k + 1))
-            term_c = -term_c * r2 / ((k - 1) * k)
-            if abs(term_s) < Decimal(10) ** (-(PREC + 20)) and abs(term_c) < Decimal(10) ** (-(PREC + 20)):
-                break
-            s += term_s
-            c += term_c
-        return s, c
+# The ADR 0006 corrections (item 12): module -> [(where, corrected output tokens, misrounded calls)], in golden
+# order. A misrounded call is (MPFR name, arguments, glibc's result, the correctly rounded result).
+CORRECTIONS = {}
+def add_correction(mod, where, ctoks, mis):
+    CORRECTIONS.setdefault(mod, []).append((where, ctoks, mis))
 
-def d_atan(z):
-    """atan of a Decimal z, PREC good digits."""
-    with localcontext() as ctx:
-        ctx.prec = PREC + 20
-        if z == 0: return Decimal(0)
-        if abs(z) > 1:
-            half = PI / 2 if z > 0 else -PI / 2
-            return half - d_atan(1 / z)
-        halvings = 0
-        while abs(z) > Decimal("0.05"):
-            z = z / (1 + (1 + z * z).sqrt())
-            halvings += 1
-        s, term, k, z2 = z, z, 1, z * z
-        while True:
-            term = -term * z2
-            k += 2
-            t = term / k
-            if abs(t) < Decimal(10) ** (-(PREC + 25)): break
-            s += t
-        return s * (2 ** halvings)
-
-def d_ln(x): return Decimal(x).ln()
-def d_exp_or_inf(z):
-    """exp of a Decimal, saturating far outside the double range."""
-    if z > 710: return math.inf
-    if z < -746: return 0.0
-    return z.exp()
-
-def to_double(d):
-    if isinstance(d, float): return d
-    return float(d)
-
-def ref_exp(x):
-    if math.isnan(x): return math.nan
-    if math.isinf(x): return math.inf if x > 0 else 0.0
-    with localcontext() as ctx:
-        ctx.prec = PREC
-        return to_double(d_exp_or_inf(Decimal(x)))
-
-def ref_expm1(x):
-    if math.isnan(x): return math.nan
-    if math.isinf(x): return math.inf if x > 0 else -1.0
-    if x == 0: return x
-    with localcontext() as ctx:
-        ctx.prec = PREC + 20
-        d = Decimal(x)
-        if abs(x) < 1e-3:  # the series keeps relative precision for tiny x
-            s, term, k = d, d, 1
-            while abs(term) > abs(s) * Decimal(10) ** (-(PREC + 10)):
-                k += 1
-                term = term * d / k
-                s += term
-            return to_double(s)
-        e = d_exp_or_inf(d)
-        return math.inf if e == math.inf else to_double(e - 1)
-
-def ref_log(x, base10):
-    if math.isnan(x) or x < 0: return math.nan
-    if x == 0: return -math.inf
-    if math.isinf(x): return math.inf
-    with localcontext() as ctx:
-        ctx.prec = PREC
-        return to_double(Decimal(x).log10() if base10 else Decimal(x).ln())
-
-def is_int(y): return math.isfinite(y) and y == math.floor(y)
-def is_odd_int(y): return is_int(y) and abs(y) < 2.0**53 and int(y) % 2 == 1
-
-def ref_pow(x, y):
-    """C99 Annex F.9.4.4, then a correctly rounded exp(y·ln|x|)."""
-    if y == 0: return 1.0
-    if x == 1: return 1.0
-    if math.isnan(x) or math.isnan(y): return math.nan
-    if x == 0:
-        neg = math.copysign(1.0, x) < 0 and is_odd_int(y)
-        if y < 0: return -math.inf if neg else math.inf
-        return -0.0 if neg else 0.0
-    if math.isinf(y):
-        if x == -1: return 1.0
-        if (abs(x) < 1) == (y < 0): return math.inf
-        return 0.0
-    if math.isinf(x):
-        if x > 0: return 0.0 if y < 0 else math.inf
-        odd = is_odd_int(y)
-        if y < 0: return -0.0 if odd else 0.0
-        return -math.inf if odd else math.inf
-    if x < 0 and not is_int(y): return math.nan
-    sign = -1.0 if x < 0 and is_odd_int(y) else 1.0
-    with localcontext() as ctx:
-        ctx.prec = PREC + 30
-        z = Decimal(y) * Decimal(abs(x)).ln()
-        e = d_exp_or_inf(z)
-        ctx.prec = PREC
-        return sign * to_double(+e if isinstance(e, Decimal) else e)
-
-def ref_sin(x):
-    if not math.isfinite(x): return math.nan
-    if x == 0: return x
-    with localcontext() as ctx:
-        ctx.prec = PREC
-        return to_double(+d_sin_cos(x)[0])
-
-def ref_cos(x):
-    if not math.isfinite(x): return math.nan
-    with localcontext() as ctx:
-        ctx.prec = PREC
-        return to_double(+d_sin_cos(x)[1])
-
-def ref_acos(x):
-    if math.isnan(x) or abs(x) > 1: return math.nan
-    if x == 1: return 0.0
-    with localcontext() as ctx:
-        ctx.prec = PREC + 20
-        if x == -1: r = PI
-        else:
-            d = Decimal(x)
-            r = PI / 2 - d_atan(d / (1 - d * d).sqrt())
-        ctx.prec = PREC
-        return to_double(+r)
-
-def ref_atan2(y, x):
-    """C99 Annex F.9.1.4, then the quadrant-corrected atan(y/x)."""
-    if math.isnan(x) or math.isnan(y): return math.nan
-    sy = -1 if math.copysign(1.0, y) < 0 else 1
-    with localcontext() as ctx:
-        ctx.prec = PREC + 20
-        if y == 0:
-            if math.copysign(1.0, x) < 0: r = sy * PI
-            else: return math.copysign(0.0, y)
-        elif math.isinf(y):
-            if math.isinf(x): r = sy * (3 * PI / 4 if x < 0 else PI / 4)
-            else: r = sy * PI / 2
-        elif x == 0: r = sy * PI / 2
-        elif math.isinf(x):
-            if x > 0: return math.copysign(0.0, y)
-            r = sy * PI
-        else:
-            r = d_atan(Decimal(y) / Decimal(x))
-            if x < 0: r = r + sy * PI
-        ctx.prec = PREC
-        return to_double(+r)
-
-transcendental = {
-    "f64::exp": (lambda a: ref_exp(a[0]), 1),
-    "f64::exp_m1": (lambda a: ref_expm1(a[0]), 1),
-    "f64::ln": (lambda a: ref_log(a[0], False), 1),
-    "f64::log10": (lambda a: ref_log(a[0], True), 2),
-    "f64::powf": (lambda a: ref_pow(a[0], a[1]), 1),
-    "f64::powf_base10": (lambda a: ref_pow(10.0, a[0]), 1),
-    "f64::powf_base2": (lambda a: ref_pow(2.0, a[0]), 1),
-    "f64::sin": (lambda a: ref_sin(a[0]), 1),
-    "f64::cos": (lambda a: ref_cos(a[0]), 1),
-    "f64::acos": (lambda a: ref_acos(a[0]), 1),
-    "f64::atan2": (lambda a: ref_atan2(a[0], a[1]), 1),
+# The math functions that are transcendental primitives: the MPFR function the oracle's call rounds, its
+# arguments from the row's inputs, and glibc's documented bound in ulp. powf_base10 is pow(10, y);
+# powf_base2 is glibc's exp2 (LLVM's rewrite of 2.0_f64.powf(y), README); atan2's inputs are (y, x).
+CR_MATH = {
+    "f64::exp": ("exp", lambda a: (a[0],), 1),
+    "f64::exp_m1": ("expm1", lambda a: (a[0],), 1),
+    "f64::ln": ("log", lambda a: (a[0],), 1),
+    "f64::log10": ("log10", lambda a: (a[0],), 2),
+    "f64::powf": ("pow", lambda a: (a[0], a[1]), 1),
+    "f64::powf_base10": ("pow", lambda a: (10.0, a[0]), 1),
+    "f64::powf_base2": ("exp2", lambda a: (a[0],), 1),
+    "f64::sin": ("sin", lambda a: (a[0],), 1),
+    "f64::cos": ("cos", lambda a: (a[0],), 1),
+    "f64::acos": ("acos", lambda a: (a[0],), 1),
+    "f64::atan2": ("atan2", lambda a: (a[0], a[1]), 1),
 }
+CBRT_ARGS = []   # every golden cbrt argument (math rows, the Peng–Robinson cubic): glibc's cbrt is measured on them
 
 hist = {}
 counts = {}
@@ -492,29 +366,30 @@ for fn, cls, ins, outs, where in R.get("math", []):
     elif fn == "f64::cbrt":
         check(cls == "A", f"{where}: {fn} class {cls}")
         check(cbrt_correctly_rounded(a[0], outs[0][1]), f"{where}: cbrt({a[0]!r}) = {outs[0][1]!r} is not correctly rounded")
-    elif fn in transcendental:
+        check(same_f(cr_of("cbrt", (a[0],)), outs[0][1]), f"{where}: cbrt({a[0]!r}) = {outs[0][1]!r} is not MPFR's")
+        CBRT_ARGS.append(a[0])
+    elif fn in CR_MATH:
         check(cls == "C", f"{where}: {fn} class {cls}")
-        ref, bound = transcendental[fn]
-        try:
-            want = ref(a)
-        except (Overflow, Underflow, InvalidOperation, ZeroDivisionError) as e:
-            check(False, f"{where}: reference failed: {e!r}")
-            continue
+        name, argf, bound = CR_MATH[fn]
+        args = argf(a)
+        want = cr_of(name, args)
         d = ulp_dist(outs[0][2], f2b(want))
         h = hist.setdefault(fn, {0: 0, 1: 0, 2: 0, "more": 0, "max": 0})
         h[d if d in (0, 1, 2) else "more"] += 1
         if d != math.inf: h["max"] = max(h["max"], d)
         check(d <= bound, f"{where}: {fn}{tuple(a)} = {outs[0][1]!r}, correctly rounded {want!r}: {d} ulp > {bound}")
+        if not same_f(outs[0][1], want):
+            add_correction("math", where, [("f", want, f2b(want))], [(name, args, outs[0][1], want)])
     else:
         unknown.add(fn)
 check(not unknown, f"math.tsv functions with no rule here: {sorted(unknown)}")
 print("math rows checked:", sum(counts.values()), "over", len(counts), "functions")
 for rule in sorted(minmax_zero_rule):
     print("  observed:", rule)
-print("glibc vs correctly rounded (decimal reference), ulp histogram:")
+print(f"glibc vs correctly rounded (MPFR {MPFR.VERSION}), ulp histogram:")
 for fn in sorted(hist):
     h = hist[fn]
-    print(f"  {fn:20} 0:{h[0]} 1:{h[1]} 2:{h[2]} more:{h['more']} max:{h['max']} (bound {transcendental[fn][1]})")
+    print(f"  {fn:20} 0:{h[0]} 1:{h[1]} 2:{h[2]} more:{h['more']} max:{h['max']} (bound {CR_MATH[fn][2]})")
 # ── 6. element.tsv against the Rust source literals ──────────────────────────────────
 esrc = (root / "rust-old/src/element.rs").read_text()
 def literal_blocks(name, struct):
@@ -672,6 +547,8 @@ def r_max(x, y):
 def cbrt_cr(x):
     """cbrt(x), correctly rounded (Rust's compiler-builtins cbrt is CORE-MATH)."""
     if math.isnan(x) or x == 0 or math.isinf(x): return x
+    if NUDGE[0] is None and not CORRECT[0]:
+        CBRT_ARGS.append(x)
     y = math.cbrt(x)           # glibc's cbrt is not correctly rounded (seen 2 ulp off): search out
     up = down = y
     for _ in range(16):
@@ -682,15 +559,24 @@ def cbrt_cr(x):
 
 # The class-C primitives (glibc through Python's math). Each call is counted and logged (its kind,
 # arguments and result), and the call NUDGE[0] gets its result moved one ulp in direction NUDGE[1]
-# (the sensitivity mode). The kinds name the port's counterpart: "exp" (f64_exp) and "pow10"
-# (ganita_f64_pow(10, y)) can differ from glibc on any argument; "cos", "acos", "ln" and "pow25"
-# are the port's correctly rounded _km_cos / _km_acos / _km_ln / _km_pow_2_5 (ADR 0005).
+# (the sensitivity mode). The kinds name the port's correctly rounded counterpart (ADR 0006, M3c-3): "exp"
+# _km_cr_exp, "expm1" _km_cr_expm1, "ln" _km_cr_ln, "log10" _km_cr_log10, "pow" _km_cr_pow, "pow10"
+# _km_cr_exp10 (= a correctly rounded pow(10, y)), "pow25" _km_cr_pow(x, 2.5), "cos" _km_cos (correctly
+# rounded for |x| ≤ 8, which every Peng–Robinson argument is) and "acos" _km_acos.
+# With CORRECT[0] set (the corrected oracle, ADR 0006), every result is replaced by its correctly rounded
+# value from MPFR before it is logged or used. cbrt is not logged: the oracle's (Rust's) is correctly rounded.
 CALLS = [0]
 NUDGE = [None]
+CORRECT = [False]
 CALL_LOG = []
+# The MPFR function each kind rounds; pow10's arguments are (10.0, y) and pow25's (x, 2.5).
+KIND_MPFR = {"exp": "exp", "expm1": "expm1", "ln": "log", "log10": "log10", "pow": "pow", "pow10": "pow",
+             "pow25": "pow", "cos": "cos", "acos": "acos"}
 def _prim(y, kind, args):
     k = CALLS[0]
     CALLS[0] += 1
+    if CORRECT[0]:
+        y = cr_of(KIND_MPFR[kind], args)
     CALL_LOG.append((kind, args, y))
     if NUDGE[0] is not None and NUDGE[0][0] == k and math.isfinite(y) and y != 0:
         return math.nextafter(y, math.inf if NUDGE[0][1] > 0 else -math.inf)
@@ -716,25 +602,16 @@ def p_cos(x):
     if not math.isfinite(x): return _prim(math.nan, "cos", (x,))
     return _prim(math.cos(x), "cos", (x,))
 
-# ADR 0005: which logged calls can give a different result in the port than in the oracle.
-# A result that is 0, ±∞ or NaN is exact on both sides, as is acos(±1) (0 and π rounded, by C99
-# and in ganita). exp, pow(10, y) and any other pow keep a stdlib counterpart, so any other result
-# can differ. The correctly rounded four differ exactly where glibc's result is not correctly
-# rounded (decided with the 60-digit references of section 5; cos only for |x| ≤ 8, its CR domain).
-_CR_REF = {"cos": lambda a: ref_cos(a[0]), "acos": lambda a: ref_acos(a[0]),
-           "ln": lambda a: ref_log(a[0], False), "pow25": lambda a: ref_pow(a[0], 2.5)}
-_cr_cache = {}
+# The sensitivity mode's nudges (a diagnostic of conditioning since ADR 0006): every logged result but one that is
+# 0, ±∞ or NaN, or acos(±1) (0 and π rounded, by C99 and in the port). The port's primitives are all correctly
+# rounded, so its result differs from the oracle's exactly where glibc's is not correctly rounded (MPFR decides;
+# glibc_not_cr), and from the corrected oracle's nowhere.
 def glibc_not_cr(kind, args, y):
-    key = (kind, args)
-    if key not in _cr_cache:
-        _cr_cache[key] = f2b(_CR_REF[kind](args)) != f2b(y)
-    return _cr_cache[key]
-def may_differ(kind, args, y):
+    return not same_f(cr_of(KIND_MPFR[kind], args), y)
+def nudged(kind, args, y):
     if not math.isfinite(y) or y == 0: return False
     if kind == "acos" and abs(args[0]) == 1.0: return False
-    if kind in ("exp", "pow10", "pow", "log10", "expm1"): return True   # stdlib-like counterparts (log10: _km_log10, expm1: _km_expm1)
-    if kind == "cos" and abs(args[0]) > 8.0: return True
-    return glibc_not_cr(kind, args, y)
+    return True
 
 R_GAS = b2f(golden_consts["element::GAS_CONSTANT"])
 TAU = 2 * math.pi              # std::f64::consts::TAU (doubling is exact)
@@ -1132,34 +1009,10 @@ def shomate_rule(fn):
 # solution.rs (M3a)
 KW = b2f(golden_consts["solution::KW_WATER_25C"])
 def p_log10(x):
-    """log10 as the port's _km_log10 (fdlibm) meets it: a stdlib-like counterpart, so any result may differ."""
+    """glibc's log10 (Python's math); the port's is the correctly rounded _km_cr_log10, the corrected oracle's."""
     if math.isnan(x) or x < 0: return _prim(math.nan, "log10", (x,))
     if x == 0: return _prim(-math.inf, "log10", (x,))
     return _prim(math.log10(x), "log10", (x,))
-IVLN10, L10_2HI, L10_2LO = b2f(0x3FDBCB7B1526E50E), b2f(0x3FD34413509F6000), b2f(0x3D59FEF311F12B36)
-LOG10_LN = {"calls": 0, "glibc": 0}
-def p_log10_ln(x0):
-    """henderson_hasselbalch's log10 (_km_log10_ln, ADR 0005 amendment M3a): glibc 2.44's e_log10.c composition
-    log10(x) = (y·log10_2lo + ivln10·ln x′) + y·log10_2hi over ln (the port's correctly rounded _km_ln, logged as
-    an "ln" primitive call). Un-nudged, it must be glibc's log10 bit for bit (checked on every call)."""
-    if math.isnan(x0) or x0 < 0: return math.nan
-    if x0 == 0: return -math.inf
-    if math.isinf(x0): return x0
-    x, k, u = x0, 0, f2b(x0)
-    if u >> 52 == 0:
-        x, k = x * 2.0 ** 54, -54
-        u = f2b(x)
-    hx = u >> 32
-    k += (hx >> 20) - 1023
-    i = 1 if k < 0 else 0
-    hx = (hx & 0xFFFFF) | ((0x3FF - i) << 20)
-    y = float(k + i)
-    xr = b2f((hx << 32) | (u & 0xFFFFFFFF))
-    r = (y * L10_2LO + IVLN10 * p_ln(xr)) + y * L10_2HI
-    if NUDGE[0] is None:
-        LOG10_LN["calls"] += 1
-        LOG10_LN["glibc"] += f2b(r) == f2b(math.log10(x0))
-    return r
 def r_molarity(n, v):
     if not is_positive(v): return Err("InvalidInput")
     if not is_finite(n): return Err("InvalidInput")
@@ -1171,10 +1024,10 @@ def r_dilution(m1, v1, v2):
 def r_ph_h(h):
     if not is_positive(h): return Err("InvalidConcentration")
     return -p_log10(h)
-def r_hh(pka, base, acid, log10=None):
+def r_hh(pka, base, acid):
     if not is_positive(acid) or not is_positive(base): return Err("InvalidConcentration")
     if not is_finite(pka): return Err("InvalidInput")
-    return pka + (log10 or p_log10_ln)(dv(base, acid))
+    return pka + p_log10(dv(base, acid))
 ROOT_PATH = [None]
 def r_root(k, c, tol=1e-12, max_iter=50):
     """Rust's private charge_balance_root and checked_root, transcribed; ROOT_PATH[0] is the note's path."""
@@ -1291,7 +1144,7 @@ LN2 = b2f(0x3FE62E42FEFA39EF)        # std::f64::consts::LN_2, typed inline in s
 BOLTZMANN = b2f(golden_consts["kinetics::BOLTZMANN"])
 PLANCK = b2f(golden_consts["spectroscopy::PLANCK"])
 def p_expm1(x):
-    """exp_m1 as the port's _km_expm1 (fdlibm) meets it: a stdlib-like counterpart, so any result may differ."""
+    """glibc's expm1 (Python's math); the port's is the correctly rounded _km_cr_expm1, the corrected oracle's."""
     if math.isnan(x): return _prim(x, "expm1", (x,))
     try: return _prim(math.expm1(x), "expm1", (x,))
     except OverflowError: return _prim(math.inf, "expm1", (x,))
@@ -1447,11 +1300,6 @@ RULES = {
     "kinetics::eyring_rate": ("C", lambda a: r_eyring(*fl(a))),
     "kinetics::eyring_rate_from_activation": ("C", lambda a: r_eyring_act(*fl(a))),
 }
-# S "before" (port-parity.md §7): the function with the stdlib-like primitive the remedy replaced, every result
-# of it nudged — henderson_hasselbalch through _km_log10 (fdlibm), the Nernst functions through f64_ln.
-RULES_BEFORE = {
-    "solution::henderson_hasselbalch": lambda a: r_hh(*fl(a), log10=p_log10),
-}
 TABLE_RULES = {}
 for name, v in PRESETS.items():
     TABLE_RULES[f"gas::{name}"] = [("f", x, f2b(x)) for x in v]
@@ -1487,12 +1335,50 @@ def nudge_s(fn, rule, ins, want, a, md, log):
     NUDGE[0] = None
     return S, flips, worst
 
-# The functions whose S is also measured with the stdlib-like primitive the M3a remedy replaced (RULES_BEFORE).
-BEFORE_FNS = {"solution::henderson_hasselbalch", "electrochemistry::nernst_potential",
-              "electrochemistry::nernst_potential_25c"}
-sens_before = {}  # fn -> [S, branch flips, worst row, c]
 root_paths = {}   # weak acid / base Newton exits, recomputed
 root_iters = [0, 0]  # the most iterations entered, the most updates
+
+# ADR 0006: the corrected oracle of one row, and the tallies of glibc's misroundings over the golden calls.
+PRIM_CALLS = {}      # kind -> [calls, misrounded calls, {arguments}, {misrounded arguments}, max ulp]
+CORR_FLIPS = {}      # fn -> corrected rows whose outputs change shape (Ok <-> Err, an Err variant, the root count)
+CORR_ABSORBED = {}   # fn -> rows with a misrounded call whose outputs don't change
+def misrounded(log):
+    """The calls of a row's log, (kind, args, glibc's result), whose result is not correctly rounded: each distinct
+    call once, in call order, as (MPFR name, args, glibc's result, the correctly rounded result)."""
+    out, seen = [], set()
+    for kind, args, y in log:
+        name = KIND_MPFR[kind]
+        cr = cr_of(name, args)
+        key = (name,) + tuple(f2b(x) for x in args)
+        st = PRIM_CALLS.setdefault(kind, [0, 0, set(), set(), 0])
+        st[0] += 1
+        st[2].add(key)
+        if same_f(y, cr):
+            continue
+        st[1] += 1
+        st[3].add(key)
+        st[4] = max(st[4], ulp_dist(f2b(y), f2b(cr)))
+        if key not in seen:
+            seen.add(key)
+            out.append((name, args, y, cr))
+    return out
+def corrected_row(mod, fn, rule, ins, outs, where, log):
+    """Evaluates the row's replica again with every primitive result correctly rounded (MPFR), down whatever branch
+    that takes, and records a correction where the outputs differ from the oracle's."""
+    mis = misrounded(log)
+    CALLS[0] = 0
+    CALL_LOG.clear()
+    CORRECT[0] = True
+    try:
+        ctoks = out_toks(rule(ins))
+    finally:
+        CORRECT[0] = False
+    if toks_equal(ctoks, outs):
+        if mis: CORR_ABSORBED[fn] = CORR_ABSORBED.get(fn, 0) + 1
+        return
+    check(mis or not LIBM_EXACT, f"{where}: the corrected outputs differ, but glibc rounded every call correctly")
+    if not toks_shape(ctoks, outs): CORR_FLIPS[fn] = CORR_FLIPS.get(fn, 0) + 1
+    add_correction(mod, where, ctoks, mis)
 
 m2a_counts = {}
 shape_only = 0
@@ -1584,29 +1470,19 @@ for mod in ("reaction", "thermo", "phase", "gas", "thermochem", "solution", "ele
                 ups = int(re.search(r"(\d+) (?:updates|iterations)", path).group(1))
                 root_iters[0] = max(root_iters[0], ups if "relative step" in path else ups + 1)
                 root_iters[1] = max(root_iters[1], ups)
+        if log:
+            corrected_row(mod, fn, rule, ins, outs, where, log)
         if SENSITIVITY and cls == "C" and ncalls > 0:
             st = sens.setdefault(fn, [0, 0, 0, None, 0, 0])
             st[1] += 1
-            md = [k for k, (kind, args, y) in enumerate(log) if may_differ(kind, args, y)]
+            md = [k for k, (kind, args, y) in enumerate(log) if nudged(kind, args, y)]
             st[4] = max(st[4], len(md))
-            st[5] += sum(1 for k in md if log[k][0] in _CR_REF)
+            st[5] += sum(1 for kind, args, y in log if glibc_not_cr(kind, args, y))
             S, flips, worst = nudge_s(fn, rule, ins, want, a, md, log)
             sub = any(0 < abs(log[k][2]) < 2.0 ** -1022 for k in md)
             sens_rows.setdefault(fn, []).append((S, flips, sub, tuple(a)))
             st[2] += flips
             if S > st[0]: st[0], st[3] = S, worst
-            if fn in BEFORE_FNS:
-                rb = RULES_BEFORE.get(fn, rule)
-                CALLS[0] = 0
-                CALL_LOG.clear()
-                rb(ins)
-                logb = list(CALL_LOG)
-                mdb = [k for k, (kind, args, y) in enumerate(logb) if math.isfinite(y) and y != 0]
-                sb = sens_before.setdefault(fn, [0, 0, None, 0])
-                Sb, fb, wb = nudge_s(fn, rb, ins, want, a, mdb, logb)
-                sb[1] += fb
-                sb[3] = max(sb[3], len(mdb))
-                if Sb > sb[0]: sb[0], sb[2] = Sb, wb
 known = set(RULES) | set(TABLE_RULES) | {"phase::ANTOINE_DATA[]", "phase::lookup_antoine",
     "thermochem::THERMOCHEM_DATA[]", "thermochem::SHOMATE_DATA[]", "thermochem::lookup_thermochem",
     "thermochem::lookup_shomate", "thermochem::lookup_shomate_at", "electrochemistry::STANDARD_POTENTIALS[]",
@@ -1660,11 +1536,6 @@ for label, kw in (("CHARGE_BALANCE_REL_TOL × 0.5", {"tol": 5e-13}), ("CHARGE_BA
         check(changed == 0, f"solution: {label} changes rows: the cap is observable")
 print(f"  CHARGE_BALANCE_MAX_ITER = 50 is not observable on the corpus (no row enters more than {root_iters[0]} "
       f"iterations); tests/solution.tcyr covers it on the private helper as far as an input can reach")
-check(LOG10_LN["calls"] > 0 and LOG10_LN["glibc"] == LOG10_LN["calls"],
-      f"henderson_hasselbalch: glibc's log10 is the e_log10.c composition over log on {LOG10_LN['glibc']} of "
-      f"{LOG10_LN['calls']} golden arguments")
-print(f"  henderson_hasselbalch: glibc's log10 = (y·log10_2lo + ivln10·log x′) + y·log10_2hi, bit for bit, on all "
-      f"{LOG10_LN['calls']} golden arguments")
 
 # kinetics (M3b): Rust's std::f64::consts::LN_2 and private FIRST_ORDER_TOLERANCE (1e-12) are typed inline in
 # src/kinetics.cyr: each must change some golden row (its bits or Ok/Err) when perturbed, so the corpus pins it.
@@ -1771,15 +1642,172 @@ check(len(re.findall(r"CRC Handbook, Electrochemical Series", etext)) == 2 and
       f"{rel_e}: the literal's two CRC Handbook notes are not carried over")
 print(f"{rel_e} checked against electrochemistry.rs (49 rows: a UTF-8 equation blob, a couple blob, electrons, E°)")
 
+# ── 12. ADR 0006: the corrected oracle, tests/golden/<module>.cr.tsv ─────────────────────
+def tok_text(t):
+    k, v, b = t
+    if k == "f": return f"f:{b:016x}"
+    if k in ("i", "v"): return f"{k}:{v}"
+    if k == "E": return f"E:{v}"
+    raise ValueError(f"no corrected-output token for {t!r}")
+def toks_text(ts): return " ".join(tok_text(t) for t in ts) if ts else "-"
+def fbits(x): return f"f:{f2b(x):016x}"
+def call_text(c):
+    name, args, g, cr = c
+    return f"{name}({', '.join(fbits(x) for x in args)}) glibc {fbits(g)} correctly rounded {fbits(cr)}"
+def cr_header(mod):
+    """The five header lines of <mod>.cr.tsv, in the golden files' style; the provenance is the golden file's."""
+    prov = (gold / f"{mod}.tsv").read_text().split("\n", 2)[1].split(". Generated by", 1)[0]
+    rows = len(CORRECTIONS.get(mod, []))
+    return [f"# kimiya corrected oracle (ADR 0006), format 1: {mod}",
+            f"{prov}. Correctly rounded: MPFR {MPFR.VERSION}. Generated by scripts/oracle/validate.py; do not edit.",
+            "# regenerate: python3 -I scripts/oracle/validate.py . --write-corrections",
+            "# columns: fn<TAB>inputs<TAB>outputs<TAB>note (fn, inputs: the golden row's, byte for byte; outputs: "
+            "the oracle's operations with every primitive result correctly rounded; note: the oracle's outputs, then "
+            "each call glibc misrounded)",
+            f"# rows: {rows}"]
+def cr_rows(mod):
+    rows = []
+    for where, ctoks, mis in CORRECTIONS.get(mod, []):
+        fn_t, ins_t, outs_t = RAW[where]
+        rows.append((fn_t, ins_t, toks_text(ctoks), "; ".join([f"oracle {outs_t}"] + [call_text(c) for c in mis])))
+    return rows
+def cr_text(mod):
+    return "\n".join(cr_header(mod) + ["\t".join(r) for r in cr_rows(mod)]) + "\n"
+
+# The serializer writes the generator's tokens: every golden output field that gets a correction is rewritten
+# from its parsed tokens, byte for byte.
+for mod in CORRECTIONS:
+    by_where = {w: o for f_, c_, i_, o, w in R[mod]}
+    for where, ctoks, mis in CORRECTIONS[mod]:
+        check(toks_text(by_where[where]) == RAW[where][2], f"{where}: the outputs don't re-serialize as written")
+
+GLIBC_OF = {"exp": math.exp, "expm1": math.expm1, "log": math.log, "log10": math.log10, "pow": math.pow,
+            "cos": math.cos, "sin": math.sin, "acos": math.acos, "atan2": math.atan2, "exp2": math.exp2}
+CR_CALL = re.compile(r"(\w+)\((f:[0-9a-f]{16}(?:, f:[0-9a-f]{16})?)\) glibc f:([0-9a-f]{16}) correctly rounded "
+                     r"f:([0-9a-f]{16})")
+def check_listed_call(rel, k, text):
+    """One call a note lists, against MPFR directly (not the replica): its correctly rounded value is MPFR's, glibc's
+    differs from it, and (on the recorded platform) glibc's is this machine's libm result."""
+    m = CR_CALL.fullmatch(text)
+    check(m is not None and m.group(1) in GLIBC_OF, f"{rel}:{k}: malformed call {text!r}")
+    if m is None or m.group(1) not in GLIBC_OF: return
+    name = m.group(1)
+    args = tuple(b2f(int(x[2:], 16)) for x in m.group(2).split(", "))
+    g, cr = b2f(int(m.group(3), 16)), b2f(int(m.group(4), 16))
+    want = MPFR.cr(name, args[0]) if len(args) == 1 else MPFR.cr2(name, args[0], args[1])
+    check(same_f(cr, want), f"{rel}:{k}: {name}{args} correctly rounded is {want!r}, the note says {cr!r}")
+    check(not same_f(g, cr), f"{rel}:{k}: {name}{args}: glibc's result is correctly rounded")
+    if LIBM_EXACT:
+        try: lib = GLIBC_OF[name](*args)
+        except (OverflowError, ValueError): lib = None
+        check(lib is not None and same_f(g, lib), f"{rel}:{k}: {name}{args}: glibc gives {lib!r}, the note says {g!r}")
+
+cr_on_disk = sorted(p.name[:-len(CR_SUFFIX)] for p in gold.glob("*" + CR_SUFFIX))
+if WRITE_CORRECTIONS:
+    check(LIBM_EXACT, f"--write-corrections: this machine ({running_platform()}) is not the corpus's libm platform "
+                      f"({recorded_platform('gas')}); the notes hold glibc's results, so nothing is written")
+    if LIBM_EXACT:
+        for mod in tsvs:
+            path = gold / f"{mod}{CR_SUFFIX}"
+            if CORRECTIONS.get(mod):
+                path.write_text(cr_text(mod))
+                print(f"wrote tests/golden/{mod}{CR_SUFFIX}: {len(CORRECTIONS[mod])} rows")
+            elif path.exists():
+                path.unlink()
+                print(f"removed tests/golden/{mod}{CR_SUFFIX}: no row to correct")
+        cr_on_disk = sorted(p.name[:-len(CR_SUFFIX)] for p in gold.glob("*" + CR_SUFFIX))
+for mod in cr_on_disk:
+    check(mod in tsvs, f"tests/golden/{mod}{CR_SUFFIX}: no golden module {mod}")
+for mod in sorted(set(CORRECTIONS) | set(m for m in cr_on_disk if m in tsvs)):
+    rel = f"tests/golden/{mod}{CR_SUFFIX}"
+    want_rows = cr_rows(mod)
+    path = gold / f"{mod}{CR_SUFFIX}"
+    if not path.exists():
+        check(False, f"{rel}: missing; {len(want_rows)} rows need a correction (run with --write-corrections)")
+        continue
+    check(want_rows, f"{rel}: stale: no {mod} row needs a correction")
+    text = path.read_text()
+    lines = text.split("\n")
+    check(lines[-1] == "", f"{rel}: no final newline")
+    lines = lines[:-1]
+    head, want_head = lines[:5], cr_header(mod)
+    for k in range(5):
+        if k == 1 and not LIBM_EXACT: continue
+        check(k < len(head) and head[k] == want_head[k], f"{rel}: header line {k + 1} is "
+              f"{head[k] if k < len(head) else None!r}, want {want_head[k]!r}")
+    got_rows = []
+    for k, line in enumerate(lines[5:], 6):
+        if line.startswith("#"): continue
+        cols = tuple(line.split("\t"))
+        check(len(cols) == 4, f"{rel}:{k}: {len(cols)} fields")
+        if len(cols) == 4: got_rows.append((k, cols))
+    golden = {}
+    for f_, c_, i_, o_, w in R[mod]:
+        golden.setdefault(RAW[w][:2], RAW[w][2])
+    want_by = {}
+    for r in want_rows: want_by.setdefault(r[:2], []).append(r)
+    got_by = {}
+    for k, r in got_rows: got_by.setdefault(r[:2], []).append((k, r))
+    for key, rs in got_by.items():
+        for k, r in rs[len(want_by.get(key, [])):]:
+            why = "no golden row has this fn and inputs" if key not in golden else "the oracle's outputs need no correction"
+            check(False, f"{rel}:{k}: extra row ({why}): {r[0]} {r[1]}")
+    for key, rs in want_by.items():
+        have = got_by.get(key, [])
+        for r in rs[len(have):]:
+            check(False, f"{rel}: missing row: {r[0]} {r[1]} -> {r[2]}")
+        for (k, g), w in zip(have, rs):
+            check(g[2] == w[2], f"{rel}:{k}: stale outputs {g[2]!r}, the corrected oracle gives {w[2]!r}")
+            if LIBM_EXACT:
+                check(g[3] == w[3], f"{rel}:{k}: stale note {g[3]!r}, want {w[3]!r}")
+    check([r[:2] for k, r in got_rows] == [r[:2] for r in want_rows] or len(got_rows) != len(want_rows),
+          f"{rel}: rows are not in golden-file order")
+    for k, r in got_rows:
+        parts = r[3].split("; ")
+        check(parts[0] == f"oracle {golden.get(r[:2])}", f"{rel}:{k}: the note's oracle outputs {parts[0]!r} are not the golden row's")
+        check(len(parts) > 1, f"{rel}:{k}: the note lists no misrounded call")
+        for call in parts[1:]:
+            check_listed_call(rel, k, call)
+    if LIBM_EXACT:
+        check(text == cr_text(mod), f"{rel}: differs from the corrected oracle (regenerate with --write-corrections)")
+    print(f"{rel}: {len(got_rows)} rows checked against the corrected oracle (recomputed) and MPFR (each listed call)")
+
+# The report: corrected rows per module and function, the calls glibc misrounds, glibc's cbrt.
+print(f"ADR 0006 corrected oracle (MPFR {MPFR.VERSION}): rows whose outputs change when every primitive result is "
+      f"correctly rounded")
+for mod in sorted(CORRECTIONS):
+    per = {}
+    for where, ctoks, mis in CORRECTIONS[mod]:
+        per[RAW[where][0]] = per.get(RAW[where][0], 0) + 1
+    print(f"  {mod}: {len(CORRECTIONS[mod])} rows")
+    for fn in sorted(per):
+        extra = f" ({CORR_FLIPS[fn]} change shape: Ok <-> Err, the Err, or the root count)" if CORR_FLIPS.get(fn) else ""
+        print(f"    {fn:44} {per[fn]}{extra}")
+if CORR_ABSORBED:
+    print("  rows with a misrounded call whose outputs don't change: "
+          + ", ".join(f"{fn} {n}" for fn, n in sorted(CORR_ABSORBED.items())))
+print("glibc vs correctly rounded over the M2–M3b replicas' golden calls (the math rows are above):")
+for kind in sorted(PRIM_CALLS):
+    c, m_, args, margs, mx = PRIM_CALLS[kind]
+    print(f"  {kind:6} {c} calls ({len(args)} distinct arguments): {m_} misrounded ({len(margs)} distinct), max {mx} ulp")
+cb = {f2b(x): x for x in CBRT_ARGS}
+cb_or = sum(1 for x in cb.values() if not same_f(cbrt_cr(x), cr_of("cbrt", (x,))))
+cb_gl = [x for x in cb.values() if not same_f(math.cbrt(x), cr_of("cbrt", (x,)))]
+check(cb_or == 0, f"cbrt: the oracle's (Rust's) cbrt is not MPFR's on {cb_or} golden arguments")
+print(f"  cbrt: the oracle's (Rust's compiler-builtins) is correctly rounded on all {len(cb)} distinct golden arguments "
+      f"(math rows and the Peng–Robinson cubic); glibc's own cbrt (not the oracle's) misrounds {len(cb_gl)} of them"
+      + (f", max {max(ulp_dist(f2b(math.cbrt(x)), f2b(cr_of('cbrt', (x,)))) for x in cb_gl)} ulp" if cb_gl else ""))
+
 if SENSITIVITY:
-    print("sensitivity (ADR 0005): S = the largest output change, in ulp, from a 1-ulp nudge of one primitive")
-    print("result that can differ between port and oracle; c = the most such calls in one row; K = 2·S·c + 2")
+    print("sensitivity, a diagnostic of conditioning (ADR 0006): S = the largest output change, in ulp, from a 1-ulp")
+    print("nudge of one primitive result; c = the most nudged calls in one row; K = 2·S·c + 2 is the retired rule's")
+    print("bound, for comparison (the gate is 0 ulp against the corrected oracle, port-parity.md §10)")
     for fn in sorted(sens):
         S, rows, flips, worst, calls, crcalls = sens[fn]
         print(f"  {fn:40} S = {S:<3} c = {calls}  K = {2 * S * calls + 2:<4} ({rows} rows; {crcalls} calls where "
               f"glibc is not correctly rounded; {flips} branch flips) worst: {worst}")
-    print("functions past K = 64 (M3b: left measured, not gated): the rows whose own S puts K past 64 (or flips a")
-    print("branch), how many of them nudge a subnormal primitive result, and S over the other rows:")
+    print("ill-conditioned on their grids (K past 64; gated exactly since M3c-3): the rows whose own S puts K past 64")
+    print("(or flips a branch), how many of them nudge a subnormal primitive result, and S over the other rows:")
     for fn in sorted(sens):
         S, rows, flips, worst, calls, crcalls = sens[fn]
         if 2 * S * calls + 2 <= 64 and flips == 0:
@@ -1795,11 +1823,6 @@ if SENSITIVITY:
               f"flip = {snorm} (K = {2 * snorm * calls + 2})")
         for r in sorted(over, key=lambda r: -r[0])[:3]:
             print(f"      e.g. {fn}{r[3]}: S = {r[0]}")
-    print("before the M3a remedy (every result of the stdlib-like primitive nudged: _km_log10 for")
-    print("henderson_hasselbalch, f64_ln for the Nernst functions):")
-    for fn in sorted(sens_before):
-        S, flips, worst, calls = sens_before[fn]
-        print(f"  {fn:40} S = {S:<20} c = {calls}  K = {2 * S * calls + 2} ({flips} branch flips) worst: {worst}")
 
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

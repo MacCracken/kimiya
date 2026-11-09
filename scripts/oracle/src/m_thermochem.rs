@@ -30,7 +30,8 @@
 //!     underflows; large ones: |f| can't get below the 10⁻³ J/mol tolerance, so the bisection
 //!     fallback answers); and every Err path in Rust's check order.
 //! - Class C: `vant_hoff_k` (one `exp`): each argument over the edges, the Rust tests' values, exp's
-//!   overflow and underflow, and a seeded sweep.
+//!   overflow and underflow, and a seeded sweep; and (ADR 0006 item 6, M3c-3) the hard rows where the exp
+//!   result is subnormal and K₁ scales it back into the normal range, hand-picked and seeded.
 //!
 //! **Solver paths.** `flame_replica` re-implements the flame solver from the public API (`SHOMATE_DATA`,
 //! `Shomate::cp`, `Shomate::enthalpy_antiderivative`, and hisab 1.4.0's `newton_raphson` and `bisection`
@@ -40,10 +41,11 @@
 
 use std::hint::black_box as bb;
 
-use crate::grids::{Rng, specials};
+use crate::grids::{EXP_SUBNORMAL_X, Rng, specials, subnormal_prefactors};
 use crate::m_reaction::{edges, res};
 use crate::t_thermochem::shomate_fields;
 use crate::tsv::{Class, Module, Tok, f, i, s};
+use kimiya::element::GAS_CONSTANT;
 use kimiya::error::KimiyaError;
 use kimiya::thermochem::{
     SHOMATE_DATA, Shomate, THERMOCHEM_DATA, adiabatic_flame_temperature, enthalpy_change_cp,
@@ -599,6 +601,25 @@ pub fn emit() -> Module {
         let t1 = rng.uniform(100.0, 2000.0);
         let t2 = rng.uniform(100.0, 2000.0);
         vh(&mut m, k, dh, t1, t2);
+    }
+    // ADR 0006's hard rows (M3c-3): the exponent −(ΔH/R)(1/T₂ − 1/T₁) placed on subnormal-exp targets x
+    // (ΔH = −x·R/(1/T₂ − 1/T₁)) and K₁ scaling e^x back into the normal range. With the stdlib's exp these rows
+    // were up to 12 ulp from the oracle on x86_64 (M3b); only a correctly rounded exp matches the corrected oracle.
+    let (t1, t2) = (300.0, 299.0);
+    let d = 1.0 / t2 - 1.0 / t1;
+    for k in subnormal_prefactors() {
+        for x in EXP_SUBNORMAL_X {
+            vh(&mut m, k, -x * GAS_CONSTANT / d, t1, t2);
+        }
+    }
+    let mut hard = Rng::new(0x3c3c);
+    for _ in 0..300 {
+        let x = hard.uniform(-745.2, -708.0);
+        let k = hard.log_uniform(200.0, 308.0);
+        let t1 = hard.uniform(100.0, 2000.0);
+        let t2 = hard.uniform(100.0, 2000.0);
+        let d = 1.0 / t2 - 1.0 / t1;
+        vh(&mut m, k, -x * GAS_CONSTANT / d, t1, t2);
     }
 
     // ── enthalpy_change_cp ──

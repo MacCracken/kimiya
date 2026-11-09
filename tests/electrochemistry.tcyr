@@ -8,6 +8,7 @@
 include "tests/ulp.cyr"
 include "src/error.cyr"
 include "src/constants.cyr"
+include "src/mathx_data.cyr"
 include "src/mathx.cyr"
 include "src/validate.cyr"
 include "src/electrochemistry_data.cyr"
@@ -444,18 +445,19 @@ fn _t_cyrius_u8_electrons() {
     assert(is_err_code(t10, v10, KM_ERR_INVALID_INPUT) == 1, "n is checked first");
 }
 
-# The Nernst equation's ln is the correctly rounded _km_ln (ADR 0005, amendment M3a): E° − (RT/nF)·ln Q cancels
-# where E° ≈ (RT/nF)·ln Q. On this golden near-cancellation row the oracle's E is exactly 0; with the aarch64
-# f64_ln polyfill the same expression is 2⁶² ulp away (port-parity.md §7). The 25 °C variant is T = 298.15.
+# The Nernst equation's ln is the correctly rounded _km_cr_ln (ADR 0006; ADR 0005's _km_ln before M3c-3):
+# E° − (RT/nF)·ln Q cancels where E° ≈ (RT/nF)·ln Q. On this golden near-cancellation row the oracle's E is exactly
+# 0; with the aarch64 f64_ln polyfill the same expression is 2⁶² ulp away (port-parity.md §7). The 25 °C variant is
+# T = 298.15.
 fn _t_cyrius_nernst_ln() {
     test_group("cyrius_nernst_ln");
     var t, v = nernst_potential(0.029130260074714004, 2, 493.35359500187104, 3.936873243672229);
-    assert(is_ok(t) == 1 && _km_bits(v) == 0, "E = +0.0, the oracle's");
+    assert(is_ok(t) == 1 && _km_bits(v) == 0, "E = +0.0, the oracle's (glibc's ln is correctly rounded here)");
     var r: f64 = KM_GAS_CONSTANT;
     var f: f64 = KM_FARADAY;
     var q: f64 = 0.1;
     var factor: f64 = (r * 298.15) / (2.0 * f);
-    var l: f64 = _km_ln(q);
+    var l: f64 = _km_cr_ln(q);
     var want: f64 = 0.342 - (factor * l);
     var t2, v2 = nernst_potential_25c(0.342, 2, q);
     assert(is_ok(t2) == 1 && _km_bits(v2) == _km_bits(want), "E° − (RT/nF)·ln Q, in Rust's order");

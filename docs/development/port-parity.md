@@ -2,7 +2,9 @@
 
 Measurements that set the parity classes (port plan §5). The oracle is Rust 1.2.0 on
 **glibc 2.44** (Rust std f64 methods call the host libm); the port is Cyrius 6.7.18 with
-ganita 1.2.15.
+ganita 1.2.15. Since M3c (§9, §10; ADR 0006) a class-C row's reference is the corrected oracle — the
+oracle's operations with every primitive result correctly rounded — and every class-C function is on
+correctly rounded primitives and gated at 0 ulp; §2–§8 are the history of the glibc-relative bounds.
 
 ## 1. Semantics probe (M0 step 4, 2026-11-08, x86_64 Linux ELF)
 
@@ -121,6 +123,10 @@ and finds the corpus's bits on every one.
 
 ### Setting the class-C bounds
 
+> **Superseded by [ADR 0006](../adr/0006-correct-rounding-is-the-accuracy-target.md) (M3c-3, §10).** Every class-C function here
+> is now on correctly rounded primitives and gated at 0 ulp against the corrected oracle. The S, c and K below are the
+> history of the M2a rule; `--sensitivity` still prints S, now as a diagnostic of conditioning.
+
 S was measured by the rule's perturbation method before the first gated comparison:
 `python3 -I scripts/oracle/validate.py . --sensitivity` re-evaluates every golden row of each class-C
 function with one primitive result nudged one ulp up, then down, one call at a time, and reports the largest
@@ -206,7 +212,7 @@ kJ/mol result by 1000.0 (the row note says so), and the port computes Rust's kJ 
 multiply, so the rows are compared directly as class B — 844 Ok rows at 0 ulp, 14 Err rows. The harness reports the
 count after the module (`ADR 0002 #1 kJ -> J`); no row is mapped or accepted.
 
-**vant_hoff_k's bound.** One exp: K₂ = K₁·exp(−(ΔH/R)(1/T₂ − 1/T₁)). Measured before its first gated comparison
+**vant_hoff_k's bound** (superseded by ADR 0006, §10: bound 0 on `_km_cr_exp`). One exp: K₂ = K₁·exp(−(ΔH/R)(1/T₂ − 1/T₁)). Measured before its first gated comparison
 (the 649 Ok rows were replayed as *measured* first, 0 ulp on x86_64 ELF): `validate.py --sensitivity` gives
 **S = 2** (the exp result, through K₁·e, as `clausius_clapeyron`), c = 1, so **K = 2·2·1 + 2 = 6**. Observed max 0
 (x86_64) and 2 (aarch64, the exp polyfill).
@@ -262,6 +268,10 @@ the 10 new constants.
 | `charge_to_moles_electrons`, `moles_electrons_to_charge` | 853 each | B | 0 ulp |
 
 ### Setting the class-C bounds
+
+> **Superseded by [ADR 0006](../adr/0006-correct-rounding-is-the-accuracy-target.md) (M3c-3, §10).** The K column below is the M3a
+> rule's; `_km_log10`, `_km_log10_ln` and ADR 0005's amendment M3a are retired (`_km_cr_log10`, `_km_cr_exp10` and
+> `_km_cr_ln` now, every row at 0 ulp against the corrected oracle).
 
 Every class-C row was replayed unbounded (*measured*) first; then `validate.py --sensitivity` measured S, the rule set
 K = 2·S·c + 2, and the rows were gated. Three functions cancel by construction, and the grids include
@@ -357,6 +367,11 @@ show; `tests/kinetics.tcyr` pins the four boundary orders (1 + 4503·2⁻⁵² r
 
 ### The class-C functions: measured, not gated
 
+> **Superseded by [ADR 0006](../adr/0006-correct-rounding-is-the-accuracy-target.md) (M3c-3, §10).** The six functions moved to
+> `_km_cr_exp`, `_km_cr_expm1` and `_km_cr_pow` and are gated at 0 ulp against the corrected oracle; nothing is measured.
+> The S and K tables below are the conditioning that made the rule fail, and the histograms the stdlib primitives'
+> distances, kept as history.
+
 The six class-C functions take exp (`f64_exp`), exp_m1 (`_km_expm1`) and powf (`ganita_f64_pow`), as briefed. Their rows
 were replayed unbounded (*measured*), then `validate.py --sensitivity` measured S by the rule (every exp, exp_m1 and pow
 result nudged ±1 ulp, one call at a time). The grids include **on purpose the rows where an exp or pow result is subnormal
@@ -406,17 +421,305 @@ Measured histograms (float outputs; Err rows have none):
   2⁻¹⁰⁷⁴); ADR 0006's reference needs exact rational arithmetic there.
 - glibc 2.44's exp is correctly rounded on all 6,801 golden calls with x < −708 (2,118 distinct arguments) and on all but
   2 of 200,000 seeded arguments between −745.2 and −708.39; its pow on all 1,845 golden calls with a result under 2⁻¹⁰²¹.
-  Recorded for ADR 0006; under the decision above it decides nothing.
+  Recorded for ADR 0006; under the decision above it decides nothing. (MPFR corrects the pow figure, §9: the two exact
+  ties are misrounded.)
 
 Summary, every target: **12 modules, 0 failing; 119,044 ok, 0 failed, 22,205 measured (the six kinetics class-C
 functions), 10 pending (the M4 inorganic constants), 441 accepted (ADR 0004's row and the 440 ADR 0002 #4 mapped Antoine
 rows).**
 
+## 9. M3c-1, ADR 0006: the corrected oracle (2026-11-09)
+
+[ADR 0006](../adr/0006-correct-rounding-is-the-accuracy-target.md) makes correct rounding the accuracy target. A golden
+row's reference is now the **corrected oracle**: Rust 1.2.0's operations as `validate.py` transcribes them, evaluated with
+every transcendental primitive result correctly rounded by MPFR 4.2.2 (`scripts/oracle/mpfr_ref.py`: 53 bits, binary64's
+exponent range, subnormalized, so exact ties and subnormal results are exact). Where glibc rounded every call of a row
+correctly, that is the golden value. Where it didn't and the outputs change, `validate.py . --write-corrections` writes
+the corrected outputs to `tests/golden/<module>.cr.tsv` (format: `scripts/oracle/README.md`), and the harness compares the
+port against them. This step changes the reference and the harness only: the modules still call the primitives of §2–§8.
+The correctly rounded primitives and the switch to them are M3c-2 / M3c-3.
+
+**The harness rule** (`tests/parity_core.cyr`), for a row with a correction, under its class and its current bound:
+- it passes against the corrected outputs: **accepted (ADR 6)**, counted quietly;
+- it fails there but passes against the golden (misrounded) outputs: **measured, glibc-matching**. Transitional, M3c-1
+  only: the port still uses a glibc-like primitive on that path, and M3c-3 makes this a failure;
+- it matches neither: FAIL. A correction that no golden row takes fails its module too.
+
+Rows without a correction are compared as before. The histograms are the distance from each row's reference (the corrected
+outputs where there are some), and so are the shadow lines.
+
+**The report format.** A function line gains `N accepted (ADR 6: a)`, `N measured (g match glibc's misrounding)` and, at
+its end, `| ADR 6 rows: n, port = corrected c, = glibc's g` (the rows bit-identical to the corrected outputs and to the
+golden ones). A module with a `.cr.tsv` gains a line `ADR 0006 corrected oracle, tests/golden/<m>.cr.tsv: n rows: …`
+with every outcome. The summary line keeps its prefix and appends the two counts:
+
+```text
+=== parity summary: M modules, F failing | rows: O ok, X failed, Me measured, P pending, A accepted (ADR 6: a), g glibc-matching (measured) ===
+```
+
+`A` includes the `a` ADR 6 rows and `Me` the `g` glibc-matching rows, so a reader of the old line still gets the totals.
+(Since M3c-3, §10, a glibc-matching row is a failure: the line ends `g glibc-matching (failed)` and `X` includes `g`.)
+
+### The corrections on the current corpus
+
+665 rows have a correction: `gas` 11, `kinetics` 323, `math` 96, `phase` 4, `reaction` 2, `solution` 229. None changes
+shape (Ok ↔ Err, the Err variant, the root count); `validate.py` would follow and report such a row. The outcome is the
+same on x86_64 ELF, x86_64 PE and aarch64. Where the bit-identical counts differ, aarch64's follow the `·`.
+
+| Function | Rows | glibc misrounded | Outcome | Port = corrected | Port = glibc's |
+|---|---|---|---|---|---|
+| `f64::exp_m1` (`_km_expm1`) | 34 | expm1 | accepted (ADR 6) | 0 | 34 |
+| `f64::log10` (`_km_log10`) | 48 | log10 | accepted | 48 | 0 |
+| `f64::cos` (`f64_cos`) | 4 | cos | accepted | 1 | 3 |
+| `f64::ln` (`f64_ln`) | 3 | log | accepted | 3 · 2 | 0 · 1 |
+| `f64::powf` (`ganita_f64_pow`) | 3 | pow (2 of them x^2.5) | accepted | 1 | 2 |
+| `f64::sin` (`f64_sin`) | 2 | sin | accepted | 1 | 1 |
+| `f64::acos` (`ganita_f64_acos`) | 1 | acos | accepted | 0 | 1 |
+| `f64::powf_base2` (`ganita_f64_pow(2, ·)`) | 1 | exp2 | accepted | 0 | 1 |
+| `reaction::equilibrium_constant` | 2 | exp | accepted | 1 | 1 |
+| `phase::antoine_pressure_mmhg`, `_pa` | 2 + 2 | pow(10, ·) | accepted | 1 + 1 | 1 + 1 |
+| `gas::fugacity_coefficient_pr` | 6 | exp 5, log 1 | accepted | 6 · 5 | 0 · 1 |
+| `gas::fugacity_pr` | 5 | exp 4, log 1 | accepted | 5 · 4 | 0 · 1 |
+| `solution::ph_from_h_concentration`, `poh_from_oh_concentration` | 2 + 2 | log10 | accepted | 2 + 2 | 0 |
+| `solution::weak_acid_ph` | 178 | log10 | accepted | 178 | 0 |
+| `solution::weak_base_ph` | 39 | log10 | accepted | 39 | 0 |
+| `solution::debye_huckel_extended` | 1 | pow(10, ·) | accepted | 1 | 0 |
+| `solution::henderson_hasselbalch` | 7 | log10 | **glibc-matching (measured)** | 0 | 7 |
+| `kinetics::nth_order_half_life` | 320 | expm1 318, pow 1, both 1 | measured (no bound) | 3 | 270 |
+| `kinetics::eyring_rate` | 1 | exp | measured | 1 · 0 | 0 · 1 |
+| `kinetics::eyring_rate_from_activation` | 2 | exp | measured | 1 · 0 | 1 · 2 |
+
+So **335 rows are accepted under ADR 6, 7 are glibc-matching, and the 323 kinetics rows stay measured** (with the rest of
+those six functions' rows, §8). 389 more rows make a misrounded call whose error doesn't reach the outputs:
+`peng_robinson_z` 5, `peng_robinson_z_roots` 5, `fugacity_coefficient_pr` 9, `fugacity_pr` 10, `henderson_hasselbalch`
+18, `weak_base_ph` 111 (14 − pOH absorbs it), `nth_order_half_life` 231.
+
+- **"Accepted" is within the row's current bound, not bit-identical.** Where the port's primitive is glibc-like it
+  passes with glibc's misrounded value: `f64::exp_m1` on all 34 rows (`_km_expm1` is fdlibm, which glibc's expm1 equals bit
+  for bit), and 1–3 rows each of cos, ln (aarch64), powf, sin, acos, exp2, the equilibrium constant, Antoine and the
+  fugacities on aarch64. At ADR 0006 §3's bound of 0 (M3c-3) these would fail; they are what M3c-2's primitives must fix.
+- **ADR 0005's correctly rounded primitives.** glibc's cos misrounds 5 distinct golden arguments (20 calls), and the
+  Peng–Robinson Newton polish absorbs every one: no root changes. Its log misrounds 5 (10 calls), and one of them (ln of
+  1.0198…) changes both of that state's fugacity rows (accepted, ADR 6); acos and x^2.5 are correctly rounded on every
+  golden call. The other 9 fugacity corrections are glibc's exp (1 ulp), where the port's exp (x87) is correctly rounded on
+  x86_64; the aarch64 polyfill keeps glibc's value on one row of each function.
+- **`henderson_hasselbalch`'s 7 rows** are where glibc's log10 misrounds base/acid: at 0.3004… under 5 near-cancellation
+  rows (pKa = −log₁₀(base/acid) to within 2 ulp), and at 0.0660… and 8.3 × 10⁻⁶. The correctly rounded log10 is one ulp
+  lower, so the 5 pH values each move down one step of 2⁻⁵³ (the exactly-zero row becomes −2⁻⁵³, the +2⁻⁵³ row 0).
+  `_km_log10_ln` reproduces glibc's log10, so the port is the oracle's value there: up to 4.4 × 10¹⁸ ulp from the
+  corrected one (0 against −2⁻⁵³). ADR 0006 replaces it with a correctly rounded log10 in M3c-3.
+- **`nth_order_half_life`'s two exact half-way rows** ((3·2⁻²¹⁵)⁵ and (9·2⁻⁴³⁰)^2.5, §8), 4.9 × 10¹³ ulp from the oracle,
+  are 0 ulp from the corrected oracle: the function's histogram maximum falls from 4.9 × 10¹³ to 13 ulp on every target.
+- **The shadow lines** now show the correctly rounded primitives at 0 ulp on every `math` row (`_km_cos` 2,660,
+  `_km_acos` 2,620, `_km_ln` 3,857, `_km_pow_2_5` 1,100) and `_km_log10_ln` 1 ulp off on exactly glibc's 48 log10 rows.
+- **cbrt**: the oracle's (Rust's compiler-builtins, CORE-MATH) is correctly rounded on all 4,877 distinct golden arguments
+  (the `math` rows and the Peng–Robinson cubic), so cbrt corrects nothing. glibc's own cbrt, which the oracle never calls,
+  misrounds 2,445 of them (up to 3 ulp; about 45 % of random arguments, cbrt(2) included). ganita's is bit-identical to
+  the oracle on every `math` row (class A).
+
+**glibc 2.44's misroundings over the golden calls** (`validate.py`'s report; a call of the M2–M3b replicas is one
+primitive evaluation inside a function's row, and the `math` rows are the primitives themselves):
+
+| Primitive | `math` rows (misrounded) | Replica calls (distinct arguments) | Misrounded calls (distinct) |
+|---|---|---|---|
+| exp | 1,125 (0) | 29,966 (11,257) | 15 (10) |
+| expm1 | 810 (34) | 7,741 (1,267) | 550 (109) |
+| log | 3,857 (3) | 19,572 (8,877) | 10 (5) |
+| log10 | 1,296 (48) | 24,603 (11,027) | 357 (215) |
+| pow(x, y) | 1,750 (3) | 7,364 (1,757) | 2 (2: the exact ties) |
+| pow(10, y) | 571 (0) | 3,239 (1,906) | 5 (3) |
+| pow(x, 2.5) | (in pow's 1,750: 1,100 rows, 2 misrounded) | 593 (13) | 0 |
+| exp2 (`powf_base2`) | 369 (1) | — | — |
+| cos | 2,910 (4) | 18,444 (4,209) | 20 (5) |
+| acos | 2,620 (1) | 6,148 (1,403) | 0 |
+| sin | 710 (2) | — | — |
+| atan2 | 1,000 (0) | — | — |
+
+Every misrounding is 1 ulp. The `math` counts are the 60-digit `decimal` references' (§2, §4, §5), now decided by MPFR.
+One earlier figure changes: §8's "glibc's pow is correctly rounded on all 1,845 golden calls with a result under 2⁻¹⁰²¹"
+used the decimal reference, which misjudges ties. With MPFR it misrounds 2 of the 662 distinct arguments (1,851 calls),
+the two ties above. Its exp is correctly rounded on all 6,802 calls with x < −708 (2,115 distinct arguments), as §8
+says.
+
+**`--sensitivity`** now decides "glibc is not correctly rounded here" with MPFR. Every S, c, K, worst row and count it
+prints is unchanged, so no gated K moves.
+
+Summary, every target: **12 modules, 0 failing; 118,702 ok, 0 failed, 22,212 measured (the six kinetics class-C functions
+and 7 glibc-matching rows), 10 pending (the M4 inorganic constants), 776 accepted (335 under ADR 6, ADR 0004's row and the
+440 ADR 0002 #4 mapped Antoine rows).**
+
+## 10. M3c: every class-C row exact (2026-11-09)
+
+[ADR 0006](../adr/0006-correct-rounding-is-the-accuracy-target.md), completed. M3c-1 made the reference the corrected oracle
+(§9); M3c-2 built the correctly rounded primitives of `src/mathx.cyr` — `_km_cr_exp`, `_km_cr_expm1`, `_km_cr_exp10`,
+`_km_cr_ln`, `_km_cr_log10` and `_km_cr_pow`, two-phase (Ziv: a fast path with a proven error bound and a rounding test,
+a triple-double accurate path), on the MPFR-generated tables of `src/mathx_data.cyr` (`scripts/oracle/mathx_tables.py`),
+verified against MPFR by `scripts/oracle/cr_verify.py` and `tests/mathx.tcyr`; M3c-3 moved every module onto them and
+compares every class-C row exactly. **Every class-C function the port has is at bound 0, and every row is at 0 ulp from
+its reference, on x86_64 ELF, x86_64 PE and aarch64.** Nothing is measured; no row is glibc-matching.
+
+### The switch
+
+Rust's operation order is kept everywhere; only the primitive changed.
+
+| Module (functions) | Rust | Until M3c-3 | Now |
+|---|---|---|---|
+| `reaction::equilibrium_constant`, `phase::clausius_clapeyron`, `thermochem::vant_hoff_k`, `gas::fugacity_coefficient_pr` / `fugacity_pr`, the five exp functions of `kinetics` | `exp` | `f64_exp` (x87 on x86_64, the fdlibm polyfill on aarch64) | `_km_cr_exp` |
+| `kinetics::nth_order_half_life` | `exp_m1`, `powf` | `_km_expm1` (fdlibm), `ganita_f64_pow` | `_km_cr_expm1`, `_km_cr_pow` |
+| `phase::antoine_pressure_mmhg` / `_pa`, `solution::h_concentration_from_ph`, `debye_huckel_limiting`, `debye_huckel_extended`, `davies_activity` | `10.0_f64.powf(x)` | `ganita_f64_pow(10, x)` | `_km_cr_exp10(x)` (the same value as a correctly rounded pow(10, x)) |
+| `solution::ph_from_h_concentration`, `poh_from_oh_concentration`, `weak_acid_ph`, `weak_base_ph` | `log10` | `_km_log10` (fdlibm) | `_km_cr_log10` |
+| `solution::henderson_hasselbalch` | `log10` | `_km_log10_ln` (glibc's composition, ADR 0005 amendment M3a) | `_km_cr_log10` |
+| `electrochemistry::nernst_potential` / `_25c`, `gas::fugacity_coefficient_pr` / `fugacity_pr` | `ln` | `_km_ln` (since M3c-2a a wrapper of `_km_cr_ln`) | `_km_cr_ln` |
+| `gas::redlich_kwong_pressure` | `tc.powf(2.5)` | `_km_pow_2_5` (double-double, ADR 0005) | `_km_cr_pow(tc, 2.5)` |
+| `gas::peng_robinson_z` / `_roots` (and the fugacities' cubic) | `acos`, `cos` | `_km_acos`, `_km_cos` (ADR 0005) | unchanged |
+
+- **x^2.5.** `_km_pow_2_5` was correctly rounded only from 2⁻³⁸⁷ (below, its double-double product's error term underflows)
+  and had no rounding test. Measured per call: `_km_pow_2_5` 85 ns, `_km_cr_pow(x, 2.5)` 130 ns (x = 126.2 and 647.1;
+  `ganita_f64_pow` 185 ns). `redlich_kwong_pressure` now calls `_km_cr_pow(tc, 2.5)` on its whole range — one primitive
+  with a proven bound, a rounding test and the exact / midpoint cases — and `_km_pow_2_5` is gone; the function is not
+  benched in Rust, and its 45 ns are the price.
+- **Removed, nothing calls them:** `_km_log10` and `_km_expm1` (M1's Rust libm transcriptions), `_km_log10_ln` (M3a), the
+  `_km_ln` wrapper, `_km_pow_2_5` and the unused `_km_dd_div`. `phase`, `solution` and `kinetics` no longer include
+  `lib/ganita.cyr`; `gas` does, for `ganita_f64_cbrt` (the oracle's cbrt, compiler-builtins', and ganita's are both
+  correctly rounded on every golden argument, §9). `dist/kimiya.deps` is unchanged (math, string, vec, str, ganita,
+  tagged): `mathx.cyr` keeps `lib/math.cyr` for `_km_cos`'s fallback.
+- The Cyrius-only test groups that pinned glibc's bits now pin the correctly rounded ones: `tests/solution.tcyr`'s
+  Henderson–Hasselbalch row (base/acid = 0.8068…/2.6858…) asserts log10 = `…69DB` (glibc `…69DA`) and the corrected
+  oracle's pH −2⁻⁵³ (the oracle's +0.0). No ported Rust test changed.
+
+### The harness
+
+- **Bound 0** in `_par_c_bound` for all 27 kimiya class-C functions and for the `math` primitives `f64::exp`, `exp_m1`,
+  `ln`, `log10`, `powf`, `powf_base10`, `powf_base2` and `acos`, each now dispatched to the port's correctly rounded
+  primitive (`powf_base10` to `_km_cr_exp10`, what the modules call; `powf_base2`, glibc's exp2 in the oracle, to
+  `_km_cr_pow(2, y)`); `f64::cos` goes to `_km_cos` at bound 0 where `_km_cos` is correctly rounded (|x| ≤ 8, and NaN / ±∞).
+- **What stays on the stdlib, at its bound of 2:** `f64::sin` (`f64_sin`) and `f64::atan2` (`ganita_f64_atan2`), which have
+  no correctly rounded port primitive yet — M4 adds them with their first callers (the dihedral, spectroscopy; ADR 0006
+  item 1) — and the **247 `f64::cos` rows with a finite |x| > 8**, outside `_km_cos`'s correctly rounded range, where it is
+  `f64_cos` (6 of them 1 ulp from the correctly rounded value). No kimiya function calls any of them on a golden row: the
+  Peng–Robinson cos arguments are in [−2π/3, π].
+- **glibc-matching is a failure.** A row whose port value fails against the corrected outputs but matches the oracle's
+  misrounded ones fails its module (printed as `FAIL: (matches only the oracle's misrounded outputs, ADR 0006)`) and is
+  counted on its own as well; the summary line ends `g glibc-matching (failed)` and `X failed` includes them. 0 on every
+  target.
+- **ADR 0004's row**, `f64::powf(−1, DBL_MAX)`, goes through `_km_cr_pow`, which gives 1: a plain ok, and its
+  `_par_accepted` entry is gone. ADR 0004 stays the record of ganita's defect, and so does the new shadow line
+  `f64::powf ~ ganita_f64_pow` (its one nan/inf mismatch).
+- **Shadow lines** (never gated) now show the stdlib primitives the modules stopped calling, against the corrected oracle:
+  `f64_exp` 45 rows at 1 ulp (aarch64: 99), `f64_ln` 0 (aarch64: 152), `ganita_f64_acos` 727 at 1 ulp and 1 at 2 (aarch64:
+  743 and 2), `ganita_f64_pow` 153 at 1 ulp and ADR 0004's row; `_km_cr_pow(10, y)` is bit-identical to `_km_cr_exp10` on all
+  571 `powf_base10` rows; the cos rows past 8 on their own line. The ADR 0005 shadows (`_km_cos`, `_km_acos`, `_km_ln`,
+  `_km_pow_2_5`, `_km_log10_ln`) and the polyfill shadows are retired: those rows are the gated ones now.
+
+### Every class-C row, all three targets
+
+Bound 0 everywhere but the four `math` lines marked. "ADR 6" counts the rows compared against `tests/golden/<m>.cr.tsv`
+(accepted under ADR 6); "floats" the compared float outputs (Err rows have none; the roots count each root). Every
+function's histogram is the same on x86_64 ELF, x86_64 PE and aarch64, except `f64::atan2` on aarch64 (0: 798 · 1: 202).
+
+| Function | Rows | Floats | ADR 6 | Primitives | ulp (every target) |
+|---|---|---|---|---|---|
+| `reaction::equilibrium_constant` | 1,083 | 1,030 | 2 | exp | 0 |
+| `phase::clausius_clapeyron` | 849 | 815 | 0 | exp | 0 |
+| `phase::antoine_pressure_mmhg` / `_pa` | 558 each (222 mapped, ADR 2) | 338 each | 2 each | exp10 | 0 |
+| `gas::peng_robinson_z` | 4,663 | 4,603 | 0 | acos, cos | 0 |
+| `gas::peng_robinson_z_roots` | 4,663 | 5,539 roots | 0 | acos, cos | 0 |
+| `gas::fugacity_coefficient_pr` | 4,663 | 4,544 | 6 | acos, cos, ln, exp | 0 |
+| `gas::fugacity_pr` | 4,663 | 4,544 | 5 | acos, cos, ln, exp | 0 |
+| `gas::redlich_kwong_pressure` | 623 | 547 | 0 | pow(x, 2.5) | 0 |
+| `thermochem::vant_hoff_k` | 1,055 | 1,019 | 0 | exp | 0 |
+| `solution::ph_from_h_concentration` / `poh_from_oh_concentration` | 2,851 each | 2,838 each | 2 each | log10 | 0 |
+| `solution::henderson_hasselbalch` | 859 | 831 | 7 | log10 | 0 |
+| `solution::h_concentration_from_ph` | 439 | 439 | 0 | exp10 | 0 |
+| `solution::weak_acid_ph` | 9,111 | 9,048 | 178 | log10 | 0 |
+| `solution::weak_base_ph` | 9,111 | 9,048 | 39 | log10 | 0 |
+| `solution::debye_huckel_limiting` / `davies_activity` | 503 each | 488 each | 0 | exp10 | 0 |
+| `solution::debye_huckel_extended` | 538 | 505 | 1 | exp10 | 0 |
+| `electrochemistry::nernst_potential` | 1,485 | 1,430 | 0 | ln | 0 |
+| `electrochemistry::nernst_potential_25c` | 1,132 | 1,106 | 0 | ln | 0 |
+| `kinetics::arrhenius_rate` | 9,256 | 9,232 | 0 | exp | 0 |
+| `kinetics::first_order_concentration` | 2,529 | 2,529 | 0 | exp | 0 |
+| `kinetics::nth_order_half_life` | 7,822 | 4,605 | 320 | expm1, pow | 0 |
+| `kinetics::collision_theory_rate` | 2,297 | 2,228 | 0 | exp | 0 |
+| `kinetics::eyring_rate` | 1,573 | 1,556 | 1 | exp | 0 |
+| `kinetics::eyring_rate_from_activation` | 2,076 | 2,055 | 2 | exp ×2 | 0 |
+| `f64::exp` | 1,125 | 1,125 | 0 | `_km_cr_exp` | 0 |
+| `f64::exp_m1` | 810 | 810 | 34 | `_km_cr_expm1` | 0 |
+| `f64::ln` | 3,857 | 3,857 | 3 | `_km_cr_ln` | 0 |
+| `f64::log10` | 1,296 | 1,296 | 48 | `_km_cr_log10` | 0 |
+| `f64::powf` | 1,750 | 1,750 | 3 | `_km_cr_pow` (ADR 0004's row ok) | 0 |
+| `f64::powf_base10` | 571 | 571 | 0 | `_km_cr_exp10` | 0 |
+| `f64::powf_base2` | 369 | 369 | 1 | `_km_cr_pow(2, y)` | 0 |
+| `f64::acos` | 2,620 | 2,620 | 1 | `_km_acos` | 0 |
+| `f64::cos`, \|x\| ≤ 8 or non-finite | 2,663 | 2,663 | 4 | `_km_cos` | 0 |
+| `f64::cos`, finite \|x\| > 8 (**bound 2**) | 247 | 247 | 0 | `f64_cos` | 0: 241 · 1: 6 |
+| `f64::sin` (**bound 2**) | 710 | 710 | 2 | `f64_sin` | 0: 690 · 1: 20 |
+| `f64::atan2` (**bound 2**) | 1,000 | 1,000 | 0 | `ganita_f64_atan2` | 0: 797 · 1: 203 |
+
+The 665 ADR 6 rows are the corrected rows of §9 (no new correction, below); on every one the port is bit-identical to the
+corrected outputs except `f64::sin`'s, where `f64_sin` keeps glibc's value on 1 of its 2 rows (within its bound 2).
+
+### The hard rows (ADR 0006 item 6)
+
+The M2 functions gain the subnormal-exp-times-prefactor inputs M3b found outside their grids, hand-picked on targets
+plus a seeded sweep (`scripts/oracle/src/m_*.rs`, fresh seeds, so no existing row moved; `grids::EXP_SUBNORMAL_X`, 14
+exponents from −745.2 to −708.39, and `grids::subnormal_prefactors`, DBL_MAX, 10³⁰⁰, 2¹⁰⁰⁰, 10²⁵⁰ and 1; the exponent placed
+with + − × ÷ only):
+
+| Function | New rows | Hand-picked | Seeded | New outputs: normal · subnormal · 0 · Err |
+|---|---|---|---|---|
+| `reaction::equilibrium_constant` (K is the exp result) | 370 | 70: 14 exponents at T = 2, 298.15, 1500, 5000 and 10⁻³ K | 300: x in [−745.2, −708], T 10⁻¹ … 10⁴ K | 13 · 347 · 10 · 0 |
+| `thermochem::vant_hoff_k` | 370 | 70: 14 exponents × 5 K₁ at 300 → 299 K | 300: K₁ 10²⁰⁰ … 10³⁰⁸, T₁, T₂ 100–2000 K | 348 · 11 · 11 · 0 |
+| `phase::clausius_clapeyron` | 370 | 70: 14 exponents × 5 P₁ at 373.15 → 363.15 K | 300: P₁ 10²⁰⁰ … 10³⁰⁸, T₁, T₂ 150–700 K | 349 · 11 · 10 · 0 |
+| `gas::fugacity_coefficient_pr` / `fugacity_pr` (and the state's Z and roots rows) | 344 states × 4 | 44: water 9.76–10.25 K, CO₂ 3.9–4.05 K, methane 1.7–1.75 K, P 10³ … 10⁷ Pa (water at 10.25 K and 5·10⁵ Pa: φ ≈ 2.4·10⁻³⁰⁹) | 300: 100 per gas over the same boxes, P 10³ … 10^7.5 Pa | φ: 51 · 245 · 0 · 48; f = φ·P: 133 · 163 · 0 · 48 |
+
+(The 48 Err rows are states with ln φ below −745.13, where φ rounds to 0: `ComputationError`, on both sides.)
+
+- `validate.py` recomputes every new row bit for bit from the transcription and through the corrected oracle. **None needs
+  a correction**: glibc's exp and log are correctly rounded on every new call (exp: 31,764 golden calls now, 12,506
+  distinct arguments, still the same 15 misrounded calls at 10 arguments; log 20,948 calls, 9,565 arguments, the same 10 at
+  5). So these rows test the port's primitive, not glibc's: they are where a double-rounding exp shows.
+- **What they showed.** With the stdlib's `f64_exp` in place of `_km_cr_exp` in the four modules (a scratch build, not
+  committed), the functions are at most 1 ulp from the oracle on x86_64 (x87's exp is close to correctly rounded on
+  subnormal results), but on aarch64 the polyfill rounds twice (`y·2^(k+1000)`, then `× 2⁻¹⁰⁰⁰`) and they reach
+  **27 ulp** (`vant_hoff_k`), **15** (`fugacity_pr`) and **9** (`clausius_clapeyron`); `equilibrium_constant`, whose output
+  is the exp result itself, at most 1. With `_km_cr_exp` every row is 0 ulp on every target.
+- **Their conditioning** (`--sensitivity`, below): `vant_hoff_k` and `clausius_clapeyron` gain 306 and 303 rows past
+  K = 64 (S up to 4.4 × 10¹⁸, all with a subnormal exp result), `fugacity_pr` 245 (S up to 1.6 × 10⁷) and
+  `fugacity_coefficient_pr` S = 1,539 at the low-temperature states, where |ln φ| is about 700. Under the old rule none of
+  them could have been gated; under ADR 0006 they are gated at 0.
+
+### validate.py and `--sensitivity`
+
+- The port model is the oracle's own code with correctly rounded primitives, which is the corrected oracle, so
+  `SENS_RULES` (the `_km_log10_ln` model), the "S before" mode and the e_log10.c composition check are gone.
+- `--sensitivity` is a diagnostic of conditioning (ADR 0006 item 3): it nudges **every** primitive result (but 0, ±∞, NaN
+  and acos(±1)) one ulp, and prints S, c, the retired rule's K for comparison, and the calls where glibc is not correctly
+  rounded. It reproduces the conditioning §5 and §7 measured "before": `peng_robinson_z_roots` S = 2²⁶,
+  `redlich_kwong_pressure` 64, `nernst_potential` 8.8 × 10¹⁸, `henderson_hasselbalch` 4.4 × 10¹⁸, and §8's kinetics values.
+
+### The corpus and the summary
+
+Golden rows: `gas` 21,093 (+1,376), `phase` 3,646 (+370), `reaction` 1,558 (+370), `thermochem` 9,857 (+370); the
+corrections are unchanged (665 rows: `gas` 11, `kinetics` 323, `math` 96, `phase` 4, `reaction` 2, `solution` 229), and a
+second `--write-corrections` is byte-identical.
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **12 modules, 0 failing; 143,071 ok, 0 failed, 0 measured,
+10 pending (the M4 inorganic constants), 1,105 accepted (665 under ADR 6 and the 440 ADR 0002 #4 mapped Antoine rows),
+0 glibc-matching.**
+
+```text
+=== parity summary: 12 modules, 0 failing | rows: 143071 ok, 0 failed, 0 measured, 10 pending, 1105 accepted (ADR 6: 665), 0 glibc-matching (failed) ===
+```
+
 ## How to reproduce
 
 ```sh
 cargo run --release --locked --manifest-path scripts/oracle/Cargo.toml -- --check
-python3 -I scripts/oracle/validate.py . --sensitivity   # S, c and K of the class-C functions (§5–§8)
+python3 -I scripts/oracle/validate.py .                  # the corpus, and the ADR 0006 corrections (§9)
+python3 -I scripts/oracle/validate.py . --write-corrections   # regenerate tests/golden/<module>.cr.tsv
+python3 -I scripts/oracle/validate.py . --sensitivity   # S of the class-C functions: conditioning (§5–§8, §10)
+python3 -I scripts/oracle/cr_verify.py                  # the correctly rounded primitives against MPFR, every target
 cyrius test tests/parity.tcyr                  # x86_64 ELF
 cyrius test --win tests/parity.tcyr            # x86_64 PE, needs wine
 cyrius test --aarch64 tests/parity.tcyr        # aarch64, needs qemu-aarch64

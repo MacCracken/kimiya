@@ -3,6 +3,10 @@
 **Status**: Accepted
 **Date**: 2026-11-08
 
+> **Note (2026-11-09, M3c-3).** The port no longer calls `ganita_f64_pow`: powf is the correctly rounded `_km_cr_pow`
+> (ADR 0006), which gives `pow(-1, DBL_MAX) = 1`, so this row is a plain ok and its accepted entry in `tests/parity.tcyr`
+> is gone. The ADR stays as the record of ganita's defect; the shadow line `f64::powf ~ ganita_f64_pow` still shows it.
+
 ## Context
 
 The M0 `math` golden module records Rust std `f64::powf` (glibc 2.44) over special values.

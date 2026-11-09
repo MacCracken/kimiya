@@ -5,7 +5,8 @@
 //!   values and a seeded sweep (ΔH ±10⁻²…10⁷ J/mol, T 10⁻³…10⁵ K, ΔS ±10⁻²…10⁴ J/(mol·K)).
 //! - `reaction::equilibrium_constant` (class C: one `exp`): the edges, then ΔG built from a target
 //!   x = −ΔG/RT at three temperatures, across the underflow (x ≈ −745) and overflow (x ≈ 709.78)
-//!   ends and zero, the Rust tests' values, and a seeded sweep of x over −760…720.
+//!   ends and zero, the Rust tests' values, and a seeded sweep of x over −760…720; then (ADR 0006
+//!   item 6, M3c-3) the subnormal results densely, on targets at five temperatures and seeded.
 //! - `reaction::is_spontaneous` (class A, `i:0/1`): the special values and both signs.
 //!
 //! Every input goes through `black_box`, so each row is a run-time call (the transcendental bits
@@ -13,7 +14,7 @@
 
 use std::hint::black_box as bb;
 
-use crate::grids::{Rng, specials};
+use crate::grids::{EXP_SUBNORMAL_X, Rng, specials};
 use crate::tsv::{Class, Module, Tok, b, err, f};
 use kimiya::element::GAS_CONSTANT;
 use kimiya::error::KimiyaError;
@@ -100,6 +101,20 @@ pub fn emit() -> Module {
         let t = rng.log_uniform(-3.0, 5.0);
         let dg = rng.signed_log_uniform(-3.0, 7.0);
         keq(&mut m, dg, t);
+    }
+    // ADR 0006's hard rows (M3c-3): K is the exp result itself, so the subnormal end of exp's range, densely:
+    // x = −ΔG/RT on the subnormal targets at five temperatures (not the three above, so no row repeats), then
+    // seeded.
+    for t in [2.0, 298.15, 1500.0, 5000.0, 1e-3] {
+        for x in EXP_SUBNORMAL_X {
+            keq(&mut m, -x * GAS_CONSTANT * t, t);
+        }
+    }
+    let mut hard = Rng::new(0x2e03);
+    for _ in 0..300 {
+        let t = hard.log_uniform(-1.0, 4.0);
+        let x = hard.uniform(-745.2, -708.0);
+        keq(&mut m, -x * GAS_CONSTANT * t, t);
     }
 
     let mut probes = specials();

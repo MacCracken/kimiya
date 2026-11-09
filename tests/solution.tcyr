@@ -9,6 +9,7 @@
 include "tests/ulp.cyr"
 include "src/error.cyr"
 include "src/constants.cyr"
+include "src/mathx_data.cyr"
 include "src/mathx.cyr"
 include "src/validate.cyr"
 include "src/solution.cyr"
@@ -626,30 +627,31 @@ fn _t_cyrius_charge_balance_root() {
     assert(is_ok(t11) == 1 && okf(t11, v11) == 0.0000001, "checked_root(1e-7)");
 }
 
-# henderson_hasselbalch's log10 is _km_log10_ln, glibc's e_log10.c composition over the correctly rounded _km_ln
-# (ADR 0005, amendment M3a). On the golden near-cancellation row with base/acid = 0.8068…/2.6858… glibc's
-# log10 is not correctly rounded (…69da, correctly rounded …69db): the oracle's pH is exactly 0, which this
-# reproduces; a correctly rounded log10 would give −1.1e-16, 2⁶² ulp away.
+# henderson_hasselbalch's log10 is the correctly rounded _km_cr_log10 (ADR 0006; M3a's _km_log10_ln, glibc's
+# e_log10.c composition, until M3c-3). On the golden near-cancellation row with base/acid = 0.8068…/2.6858… glibc's
+# log10 is not correctly rounded (…69da; correctly rounded, MPFR: …69db), so the oracle's pH is +0.0 and the
+# corrected oracle's (tests/golden/solution.cr.tsv) is −2⁻⁵³, one step of the log's ulp below: the port returns
+# the corrected value. Plus log10's exact and special cases.
 fn _t_cyrius_henderson_log10() {
     test_group("cyrius_henderson_log10");
     var t, v = henderson_hasselbalch(0.5222965678797735, 0.8068231517516123, 2.6858077314049895);
-    assert(is_ok(t) == 1 && _km_bits(v) == 0, "pKa + log10(ratio) = +0.0, the oracle's");
+    assert(is_ok(t) == 1 && _km_bits(v) == 0xBCA0000000000000, "pKa + log10(ratio) = -2^-53, the corrected oracle's");
     var r: f64 = 0.8068231517516123 / 2.6858077314049895;
-    var l: f64 = _km_log10_ln(r);
-    assert_eq(_km_bits(l), 0xBFE0B6A74ABB69DA, "glibc's log10 bits");
-    var one: f64 = _km_log10_ln(1.0);
+    var l: f64 = _km_cr_log10(r);
+    assert_eq(_km_bits(l), 0xBFE0B6A74ABB69DB, "the correctly rounded log10 bits (glibc's are ...69DA)");
+    var one: f64 = _km_cr_log10(1.0);
     assert_eq(_km_bits(one), 0, "log10(1) = +0");
-    var k: f64 = _km_log10_ln(1000.0);
+    var k: f64 = _km_cr_log10(1000.0);
     assert(k == 3.0, "log10(1000) = 3");
     var dmin: f64 = 0.0;
     store64(&dmin, 1);                   # the smallest subnormal, 5e-324
-    var sub: f64 = _km_log10_ln(dmin);
+    var sub: f64 = _km_cr_log10(dmin);
     var subw: f64 = 0.0;
-    store64(&subw, 0xC07434E6420F4374);  # glibc's log10(5e-324)
+    store64(&subw, 0xC07434E6420F4374);  # log10(5e-324), correctly rounded (MPFR; glibc's too)
     assert_bits_eq(sub, subw, "the smallest subnormal");
-    var zero: f64 = _km_log10_ln(0.0);
+    var zero: f64 = _km_cr_log10(0.0);
     assert(ulp_is_inf(zero) == 1 && zero < 0.0, "log10(0) = -inf");
-    var neg: f64 = _km_log10_ln(-1.0);
+    var neg: f64 = _km_cr_log10(-1.0);
     assert_eq(ulp_is_nan(neg), 1, "log10(-1) = NaN");
 }
 

@@ -16,8 +16,11 @@
 #   KM_PR_WATER, … (port plan §6.4).
 # - peng_robinson_z_roots's Vec<f64> of 1–3 roots becomes a caller's buffer of three f64 (24
 #   bytes), `var roots[24];`: the call returns Ok(n) with the n ascending roots in roots[0 .. n − 1].
-# - acos, cos, ln and x^2.5 are src/mathx.cyr's correctly rounded _km_acos, _km_cos, _km_ln and
-#   _km_pow_2_5 (ADR 0005); exp is f64_exp and cbrt ganita_f64_cbrt (correctly rounded, as Rust's).
+# - Every transcendental is correctly rounded (ADR 0006): acos and cos are src/mathx.cyr's _km_acos and
+#   _km_cos (ADR 0005), ln, exp and x^2.5 its _km_cr_ln, _km_cr_exp and _km_cr_pow(x, 2.5), so the class-C
+#   rows are compared exactly against the corrected oracle (docs/development/port-parity.md §10). cbrt is
+#   ganita_f64_cbrt, correctly rounded as the oracle's (Rust's compiler-builtins) is on every golden argument;
+#   f64_clamp is lib/math.cyr's.
 
 include "lib/math.cyr"
 include "lib/ganita.cyr"
@@ -317,13 +320,13 @@ fn fugacity_coefficient_pr(params: KmPengRobinsonParams, temperature_k: f64, pre
     if (n == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
     var z: f64 = load64(&roots + (n - 1) * 8);
     var sqrt2: f64 = 0x3FF6A09E667F3BCD;  # std::f64::consts::SQRT_2
-    var l1: f64 = _km_ln(z - cap_b);
+    var l1: f64 = _km_cr_ln(z - cap_b);
     var coef: f64 = cap_a / ((2.0 * sqrt2) * cap_b);
     var num: f64 = z + ((1.0 + sqrt2) * cap_b);
     var den: f64 = z + ((1.0 - sqrt2) * cap_b);
-    var l2: f64 = _km_ln(num / den);
+    var l2: f64 = _km_cr_ln(num / den);
     var ln_phi: f64 = ((z - 1.0) - l1) - (coef * l2);
-    var phi: f64 = f64_exp(ln_phi);
+    var phi: f64 = _km_cr_exp(ln_phi);
     if (_km_is_positive(phi) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
     return Ok(phi);
 }
@@ -351,7 +354,7 @@ fn redlich_kwong_pressure(tc: f64, pc: f64, temperature_k: f64, molar_volume: f6
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_positive(tc) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_positive(pc) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var tc25: f64 = _km_pow_2_5(tc);
+    var tc25: f64 = _km_cr_pow(tc, 2.5);
     var a: f64 = (((0.42748 * KM_GAS_CONSTANT) * KM_GAS_CONSTANT) * tc25) / pc;
     var b: f64 = ((0.08664 * KM_GAS_CONSTANT) * tc) / pc;
     if (_km_is_finite(molar_volume) != 1 || molar_volume <= b) { return Err(KM_ERR_INVALID_INPUT); }

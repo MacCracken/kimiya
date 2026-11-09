@@ -3,10 +3,11 @@
 #
 # Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and reject NaN
 # and ±∞ inputs. Every expression keeps Rust's operation order, so the arithmetic functions are
-# bit-identical (class B); clausius_clapeyron (one exp) and the Antoine functions (one pow) are
-# class C (docs/development/port-parity.md). The data — struct KmAntoineCoeffs, the 8 ANTOINE_DATA
-# sets, the mmHg → Pa factor and the KM_KB_* / KM_KF_* constants — is src/phase_data.cyr
-# (generated).
+# bit-identical (class B); clausius_clapeyron (one exp, _km_cr_exp) and the Antoine functions (one
+# 10^x, _km_cr_exp10) are class C on src/mathx.cyr's correctly rounded primitives (ADR 0006), so
+# they are compared exactly against the corrected oracle (docs/development/port-parity.md §10). The
+# data — struct KmAntoineCoeffs, the 8 ANTOINE_DATA sets, the mmHg → Pa factor and the KM_KB_* /
+# KM_KF_* constants — is src/phase_data.cyr (generated).
 #
 # ADR 0002 #4 (the one API change here): antoine_pressure_mmhg / antoine_pressure_pa return a
 # Result, Err outside the coefficient set's fitted range t_min_c ..= t_max_c, at or below the pole
@@ -18,8 +19,6 @@
 # set of NaN fields (which antoine_pressure_* reject).
 
 include "lib/string.cyr"
-include "lib/math.cyr"
-include "lib/ganita.cyr"
 
 # 1 if 0 ≤ x ≤ 1 (Rust's `(0.0..=1.0).contains(&x)`, false for NaN).
 #must_use
@@ -129,7 +128,7 @@ fn clausius_clapeyron(p1: f64, t1_k: f64, t2_k: f64, delta_h_vap_j: f64): Result
     if (_km_is_finite(delta_h_vap_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var h: f64 = delta_h_vap_j / KM_GAS_CONSTANT;
     var exponent: f64 = -h * ((1.0 / t2_k) - (1.0 / t1_k));
-    var e: f64 = f64_exp(exponent);
+    var e: f64 = _km_cr_exp(exponent);
     var p2: f64 = p1 * e;
     return Ok(p2);
 }
@@ -158,7 +157,7 @@ fn antoine_pressure_mmhg(coeffs: KmAntoineCoeffs, temperature_c: f64): Result {
         var denom: f64 = c + temperature_c;
         if (_km_is_positive(denom) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
         var x: f64 = a - (b / denom);
-        var p: f64 = ganita_f64_pow(10.0, x);
+        var p: f64 = _km_cr_exp10(x);
         return Ok(p);
     }
     return Err(KM_ERR_INVALID_TEMPERATURE);
