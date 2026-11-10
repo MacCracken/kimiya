@@ -5,8 +5,9 @@
 # SI as Rust documents it: energies in J (eV where a name says so), wavelengths in m, frequencies in Hz, wavenumbers
 # in cm⁻¹, masses in any consistent unit (kg for the oscillator and the rotor). PLANCK, SPEED_OF_LIGHT, RYDBERG and
 # RYDBERG_EV are src/constants.cyr's KM_* (generated), ELEMENTARY_CHARGE (Rust's electrochemistry::) too; the
-# SpectralSeries enum, its n_lower column, the isotope abundance table and Rust's private RYDBERG_HYDROGEN (the
-# reduced-mass-corrected R_H, read through the API) are src/spectroscopy_data.cyr (generated). Fallible functions
+# SpectralSeries enum, its n_lower column, the isotope abundance table (ADR 0002 #23: from its cited sources) and Rust's
+# private RYDBERG_HYDROGEN (the reduced-mass-corrected R_H, read through the API) are src/spectroscopy_data.cyr
+# (generated). Fallible functions
 # return a value-form Result whose Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs where Rust does.
 # Every expression keeps Rust's operation order, constant by constant, so the arithmetic functions are
 # bit-identical (class B: + − × ÷ and √); transmittance (10^x) and absorbance_from_transmittance (log10) are class C
@@ -31,6 +32,10 @@
 #   (src/mathx.cyr's _km_cr_hundredth_div), where Rust's `0.01 / x` rounds 1/100 and then the quotient (one ulp off on
 #   about 14 % of inputs). The golden rows keep the oracle's values; where the port's differ, the note names them and
 #   the harness maps the two (accepted under ADR 2, counted).
+# - ADR 0002 #23 (M4e-4, the user's decision of 2026-11-10): the isotope table is the cited AME2020 masses (full
+#   precision) and TICE 2009 abundances with ³⁶S, not Rust's five-decimal masses without it; isotope_pattern's algorithm
+#   is Rust's unchanged, so only its results move (every pattern with an element that has data). The golden rows keep
+#   the oracle's values; their notes name the port's whole result (accepted under ADR 2, counted).
 # - isotope_pattern is Rust's pruned convolution operation for operation: the scratch peaks sorted by a stable
 #   insertion sort on the masses' IEEE total order (Rust's `sort_by(total_cmp)` is stable, and the binned means depend
 #   on the order of equal masses), binning, Rust's `fold(0.0, max)` (NaN-ignoring, src/mathx.cyr's _km_max), the
@@ -66,6 +71,8 @@ include "lib/alloc.cyr"
 # _km_is_u32.
 
 # The isotope_pattern working tables' stack capacity, in (mass, intensity) records: the pattern and the scratch each.
+# A step's scratch is (pattern peaks) × (the element's isotopes): since ADR 0002 #23 sulfur has four, so S₈'s largest is
+# 4·17 = 68 records and cystine's 4·11 = 44 (glucose's 3·10 = 30); a molecule past 192 moves both to the heap.
 const _KM_ISO_STACK = 192;
 
 # ── Beer–Lambert law ────────────────────────────────────────────────────────────────
@@ -636,10 +643,14 @@ fn diatomic_moment_of_inertia(reduced_mass_kg: f64, bond_length_m: f64): f64 {
 # ── mass-spectrometry isotope patterns ──────────────────────────────────────────────
 
 # The natural isotope abundances of the element with atomic number z (Rust's u8): (pointer, n) to n (isotope mass in
-# u, abundance as a mole fraction) pairs, 16 bytes each (the two f64), in the baked table (src/spectroscopy_data.cyr;
-# IUPAC 2009 representative isotopic compositions, Rust's literal). Only elements with significant isotope patterns
-# have data (H, C, N, O, S, Cl, Br); every other z, and a word outside 0 ..= 255, gives the empty slice (0, 0).
-# Mirrors `spectroscopy::isotope_abundances`.
+# u, abundance as a mole fraction) pairs, 16 bytes each (the two f64), in the baked table (src/spectroscopy_data.cyr).
+# ADR 0002 #23 (M4e-4, the user's decision): the masses are AME2020's at full published precision (Wang et al., Chinese
+# Physics C 45, 030003 (2021)), the abundances the IUPAC 2009 representative isotopic compositions (TICE 2009: Berglund
+# and Wieser, Pure Appl. Chem. 83, 397-410 (2011)), ³⁶S included, from the cited records in scripts/oracle/isotopes.tsv;
+# Rust 1.2.0's literal rounds the masses to five decimals (¹H 1.00783, not 1.007825031898) and omits ³⁶S, so its sulfur
+# sums to 0.9999. Only elements with significant isotope patterns have data (H, C, N, O, S, Cl, Br: sulfur 4 isotopes,
+# the others Rust's); every other z, and a word outside 0 ..= 255, gives the empty slice (0, 0). Mirrors
+# `spectroscopy::isotope_abundances`, with that table.
 #must_use
 fn isotope_abundances(atomic_number): (i64, i64) {
     if (atomic_number < 0 || atomic_number >= _KM_ISOTOPE_ABUNDANCE_ZS) { return (0, 0); }

@@ -1210,6 +1210,50 @@ Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **17 modules, 0 faili
 === parity summary: 17 modules, 0 failing | rows: 301484 ok, 0 failed, 0 measured, 0 pending, 19477 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
 ```
 
+## 18. M4e-4: the cited isotope table, ADR 0002 #23 (2026-11-10)
+
+The user's decision of 2026-11-10 ("Upgrade the data"; ADR 0002's M4e-4 addition quotes it): `isotope_abundances` is the
+AME2020 masses at full published precision and the TICE 2009 representative abundances, ³⁶S included, from the cited
+records in `scripts/oracle/isotopes.tsv`; `isotope_pattern` is Rust's algorithm on that table. No other function and no
+other row changes: the data, not the arithmetic, differs, so the rows whose result changes keep the oracle's values and
+carry the port's result in their note, and the harness compares it bit for bit.
+
+| Function | Class | Rows | Ok rows | #23 noted | Unnoted (port = oracle) | ulp (every target) |
+|---|---|---|---|---|---|---|
+| `spectroscopy::isotope_abundances` | A | 256 | 256 | 7 (H, C, N, O, S, Cl, Br) | 249 (no data) | 0 |
+| `spectroscopy::isotope_pattern` | B | 696 | 515 | 347 | 349 (181 Err rows, 168 Ok rows whose only elements have no data or count 0) | 0 |
+
+- **The note.** `[ADR 0002 #23: with the AME2020 masses and the TICE 2009 abundances, ³⁶S included, the port returns [n],
+  m, i, … (v:n f:… f:… …)]`: the trailing parenthesis holds the whole result's golden tokens (#13–#22's hold one
+  `f:` or `i:` token). The generator computes it with `m_spectroscopy::pattern_replica` (Rust's function, the table a
+  parameter; with Rust's table it reproduces the oracle on all 696 rows, checked on every run).
+- **The proofs.** `validate.py` parses `isotopes.tsv` on its own (each mass from its verbatim AME2020 line, each abundance
+  from its printed TICE value) and checks it against Rust's literal: the same isotopes plus ³⁶S, the shared abundances
+  equal as decimal strings, Rust's masses the AME2020 ones to five decimals, each element summing to exactly 1 (Rust's
+  sulfur 0.9999); the mean masses inside CIAAW's intervals for H (1.007941 in [1.007 84, 1.008 11]) and S (32.064787 in
+  [32.059, 32.076]); the generated table against the file; and every isotope row's port result (its replica `r_pattern`
+  on the new table): noted exactly where it differs from the oracle's, the note's tokens it bit for bit. The isotope
+  thresholds' pinning runs against the port's expected results as well (prune × ½ / × 2 change 115 / 125 of the 693
+  rows of at most 3,000 steps, report × ½ / × 2 151 / 171, bin width × 2 173; against the oracle's rows 110 / 117,
+  153 / 173 and 173).
+- **Sulfur's fourth isotope** makes a step's scratch 4·n records for n peaks; S₈'s largest is 68 (17 peaks), cystine's
+  44, both within the port's 192-record stack tables; the corpus's S₃₀₀₀ row takes the heap path, as before (its
+  scratch reaches 1,276 records, 951 with Rust's table).
+
+`tests/spectroscopy.tcyr` checks the table cell by cell and S₈'s seven peaks bit for bit against the Python replica,
+with ³⁶S raising M+4 … M+6 (+1.5 %, +1.7 %, +5.2 %).
+
+**Cost** (`tests/kimiya.bcyr`'s isotope benches, the old table against the new, interleaved): glucose 15.8 µs either way
+(Rust 2.80), cystine 16.9 → 18.5 µs, S₈ 8.4 → 18.8 µs.
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **17 modules, 0 failing; 301,130 ok, 0 failed, 0 measured,
+0 pending, 19,831 accepted (809 under ADR 6; under ADR 2, 440 #4 Antoine, 13 #12 CFSE, 23 #3 SEMF, 1,810 #13, 208 #14,
+59 #15, 1,041 #16, 180 #17, 181 #18, 1,654 #19, 3,605 #20, 6,617 #21, 2,837 #22 and 354 #23 rows), 0 glibc-matching.**
+
+```text
+=== parity summary: 17 modules, 0 failing | rows: 301130 ok, 0 failed, 0 measured, 0 pending, 19831 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
+```
+
 ## How to reproduce
 
 ```sh
@@ -1219,6 +1263,7 @@ python3 -I scripts/oracle/validate.py . --write-corrections   # regenerate tests
 python3 -I scripts/oracle/validate.py . --sensitivity   # S of the class-C functions: conditioning (§5–§8, §10)
 python3 -I scripts/oracle/cr_verify.py                  # the correctly rounded primitives against MPFR, every target
 python3 -I scripts/oracle/mathx_tables.py --check       # the generated tables and their proofs (2^(1/6)'s bound included)
+python3 -I scripts/oracle/isotope_sources.py . DIR      # ADR 0002 #23's isotope records against fresh downloads in DIR
 cyrius test tests/parity.tcyr                  # x86_64 ELF
 cyrius test --win tests/parity.tcyr            # x86_64 PE, needs wine
 cyrius test --aarch64 tests/parity.tcyr        # aarch64, needs qemu-aarch64

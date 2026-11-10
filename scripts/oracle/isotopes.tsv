@@ -1,0 +1,55 @@
+# kimiya — the isotope table behind spectroscopy::isotope_abundances (ADR 0002 #23, M4e-4): source data, typed from the
+# publications below. scripts/oracle/src/t_spectroscopy.rs writes src/spectroscopy_data.cyr from it, scripts/oracle/
+# validate.py re-checks it independently, and scripts/oracle/isotope_sources.py re-verifies it against fresh downloads of
+# the sources (scripts/oracle/README.md). Retrieved 2026-11-10. Edit only to follow a source; then regenerate.
+#
+# Masses: AME2020, the unrounded atomic-mass table ("mass.mas20", file 1 of 4, DATE 3 Mar 2021).
+#   https://www-nds.iaea.org/amdc/ame2020/mass_1.mas20.txt
+#   sha256 e8599c6d7f724fac91934e59f1b9de8fb8f63e820f4b39456b790665ed2a3307
+#   M. Wang, W.J. Huang, F.G. Kondev, G. Audi and S. Naimi, "The AME 2020 atomic mass evaluation (II). Tables, graphs and
+#   references", Chinese Physics C 45, 030003 (2021).
+#   `mas20` is the nuclide's line, verbatim. Its format, from the file's header: a1,i3,i5,i5,i5,1x,a3,a4,1x,f14.6,f12.6,
+#   f13.5,1x,f10.5,1x,a2,f13.5,f11.5,1x,i3,1x,f13.6,f12.6 (cc NZ N Z A el o, mass excess, binding energy per nucleon, beta-
+#   decay energy, atomic mass, each with its uncertainty); the atomic mass is the i3 in u (columns 107-109) and the f13.6
+#   in micro-u that follows (columns 111-123). `mass_u` is that mass in u with its published digits: "1 007825.031898"
+#   micro-u is 1.007825031898 u.
+# Abundances: TICE 2009, Table 1, column 9, "Representative isotopic composition (mole fraction)", pp. 399-402.
+#   https://www.ciaaw.org/pubs/TICE-2009.pdf
+#   sha256 2145b6762c77f229c4594f5bc4bd4f6d98e1194c0a554f7a5e11881f1db2c893
+#   M. Berglund and M.E. Wieser, "Isotopic compositions of the elements 2009 (IUPAC Technical Report)", Pure Appl. Chem.
+#   83(2), 397-410 (2011), doi:10.1351/PAC-REP-10-06-02.
+#   `tice` is the value as printed (its digit groups, and the expanded uncertainty of the last digits in parentheses);
+#   `abundance` is its digits without the spaces and the uncertainty. 2H's footnote b ("Tank hydrogen has reported 2H mole
+#   fractions as low as 0.000 032") is not part of the value.
+# Why TICE 2009: CIAAW's current table, "Isotopic compositions of the elements 2024"
+#   (https://www.ciaaw.org/isotopic-abundances.htm, retrieved 2026-11-10, sha256
+#   1ab770a48bb539d26ad2992a94b4c60d51743058b67f106796b754cd5035423b), gives these seven elements only intervals (H
+#   [0.999 72, 0.999 99] for 1H, ...), so the 2009 single values remain their representative compositions; they are the
+#   source kimiya 1.2.0 cites.
+#
+# Records, tab-separated; a `#` line is a comment.
+# - isotope: Z, A, symbol, mass_u, abundance, tice, mas20. One per isotope, in Z then A order: kimiya 1.2.0's 16 and 36S.
+# - interval: symbol, low, high, as printed, source: the element's CIAAW standard atomic weight interval, against which
+#   validate.py checks its abundance-weighted mean mass. H and S, whose CIAAW pages were retrieved with the sources:
+#   https://www.ciaaw.org/hydrogen.htm (sha256 eeb33c101263ab3047789c45758f2b2d63fd60622fd8e135c0af2d1a4e109d3b) and
+#   https://www.ciaaw.org/sulfur.htm (sha256 5103098a7605eccb73932ec5058fd0b3a9a138d5089f2fd7acb7e52b730b5c12), each
+#   "A_r(E) = [low, high] since 2009".
+isotope	1	1	H	1.007825031898	0.999885	0.999 885(70)	  -1    0    1    1 H          7288.971064    0.000013      0.0        0.0     B-      *                    1 007825.031898    0.000014
+isotope	1	2	H	2.014101777844	0.000115	0.000 115(70)	0  0    1    1    2 H         13135.722895    0.000015   1112.2831     0.0002  B-      *                    2 014101.777844    0.000015
+isotope	6	12	C	12.0000000	0.9893	0.9893(8)	   0    6    6   12 C             0.0         0.0        7680.1446     0.0002  B- -17338.0681     0.9999   12 000000.0         0.0
+isotope	6	13	C	13.00335483534	0.0107	0.0107(8)	   1    7    6   13 C          3125.00933     0.00023    7469.8495     0.0002  B-  -2220.4718     0.2695   13 003354.83534     0.00025
+isotope	7	14	N	14.00307400425	0.99636	0.996 36(20)	   0    7    7   14 N          2863.41683     0.00022    7475.6148     0.0002  B-  -5144.3643     0.0252   14 003074.00425     0.00024
+isotope	7	15	N	15.00010889827	0.00364	0.003 64(20)	   1    8    7   15 N           101.43809     0.00058    7699.4603     0.0002  B-  -2754.1841     0.4902   15 000108.89827     0.00062
+isotope	8	16	O	15.99491461926	0.99757	0.997 57(16)	   0    8    8   16 O         -4737.00217     0.00030    7976.2072     0.0002  B- -15412.1840     5.3642   15 994914.61926     0.00032
+isotope	8	17	O	16.99913175595	0.00038	0.000 38(1)	   1    9    8   17 O          -808.76421     0.00064    7750.7291     0.0002  B-  -2760.4655     0.2479   16 999131.75595     0.00069
+isotope	8	18	O	17.99915961214	0.00205	0.002 05(14)	   2   10    8   18 O          -782.81634     0.00064    7767.0981     0.0002  B-  -1655.9288     0.4633   17 999159.61214     0.00069
+isotope	16	32	S	31.97207117354	0.9499	0.9499(26)	   0   16   16   32 S        -26015.53714     0.00131    8493.1301     0.0002  B- -12680.8313     0.5617   31 972071.17354     0.00141
+isotope	16	33	S	32.97145890862	0.0075	0.0075(2)	   1   17   16   33 S        -26585.85830     0.00134    8497.6304     0.0002  B-  -5582.5182     0.3908   32 971458.90862     0.00144
+isotope	16	34	S	33.967867011	0.0425	0.0425(24)	   2   18   16   34 S        -29931.689       0.045      8583.4986     0.0013  B-  -5491.6037     0.0378   33 967867.011       0.047
+isotope	16	36	S	35.967080692	0.0001	0.0001(1)	   4   20   16   36 S        -30664.141       0.188      8575.3900     0.0052  B-  -1142.1329     0.1893   35 967080.692       0.201
+isotope	17	35	Cl	34.968852694	0.7576	0.7576(10)	   1   18   17   35 Cl       -29013.532       0.035      8520.2790     0.0010  B-  -5966.2429     0.6794   34 968852.694       0.038
+isotope	17	37	Cl	36.965902573	0.2424	0.2424(10)	   3   20   17   37 Cl       -31761.552       0.052      8570.2816     0.0014  B-   -813.8729     0.2000   36 965902.573       0.055
+isotope	35	79	Br	78.918337574	0.5069	0.5069(7)	   9   44   35   79 Br       -76068.067       1.001      8687.5956     0.0127  B-  -1625.7778     3.3333   78 918337.574       1.074
+isotope	35	81	Br	80.916288197	0.4931	0.4931(7)	  11   46   35   81 Br       -77977.051       0.978      8695.9465     0.0121  B-   -280.8517     0.4713   80 916288.197       1.049
+interval	H	1.00784	1.00811	[1.007 84, 1.008 11]	hydrogen.htm
+interval	S	32.059	32.076	[32.059, 32.076]	sulfur.htm

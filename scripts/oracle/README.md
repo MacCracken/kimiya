@@ -32,7 +32,12 @@ python3 -I scripts/oracle/mpfr_ref.py                                           
 python3 -I scripts/oracle/probe_tables.py .                                        # generated .cyr through the Cyrius compiler
 python3 -I scripts/oracle/mathx_tables.py                                          # write src/mathx_data.cyr (--check: verify)
 python3 -I scripts/oracle/cr_verify.py                                             # the correctly rounded primitives vs MPFR, every target
+python3 -I scripts/oracle/isotope_sources.py . DIR                                 # isotopes.tsv (ADR 0002 #23) against fresh downloads in DIR
 ```
+
+One input is not the oracle's: **`isotopes.tsv`**, the cited source records of the isotope table (M4e-4, ADR 0002 #23;
+[*The isotope table*](#the-isotope-table-a-cited-source-m4e-4-adr-0002-23)). The generator reads it, checks it against the
+oracle and writes it into `src/spectroscopy_data.cyr`.
 
 ## Rules
 
@@ -74,7 +79,7 @@ python3 -I scripts/oracle/cr_verify.py                                          
 | `thermo` | M2a | 1,107 | `src/m_thermo.rs`: all class B — `heat_transfer`, `hess_law` and `enthalpy_from_formation` (slices as `v:n` + values; −0.0 sums, ∞ − ∞, cancellation, seeded slices), `specific_heat_from_calorimetry` (the 1e-12 threshold ± 1 ulp) | `src/constants.cyr` gains `KM_WATER_SPECIFIC_HEAT` (thermo has no data file) |
 | `organic` | M4b | 9,104 | `src/m_organic.rs`: every enum value × every property — `BondType::energy_kj`, `Geometry::ideal_bond_angle`, `FunctionalGroup::pattern` / `is_polar` / `hydrogen_bonding` (the port's donor function, ADR 0002 #6), input `e:<Enum>.<Variant>` — and `predict_geometry` over the 0 … 15 square and every u8 of each argument against the other's edges (A); `enthalpy_from_bonds` (B), each list `v:n` + n pairs `e:BondType.<Variant> i:count`: empty lists, the Rust and integration tests' lists, every bond alone × 9 counts to u32::MAX on either side, self-cancellation, seeded lists | `src/organic_data.cyr` (`src/t_organic.rs`): `enum KmBondType`, `KmGeometry` (ADR 0002 #6: `KM_GEOMETRY_T_SHAPED`), `KmFunctionalGroup`, each with `KM_<ENUM>_COUNT`, and their property columns (energies with the match's `// Carbon bonds` headings, angles with the arms' notes, a **UTF-8** pattern blob, the polar / donor flags), plus ADR 0002 #6's **acceptor column, the generator's cited classification, not the oracle's** (below) |
 | `potential` | M4d (M4e-2) | 31,761 | `src/m_potential.rs`: `lennard_jones` (each argument over the edges, r/σ 0.5–100 at Å and metre scale, (σ/r)⁶ and (σ/r)¹² over- and underflowing, seeded; **ADR 0002 #17**: ε ≥ 2¹⁰²², 180 rows noted with the port's (ε·d)·4), `morse_width_parameter` (the edges, the HCl values, every decade, seeded; **ADR 0002 #18**: D_e ≥ 2¹⁰²³, 181 rows noted with ω·√((μ·½)/D_e)), `coulomb`, `coulomb_force`, `distance_3d` (B); `lj_equilibrium_distance` (σ over every binade, subnormals, the overflow end; **ADR 0002 #16**: 1,041 rows noted with the correctly rounded σ·2^(1/6)), `morse` (exp: targets across exp's range, near-cancellation rows), `bond_angle`, `dihedral_angle` (atan2: Å, metre and femtometre scale, every sign of the zero coordinates of the trans / cis tests, **atoms on the 10⁻¹² and 10⁻²⁰ tolerances to the ulp**, every Err path) (C); **ADR 0002 #20** (M4e-2): the three geometry functions' edge grids (`edges20`: 4,823 rows at 2^±(230 … 1074), mixed and subnormal coordinates, overflowing differences, the tolerances at extreme scales by bisection, tiny angles with subnormal results, trans and cis at scale) and 3,605 rows noted with the unbounded-exponent evaluation. A Rust `[f64; 3]` is three `f:` tokens | — (`COULOMB_CONSTANT` is `src/constants.cyr`'s) |
-| `spectroscopy` | M4e (M4e-3) | 66,691 | `src/m_spectroscopy.rs`: `isotope_abundances` (every u8: `v:n` + n (mass, abundance) float pairs), `SpectralSeries::n_lower` (input `e:SpectralSeries.<Variant>`), `find_peaks` (the data `v:n` + floats, then the threshold; output `v:k` + `i:` indices: thresholds 0, 1, −0.0, the ulps inside [0, 1] and every way out, NaN and ±∞; plateaus, non-finite data, fewer than 3 points, seeded) (A); the Beer–Lambert, photon and eV conversions, `bohr_energy_level` (every u8 Z × 20 u32 n), `bohr_transition_energy` and `rydberg_wavelength` (Z × (n₁, n₂) grids, close large n), `SpectralSeries::wavelength` (every series to u32::MAX's `checked_add` overflow), the oscillator, rotor, reduced mass and moment of inertia, **ADR 0002 #19**'s `wavenumber_from_wavelength` / `wavelength_from_wavenumber` (827 rows each noted with the correctly rounded 1/(100·x)), `isotope_pattern` (input `v:n` + n pairs `i:z i:count`, output `v:m` + m (mass, intensity) float pairs or `E:`: the Rust tests' molecules, the empty one, every u8 Z alone, every element with data × counts to 5,000, elements without data to u32::MAX, the Err position, seeded) (B); `transmittance` (exp10's whole range, the integers, subnormal results), `absorbance_from_transmittance` (log10: every decade, T near 1, the round trips), `fft_spectrum` (`v:n` + floats → `v:n/2+1` + floats: every length 0 … 16, every power of two to 2¹³, 2^k ± 1, impulses, constants, ±0, Nyquist, sinusoids (a Taylor series in + − × ÷, not std's sin), random, huge, subnormal, NaN and ±∞ samples) (C) **ADR 0002 #21** (M4e-3): every exact Bohr level (n = 2^k·Z), n₁ = n₂ − 1 at every binary scale and next to u32::MAX, the 2¹³ edge, the 13 transition ties and the exact-value families of `transition_exact_values`' exhaustive search, the series' large lines, and 6,617 rows noted with the correctly rounded exact rational; **ADR 0002 #22**: `reduced_mass`'s m = m at every power of two and subnormal multiple, its tie families, exponent gaps 45 … 64, the range ends, and 2,837 rows noted with the correctly rounded m₁·m₂/(m₁ + m₂). | `src/spectroscopy_data.cyr` (`src/t_spectroscopy.rs`): `enum KmSpectralSeries` and `KM_SPECTRAL_SERIES_N_LOWER`; the isotope abundances from the oracle's `isotope_abundances(z)` **at every u8 z** (`_KM_ISOTOPE_ABUNDANCES` pairs with per-z start / count columns, the match arms' comments); Rust's private `RYDBERG_HYDROGEN` **through the API** (below) and `ELECTRON_PROTON_MASS_RATIO` from its literal |
+| `spectroscopy` | M4e (M4e-3) | 66,691 | `src/m_spectroscopy.rs`: `isotope_abundances` (every u8: `v:n` + n (mass, abundance) float pairs), `SpectralSeries::n_lower` (input `e:SpectralSeries.<Variant>`), `find_peaks` (the data `v:n` + floats, then the threshold; output `v:k` + `i:` indices: thresholds 0, 1, −0.0, the ulps inside [0, 1] and every way out, NaN and ±∞; plateaus, non-finite data, fewer than 3 points, seeded) (A); the Beer–Lambert, photon and eV conversions, `bohr_energy_level` (every u8 Z × 20 u32 n), `bohr_transition_energy` and `rydberg_wavelength` (Z × (n₁, n₂) grids, close large n), `SpectralSeries::wavelength` (every series to u32::MAX's `checked_add` overflow), the oscillator, rotor, reduced mass and moment of inertia, **ADR 0002 #19**'s `wavenumber_from_wavelength` / `wavelength_from_wavenumber` (827 rows each noted with the correctly rounded 1/(100·x)), `isotope_pattern` (input `v:n` + n pairs `i:z i:count`, output `v:m` + m (mass, intensity) float pairs or `E:`: the Rust tests' molecules, the empty one, every u8 Z alone, every element with data × counts to 5,000, elements without data to u32::MAX, the Err position, seeded) (B); `transmittance` (exp10's whole range, the integers, subnormal results), `absorbance_from_transmittance` (log10: every decade, T near 1, the round trips), `fft_spectrum` (`v:n` + floats → `v:n/2+1` + floats: every length 0 … 16, every power of two to 2¹³, 2^k ± 1, impulses, constants, ±0, Nyquist, sinusoids (a Taylor series in + − × ÷, not std's sin), random, huge, subnormal, NaN and ±∞ samples) (C) **ADR 0002 #21** (M4e-3): every exact Bohr level (n = 2^k·Z), n₁ = n₂ − 1 at every binary scale and next to u32::MAX, the 2¹³ edge, the 13 transition ties and the exact-value families of `transition_exact_values`' exhaustive search, the series' large lines, and 6,617 rows noted with the correctly rounded exact rational; **ADR 0002 #22**: `reduced_mass`'s m = m at every power of two and subnormal multiple, its tie families, exponent gaps 45 … 64, the range ends, and 2,837 rows noted with the correctly rounded m₁·m₂/(m₁ + m₂); **ADR 0002 #23** (M4e-4): 7 `isotope_abundances` and 347 `isotope_pattern` rows noted with the port's whole result from the cited table. | `src/spectroscopy_data.cyr` (`src/t_spectroscopy.rs`): `enum KmSpectralSeries` and `KM_SPECTRAL_SERIES_N_LOWER`; the isotope abundances, since M4e-4 **ADR 0002 #23's cited table** from `isotopes.tsv` (AME2020 masses, TICE 2009 abundances, ³⁶S), checked against the oracle's `isotope_abundances(z)` **at every u8 z** (`_KM_ISOTOPE_ABUNDANCES` pairs with per-z start / count columns, each cell labelled with its published decimal); Rust's private `RYDBERG_HYDROGEN` **through the API** (below) and `ELECTRON_PROTON_MASS_RATIO` from its literal |
 | `phase` | M2a | 3,276 | `src/m_phase.rs`: Raoult, Henry, colligative, osmotic (B); Clausius–Clapeyron (C); Antoine mmHg / Pa (C) for every set at and one ulp past each range end, 0.5/1/10 °C outside, a 5 °C ladder, seeded points, the pole ± 1 ulp, specials, custom sets (non-finite fields, inverted range, pole inside the range, overflow), and the unit set's class-A rows that pin `PA_PER_MMHG`; `lookup_antoine`, `phase_rule` (all pairs of 13 u32 probes), `ANTOINE_DATA` / `ANTOINE_DATA[]` (A) | `src/phase_data.cyr` (`src/t_phase.rs`): `struct KmAntoineCoeffs`, the 8 sets (name blob + A, B, C, t_min_c, t_max_c columns), `_KM_PA_PER_MMHG` (through the API, see below), `KM_KB_*` / `KM_KF_*` |
 | `thermochem` | M2b | 9,487 | `src/m_thermochem.rs`: the tables and lookups (A); `Shomate::cp` / `enthalpy_antiderivative` per segment incl. range ends, extrapolation, T = 0 / ±∞ / NaN, `enthalpy_change_cp` within and across segments (B); `reaction_enthalpy` / `_gibbs_energy` (B, **J/mol: the oracle's kJ/mol × 1000.0, computed by the generator**, ADR 0002 #1, said in the row note) and `reaction_entropy` over seeded species lists (`v:n` + `s:formula f:coeff` pairs); `vant_hoff_k` (C); `adiabatic_flame_temperature` (B) over fuels, equivalence ratios, oxidisers, T₀, 10⁻²⁰⁰…10³⁰⁰ scalings and every Err path, **each Ok row's note naming the solver that answered** (`[newton, k steps]`, `[bisection after newton: …, k halvings]`) | `src/thermochem_data.cyr` (`src/t_thermochem.rs`): `struct KmShomate`, the 76 `THERMOCHEM_DATA` rows (formula and name blobs, ΔH_f°, ΔG_f°, S°), the 34 `SHOMATE_DATA` segments (formula blob, a … t_max), `KM_THERMOCHEM_COUNT`, `KM_SHOMATE_COUNT`, and the literals' `//` comments |
 | `gas` | M2a | 19,717 | `src/m_gas.rs`: ideal gas, van der Waals, Dalton, density, `peng_robinson_pressure` (B); `peng_robinson_z`, `_z_roots` (`v:n` + roots), `fugacity_coefficient_pr`, `fugacity_pr` over each preset × 26 temperatures × 29 pressures (one- and three-root regions, the critical point ± 10⁻⁶, 90–200 MPa), seeded states, validation edges and overflow, and `redlich_kwong_pressure` (C); the `PR_*` presets and `joule_thomson_ideal` (A) | `src/gas_data.cyr` (`src/t_gas.rs`): `struct KmPengRobinsonParams`, `KM_STP_*`, the 5 `KM_PR_*` presets as top-level struct values |
@@ -146,7 +151,9 @@ fn <TAB> class <TAB> inputs <TAB> outputs <TAB> note
 - **`inputs` and `outputs`** are space-separated tokens, or `-` when empty.
   - A struct is flattened into its fields in declaration order; a tuple in order.
 - **`note`** is the same call in readable form, e.g. `f64::exp(-1.5) -> 0.22313016014842982`.
-  It is for review only: the harness ignores it.
+  It is for review only: the harness ignores it, except an ADR 0002 suffix that names the port's value (*Generated Cyrius
+  sources*, below), whose trailing parenthesis holds golden tokens: one value, `(f:<bits>)]`, `(i:<n>)]` or
+  `(E:<Variant>)]`, or since M4e-4 (#23) a whole result, `(v:n f:… …)]`.
 
 ### Tokens
 
@@ -302,7 +309,8 @@ subnormal results, hard cases, every expected value MPFR's).
 
 ## Generated Cyrius sources
 
-Values come from the oracle's public API. The Rust source is read only for the `///` doc
+Values come from the oracle's public API (the one exception, since M4e-4, is ADR 0002 #23's isotope table, from its cited
+source file and checked against the API). The Rust source is read only for the `///` doc
 comments, which carry the citations (SI 2019, CODATA 2018, AME2020, …) into the Cyrius file,
 and `t_constants::complete` proves the list is every `pub const NAME: f64` in
 `rust-old/src` — no more, no fewer — before anything is written.
@@ -313,7 +321,7 @@ Rust's `phase::PA_PER_MMHG` is private. `t_phase.rs` reads it as `antoine_pressu
 (A = B = 0, C = 1, range [0, 0]) at T = 0: `antoine_pressure_mmhg` of that set is 10⁰ = 1.0 exactly (checked),
 so the Pa value is the factor itself. Its golden row is class A, and the source literal is a cross-check.
 
-### The flame solver's path, ADR 0002 #1's × 1000, #12's exact CFSE, #3's Err, #13–#19's and #21–#22's exact values and #20's results
+### The flame solver's path, ADR 0002 #1's × 1000, #12's exact CFSE, #3's Err, #13–#19's and #21–#22's exact values, #20's results and #23's isotope table
 
 Some golden rows carry a bracketed suffix in their note (`Module::row_noted`; the harness ignores notes):
 - `thermochem::reaction_enthalpy` / `reaction_gibbs_energy`: `[J/mol: the oracle's kJ/mol result × 1000.0 (ADR 0002
@@ -373,6 +381,14 @@ Some golden rows carry a bracketed suffix in their note (`Module::row_noted`; th
   grid takes all 13 ties and each exact family's smallest, middle and largest member. `validate.py` proves every Ok row
   with `Fraction` (a note exactly where the rounded value differs, naming it), factors R's odd significands and repeats
   the search independently. The harness maps a noted row through `_par_got_noted` and counts #21 per function.
+- `spectroscopy::isotope_abundances` and `spectroscopy::isotope_pattern` (M4e-4, ADR 0002 #23): `[ADR 0002 #23: with the
+  AME2020 masses and the TICE 2009 abundances, ³⁶S included, the port returns [n], m, i, … (v:n f:… f:… …)]` on exactly the
+  rows whose result changes with the cited table (7 and 347): the readable result, then its golden tokens
+  (`tsv::tokens_note`) — the one note whose parenthesis holds a whole result rather than one value. The generator computes
+  it with `m_spectroscopy::pattern_replica`, Rust's `isotope_pattern` transcribed with the table a parameter, which must
+  give the oracle's tokens on every row with Rust's table (checked on every run). The harness parses the token list and
+  requires the port's whole result to be it, bit for bit (`_par_map_toks`), counting the row as accepted under ADR 2;
+  `validate.py` proves each with its replica `r_pattern` on its own parse of `isotopes.tsv`.
 - `thermochem::adiabatic_flame_temperature`: the solver that produced an `Ok` value. `m_thermochem::flame_replica`
   rebuilds the solver from the public API (`SHOMATE_DATA`, `Shomate::cp`, `Shomate::enthalpy_antiderivative`, Rust's
   private `Segments` logic, hisab 1.4.0's `newton_raphson` and `bisection` loops), and generation fails unless it
@@ -421,6 +437,33 @@ Rust's private `spectroscopy::RYDBERG_HYDROGEN` is `RYDBERG / (1.0 + ELECTRON_PR
 must equal the const expression evaluated in f64 on the source's literal ratio. Both are generated
 (`_KM_RYDBERG_HYDROGEN`, `_KM_ELECTRON_PROTON_MASS_RATIO`); the golden Lyman row pins R_H, `probe_tables.py` compiles both
 through it, and `validate.py` checks the uniqueness.
+
+### The isotope table: a cited source (M4e-4, ADR 0002 #23)
+
+`spectroscopy_data.cyr`'s isotope table is not the oracle's: by the user's decision it is the AME2020 masses at full
+published precision and the TICE 2009 representative abundances, ³⁶S included, from **`scripts/oracle/isotopes.tsv`**.
+- **The file.** A header with each source's URL, sha256 and reference (AME2020: `mass_1.mas20.txt`, Wang et al., Chinese
+  Physics C 45, 030003 (2021); TICE 2009: Berglund and Wieser, Pure Appl. Chem. 83, 397–410 (2011), Table 1, column 9;
+  CIAAW's current table, which gives these elements intervals only, for the record), retrieved 2026-11-10. One `isotope`
+  record per isotope, tab-separated: Z, A, symbol, the mass in u with its published digits, the abundance, the TICE value
+  as printed (with its uncertainty), and the AME2020 line verbatim; two `interval` records, CIAAW's standard atomic weight
+  intervals of H and S. Typed from the sources, never from the oracle; edited only to follow a source.
+- **The generator's checks** (`t_spectroscopy::isotope_table`, before anything is written): each mass re-read from its
+  line by the file's Fortran format (the atomic mass's i3 in u at columns 107–109 and f13.6 in micro-u at 111–123), each
+  abundance from its printed value; then (a) the isotopes are the oracle's `isotope_abundances(z)` at every u8 z (A its
+  mass rounded, Rust's literal checked against the API's bits) plus ³⁶S, the only addition; (b) every shared abundance is
+  Rust's literal as a decimal string; (c) every Rust mass is the AME2020 mass rounded to five decimals (exact decimal
+  arithmetic, a tie refused); (d) each element's abundances sum to exactly 1. The emitted values are the doubles nearest
+  the decimals (`str::parse`), written as round-trip decimals; each cell's label carries its published decimal.
+- **Re-verifying the sources.** Download the URLs into a new directory under their basenames (`mass_1.mas20.txt`,
+  `TICE-2009.pdf`, and optionally CIAAW's `hydrogen.htm` and `sulfur.htm`) and run `python3 -I
+  scripts/oracle/isotope_sources.py . DIR` from the repository root. It checks the two publications' sha256s against the
+  header, that every recorded AME2020 line is a whole line of the file (its only line for that Z and A) and gives the
+  record's mass, that every TICE value is a cell of the PDF's Table 1 in record order (the content streams inflated with
+  zlib, each text run split at its column gaps), and that each CIAAW page states the recorded interval (a page's own
+  sha256 is printed, since web pages change). It reads the downloads as data and needs only the standard library.
+- **validate.py** parses the file on its own and repeats (a)–(d), checks the generated table against it and each
+  element's abundance-weighted mean mass against its CIAAW interval, and proves the #23 notes (above).
 
 ### Private tables through the API (M4b)
 
@@ -497,10 +540,10 @@ solution constants, and from M4b every `organic_data.cyr` cell (197: each enum m
 angle, pattern — UTF-8 — polar and donor flag against its golden row, and the acceptor flag against its rule on the
 golden pattern) and `inorganic_data.cyr` cell (220: KmLigand and its strengths, each occupancy pair through t₂g + e_g = n
 and the golden CFSE, each unpaired count, the 30 IONIC_RADII rows and count) and the ten inorganic constants, and from M4c every `nuclear_data.cyr` cell (91: each ISOTOPES label, Z, A, half-life
-and decay mode — UTF-8 — and the count), and from M4e every `spectroscopy_data.cyr` cell (81: each KmSpectralSeries
+and decay mode — UTF-8 — and the count), and from M4e every `spectroscopy_data.cyr` cell (83 since M4e-4, 81 before: each KmSpectralSeries
 member's value and n_lower and the count; for every u8 z the isotope count and each (mass, abundance) pair through the
-start / count columns, none past `_KM_ISOTOPE_ABUNDANCE_ZS`; R_H and the mass ratio through the golden Lyman row,
-1/R_H). Since M4b it also fails if a golden constant has no generated home. It reads the arrays directly, not through `src/element.cyr`, so it tests the
+start / count columns, none past `_KM_ISOTOPE_ABUNDANCE_ZS`, against the row's ADR 0002 #23 note where it has one (the
+port's table, M4e-4); R_H and the mass ratio through the golden Lyman row, 1/R_H). Since M4b it also fails if a golden constant has no generated home. It reads the arrays directly, not through `src/element.cyr`, so it tests the
 data while the harness tests the accessors. It builds in `build/oracle-probe/` with the project's
 manifest, then compares each value bit for bit with the golden rows. It fails on any mismatch, any
 compiler warning, a generated constant with no golden row, and a table it doesn't probe. A mass, an
@@ -627,7 +670,12 @@ needs only Python 3, with no packages (run it with `-I`), and the system MPFR li
   exact rational rounded once differs from Rust's value, so every unnoted row is correctly rounded too), with the
   structure behind their hard rows: R's odd significands factored (no level tie, a level exact iff n/Z = 2^k, no
   wavelength dyadic), the transition energy's exhaustive search repeated (13 ties, every one in the corpus), every exact
-  level present, and the reduced mass's tie rows counted.
+  level present, and the reduced mass's tie rows counted; since M4e-4, ADR 0002 #23: `isotopes.tsv` parsed independently
+  (each mass from its verbatim AME2020 line) and checked against Rust's literal (the same isotopes plus ³⁶S, the shared
+  abundances as decimal strings, Rust's masses the AME2020 ones to five decimals, each element summing to exactly 1), the
+  mean masses against CIAAW's intervals, the generated table against the file, every isotope row's port result
+  (`r_pattern` with the table swapped) noted exactly where it differs from the oracle's and named by the note bit for
+  bit, and the thresholds' pinning repeated against the port's results.
 - **The corrected oracle** (M3c-1, ADR 0006): every row whose replica calls a primitive is evaluated again with each
   primitive result correctly rounded (the `math` rows of the primitives are their MPFR values), and the corrections
   are checked against `tests/golden/<module>.cr.tsv` as [above](#the-corrected-oracle-modulecrtsv-adr-0006).

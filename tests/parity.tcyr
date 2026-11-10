@@ -1452,6 +1452,62 @@ fn _par_map_exact(adr, v, kind) {
     return 0;
 }
 
+# ADR 0002 #23 (M4e-4): a Vec row whose note names the port's whole result, `[ADR 0002 #23: … (<golden tokens>)]` (the
+# isotope table's slices and patterns, from the cited AME2020 / TICE 2009 table: scripts/oracle/README.md). The got
+# list, already the port's result, must be those tokens exactly (a float bit for bit, a length or an integer equal, a
+# name's text equal); then the row is mapped (_par_mapped = adr, accepted under ADR 2, counted) and its comparison with
+# the oracle's outputs is moot. Any other result becomes "Unknown", which matches nothing. Returns 1 when the row is
+# noted.
+var _par_adr23_abund = 0;
+var _par_adr23_pattern = 0;
+var _par_nt_k = 0;                          # the note's token list, _PAR_MAX tokens (allocated on first use)
+var _par_nt_v = 0;
+var _par_nt_l = 0;
+fn _par_map_toks(adr): i64 {
+    if (_par_note_has("[ADR 0002 #23:") != 1) { return 0; }
+    if (_par_nt_k == 0) {
+        _par_nt_k = _par_words(_PAR_MAX);
+        _par_nt_v = _par_words(_PAR_MAX);
+        _par_nt_l = _par_words(_PAR_MAX);
+    }
+    var p = _par_note_p;
+    var l = _par_note_l;
+    var same = 0;
+    if (_par_nt_l != 0 && l >= 4 && load8(p + l - 1) == 93 && load8(p + l - 2) == 41) {
+        var k = l - 3;
+        while (k >= 0 && load8(p + k) != 40) { k = k - 1; }
+        var n = 0 - 1;
+        if (k >= 0) { n = _par_tokens(p + k + 1, (l - 2) - (k + 1), _par_nt_k, _par_nt_v, _par_nt_l); }
+        if (n >= 0 && n == _par_got_n) {
+            same = 1;
+            var j = 0;
+            while (j < n) {
+                var at = j * 8;
+                var kind = load64(_par_nt_k + at);
+                var nv = load64(_par_nt_v + at);
+                var gv = load64(_par_got_v + at);
+                if (kind != load64(_par_got_k + at)) { same = 0; }
+                elif (kind == 102 || kind == 105 || kind == 118) {
+                    if (nv != gv) { same = 0; }
+                } elif (kind != 110) {
+                    var nl = load64(_par_nt_l + at);
+                    if (nl != load64(_par_got_l + at) || memeq(nv, gv, nl) != 1) { same = 0; }
+                }
+                j = j + 1;
+            }
+        }
+    }
+    if (same != 1) {
+        _par_got_n = 0;
+        _par_got_err(0 - 1);
+        return 1;
+    }
+    _par_mapped = adr;
+    _par_force_map = 1;
+    _par_hist_on = 0;
+    return 1;
+}
+
 # ── nuclear (M4c) ───────────────────────────────────────────────────────────────────
 
 # ADR 0002 #3: semi_empirical_binding_energy rows where the oracle's NaN (z > a or a = 0) is the port's
@@ -1766,7 +1822,7 @@ fn _par_got_f64s(t, v, buf) {
 # fft_spectrum runs with a buffer of n/2 + 1 values up to n = 64 (the heap work table) and of 2n above (the in-place
 # transform), so both paths replay the corpus. ADR 0002 #19 (the wavenumber conversions), #21 (the Bohr levels, the
 # transition energy, the Rydberg formula and the series) and #22 (the reduced mass): a noted row's port value must be
-# the note's.
+# the note's; #23 (the isotope abundances and patterns, M4e-4): a noted row's whole result must be the note's tokens.
 fn _par_spectroscopy(fp, fl): i64 {
     if (_par_spec_alloc() != 1) { return 0 - 1; }
     if (_par_eq(fp, fl, "SpectralSeries::n_lower") == 1) {
@@ -1809,6 +1865,8 @@ fn _par_spectroscopy(fp, fl): i64 {
             _par_got_f(load64(ap + 8 * j));
             j = j + 1;
         }
+        _par_map_toks(23);
+        if (_par_mapped == 23) { _par_adr23_abund = _par_adr23_abund + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "spectroscopy::isotope_pattern") == 1) {
@@ -1819,13 +1877,18 @@ fn _par_spectroscopy(fp, fl): i64 {
             k = k + 1;
         }
         var tp, vp = isotope_pattern(_par_spec_in, na, _par_spec_out, _PAR_MAX);
-        if (is_err_result(tp) == 1) { _par_got_err(vp); return 1; }
-        _par_got_seq(vp);
-        k = 0;
-        while (k < 2 * vp) {
-            _par_got_f(load64(_par_spec_out + 8 * k));
-            k = k + 1;
+        if (is_err_result(tp) == 1) {
+            _par_got_err(vp);
+        } else {
+            _par_got_seq(vp);
+            k = 0;
+            while (k < 2 * vp) {
+                _par_got_f(load64(_par_spec_out + 8 * k));
+                k = k + 1;
+            }
         }
+        _par_map_toks(23);
+        if (_par_mapped == 23) { _par_adr23_pattern = _par_adr23_pattern + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "spectroscopy::fft_spectrum") == 1) {
@@ -2162,19 +2225,19 @@ fn _par_accepted(fp, fl, ip, il): i64 {
     if (_par_mapped == 12) { return 2; }
     # ADR 0002 #3: a SEMF row where the oracle's NaN (z > a or a = 0) is the port's Err(InvalidInput).
     if (_par_mapped == 3) { return 2; }
-    # ADR 0002 #13 … #22: a row whose note names the port's exact value, which the port returned.
-    if (_par_mapped >= 13 && _par_mapped <= 22) { return 2; }
+    # ADR 0002 #13 … #22: a row whose note names the port's exact value, which the port returned; #23 its whole result.
+    if (_par_mapped >= 13 && _par_mapped <= 23) { return 2; }
     return 0;
 }
 
-# 1 for an ADR whose accepted rows are counted but not printed row by row: ADR 0002 #4's Antoine mapping and #13 … #22's
-# exact-value rows (M4c … M4e-3; about 17,000 rows between them), each summarised by _par_module_done with its count;
-# the validate.py proofs check every one of them. ADR 0002 #12's CFSE rows (13) and #3's SEMF rows (23) are printed by
-# name.
+# 1 for an ADR whose accepted rows are counted but not printed row by row: ADR 0002 #4's Antoine mapping, #13 … #22's
+# exact-value rows (M4c … M4e-3; about 17,000 rows between them) and #23's isotope rows (M4e-4), each summarised by
+# _par_module_done with its count; the validate.py proofs check every one of them. ADR 0002 #12's CFSE rows (13) and
+# #3's SEMF rows (23) are printed by name.
 #must_use
 fn _par_accepted_quiet(adr): i64 {
     if (adr == 2 && _par_mapped == 2) { return 1; }
-    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 22) { return 1; }
+    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 23) { return 1; }
     return 0;
 }
 
@@ -2188,7 +2251,7 @@ fn _par_accepted_bits(adr): i64 {
 
 # After the phase module: the ADR 0002 #4 mapping summary; after thermochem, ADR 0002 #1's; after organic, #6's; after
 # inorganic, #12's and #15's; after nuclear, #3's, #13's and #14's; after potential, #16's, #17's, #18's and #20's;
-# after spectroscopy, #19's, #21's (per function) and #22's.
+# after spectroscopy, #19's, #21's (per function), #22's and #23's (per function).
 fn _par_module_done(mp, ml) {
     if (_par_eq(mp, ml, "spectroscopy") == 1) {
         print("  ADR 0002 #19 exact 1/(100x): ", 31);
@@ -2210,6 +2273,14 @@ fn _par_module_done(mp, ml) {
         print("  ADR 0002 #22 exact reduced mass: ", 35);
         fmt_int(_par_adr22);
         print(" reduced_mass rows where the port's correctly rounded m1*m2/(m1 + m2) differs from Rust's", 89);
+        println(" (accepted, ADR 2, counted, not listed)");
+        print("  ADR 0002 #23 AME2020 / TICE 2009 isotope table: ", 50);
+        fmt_int(_par_adr23_abund + _par_adr23_pattern);
+        print(" rows (isotope_abundances ", 26);
+        fmt_int(_par_adr23_abund);
+        print(", isotope_pattern ", 18);
+        fmt_int(_par_adr23_pattern);
+        print(") where the port's result from the cited table is the noted one, not Rust's", 75);
         println(" (accepted, ADR 2, counted, not listed)");
         return 0;
     }

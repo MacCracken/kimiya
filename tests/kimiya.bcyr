@@ -70,6 +70,8 @@ var _bench_s = 0;           # M4e: 5 f64 input slots, filled by main()
 var _bench_sz = 0;          # 1 (Rust's black_box(1) u8)
 var _bench_sn3 = 0;         # 3 (Rust's black_box(3) u32)
 var _bench_glucose = 0;     # [(6, 6), (1, 12), (8, 6)]: 3 (z, count) records
+var _bench_cystine = 0;     # M4e-4: [(6, 6), (1, 12), (7, 2), (8, 4), (16, 2)]: 5 records
+var _bench_s8 = 0;          # [(16, 8)]: 1 record
 var _bench_iso_out = 0;     # isotope_pattern's out buffer (64 records)
 var _bench_sig = 0;         # fft_spectrum's signal (4096 f64) and find_peaks' data (1000 of them)
 var _bench_spec = 0;        # fft_spectrum's out buffer (2 × 4096 f64: the in-place transform), find_peaks' indices
@@ -865,15 +867,19 @@ fn bench_rydberg(name, fid, per_batch, batches) {
 }
 
 # spectroscopy/isotope_pattern_glucose: Rust's bench_isotope_pattern, C₆H₁₂O₆ (24 convolution steps; the working tables
-# stay in the stack tables, nothing is allocated).
-fn bench_isotope_pattern_glucose(per_batch, batches) {
-    var b = bench_new("spectroscopy/isotope_pattern_glucose");
+# stay in the stack tables, nothing is allocated). Cyrius-only (M4e-4, ADR 0002 #23's sulfur-bearing inputs):
+# spectroscopy/isotope_pattern_cystine, C₆H₁₂N₂O₄S₂ (26 steps, two of them sulfur's), and
+# spectroscopy/isotope_pattern_s8, S₈ (8 steps, every one sulfur's: since #23 four isotopes, so a scratch of 4·n records
+# for n pattern peaks, at most 4·17 = 68 for S₈ and 4·11 = 44 for cystine, within the 192-record stack tables: nothing
+# is allocated).
+fn bench_isotope_pattern(name, atoms, n, per_batch, batches) {
+    var b = bench_new(name);
     var k = 0;
     while (k < batches) {
         bench_batch_start(b);
         var i = 0;
         while (i < per_batch) {
-            var t, v = isotope_pattern(_bench_glucose, 3, _bench_iso_out, 64);
+            var t, v = isotope_pattern(atoms, n, _bench_iso_out, 64);
             _bench_sink = v;
             i = i + 1;
         }
@@ -1169,8 +1175,24 @@ fn main(): i64 {
     store64(_bench_glucose + 24, 12);
     store64(_bench_glucose + 32, 8);
     store64(_bench_glucose + 40, 6);
+    _bench_cystine = alloc(10 * 8);
+    store64(_bench_cystine, 6);
+    store64(_bench_cystine + 8, 6);
+    store64(_bench_cystine + 16, 1);
+    store64(_bench_cystine + 24, 12);
+    store64(_bench_cystine + 32, 7);
+    store64(_bench_cystine + 40, 2);
+    store64(_bench_cystine + 48, 8);
+    store64(_bench_cystine + 56, 4);
+    store64(_bench_cystine + 64, 16);
+    store64(_bench_cystine + 72, 2);
+    _bench_s8 = alloc(2 * 8);
+    store64(_bench_s8, 16);
+    store64(_bench_s8 + 8, 8);
     _bench_iso_out = alloc(64 * 16);
-    bench_isotope_pattern_glucose(10000, 20);
+    bench_isotope_pattern("spectroscopy/isotope_pattern_glucose", _bench_glucose, 3, 10000, 20);
+    bench_isotope_pattern("spectroscopy/isotope_pattern_cystine", _bench_cystine, 5, 10000, 20);
+    bench_isotope_pattern("spectroscopy/isotope_pattern_s8", _bench_s8, 1, 10000, 20);
     _bench_sig = alloc(4096 * 8);
     _bench_spec = alloc(2 * 4096 * 8);
     var seed = 0x2545F4914F6CDD1D;

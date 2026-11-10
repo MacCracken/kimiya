@@ -24,7 +24,8 @@
 //! `src/thermochem_data.cyr` (M2b); `solution` and `electrochemistry`, with `src/electrochemistry_data.cyr` (M3a);
 //! `kinetics` (M3b); `organic` and `inorganic`, with `src/organic_data.cyr` and `src/inorganic_data.cyr` (M4b);
 //! `nuclear`, with `src/nuclear_data.cyr` (M4c); `potential` (M4d: no data file); `spectroscopy`, with
-//! `src/spectroscopy_data.cyr` (M4e); …
+//! `src/spectroscopy_data.cyr` (M4e; since M4e-4 its isotope table from the cited `isotopes.tsv`, ADR 0002 #23, checked
+//! against the oracle); …
 
 mod cyr;
 mod exact;
@@ -64,8 +65,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-/// Every golden emitter, in file-name order.
-fn golden_modules() -> Vec<tsv::Module> {
+/// Every golden emitter, in file-name order. `isos` is ADR 0002 #23's isotope table (`t_spectroscopy::isotope_table`),
+/// whose results the spectroscopy rows' notes name.
+fn golden_modules(isos: &[t_spectroscopy::Iso]) -> Vec<tsv::Module> {
     vec![
         m_constants::emit(),
         m_electrochemistry::emit(),
@@ -81,7 +83,7 @@ fn golden_modules() -> Vec<tsv::Module> {
         m_potential::emit(),
         m_reaction::emit(),
         m_solution::emit(),
-        m_spectroscopy::emit(),
+        m_spectroscopy::emit(isos),
         m_thermo::emit(),
         m_thermochem::emit(),
     ]
@@ -98,9 +100,9 @@ fn read(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Every generated Cyrius source, in file-name order. Each is built from the oracle's API;
-/// the Rust source is read for comments only.
-fn cyrius_outputs(root: &Path, prov: &str) -> Result<Vec<Output>, String> {
+/// Every generated Cyrius source, in file-name order. Each is built from the oracle's API (the isotope table from its
+/// cited source, ADR 0002 #23); the Rust source is read for comments only.
+fn cyrius_outputs(root: &Path, prov: &str, isos: &[t_spectroscopy::Iso]) -> Result<Vec<Output>, String> {
     let element_src = read(&root.join("rust-old/src/element.rs"))?;
     let phase_src = read(&root.join("rust-old/src/phase.rs"))?;
     let gas_src = read(&root.join("rust-old/src/gas.rs"))?;
@@ -119,7 +121,7 @@ fn cyrius_outputs(root: &Path, prov: &str) -> Result<Vec<Output>, String> {
         ("src/nuclear_data.cyr", t_nuclear::emit(&nuclear_src, prov)?),
         ("src/organic_data.cyr", t_organic::emit(&organic_src, prov)?),
         ("src/phase_data.cyr", t_phase::emit(root, &phase_src, prov)?),
-        ("src/spectroscopy_data.cyr", t_spectroscopy::emit(&spectroscopy_src, prov)?),
+        ("src/spectroscopy_data.cyr", t_spectroscopy::emit(&spectroscopy_src, prov, isos)?),
         ("src/thermochem_data.cyr", t_thermochem::emit(&thermochem_src, prov)?),
     ];
     Ok(files
@@ -251,9 +253,12 @@ fn run() -> Result<bool, String> {
         ok &= check_platform(&dir, &platform);
     }
 
+    // ADR 0002 #23: the cited isotope table, checked against the oracle before anything is written.
+    let isos = t_spectroscopy::isotope_table(&root, &read(&root.join("rust-old/src/spectroscopy.rs"))?)?;
+
     let mut outputs = Vec::new();
     let mut emitted = BTreeSet::new();
-    for module in golden_modules() {
+    for module in golden_modules(&isos) {
         let name = format!("{}.tsv", module.name);
         emitted.insert(name.clone());
         outputs.push(Output {
@@ -276,7 +281,7 @@ fn run() -> Result<bool, String> {
         summary: format!("{} modules", emitted.len()),
         text: index,
     });
-    outputs.extend(cyrius_outputs(&root, &oracle)?);
+    outputs.extend(cyrius_outputs(&root, &oracle, &isos)?);
 
     for out in &outputs {
         ok &= emit(&root, check, out)?;

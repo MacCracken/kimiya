@@ -9,7 +9,9 @@
 //! ```
 //!
 //! `inputs` and `outputs` are space-separated typed tokens (`-` when empty). `note` is a
-//! human-readable rendering of the same call, for review only; the harness ignores it.
+//! human-readable rendering of the same call, for review only; the harness ignores it, but for
+//! the ADR 0002 notes that name the port's value (`… (f:<bits>)]`, `(i:<n>)]`, `(E:<Variant>)]`, and
+//! since M4e-4 a whole token list, `(v:n f:… …)]`: [`tokens_note`]).
 
 /// Parity tolerance class of a row (port plan §5).
 #[allow(dead_code)] // D arrives with the Newton loops and the ODE trajectories (M3, M5)
@@ -131,6 +133,13 @@ fn wire_list(toks: &[Tok]) -> String {
 
 fn human_list(toks: &[Tok]) -> String {
     toks.iter().map(Tok::human).collect::<Vec<_>>().join(", ")
+}
+
+/// A whole result for a note (ADR 0002 #23, M4e-4: a `Vec<(f64, f64)>` the port returns): its readable form, then its
+/// golden tokens in parentheses, `[2], 1.0, 0.5, … (v:2 f:… f:… …)`. The note then ends `(<tokens>)]`, as a one-value
+/// note ends `(f:<bits>)]`; the harness reads the token list.
+pub fn tokens_note(toks: &[Tok]) -> String {
+    format!("{} ({})", human_list(toks), wire_list(toks))
 }
 
 /// The rows of one `tests/golden/<name>.tsv`.

@@ -7,7 +7,8 @@
 //! `&[f64]` as n `f:` tokens (`find_peaks`' threshold follows). A Vec result is `v:n` and its elements: the isotope
 //! pattern's (mass, intensity) pairs, the spectrum's floats, the peaks' `i:` indices; `isotope_abundances`' slice the
 //! same way.
-//! - Class A: `isotope_abundances` (every u8), `SpectralSeries::n_lower` (every variant), `find_peaks` (integers: the
+//! - Class A: `isotope_abundances` (every u8; **ADR 0002 #23**, M4e-4: the 7 elements' rows noted with the port's slice from
+//!   the cited AME2020 / TICE 2009 table), `SpectralSeries::n_lower` (every variant), `find_peaks` (integers: the
 //!   Rust tests' data, fewer than 3 points, thresholds 0, 1, −0.0, the ulps inside [0, 1] and every way out of it, NaN
 //!   and ±∞; plateaus, flat and monotone data, NaN and ±∞ in the data, all non-finite, ±0, DBL_MAX ranges where the
 //!   interpolated threshold over- or underflows, seeded data).
@@ -24,7 +25,9 @@
 //!   the overflow and underflow ends, seeded over every binade), noted likewise; `isotope_pattern` (the Rust tests'
 //!   molecules, the empty molecule, every u8 Z alone, every element with data × counts to 5000 (the pruning keeps the
 //!   peak count bounded), elements without data with counts to u32::MAX, H₂… (equal scratch masses: the stable sort's
-//!   order decides the binned mean), mixtures, the Err position in a list, seeded molecules); and **ADR 0002 #19**:
+//!   order decides the binned mean), mixtures, the Err position in a list, seeded molecules; **ADR 0002 #23**: each row
+//!   whose result changes with the AME2020 / TICE 2009 table noted with the port's, from [`pattern_replica`], Rust's
+//!   function transcribed with the table a parameter and checked against the oracle on every row); and **ADR 0002 #19**:
 //!   `wavenumber_from_wavelength` and `wavelength_from_wavenumber` (the edges, every decade, every power of two, the
 //!   subnormal-result and overflow ends, seeded over every binade), the rows where the port's correctly rounded
 //!   1/(100·x) differs from Rust's `0.01 / x` noted with it.
@@ -42,7 +45,8 @@ use std::hint::black_box as bb;
 use crate::exact::{cr_bohr_level, cr_hundredth_div, cr_reduced_mass, cr_rydberg, cr_transition};
 use crate::grids::{Rng, decades, pow2};
 use crate::m_reaction::{edges, res};
-use crate::tsv::{Class, Module, Tok, e, err, f, i};
+use crate::t_spectroscopy::{Iso, new_abundances};
+use crate::tsv::{Class, Module, Tok, e, err, f, i, tokens_note};
 use kimiya::spectroscopy::{
     SpectralSeries, absorbance, absorbance_from_transmittance, bohr_energy_level, bohr_transition_energy,
     concentration_from_absorbance, diatomic_moment_of_inertia, ev_to_joules, fft_spectrum, find_peaks,
@@ -361,24 +365,119 @@ fn rotor(m: &mut Module, j: u32, b: f64) {
     m.row("spectroscopy::rigid_rotor_energy", Class::B, &[i(j), f(b)], &[f(out)]);
 }
 
-fn pattern(m: &mut Module, atoms: &[(u8, u32)]) {
+/// Rust 1.2.0's `isotope_pattern` (rust-old/src/spectroscopy.rs), transcribed operation for operation with the isotope
+/// table a parameter (`table(z)` is z's (mass, abundance) pairs, empty for none) and its private `ISOTOPE_BIN_WIDTH_U`
+/// (0.5), `ISOTOPE_PRUNE_REL` (10⁻¹²) and `ISOTOPE_REPORT_REL` (0.001) typed: the pruned convolution, the stable
+/// `sort_by(total_cmp)`, the binning, `fold(0.0, max)` and the two `retain`s. With the oracle's `isotope_abundances` it
+/// must give the oracle's result on every row (`pattern` checks it), so with ADR 0002 #23's table it gives the port's.
+/// The Err is the variant's name.
+fn pattern_replica(atoms: &[(u8, u32)], table: &dyn Fn(u8) -> Vec<(f64, f64)>) -> Result<Vec<(f64, f64)>, &'static str> {
+    if atoms.is_empty() {
+        return Err("InvalidInput");
+    }
+    let mut pattern: Vec<(f64, f64)> = vec![(0.0, 1.0)];
+    let mut scratch: Vec<(f64, f64)> = Vec::new();
+    for &(z, count) in atoms {
+        let abundances = table(z);
+        if abundances.is_empty() {
+            let Some(elem) = kimiya::element::lookup_by_number(z) else {
+                return Err("InvalidElement");
+            };
+            let shift = f64::from(count) * elem.atomic_mass;
+            for peak in &mut pattern {
+                peak.0 += shift;
+            }
+            continue;
+        }
+        for _ in 0..count {
+            scratch.clear();
+            for &(m1, i1) in &pattern {
+                for &(m2, i2) in &abundances {
+                    scratch.push((m1 + m2, i1 * i2));
+                }
+            }
+            scratch.sort_by(|a, b| a.0.total_cmp(&b.0));
+            pattern.clear();
+            for &(m, i) in &scratch {
+                if let Some(last) = pattern.last_mut()
+                    && (m - last.0).abs() < 0.5
+                {
+                    let total = last.1 + i;
+                    if total > 0.0 {
+                        last.0 = (last.0 * last.1 + m * i) / total;
+                    }
+                    last.1 = total;
+                    continue;
+                }
+                pattern.push((m, i));
+            }
+            let max_intensity = pattern.iter().fold(0.0_f64, |acc, p| acc.max(p.1));
+            if max_intensity > 0.0 {
+                for peak in &mut pattern {
+                    peak.1 /= max_intensity;
+                }
+            }
+            pattern.retain(|p| p.1 >= 1e-12);
+        }
+    }
+    pattern.retain(|(_, i)| *i > 0.001);
+    Ok(pattern)
+}
+
+/// A `Vec<(f64, f64)>` result's golden tokens: `v:n`, then each pair's two floats; an Err its `E:` token.
+fn pairs_toks(r: Result<&[(f64, f64)], &str>) -> Vec<Tok> {
+    match r {
+        Ok(p) => {
+            let mut v = vec![Tok::V(p.len())];
+            for &(a, b) in p {
+                v.push(f(a));
+                v.push(f(b));
+            }
+            v
+        }
+        Err(name) => vec![Tok::Err(name.to_string())],
+    }
+}
+
+/// Whether two token lists are the same bits (every float bit for bit; a NaN is no isotope value, so none is special).
+fn same_toks(a: &[Tok], b: &[Tok]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| match (x, y) {
+            (Tok::F(p), Tok::F(q)) => p.to_bits() == q.to_bits(),
+            (Tok::V(p), Tok::V(q)) => p == q,
+            (Tok::Err(p), Tok::Err(q)) => p == q,
+            _ => false,
+        })
+}
+
+/// ADR 0002 #23 (M4e-4): a row whose result is a `Vec<(f64, f64)>`, the oracle's outputs, noted with the port's result
+/// from the cited table where the two differ.
+fn row23(m: &mut Module, name: &str, cls: Class, ins: &[Tok], oracle: &[Tok], port: &[Tok]) {
+    if same_toks(oracle, port) {
+        m.row(name, cls, ins, oracle);
+        return;
+    }
+    let note = format!(
+        "ADR 0002 #23: with the AME2020 masses and the TICE 2009 abundances, ³⁶S included, the port returns {}",
+        tokens_note(port)
+    );
+    m.row_noted(name, cls, ins, oracle, &note);
+}
+
+fn pattern(m: &mut Module, isos: &[Iso], atoms: &[(u8, u32)]) {
     let mut ins = vec![Tok::V(atoms.len())];
     for &(z, c) in atoms {
         ins.push(i(z));
         ins.push(i(c));
     }
     let outs = match isotope_pattern(bb(atoms)) {
-        Ok(p) => {
-            let mut v = vec![Tok::V(p.len())];
-            for (mass, int) in p {
-                v.push(f(mass));
-                v.push(f(int));
-            }
-            v
-        }
+        Ok(p) => pairs_toks(Ok(&p)),
         Err(e_) => vec![err(&e_)],
     };
-    m.row("spectroscopy::isotope_pattern", Class::B, &ins, &outs);
+    let rust = pattern_replica(atoms, &|z| isotope_abundances(z).to_vec());
+    assert!(same_toks(&pairs_toks(rust.as_deref().map_err(|e| *e)), &outs), "isotope_pattern replica disagrees with the oracle: {atoms:?}");
+    let port = pattern_replica(atoms, &|z| new_abundances(isos, z));
+    row23(m, "spectroscopy::isotope_pattern", Class::B, &ins, &outs, &pairs_toks(port.as_deref().map_err(|e| *e)));
 }
 
 fn spectrum(m: &mut Module, signal: &[f64]) {
@@ -435,7 +534,7 @@ fn sine(c: u64, k: u64, n: u64) -> f64 {
 }
 
 #[allow(clippy::too_many_lines)] // one function after another, in source order
-pub fn emit() -> Module {
+pub fn emit(isos: &[Iso]) -> Module {
     let mut m = Module::new("spectroscopy");
     let mut rng = Rng::new(0x5ec7);
     let big = f64::MAX;
@@ -937,19 +1036,15 @@ pub fn emit() -> Module {
         mi(&mut m, rng.signed_log_uniform(-300.0, 300.0), rng.signed_log_uniform(-200.0, 200.0));
     }
 
-    // ── isotope_abundances (A): every u8 ──
+    // ── isotope_abundances (A): every u8; ADR 0002 #23's notes ──
     for z in 0..=255u8 {
-        let a = isotope_abundances(bb(z));
-        let mut outs = vec![Tok::V(a.len())];
-        for &(mass, ab_) in a {
-            outs.push(f(mass));
-            outs.push(f(ab_));
-        }
-        m.row("spectroscopy::isotope_abundances", Class::A, &[i(z)], &outs);
+        let outs = pairs_toks(Ok(isotope_abundances(bb(z))));
+        let port = pairs_toks(Ok(&new_abundances(isos, z)));
+        row23(&mut m, "spectroscopy::isotope_abundances", Class::A, &[i(z)], &outs, &port);
     }
 
-    // ── isotope_pattern (B) ──
-    pattern(&mut m, &[]);
+    // ── isotope_pattern (B; ADR 0002 #23's notes) ──
+    pattern(&mut m, isos, &[]);
     for atoms in [
         &[(6u8, 1u32), (1, 4)][..], // the Rust tests' molecules: CH₄, Cl₂, H₈₈, C₁₆₈, the large one
         &[(17, 2)][..],
@@ -961,14 +1056,14 @@ pub fn emit() -> Module {
         &[(26, 2)][..],
         &[(6, 6), (1, 12), (8, 6)][..], // glucose (the bench)
     ] {
-        pattern(&mut m, atoms);
+        pattern(&mut m, isos, atoms);
     }
     for z in 0..=255u8 {
-        pattern(&mut m, &[(z, 1)]);
+        pattern(&mut m, isos, &[(z, 1)]);
     }
     for z in [1u8, 6, 7, 8, 16, 17, 35] {
         for c in [0u32, 1, 2, 3, 4, 5, 7, 10, 20, 50, 100, 200, 500, 1000, 2000] {
-            pattern(&mut m, &[(z, c)]);
+            pattern(&mut m, isos, &[(z, c)]);
         }
     }
     for atoms in [
@@ -998,7 +1093,7 @@ pub fn emit() -> Module {
         &[(6, 1), (1, 4), (8, 1), (7, 1), (16, 1), (17, 1), (35, 1), (26, 1), (53, 1), (11, 1)][..],
         &[(6, 60), (1, 98), (7, 16), (8, 18), (16, 1)][..], // a peptide-sized molecule
     ] {
-        pattern(&mut m, atoms);
+        pattern(&mut m, isos, atoms);
     }
     let zs = [1u8, 6, 7, 8, 16, 17, 35, 26, 11, 53, 92, 0, 119, 200];
     for _ in 0..300 {
@@ -1010,7 +1105,7 @@ pub fn emit() -> Module {
                 (z, u32::try_from(rng.int(0, 60)).unwrap_or(0))
             })
             .collect();
-        pattern(&mut m, &atoms);
+        pattern(&mut m, isos, &atoms);
     }
 
     // ── fft_spectrum (C) ──

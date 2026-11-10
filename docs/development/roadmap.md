@@ -11,9 +11,10 @@ Next: **Cyrius port** — plan of record: [`kimiya-port-plan.md`](kimiya-port-pl
 M0–M3 and M3c are done (M3c, ADR 0006: every transcendental the port calls is correctly rounded, and every class-C row
 is gated at 0 ulp against the corrected oracle); M4 (structure, nuclear, spectroscopy) is in progress, its M4b (organic,
 inorganic), M4c (nuclear), M4a (correctly rounded sin, cos, atan2, acos), M4d (potential, the trig switch), M4e
-(spectroscopy, hisab 1.4.0's FFT transcribed), M4e-2 (potential's geometry with an unbounded exponent, ADR 0002 #20) and
-M4e-3 (the Bohr model, the Rydberg formula and the reduced mass rounded once, ADR 0002 #21 and #22) done, M4f
-(stoichiometry) next — live status in [`state.md`](state.md).
+(spectroscopy, hisab 1.4.0's FFT transcribed), M4e-2 (potential's geometry with an unbounded exponent, ADR 0002 #20),
+M4e-3 (the Bohr model, the Rydberg formula and the reduced mass rounded once, ADR 0002 #21 and #22) and M4e-4 (the cited
+AME2020 / TICE 2009 isotope table with ³⁶S, ADR 0002 #23) done, M4f (stoichiometry) next — live status in
+[`state.md`](state.md).
 
 ---
 
@@ -107,9 +108,11 @@ type for average oxidation states, no separate extrapolating Antoine function. I
 - [ ] IUPAC 2011 hydrogen-bond definition — check the acceptor sentence quoted in `src/organic_data.cyr` against the
   published *Pure Appl. Chem.* 83, 1637 PDF (quoted from a secondary copy; the PDF was unreachable in M4b)
 - [ ] Na₂CO₃ ΔGf° is inconsistent with ΔHf°/S° by 2.55 kJ/mol in NBS/CRC (pinned as a known exception in tests)
-- [ ] `spectroscopy::isotope_abundances` — the masses are AME2020's to five decimals (¹H 1.00783 for 1.007825032, ¹³C
-  13.00335 for 13.003354835; within 5·10⁻⁶ u), and sulfur omits ³⁶S (0.0001; its abundances sum to 0.9999). Kept as the
-  oracle's in the port (functional parity, M4e); full AME2020 masses and ³⁶S would be a data change for a later release
+- [x] `spectroscopy::isotope_abundances` — the masses were AME2020's to five decimals (¹H 1.00783 for 1.007825032, ¹³C
+  13.00335 for 13.003354835; within 5·10⁻⁶ u), and sulfur omitted ³⁶S (0.0001; its abundances summed to 0.9999). Done in the
+  Cyrius port (M4e-4, ADR 0002 #23, the user's decision of 2026-11-10): the full AME2020 masses (Wang et al., Chin. Phys. C
+  45, 030003 (2021)) and the TICE 2009 abundances (Berglund & Wieser, Pure Appl. Chem. 83, 397 (2011)) with ³⁶S, from the
+  cited records in `scripts/oracle/isotopes.tsv`; Rust 1.2.0 keeps its table (no Rust release)
 
 ---
 

@@ -3,14 +3,19 @@
 # as words (u8 Z, u32 n / line / count outside their types), the caller buffers (too small, null, the FFT's in-place
 # work table), the private helpers (the isotope pattern's stable sort, its typed thresholds on the ulp, the FFT
 # transcription), ADR 0002 #19's correctly rounded 1/(100·x), #21's exact Rydberg rationals and #22's exact reduced
-# mass (ties, exact values, the fast paths against the exact ones) and the generated R_H. The golden corpus separately
+# mass (ties, exact values, the fast paths against the exact ones), #23's isotope table (the cited AME2020 masses and
+# TICE 2009 abundances, ³⁶S included) and a pattern it changes, and the generated R_H. The golden corpus separately
 # checks every function over its grid (tests/parity.tcyr).
 #
 # Adapted beyond the port's form (port plan §6.4: `Result::unwrap` is `is_ok` + the payload, a Vec the caller's buffer
 # and its count, a slice a pointer and a count, `SpectralSeries::X.wavelength(l)` spectral_series_wavelength(KM_…, l),
 # `x.sin()` the correctly rounded _km_cr_sin, `RYDBERG_HYDROGEN` the generated _KM_RYDBERG_HYDROGEN); no test needed
 # more. ADR 0002 #19 changes none of the Rust tests' cases (500 nm, 10 µm and their round trips are equal in both),
-# nor do #21 and #22 (the Rust tests check their values to 10⁻⁶ or better and exact zeros only).
+# nor do #21 and #22 (the Rust tests check their values to 10⁻⁶ or better and exact zeros only). #23 (M4e-4, the cited
+# AME2020 / TICE 2009 isotope table) changes one: hydrogen_abundances_iupac_2009's exact pairs are the table's (¹H
+# 1.007825031898, ²H 2.014101777844), and its Σ = 1 loop gains sulfur, which Rust's left out (its sulfur sums to
+# 0.9999). The others hold as written (CH₄'s M+1 depends on the abundances only, Cl₂'s masses move by under 10⁻⁴ u);
+# the Cyrius-only ADR 0002 #23 groups test the table and a pattern ³⁶S changes (S₈).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -184,7 +189,7 @@ var _t_data_small: f64[5] = { 0.0, 1.0, 3.0, 1.0, 0.0 };
 var _t_data_two: f64[2] = { 1.0, 2.0 };
 
 # Test inputs (a local array can't have an initializer).
-var _t_zs: i64[6] = { 1, 6, 7, 8, 17, 35 };
+var _t_zs: i64[7] = { 1, 6, 7, 8, 16, 17, 35 };
 var _t_em: f64[3] = { 69.9377, 71.9348, 73.9318 };
 var _t_ei: f64[3] = { 1.0, 0.6399, 0.1024 };
 var _t_a1: i64[2] = { 262, 1 };
@@ -608,14 +613,16 @@ fn _t_isotope_pattern_ch4() {
     assert(near(pi_(out, 1), 0.011276, 0.000001) == 1, "M+1/M = 0.011276 (IUPAC 2009)");
 }
 
+# ADR 0002 #23: the pairs are the cited table's, AME2020's full masses (Rust: 1.00783, 2.01410); every element with data
+# sums to 1 (Rust's loop leaves out sulfur, whose three isotopes sum to 0.9999).
 fn _t_hydrogen_abundances_iupac_2009() {
     test_group("hydrogen_abundances_iupac_2009");
     var p, n = isotope_abundances(1);
     assert(n == 2, "two hydrogen isotopes");
-    assert(bits(at(p, 0)) == bits(1.00783) && bits(at(p, 1)) == bits(0.999885), "¹H (1.00783, 0.999885)");
-    assert(bits(at(p, 2)) == bits(2.0141) && bits(at(p, 3)) == bits(0.000115), "²H (2.01410, 0.000115)");
+    assert(bits(at(p, 0)) == bits(1.007825031898) && bits(at(p, 1)) == bits(0.999885), "¹H (1.007825031898, 0.999885)");
+    assert(bits(at(p, 2)) == bits(2.014101777844) && bits(at(p, 3)) == bits(0.000115), "²H (2.014101777844, 0.000115)");
     var k = 0;
-    while (k < 6) {
+    while (k < 7) {
         var q, m = isotope_abundances(_t_zs[k]);
         var total: f64 = -0.0;              # Rust's `.sum()`
         var j = 0;
@@ -1379,6 +1386,73 @@ fn _t_cyrius_adr22() {
     assert(agree == 1 && passed > 15000, "fast = exact on 20,000 seeded pairs");
 }
 
+# ADR 0002 #23's table, cell by cell: the seven elements' counts, ¹H's full AME2020 mass, sulfur's four pairs (³⁶S
+# included) and their sum, which is exactly 1 in decimal (validate.py) and one ulp below 1.0 in Rust's f64 `.sum()` from
+# −0.0 (0.9499 + 0.0075 + 0.0425 + 0.0001 = 0.9999999999999999).
+var _t_iso_zs: i64[7] = { 1, 6, 7, 8, 16, 17, 35 };
+var _t_iso_ns: i64[7] = { 2, 2, 2, 3, 4, 2, 2 };
+var _t_iso_s: f64[8] = { 31.97207117354, 0.9499, 32.97145890862, 0.0075, 33.967867011, 0.0425, 35.967080692, 0.0001 };
+
+fn _t_cyrius_adr23_table() {
+    test_group("cyrius: ADR 0002 #23 (the AME2020 / TICE 2009 table)");
+    var k = 0;
+    while (k < 7) {
+        var q, m = isotope_abundances(_t_iso_zs[k]);
+        assert(m == _t_iso_ns[k] && q != 0, "isotope count");
+        k = k + 1;
+    }
+    var h, nh = isotope_abundances(1);
+    assert(nh == 2 && bits(at(h, 0)) == 0x3FF0200D2401791B, "¹H 1.007825031898 u (AME2020), not Rust's 1.00783");
+    var p, n = isotope_abundances(16);
+    assert(n == 4, "sulfur: ³²S, ³³S, ³⁴S, ³⁶S");
+    var total: f64 = -0.0;
+    var j = 0;
+    while (j < 8) {
+        assert(bits(at(p, j)) == bits(_t_iso_s[j]), "sulfur pair cell (AME2020 mass, TICE 2009 abundance)");
+        if (j % 2 == 1) { total = total + at(p, j); }
+        j = j + 1;
+    }
+    assert(bits(at(p, 6)) == bits(35.967080692) && bits(at(p, 7)) == bits(0.0001), "³⁶S (35.967080692, 0.0001)");
+    assert(bits(total) == 0x3FEFFFFFFFFFFFFF, "Σ sulfur = 1 − 2⁻⁵³ in f64 (1 exactly in decimal)");
+    var b, nb = isotope_abundances(35);
+    assert(nb == 2 && bits(at(b, 2)) == bits(80.916288197) && bits(at(b, 3)) == bits(0.4931), "⁸¹Br");
+}
+
+# S₈ through ADR 0002 #23's table, every peak bit for bit as validate.py's replica (r_pattern on scripts/oracle/
+# isotopes.tsv) gives it. ³⁶S shows from M+4 on: the M+4 bin (³²S₆³⁴S₂, merged with ³²S₇³⁶S) has 0.05736163020920976
+# where the table without ³⁶S gives 0.05651943629406078 (the same replica), +1.5 %, and its mass moves up; M+5 (+1.7 %)
+# and M+6 (+5.2 %) likewise; M … M+3 are the three-isotope values.
+var _t_s8: i64[2] = { 16, 8 };
+var _t_s8_want: i64[14] = {
+    0x406FF8D9A80BBD18, 0x3FF0000000000000,     # M    255.77656938832, 1
+    0x40700C6A520441A0, 0x3FB02B8D312F22CB,     # M+1  256.7759571234001, 0.06316454363617223
+    0x40701C5BAACD34BC, 0x3FD704F698A386A7,     # M+2  257.7723796859607, 0.3596779337513944
+    0x40702C591DFADC82, 0x3F94491AC1FD3347,     # M+3  258.77175710671156, 0.019810121622231305
+    0x40703C4AB16D2E93, 0x3FAD5E80EB966D28,     # M+4  259.7682356133384, 0.05736163020920976
+    0x40704C4825F80148, 0x3F662F2251E1B227,     # M+5  260.76761433484035, 0.002708022147137851
+    0x40705C39FC47FEF5, 0x3F75D7F686977F62      # M+6  261.76415660975846, 0.005332911483009047
+};
+var _t_s8_no36: i64[3] = { 0x3FACF01D94F15454, 0x3F65CD847C1C9356, 0x3F74C23A079C36DE };   # M+4 … M+6 without ³⁶S
+
+fn _t_cyrius_adr23_s8() {
+    test_group("cyrius: ADR 0002 #23 (S₈, ³⁶S)");
+    var out = alloc(16 * 64);
+    var t, n = pattern_of(&_t_s8, 1, out, 64);
+    assert(is_ok(t) == 1 && n == 7, "S₈: M … M+6");
+    var k = 0;
+    while (k < 14) {
+        assert(load64(out + 8 * k) == _t_s8_want[k], "S₈ peak bits (validate.py's replica)");
+        k = k + 1;
+    }
+    k = 0;
+    while (k < 3) {
+        var with: f64 = pi_(out, 4 + k);
+        var without: f64 = from_bits(_t_s8_no36[k]);
+        assert(with > without, "³⁶S raises M+4 … M+6");
+        k = k + 1;
+    }
+}
+
 # The generated constants: R_H is Rust's const evaluation; the thresholds are pinned above.
 fn _t_cyrius_constants() {
     test_group("cyrius: R_H and the generated data");
@@ -1475,6 +1549,8 @@ fn main(): i64 {
     _t_cyrius_adr19();
     _t_cyrius_adr21();
     _t_cyrius_adr22();
+    _t_cyrius_adr23_table();
+    _t_cyrius_adr23_s8();
     _t_cyrius_constants();
     return assert_summary();
 }

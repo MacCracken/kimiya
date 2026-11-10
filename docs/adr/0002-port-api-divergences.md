@@ -38,6 +38,7 @@ are compared through the stated mapping:
 | 20 *(2026-11-09, M4e-2)* | `potential::distance_3d`, `bond_angle` and `dihedral_angle` square raw coordinates: above about 10¹⁵⁴ (10⁷⁷ for the dihedral's fourth powers) or below their reciprocals a square, cross product or dot product overflows or underflows, and the result is an Err, 0, ±∞ or a degraded value where the true distance or angle is representable (`distance_3d` of (DBL_MAX, 0, 0) and the origin is +∞, the gauche dihedral at 2⁷⁰⁰·Å an Err, the angle of (1, 2⁻¹⁰⁶⁰) 0), so the angles, which Rust documents as scale-invariant, are not | Rust's own operation sequence (every subtraction, product, sum, comparison, `max` and the Err checks, in Rust's order) evaluated in IEEE binary64 round-to-nearest-even with an **unbounded exponent range**: every + − × ÷ √ rounds to 53 bits and nothing overflows or underflows. The exception is the **final** operation (`sqrt` for `distance_3d`, `atan2` for the angles), which is correctly rounded to binary64 itself: its subnormal grid, or ±∞. Comparisons and Err branches use the unbounded values; non-finite inputs keep Rust's behaviour. So every row where Rust's chain stays in the normal range is bit-identical to Rust; the angles are exactly scale-invariant (for every k with all scaled coordinates exact, the same bits at 2^k times the coordinates: every check is homogeneous, and `atan2`'s two arguments have the same degree), and `distance_3d` scales by exactly 2^k wherever the result is normal. Rust's chain with a cheap range test, and `src/mathx.cyr`'s `_km_ux_*` helpers where it fails | class B (`distance_3d`) and C (the angles); noted `(f:…)` or `(E:InvalidInput)`, mapped and counted (854, 1,205 and 1,546 rows; 91 of the dihedral's are the port's Err where Rust's rounded threshold says Ok) |
 | 21 *(2026-11-10, M4e-3)* | `spectroscopy::bohr_energy_level` computes ((−R·Z)·Z)/(n·n), `bohr_transition_energy` the difference of two such levels, `rydberg_wavelength` and `SpectralSeries::wavelength` 1/(((R·Z)·Z)·(1/(n₁·n₁) − 1/(n₂·n₂))): three to eight roundings of exact rationals, so −R at Z = n is one ulp off for 86 of the 255 Z, and the levels' difference and 1/n₁² − 1/n₂² cancel for close large n (39 ulp at n = 100, 939 at 10⁴, up to 9.0·10⁷ for the wavelength and 1.8·10⁹ for the transition energy on the corpus, near n = 2³²) | the exact rational with the constant as its double, **rounded once**: −R·Z²/n², R·Z²·(n₂² − n₁²)/(n₁²·n₂²) and n₁²·n₂²/(R·Z²·(n₂² − n₁²)) (R = `KM_RYDBERG_EV`, `KM_RYDBERG`, or Rust's const-evaluated R_H, Z = 1): a double-double fast path with a proven bound and a rounding test (exact operands for n₂ < 2¹³), and the exact slow path `_km_cr_ratio` on multi-word integers, which rounds the 13 exact ties (Z = 255, 2^k·(58,055, 524,544)) to even. Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (3,823 levels, 1,351 transition energies, 1,376 wavelengths, 67 series lines) |
 | 22 *(2026-11-10, M4e-3)* | `spectroscopy::reduced_mass` computes (m₁·m₂)/(m₁ + m₂): three roundings, so a homonuclear m/2 is one ulp off on 8.6 % of masses, and m₁·m₂ or m₁ + m₂ overflows or underflows at the range ends (NaN at (DBL_MAX, DBL_MAX), 0 or ∞ where μ is representable) | the correctly rounded m₁·m₂/(m₁ + m₂) for every pair of positive finite doubles, subnormal results and their ties included: with m₁ ≥ m₂ and the exponent gap g, the smaller mass for g ≥ 55 (proven), otherwise s₁s₂/(s₁ + s₂·2⁻ᵍ) scaled by 2^e₂ (no intermediate leaves the range), a double-double fast path and the exact `_km_cr_ratio` | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (2,837 rows) |
+| 23 *(2026-11-10, M4e-4)* | `spectroscopy::isotope_abundances`' table rounds the AME2020 masses to five decimals (¹H 1.00783 for 1.007825031898 u, ²H 2.01410 for 2.014101777844; each within 5·10⁻⁶ u) and omits ³⁶S (0.0001), so sulfur's abundances sum to 0.9999; `isotope_pattern` convolves that table | the cited table: the AME2020 masses at full published precision and the TICE 2009 representative abundances (Rust's, unchanged), ³⁶S added; each value the double nearest its published decimal, from the records in `scripts/oracle/isotopes.tsv`. `isotope_pattern`'s algorithm, Err codes and order are Rust's; only its data change | class A (`isotope_abundances`) and B (`isotope_pattern`); the rows whose result changes noted with the port's whole result `(v:n f:… …)`, mapped and counted (7 and 347 rows) |
 
 Deferred with their modules (port plan §2.2), and decided when they port: #5 `bridge::*` →
 `Result` and removal of `ionization_to_bond_energy_estimate`; #10 soorat `from_molecule` →
@@ -361,6 +362,102 @@ function, the fast path and the exact path forced) against `Fraction` on x86_64 
 **Cost** (`tests/kimiya.bcyr`, before → after, the same host): `spectroscopy/bohr_energy_level` 9 → 49 ns (Rust 1.21),
 `bohr_transition_energy` 27 → 73, `rydberg_wavelength` 24 → 73, `series_wavelength_balmer_alpha` 28 → 78,
 `reduced_mass_hcl` 14 → 73; the exact path on a tie: `bohr_transition_energy_tie` 2.42 µs, `reduced_mass_tie` 2.20 µs.
+
+## Addition, 2026-11-10 (M4e-4): #23
+
+**The user's decision (2026-11-10), verbatim.** The question was the main session's; the answer is the user's.
+Q: "Rust's isotope table rounds the AME2020 masses to 5 decimals (¹H 1.00783 vs 1.007825032, ²H 2.01410 vs 2.014101778)
+and omits ³⁶S (abundance 0.0001, so sulfur sums to 0.9999). Upgrade it to full-precision AME2020 masses and the complete
+IUPAC compositions (³⁶S included)?" A: **"Upgrade the data (Recommended)"**. The agreed form: the full AME2020 masses plus
+³⁶S, from a cited source file that the generator reads, recorded as this row.
+
+**The sources** (retrieved 2026-11-10; the hashes are of the files as downloaded):
+- **Masses: AME2020**, the unrounded atomic-mass table `mass_1.mas20.txt`
+  (https://www-nds.iaea.org/amdc/ame2020/mass_1.mas20.txt, sha256
+  `e8599c6d7f724fac91934e59f1b9de8fb8f63e820f4b39456b790665ed2a3307`): M. Wang, W.J. Huang, F.G. Kondev, G. Audi and S.
+  Naimi, "The AME 2020 atomic mass evaluation (II). Tables, graphs and references", *Chinese Physics C* 45, 030003 (2021).
+  Each mass is read by the file's own Fortran format (its header: the atomic mass is an i3 in u at columns 107–109 and an
+  f13.6 in micro-u at 111–123) and kept with its published digits: "1 007825.031898" µu is 1.007825031898 u.
+- **Abundances: TICE 2009**, Table 1, column 9, "Representative isotopic composition"
+  (https://www.ciaaw.org/pubs/TICE-2009.pdf, sha256 `2145b6762c77f229c4594f5bc4bd4f6d98e1194c0a554f7a5e11881f1db2c893`):
+  M. Berglund and M.E. Wieser, "Isotopic compositions of the elements 2009 (IUPAC Technical Report)", *Pure Appl. Chem.*
+  83(2), 397–410 (2011), doi:10.1351/PAC-REP-10-06-02. It is Rust 1.2.0's cited source ("IUPAC 2009 representative
+  isotopic compositions"); its 16 values for Rust's isotopes are Rust's literals digit for digit, and it gives ³⁶S
+  0.0001(1).
+
+**Why TICE 2009 and not CIAAW's current table.** CIAAW's current "Isotopic compositions of the elements 2024"
+(https://www.ciaaw.org/isotopic-abundances.htm, retrieved 2026-11-10, sha256
+`1ab770a48bb539d26ad2992a94b4c60d51743058b67f106796b754cd5035423b`) gives all seven of these elements intervals, not
+values: ¹H [0.999 72, 0.999 99], ¹²C [0.9884, 0.9904], ¹⁴N [0.995 78, 0.996 63], ¹⁶O [0.997 38, 0.997 76], ³²S [0.9441,
+0.9529], ³⁵Cl [0.755, 0.761], ⁷⁹Br [0.505, 0.508] (the page cites the 2013 report, J. Meija et al., *Pure Appl. Chem.*
+88, 293–306 (2016), and the revisions since). A mass spectrum needs one composition and the current table offers none
+for these elements, so the abundances stay TICE 2009's single values — Rust's, with ³⁶S added — and the decision changes
+the masses and completes sulfur. As a consistency check, each element's abundance-weighted mean mass lies in its CIAAW
+standard-atomic-weight interval where the CIAAW page was retrieved with the sources (H 1.007941 in [1.007 84, 1.008 11],
+https://www.ciaaw.org/hydrogen.htm, sha256 `eeb33c101263ab3047789c45758f2b2d63fd60622fd8e135c0af2d1a4e109d3b`; S 32.064787
+in [32.059, 32.076], https://www.ciaaw.org/sulfur.htm, sha256
+`5103098a7605eccb73932ec5058fd0b3a9a138d5089f2fd7acb7e52b730b5c12`).
+
+**#23, the table** (the 17 isotopes; the masses in u, the abundances as mole fractions):
+
+| Isotope | AME2020 mass (Rust 1.2.0) | TICE 2009 abundance |
+|---|---|---|
+| ¹H | 1.007825031898 (1.00783) | 0.999885 |
+| ²H | 2.014101777844 (2.01410) | 0.000115 |
+| ¹²C | 12.0000000 (12.0) | 0.9893 |
+| ¹³C | 13.00335483534 (13.00335) | 0.0107 |
+| ¹⁴N | 14.00307400425 (14.00307) | 0.99636 |
+| ¹⁵N | 15.00010889827 (15.00011) | 0.00364 |
+| ¹⁶O | 15.99491461926 (15.99491) | 0.99757 |
+| ¹⁷O | 16.99913175595 (16.99913) | 0.00038 |
+| ¹⁸O | 17.99915961214 (17.99916) | 0.00205 |
+| ³²S | 31.97207117354 (31.97207) | 0.9499 |
+| ³³S | 32.97145890862 (32.97146) | 0.0075 |
+| ³⁴S | 33.967867011 (33.96787) | 0.0425 |
+| ³⁶S | 35.967080692 (—) | 0.0001 (—) |
+| ³⁵Cl | 34.968852694 (34.96885) | 0.7576 |
+| ³⁷Cl | 36.965902573 (36.96590) | 0.2424 |
+| ⁷⁹Br | 78.918337574 (78.91834) | 0.5069 |
+| ⁸¹Br | 80.916288197 (80.91629) | 0.4931 |
+
+Each value in `src/spectroscopy_data.cyr` is the double nearest its decimal, written as its shortest round-trip decimal
+(12.0000000 is 12.0). `isotope_pattern` is Rust's function operation for operation (the pruned convolution, the stable
+sort, the binning, the thresholds, the Err codes and their order); it convolves this table, so every pattern with an
+element that has data moves (the masses by up to the rounding Rust's literals dropped, times the atom count; sulfur's
+intensities from M+4 on, where ³⁶S joins the bin: S₈'s M+4 is 0.0573616 against 0.0565194 without it). Sulfur's scratch is
+4·n records for n pattern peaks (S₈ at most 68, within the 192-record stack tables).
+
+**The source file and its checks.** `scripts/oracle/isotopes.tsv` holds one record per isotope — Z, A, symbol, the mass
+in u, the abundance, the TICE value as printed (with its uncertainty) and the AME2020 line verbatim — under a header with
+the URLs, sha256s and references; and the two CIAAW intervals. Before writing anything the generator
+(`t_spectroscopy::isotope_table`) re-reads each mass from its verbatim line by the Fortran columns and each abundance
+from its printed value, and fails unless (a) its elements and isotopes are the oracle's `isotope_abundances(z)` at every
+u8 z (an isotope's A its mass rounded), plus ³⁶S as the only addition; (b) every shared abundance is Rust's literal as a
+decimal string; (c) every Rust mass is the AME2020 mass rounded to five decimals (exact decimal arithmetic; a tie would
+be refused); (d) each element's abundances sum to exactly 1 in decimal arithmetic. `validate.py` repeats (a)–(d) on its
+own parse, checks the generated table against the file and the mean masses against the intervals.
+`scripts/oracle/isotope_sources.py . DIR` re-verifies the file against fresh downloads: the two sha256s, every recorded
+line a whole line of `mass_1.mas20.txt` (its only line for that Z and A), and every TICE value a cell of the PDF's Table 1
+in record order (the content streams inflated, the text runs split at the column gaps).
+
+**Golden comparison** (as #16–#22, with the note extended to a whole result): the corpus keeps the oracle's values.
+Where the port's result differs the note names it, `[ADR 0002 #23: with the AME2020 masses and the TICE 2009 abundances,
+³⁶S included, the port returns [n], m, i, … (v:n f:… f:… …)]` — the trailing parenthesis holds the result's golden
+tokens, where #13–#22's hold one `f:` or `i:` token. The generator computes it with `m_spectroscopy::pattern_replica`,
+Rust's `isotope_pattern` transcribed with the table a parameter, which must give the oracle's result (bits or Err) on
+every row with Rust's table before it is run with this one. `validate.py` proves every note with its own replica
+(`r_pattern` with the table swapped), and that a row is noted exactly where the port's result differs from the oracle's,
+so every unnoted row's port result is the oracle's; its pinning checks of the three typed thresholds run against the
+port's expected results too. The harness compares a noted row's whole result with the note's tokens (`_par_map_toks`),
+bit for bit, and counts it as accepted under ADR 2: 7 `isotope_abundances` rows (every element with data) and 347
+`isotope_pattern` rows (every Ok row with an element that has data at a count above 0; the 181 Err rows and the 168 Ok
+rows with no such element are unchanged). `probe_tables.py` compiles the generated cells against the notes' values.
+
+**Cost** (`tests/kimiya.bcyr`'s isotope benches, the old table against the new, the same host, interleaved):
+`spectroscopy/isotope_pattern_glucose` 15.8 µs either way (Rust 2.80); the Cyrius-only `isotope_pattern_cystine`
+(C₆H₁₂N₂O₄S₂) 16.9 → 18.5 µs and `isotope_pattern_s8` 8.4 → 18.8 µs: sulfur's fourth isotope lengthens each step's
+scratch by a third and widens the pattern (offsets 0, 1, 2, 4 instead of 0, 1, 2), so S₈'s steps carry up to 17 peaks
+instead of 15 and its insertion sort moves each ³⁶S record further.
 
 ## Consequences
 

@@ -496,6 +496,32 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     20 test files, 0 warnings; benches `spectroscopy/bohr_transition_energy`, `rydberg_wavelength`,
     `series_wavelength_balmer_alpha`, `reduced_mass_hcl` and the exact path's `bohr_transition_energy_tie`,
     `reduced_mass_tie`
+- **M4e-4 the cited isotope table** ([ADR 0002 #23](docs/adr/0002-port-api-divergences.md), the user's decision of
+  2026-11-10, "Upgrade the data"; the data change itself is under *Changed*):
+  - `scripts/oracle/isotopes.tsv`: the source records of the isotope table — per isotope Z, A, symbol, the AME2020 mass
+    in u with its published digits, the TICE 2009 representative abundance and its printed value, and the AME2020 line
+    verbatim — under a header with the URLs, sha256s and references; and CIAAW's standard-atomic-weight intervals of H
+    and S
+  - generator: `t_spectroscopy::isotope_table` reads it (each mass re-read from its line by the file's Fortran format)
+    and fails unless its isotopes are the oracle's plus ³⁶S alone, every shared abundance is Rust's literal, every Rust
+    mass is the AME2020 one to five decimals and each element sums to exactly 1 (decimal arithmetic);
+    `m_spectroscopy::pattern_replica` (Rust's `isotope_pattern` with the table a parameter, checked against the oracle on
+    every row) gives the port's results for the notes; `tsv::tokens_note` writes a whole result as a note
+  - golden module `spectroscopy`: the rows keep the oracle's values; 7 `isotope_abundances` and 347 `isotope_pattern`
+    rows noted with the port's result, `[ADR 0002 #23: … (v:n f:… …)]` (the note's token list extended from one value to
+    a whole result); the harness compares a noted row's result with those tokens bit for bit (`_par_map_toks`) and
+    counts it per function; `validate.py` repeats the four checks on its own parse, checks the generated table and the
+    mean masses against CIAAW's intervals, proves every note with its replica and that every unnoted row is unchanged,
+    and pins the thresholds on the port's results too; `probe_tables.py` probes the cells against the notes
+  - `scripts/oracle/isotope_sources.py`: re-verifies the file against fresh downloads (the sha256s, every AME2020 line
+    verbatim, every TICE value a cell of the PDF's Table 1 in order, the CIAAW intervals)
+  - **result**, x86_64 ELF, x86_64 PE and aarch64: `301130 ok, 0 failed, 0 measured, 0 pending, 19831 accepted (ADR 6:
+    809), 0 glibc-matching (failed)` on 17 modules — 354 rows move from ok to accepted under ADR 2 (#23)
+    ([`port-parity.md`](docs/development/port-parity.md) §18)
+  - tests: `tests/spectroscopy.tcyr`'s `hydrogen_abundances_iupac_2009` asserts the table's pairs and sums sulfur too;
+    `cyrius_adr23_table` (every element's count, ¹H's full mass, sulfur's four pairs, their sum) and `cyrius_adr23_s8`
+    (S₈'s seven peaks bit for bit against `validate.py`'s replica, ³⁶S raising M+4 … M+6): 350 assertions; benches
+    `spectroscopy/isotope_pattern_cystine` and `isotope_pattern_s8`
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -653,6 +679,15 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   Beer–Lambert `transmittance` (pow(10, ·): 3 golden rows, 10²³ among them) and `absorbance_from_transmittance` (log10:
   115 rows) differ there too; the FFT's twiddles are correctly rounded (glibc's are at the 13 golden angles, so no
   `fft_spectrum` row changes)
+- **spectroscopy** — the isotope table is the cited one ([ADR 0002 #23](docs/adr/0002-port-api-divergences.md), M4e-4):
+  `isotope_abundances` returns the AME2020 masses at full published precision (¹H 1.007825031898 u where 1.2 had
+  1.00783, ²H 2.014101777844 for 2.01410, ³⁴S 33.967867011 for 33.96787) and sulfur's fourth isotope, ³⁶S (35.967080692 u,
+  0.0001), so every element's abundances sum to 1 (1.2's sulfur: 0.9999); the abundances are 1.2's, the IUPAC 2009
+  (TICE 2009) representative compositions. `isotope_pattern`'s algorithm is unchanged, so its results change wherever
+  the molecule has H, C, N, O, S, Cl or Br: the masses by the rounding 1.2's table dropped (Cl₂'s M is 69.937705388, 1.2
+  69.9377), and with sulfur the intensities from M+4 on (S₈'s M+4 0.0573616, 0.0565194 without ³⁶S). Errors are 1.2's.
+  *Migration:* none for code that compares masses to 10⁻⁴ u; code that tested 1.2's exact bits or sulfur's three pairs
+  sees the new table
 
 ### Removed
 - **mathx** (private, M3c-3): `_km_log10` and `_km_expm1` (M1's Rust libm 0.2.16 / fdlibm transcriptions),
@@ -728,6 +763,11 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   `spectroscopy/bohr_transition_energy` 27 → 73 ns, `rydberg_wavelength` 24 → 73, `series_wavelength_balmer_alpha`
   28 → 78, `reduced_mass_hcl` 14 → 73 (double-double operands and `_km_dd_div_cr`); the exact path, on a tie:
   `bohr_transition_energy_tie` 2.42 µs, `reduced_mass_tie` 2.20 µs (1.2's chain took 28 and 14 ns there)
+- M4e-4, ADR 0002 #23's table (Cyrius, the old table against the new, the same host, interleaved):
+  `spectroscopy/isotope_pattern_glucose` 15.8 µs either way (Rust 2.80); the new Cyrius-only sulfur benches
+  `isotope_pattern_cystine` 16.9 → 18.5 µs (+10 %) and `isotope_pattern_s8` 8.4 → 18.8 µs (2.2×): ³⁶S's fourth isotope
+  makes each sulfur step's scratch a third longer and its pattern wider (S₈ up to 17 peaks a step instead of 15; the
+  scratch at most 68 records, within the 192-record stack tables)
 
 ## [1.2.0] - 2026-11-08
 

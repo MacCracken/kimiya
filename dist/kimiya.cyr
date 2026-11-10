@@ -14411,10 +14411,14 @@ fn isotope_decay_mode(h): i64 {
 # Regenerate: cargo run --release --locked --manifest-path scripts/oracle/Cargo.toml
 #
 # KmSpectralSeries follows the Rust declaration order and is append-only: value k is the k-th variant,
-# and KM_SPECTRAL_SERIES_N_LOWER is indexed by the value. The isotope abundances are
-# isotope_abundances(z) for every u8 z, the oracle's values as round-trip decimals; tests/golden/
-# spectroscopy.tsv pins every cell (the `spectroscopy::isotope_abundances` rows, every u8) and every
-# series. PLANCK, SPEED_OF_LIGHT, RYDBERG and RYDBERG_EV are src/constants.cyr's.
+# and KM_SPECTRAL_SERIES_N_LOWER is indexed by the value. The isotope abundances are ADR 0002 #23's
+# table, from scripts/oracle/isotopes.tsv (AME2020 masses, TICE 2009 abundances, ³⁶S included), not the
+# oracle's: checked against isotope_abundances(z) at every u8 z (the same elements and isotopes, ³⁶S the
+# only addition; the abundances Rust's literals; Rust's masses these to five decimals), written as the
+# round-trip decimals of the doubles nearest the published values. tests/golden/spectroscopy.tsv pins
+# every cell (the `spectroscopy::isotope_abundances` rows, every u8: the oracle's values, the port's in
+# their ADR 0002 #23 notes) and every series. PLANCK, SPEED_OF_LIGHT, RYDBERG and RYDBERG_EV are
+# src/constants.cyr's.
 
 # Named hydrogen (¹H) spectral series.
 enum KmSpectralSeries {
@@ -14441,65 +14445,71 @@ var KM_SPECTRAL_SERIES_N_LOWER: u8[5] = {
     5,  # Pfund
 };
 
-# Natural abundance data for common isotopes.
-#
-# Returns (isotope mass in u, abundance as a mole fraction) pairs for a
-# given element; abundances are IUPAC 2009 representative isotopic
-# compositions. Only elements with significant isotope patterns are
-# included; all others return an empty slice.
+# Natural abundance data for common isotopes (ADR 0002 #23, M4e-4): (isotope mass in u, abundance as a mole
+# fraction) pairs for H, C, N, O, S, Cl and Br; every other element has none. The masses are AME2020's at full
+# published precision (M. Wang, W.J. Huang, F.G. Kondev, G. Audi and S. Naimi, Chinese Physics C 45, 030003
+# (2021): mass_1.mas20.txt), the abundances the IUPAC 2009 representative isotopic compositions (M. Berglund and
+# M.E. Wieser, Pure Appl. Chem. 83, 397-410 (2011): TICE 2009, Table 1, column 9), ³⁶S included; each value is the
+# double nearest its published decimal (the label). The records, with the sources' URLs and sha256s and each
+# mass's verbatim AME2020 line, are scripts/oracle/isotopes.tsv. Rust 1.2.0's table rounds the masses to five
+# decimals and omits ³⁶S (its sulfur sums to 0.9999): its values are the golden rows', these their ADR 0002 #23
+# notes.
 #
 # The pairs of every z with data, concatenated in z order: z's slice is the _KM_ISOTOPE_ABUNDANCE_COUNT[z]
 # pairs from pair _KM_ISOTOPE_ABUNDANCE_START[z] on (16 bytes each, mass then abundance); src/spectroscopy.cyr's
 # isotope_abundances(z) returns (pointer, count). Every z from _KM_ISOTOPE_ABUNDANCE_ZS to 255 has none.
 const _KM_ISOTOPE_ABUNDANCE_ZS = 36;
 
-# The (isotope mass in u, abundance as a mole fraction) pairs, interleaved; mirrors `isotope_abundances(z)`.
-var _KM_ISOTOPE_ABUNDANCES: f64[32] = {
-    1.00783,  # Z 1 isotope 0 mass (u): H, D (IUPAC 2009)
-    0.999885,  # Z 1 isotope 0 abundance
-    2.0141,  # Z 1 isotope 1 mass (u)
-    0.000115,  # Z 1 isotope 1 abundance
-    12.0,  # Z 6 isotope 0 mass (u): 12C, 13C
-    0.9893,  # Z 6 isotope 0 abundance
-    13.00335,  # Z 6 isotope 1 mass (u)
-    0.0107,  # Z 6 isotope 1 abundance
-    14.00307,  # Z 7 isotope 0 mass (u): 14N, 15N
-    0.99636,  # Z 7 isotope 0 abundance
-    15.00011,  # Z 7 isotope 1 mass (u)
-    0.00364,  # Z 7 isotope 1 abundance
-    15.99491,  # Z 8 isotope 0 mass (u): 16O, 17O, 18O
-    0.99757,  # Z 8 isotope 0 abundance
-    16.99913,  # Z 8 isotope 1 mass (u)
-    0.00038,  # Z 8 isotope 1 abundance
-    17.99916,  # Z 8 isotope 2 mass (u)
-    0.00205,  # Z 8 isotope 2 abundance
-    31.97207,  # Z 16 isotope 0 mass (u): 32S, 33S, 34S
-    0.9499,  # Z 16 isotope 0 abundance
-    32.97146,  # Z 16 isotope 1 mass (u)
-    0.0075,  # Z 16 isotope 1 abundance
-    33.96787,  # Z 16 isotope 2 mass (u)
-    0.0425,  # Z 16 isotope 2 abundance
-    34.96885,  # Z 17 isotope 0 mass (u): 35Cl, 37Cl
-    0.7576,  # Z 17 isotope 0 abundance
-    36.9659,  # Z 17 isotope 1 mass (u)
-    0.2424,  # Z 17 isotope 1 abundance
-    78.91834,  # Z 35 isotope 0 mass (u): 79Br, 81Br
-    0.5069,  # Z 35 isotope 0 abundance
-    80.91629,  # Z 35 isotope 1 mass (u)
-    0.4931,  # Z 35 isotope 1 abundance
+# The (isotope mass in u, abundance as a mole fraction) pairs, interleaved; mirrors `isotope_abundances(z)` (ADR
+# 0002 #23's values).
+var _KM_ISOTOPE_ABUNDANCES: f64[34] = {
+    1.007825031898,  # ¹H mass (u), AME2020: 1.007825031898
+    0.999885,  # ¹H abundance, TICE 2009: 0.999885
+    2.014101777844,  # ²H mass (u), AME2020: 2.014101777844
+    0.000115,  # ²H abundance, TICE 2009: 0.000115
+    12.0,  # ¹²C mass (u), AME2020: 12.0000000
+    0.9893,  # ¹²C abundance, TICE 2009: 0.9893
+    13.00335483534,  # ¹³C mass (u), AME2020: 13.00335483534
+    0.0107,  # ¹³C abundance, TICE 2009: 0.0107
+    14.00307400425,  # ¹⁴N mass (u), AME2020: 14.00307400425
+    0.99636,  # ¹⁴N abundance, TICE 2009: 0.99636
+    15.00010889827,  # ¹⁵N mass (u), AME2020: 15.00010889827
+    0.00364,  # ¹⁵N abundance, TICE 2009: 0.00364
+    15.99491461926,  # ¹⁶O mass (u), AME2020: 15.99491461926
+    0.99757,  # ¹⁶O abundance, TICE 2009: 0.99757
+    16.99913175595,  # ¹⁷O mass (u), AME2020: 16.99913175595
+    0.00038,  # ¹⁷O abundance, TICE 2009: 0.00038
+    17.99915961214,  # ¹⁸O mass (u), AME2020: 17.99915961214
+    0.00205,  # ¹⁸O abundance, TICE 2009: 0.00205
+    31.97207117354,  # ³²S mass (u), AME2020: 31.97207117354
+    0.9499,  # ³²S abundance, TICE 2009: 0.9499
+    32.97145890862,  # ³³S mass (u), AME2020: 32.97145890862
+    0.0075,  # ³³S abundance, TICE 2009: 0.0075
+    33.967867011,  # ³⁴S mass (u), AME2020: 33.967867011
+    0.0425,  # ³⁴S abundance, TICE 2009: 0.0425
+    35.967080692,  # ³⁶S mass (u), AME2020: 35.967080692
+    0.0001,  # ³⁶S abundance, TICE 2009: 0.0001
+    34.968852694,  # ³⁵Cl mass (u), AME2020: 34.968852694
+    0.7576,  # ³⁵Cl abundance, TICE 2009: 0.7576
+    36.965902573,  # ³⁷Cl mass (u), AME2020: 36.965902573
+    0.2424,  # ³⁷Cl abundance, TICE 2009: 0.2424
+    78.918337574,  # ⁷⁹Br mass (u), AME2020: 78.918337574
+    0.5069,  # ⁷⁹Br abundance, TICE 2009: 0.5069
+    80.916288197,  # ⁸¹Br mass (u), AME2020: 80.916288197
+    0.4931,  # ⁸¹Br abundance, TICE 2009: 0.4931
 };
 
 # The first pair of z's slice in _KM_ISOTOPE_ABUNDANCES (pair index), indexed by z.
 var _KM_ISOTOPE_ABUNDANCE_START: u8[36] = {
     0,  # Z 0: none
-    0,  # Z 1: H, D (IUPAC 2009)
+    0,  # Z 1: ¹H, ²H
     2,  # Z 2: none
     2,  # Z 3: none
     2,  # Z 4: none
     2,  # Z 5: none
-    2,  # Z 6: 12C, 13C
-    4,  # Z 7: 14N, 15N
-    6,  # Z 8: 16O, 17O, 18O
+    2,  # Z 6: ¹²C, ¹³C
+    4,  # Z 7: ¹⁴N, ¹⁵N
+    6,  # Z 8: ¹⁶O, ¹⁷O, ¹⁸O
     9,  # Z 9: none
     9,  # Z 10: none
     9,  # Z 11: none
@@ -14507,39 +14517,39 @@ var _KM_ISOTOPE_ABUNDANCE_START: u8[36] = {
     9,  # Z 13: none
     9,  # Z 14: none
     9,  # Z 15: none
-    9,  # Z 16: 32S, 33S, 34S
-    12,  # Z 17: 35Cl, 37Cl
-    14,  # Z 18: none
-    14,  # Z 19: none
-    14,  # Z 20: none
-    14,  # Z 21: none
-    14,  # Z 22: none
-    14,  # Z 23: none
-    14,  # Z 24: none
-    14,  # Z 25: none
-    14,  # Z 26: none
-    14,  # Z 27: none
-    14,  # Z 28: none
-    14,  # Z 29: none
-    14,  # Z 30: none
-    14,  # Z 31: none
-    14,  # Z 32: none
-    14,  # Z 33: none
-    14,  # Z 34: none
-    14,  # Z 35: 79Br, 81Br
+    9,  # Z 16: ³²S, ³³S, ³⁴S, ³⁶S
+    13,  # Z 17: ³⁵Cl, ³⁷Cl
+    15,  # Z 18: none
+    15,  # Z 19: none
+    15,  # Z 20: none
+    15,  # Z 21: none
+    15,  # Z 22: none
+    15,  # Z 23: none
+    15,  # Z 24: none
+    15,  # Z 25: none
+    15,  # Z 26: none
+    15,  # Z 27: none
+    15,  # Z 28: none
+    15,  # Z 29: none
+    15,  # Z 30: none
+    15,  # Z 31: none
+    15,  # Z 32: none
+    15,  # Z 33: none
+    15,  # Z 34: none
+    15,  # Z 35: ⁷⁹Br, ⁸¹Br
 };
 
 # The length of z's slice (0: no isotope data), indexed by z.
 var _KM_ISOTOPE_ABUNDANCE_COUNT: u8[36] = {
     0,  # Z 0: none
-    2,  # Z 1: H, D (IUPAC 2009)
+    2,  # Z 1: ¹H, ²H
     0,  # Z 2: none
     0,  # Z 3: none
     0,  # Z 4: none
     0,  # Z 5: none
-    2,  # Z 6: 12C, 13C
-    2,  # Z 7: 14N, 15N
-    3,  # Z 8: 16O, 17O, 18O
+    2,  # Z 6: ¹²C, ¹³C
+    2,  # Z 7: ¹⁴N, ¹⁵N
+    3,  # Z 8: ¹⁶O, ¹⁷O, ¹⁸O
     0,  # Z 9: none
     0,  # Z 10: none
     0,  # Z 11: none
@@ -14547,8 +14557,8 @@ var _KM_ISOTOPE_ABUNDANCE_COUNT: u8[36] = {
     0,  # Z 13: none
     0,  # Z 14: none
     0,  # Z 15: none
-    3,  # Z 16: 32S, 33S, 34S
-    2,  # Z 17: 35Cl, 37Cl
+    4,  # Z 16: ³²S, ³³S, ³⁴S, ³⁶S
+    2,  # Z 17: ³⁵Cl, ³⁷Cl
     0,  # Z 18: none
     0,  # Z 19: none
     0,  # Z 20: none
@@ -14566,7 +14576,7 @@ var _KM_ISOTOPE_ABUNDANCE_COUNT: u8[36] = {
     0,  # Z 32: none
     0,  # Z 33: none
     0,  # Z 34: none
-    2,  # Z 35: 79Br, 81Br
+    2,  # Z 35: ⁷⁹Br, ⁸¹Br
 };
 
 # Electron-to-proton mass ratio mₑ/mₚ (dimensionless), CODATA 2018.
@@ -14592,8 +14602,9 @@ const _KM_RYDBERG_HYDROGEN = 10967758.340280328;
 # SI as Rust documents it: energies in J (eV where a name says so), wavelengths in m, frequencies in Hz, wavenumbers
 # in cm⁻¹, masses in any consistent unit (kg for the oscillator and the rotor). PLANCK, SPEED_OF_LIGHT, RYDBERG and
 # RYDBERG_EV are src/constants.cyr's KM_* (generated), ELEMENTARY_CHARGE (Rust's electrochemistry::) too; the
-# SpectralSeries enum, its n_lower column, the isotope abundance table and Rust's private RYDBERG_HYDROGEN (the
-# reduced-mass-corrected R_H, read through the API) are src/spectroscopy_data.cyr (generated). Fallible functions
+# SpectralSeries enum, its n_lower column, the isotope abundance table (ADR 0002 #23: from its cited sources) and Rust's
+# private RYDBERG_HYDROGEN (the reduced-mass-corrected R_H, read through the API) are src/spectroscopy_data.cyr
+# (generated). Fallible functions
 # return a value-form Result whose Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs where Rust does.
 # Every expression keeps Rust's operation order, constant by constant, so the arithmetic functions are
 # bit-identical (class B: + − × ÷ and √); transmittance (10^x) and absorbance_from_transmittance (log10) are class C
@@ -14618,6 +14629,10 @@ const _KM_RYDBERG_HYDROGEN = 10967758.340280328;
 #   (src/mathx.cyr's _km_cr_hundredth_div), where Rust's `0.01 / x` rounds 1/100 and then the quotient (one ulp off on
 #   about 14 % of inputs). The golden rows keep the oracle's values; where the port's differ, the note names them and
 #   the harness maps the two (accepted under ADR 2, counted).
+# - ADR 0002 #23 (M4e-4, the user's decision of 2026-11-10): the isotope table is the cited AME2020 masses (full
+#   precision) and TICE 2009 abundances with ³⁶S, not Rust's five-decimal masses without it; isotope_pattern's algorithm
+#   is Rust's unchanged, so only its results move (every pattern with an element that has data). The golden rows keep
+#   the oracle's values; their notes name the port's whole result (accepted under ADR 2, counted).
 # - isotope_pattern is Rust's pruned convolution operation for operation: the scratch peaks sorted by a stable
 #   insertion sort on the masses' IEEE total order (Rust's `sort_by(total_cmp)` is stable, and the binned means depend
 #   on the order of equal masses), binning, Rust's `fold(0.0, max)` (NaN-ignoring, src/mathx.cyr's _km_max), the
@@ -14653,6 +14668,8 @@ include "lib/alloc.cyr"
 # _km_is_u32.
 
 # The isotope_pattern working tables' stack capacity, in (mass, intensity) records: the pattern and the scratch each.
+# A step's scratch is (pattern peaks) × (the element's isotopes): since ADR 0002 #23 sulfur has four, so S₈'s largest is
+# 4·17 = 68 records and cystine's 4·11 = 44 (glucose's 3·10 = 30); a molecule past 192 moves both to the heap.
 const _KM_ISO_STACK = 192;
 
 # ── Beer–Lambert law ────────────────────────────────────────────────────────────────
@@ -15223,10 +15240,14 @@ fn diatomic_moment_of_inertia(reduced_mass_kg: f64, bond_length_m: f64): f64 {
 # ── mass-spectrometry isotope patterns ──────────────────────────────────────────────
 
 # The natural isotope abundances of the element with atomic number z (Rust's u8): (pointer, n) to n (isotope mass in
-# u, abundance as a mole fraction) pairs, 16 bytes each (the two f64), in the baked table (src/spectroscopy_data.cyr;
-# IUPAC 2009 representative isotopic compositions, Rust's literal). Only elements with significant isotope patterns
-# have data (H, C, N, O, S, Cl, Br); every other z, and a word outside 0 ..= 255, gives the empty slice (0, 0).
-# Mirrors `spectroscopy::isotope_abundances`.
+# u, abundance as a mole fraction) pairs, 16 bytes each (the two f64), in the baked table (src/spectroscopy_data.cyr).
+# ADR 0002 #23 (M4e-4, the user's decision): the masses are AME2020's at full published precision (Wang et al., Chinese
+# Physics C 45, 030003 (2021)), the abundances the IUPAC 2009 representative isotopic compositions (TICE 2009: Berglund
+# and Wieser, Pure Appl. Chem. 83, 397-410 (2011)), ³⁶S included, from the cited records in scripts/oracle/isotopes.tsv;
+# Rust 1.2.0's literal rounds the masses to five decimals (¹H 1.00783, not 1.007825031898) and omits ³⁶S, so its sulfur
+# sums to 0.9999. Only elements with significant isotope patterns have data (H, C, N, O, S, Cl, Br: sulfur 4 isotopes,
+# the others Rust's); every other z, and a word outside 0 ..= 255, gives the empty slice (0, 0). Mirrors
+# `spectroscopy::isotope_abundances`, with that table.
 #must_use
 fn isotope_abundances(atomic_number): (i64, i64) {
     if (atomic_number < 0 || atomic_number >= _KM_ISOTOPE_ABUNDANCE_ZS) { return (0, 0); }

@@ -310,3 +310,22 @@ the fast paths' 25–45 operations set the floor; the first version (TwoProducts
 `_km_dd_div_cr`) brought it to the figures above. The slow path is 55 steps of bit-wise long division over four or five
 32-bit limbs; it runs on the ties and, for the reduced mass, on every result that may be subnormal (masses below 2⁻¹⁰²¹).
 The other benches were within noise of the before run.
+
+## M4e-4 the cited isotope table (2026-11-10)
+
+ADR 0002 #23 changes `isotope_abundances`' data (the full AME2020 masses, ³⁶S added; the algorithm is Rust's). Two
+sulfur-bearing benches are new and Cyrius-only (rust-old/benches has only glucose, which has no sulfur). The old table
+(the HEAD `src/spectroscopy_data.cyr`) against the new, the same host, interleaved runs of a trimmed copy of
+`tests/kimiya.bcyr` (each figure the mean of two runs of 20 batches × 10,000 calls):
+
+| Bench | Body | Rust | Old table | New table |
+|---|---|---|---|---|
+| `spectroscopy/isotope_pattern_glucose` | C₆H₁₂O₆: 24 convolution steps, the scratch at most 30 records (unchanged: no sulfur) | 2.80 µs | 15.8 µs | 15.8 µs |
+| `spectroscopy/isotope_pattern_cystine` | C₆H₁₂N₂O₄S₂: 26 steps, two of them sulfur's; the scratch at most 33 records, now 44 | — | 16.9 µs | 18.5 µs |
+| `spectroscopy/isotope_pattern_s8` | S₈: 8 sulfur steps; up to 15 peaks a step and 45 scratch records, now 17 and 68 | — | 8.4 µs | 18.8 µs |
+
+Glucose's operations are the same with either table (its masses change, not its peak counts), and it measured the same.
+Sulfur's fourth isotope costs in two ways: each step convolves 4 isotopes instead of 3, and ³⁶S's +4 offset widens the
+pattern and puts each ³⁶S record further from its sorted place, so the insertion sort moves it further (S₈ 2.2×, cystine
++10 %). Every scratch stays within the 192-record stack tables, so nothing is allocated; the heap path starts past them
+(the corpus's S₃₀₀₀ reaches 1,276 records, 951 with Rust's table).

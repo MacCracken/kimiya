@@ -32,9 +32,10 @@ tanmatra's probe_tables.py; extend `checks` as the data modules arrive.
   `nuclear::ISOTOPES[]` rows. The four nuclear constants are src/constants.cyr's.
 - src/spectroscopy_data.cyr (M4e): KM_SPECTRAL_SERIES_COUNT, each KmSpectralSeries member's value and its n_lower cell
   against the golden `SpectralSeries::n_lower` rows; for every u8 z, the isotope count and each (mass, abundance) pair
-  through the start / count columns against the golden `spectroscopy::isotope_abundances` row (and none past
-  _KM_ISOTOPE_ABUNDANCE_ZS); _KM_RYDBERG_HYDROGEN and _KM_ELECTRON_PROTON_MASS_RATIO through what pins them, the golden
-  Lyman line u32::MAX − 1 (1/R_H, and 1/(RYDBERG / (1 + ratio))).
+  through the start / count columns against the golden `spectroscopy::isotope_abundances` row — since M4e-4 the port's
+  values, the row's ADR 0002 #23 note where it has one (the cited AME2020 / TICE 2009 table), else its outputs (and none
+  past _KM_ISOTOPE_ABUNDANCE_ZS); _KM_RYDBERG_HYDROGEN and _KM_ELECTRON_PROTON_MASS_RATIO through what pins them, the
+  golden Lyman line u32::MAX − 1 (1/R_H, and 1/(RYDBERG / (1 + ratio))).
 - src/element_data.cyr (M1): for every row of ELEMENTS, the atomic number, symbol, name,
   atomic mass, electronegativity (presence flag and value) and category, against the golden
   `element::lookup_by_number` row of that Z; for every row of ELEMENT_PROPERTIES, the atomic
@@ -49,11 +50,14 @@ root = Path(sys.argv[1]).resolve()
 work = root / "build/oracle-probe"
 work.mkdir(parents=True, exist_ok=True)
 
-def rows(name):
+def rows(name, port=False):
+    """The golden rows' (fn, class, input tokens, output tokens). port=True takes the outputs from an ADR 0002 #23 note
+    where the row has one (M4e-4: the port's isotope table differs from the oracle's; the note's trailing `(<tokens>)]`)."""
     for line in (root / f"tests/golden/{name}.tsv").read_text().splitlines():
         if not line.startswith("#"):
-            fn, cls, ins, outs, _ = line.split("\t")
-            yield fn, cls, ins.split(" "), outs.split(" ")
+            fn, cls, ins, outs, note = line.split("\t")
+            m = re.search(r"\[ADR 0002 #23: .* \(([^()]*)\)\]$", note) if port else None
+            yield fn, cls, ins.split(" "), (m.group(1) if m else outs).split(" ")
 
 def unpct(t):
     return re.sub(r"%([0-9A-F]{2})", lambda m: chr(int(m.group(1), 16)), t)
@@ -462,7 +466,7 @@ nm4c = len(checks) - nm4c_before
 nm4e_before = len(checks)
 sdata = (root / "src/spectroscopy_data.cyr").read_text()
 series, abund, lyman_top = [], {}, None
-for fn, cls, ins, outs in rows("spectroscopy"):
+for fn, cls, ins, outs in rows("spectroscopy", port=True):
     if fn == "SpectralSeries::n_lower":
         series.append((ins[0][2:].split(".", 1)[1], outs[0]))
     elif fn == "spectroscopy::isotope_abundances":

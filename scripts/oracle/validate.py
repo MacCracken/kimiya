@@ -95,7 +95,12 @@ and no Python packages. Usage, from the repo root:
    on the private helpers); the grids' coverage; and, since M4e-3, ADR 0002 #21's and #22's exact rationals rounded
    once, proven with Fraction on every Bohr, transition, Rydberg, series and reduced-mass row, with the structure that
    decides their exact values and ties (R's odd significands factored, the transition energy's domain searched
-   exhaustively for midpoints).
+   exhaustively for midpoints); since M4e-4, ADR 0002 #23: scripts/oracle/isotopes.tsv (the cited AME2020 masses and TICE
+   2009 abundances, ³⁶S included) parsed independently and checked against Rust's literal (the same isotopes plus ³⁶S,
+   the shared abundances equal, Rust's masses the AME2020 ones to five decimals, each element summing to exactly 1), the
+   mean masses against CIAAW's intervals, src/spectroscopy_data.cyr against the file, and every isotope_abundances and
+   isotope_pattern row's port result (r_pattern on the new table): noted exactly where it differs from the oracle's, the
+   note's tokens it bit for bit; the isotope thresholds pinned on the port's results too.
 Every function in every .tsv must have a rule here: a new one fails until it gets one.
 
     python3 -I scripts/oracle/validate.py . --write-corrections
@@ -1422,12 +1427,45 @@ S_RYD = b2f(golden_consts["spectroscopy::RYDBERG"])
 S_RYD_EV = b2f(golden_consts["spectroscopy::RYDBERG_EV"])
 S_QE = b2f(golden_consts["electrochemistry::ELEMENTARY_CHARGE"])
 S_RYD_H = S_RYD / (1.0 + S_RATIO)
-S_ISO = {}
+S_ISO, S_ISO_LIT = {}, {}
 _iso_body = ssrc[ssrc.index("pub fn isotope_abundances("):]
 _iso_body = _iso_body[_iso_body.index("match atomic_number {"):_iso_body.index("_ => &[],")]
 for _z, _arm in re.findall(r"(\d+) => &\[(.*?)\]", _iso_body, re.S):
-    S_ISO[int(_z)] = [(float(m_.replace("_", "")), float(a_.replace("_", "")))
-                      for m_, a_ in re.findall(r"\(([0-9_.]+), ([0-9_.]+)\)", _arm)]
+    S_ISO_LIT[int(_z)] = [(m_.replace("_", ""), a_.replace("_", ""))
+                          for m_, a_ in re.findall(r"\(([0-9_.]+), ([0-9_.]+)\)", _arm)]
+    S_ISO[int(_z)] = [(float(m_), float(a_)) for m_, a_ in S_ISO_LIT[int(_z)]]
+# ADR 0002 #23 (M4e-4): the port's isotope table, scripts/oracle/isotopes.tsv (AME2020 masses, TICE 2009 abundances, ³⁶S
+# included), parsed here independently of the generator: each `isotope` record's mass re-read from its verbatim AME2020
+# line by the file's Fortran format (Z at columns 10-14, A 15-19, the element 21-23, the atomic mass's u 107-109 and
+# micro-u 111-123), its abundance from the printed TICE value. S_ISO_NEW[z] is z's (mass, abundance) pairs, each the
+# double nearest its decimal (Python's float() is correctly rounded); section 17 checks it against the oracle.
+ISO23_PATH = root / "scripts/oracle/isotopes.tsv"
+ISO23, ISO23_IV = [], []
+for _l in ISO23_PATH.read_text(encoding="utf-8").splitlines():
+    _f = _l.split("\t")
+    if _f[0] == "isotope":
+        check(len(_f) == 8, f"isotopes.tsv: {_l[:40]!r}: {len(_f)} fields")
+        _z, _a, _sym, _mass, _ab, _tice, _line = int(_f[1]), int(_f[2]), _f[3], _f[4], _f[5], _f[6], _f[7]
+        check(_line.isascii() and len(_line) >= 123 and int(_line[9:14]) == _z and int(_line[14:19]) == _a
+              and _line[20:23].strip() == _sym, f"isotopes.tsv: {_a}{_sym}: the mas20 line is not Z {_z}, A {_a}, {_sym}")
+        _u, _mu = _line[106:109].strip(), _line[110:123].strip()
+        check(re.fullmatch(r"[0-9]{6}\.[0-9]+", _mu) is not None and _mass == f"{int(_u)}.{_mu.replace('.', '')}",
+              f"isotopes.tsv: {_a}{_sym}: mass_u {_mass} is not the mas20 line's {_u} {_mu} micro-u")
+        check(re.fullmatch(r"[0-9. ]+\([0-9]+\)", _tice) is not None and _ab == _tice.split("(")[0].replace(" ", ""),
+              f"isotopes.tsv: {_a}{_sym}: abundance {_ab} is not the printed {_tice!r}")
+        check(re.fullmatch(r"[0-9]+\.[0-9]+", _mass) is not None and re.fullmatch(r"0\.[0-9]+", _ab) is not None,
+              f"isotopes.tsv: {_a}{_sym}: {_mass} / {_ab} not decimals")
+        ISO23.append((_z, _a, _sym, _mass, _ab))
+    elif _f[0] == "interval":
+        check(len(_f) == 6, f"isotopes.tsv: {_l[:40]!r}: {len(_f)} fields")
+        ISO23_IV.append((_f[1], Fraction(_f[2]), Fraction(_f[3])))
+    else:
+        check(_l.startswith("#"), f"isotopes.tsv: {_l[:40]!r} is no record or comment")
+check(len(ISO23) > 0 and [(r[0], r[1]) for r in ISO23] == sorted({(r[0], r[1]) for r in ISO23}),
+      "isotopes.tsv: the isotope records are not in Z then A order, or repeat one")
+S_ISO_NEW = {}
+for _z, _a, _sym, _mass, _ab in ISO23:
+    S_ISO_NEW.setdefault(_z, []).append((float(_mass), float(_ab)))
 S_SERIES_SRC = ssrc[ssrc.index("pub enum SpectralSeries {"):]
 S_SERIES = re.findall(r"^    ([A-Z]\w*),$", S_SERIES_SRC[:S_SERIES_SRC.index("\n}")], re.M)
 _nl = ssrc[ssrc.index("pub const fn n_lower("):]
@@ -1480,17 +1518,19 @@ def total_key(x):
     b = f2b(x)
     s = b - (1 << 64) if b >> 63 else b
     return s ^ 0x7FFFFFFFFFFFFFFF if s < 0 else s
-def r_pattern(atoms, prune=None, report=None, width=None, ties_reversed=False):
+def r_pattern(atoms, prune=None, report=None, width=None, ties_reversed=False, table=None):
     """Rust's isotope_pattern: the pruned convolution with a stable sort (Python's is stable) on total_cmp's key.
     ties_reversed puts equal masses in the reverse order (an unstable sort's possible result), for the check that the
-    corpus pins the stable order."""
+    corpus pins the stable order. table is the isotope table, z → [(mass, abundance)]: Rust's literal by default,
+    S_ISO_NEW for the port's (ADR 0002 #23)."""
+    table = S_ISO if table is None else table
     prune = S_PRUNE if prune is None else prune
     report = S_REPORT if report is None else report
     width = S_BIN if width is None else width
     if not atoms: return Err("InvalidInput")
     pattern = [(0.0, 1.0)]
     for z, count in atoms:
-        ab = S_ISO.get(z, [])
+        ab = table.get(z, [])
         if not ab:
             if z not in ELEMS: return Err("InvalidElement")
             shift = float(count) * ELEMS[z][3]
@@ -3028,14 +3068,46 @@ check(s_members == [(f"KM_SPECTRAL_SERIES_{snake_t(v)}", str(k)) for k, v in enu
       f"spectroscopy_data.cyr: KmSpectralSeries {s_members} is not SpectralSeries {S_SERIES} in order")
 check(re.search(rf"^const KM_SPECTRAL_SERIES_COUNT = {len(S_SERIES)};$", sdata, re.M), "spectroscopy_data.cyr: the count")
 check(s_col("KM_SPECTRAL_SERIES_N_LOWER", int) == [S_N_LOWER[v] for v in S_SERIES], "spectroscopy_data.cyr: n_lower")
-zs_ = max(S_ISO) + 1
+# ADR 0002 #23 (M4e-4): the isotope table is scripts/oracle/isotopes.tsv's (parsed above), checked here against the
+# oracle's: (a) the same elements and isotopes as Rust's literal (an isotope's A is its mass rounded), plus ³⁶S as the only
+# addition; (b) every shared abundance is Rust's literal as a decimal string; (c) every Rust mass is the AME2020 mass
+# rounded to five decimals (Fraction; a tie would be ambiguous and fails); (d) each element's abundances sum to exactly 1.
+iso_rust = [(z, round(m_)) for z in sorted(S_ISO) for m_, a_ in S_ISO[z]]
+check(all(abs(m_ - round(m_)) < 0.1 for z in S_ISO for m_, a_ in S_ISO[z]), "spectroscopy.rs: an isotope mass names no A")
+iso_new = [(r[0], r[1]) for r in ISO23]
+check(iso_new.count((16, 36)) == 1 and [za for za in iso_new if za != (16, 36)] == iso_rust,
+      f"(a) isotopes.tsv's isotopes {iso_new} are not Rust's {iso_rust} plus ³⁶S")
+shared23 = [r for r in ISO23 if (r[0], r[1]) != (16, 36)]
+lits23 = [pr for z in sorted(S_ISO_LIT) for pr in S_ISO_LIT[z]]
+for (z, a, sym, mass, ab), (lm, la) in zip(shared23, lits23):
+    check(ab == la, f"(b) isotopes.tsv: {a}{sym}: abundance {ab} is not Rust's literal {la}")
+    q = Fraction(mass) * 10 ** 5
+    check(q - math.floor(q) != Fraction(1, 2) and Fraction(round(q), 10 ** 5) == Fraction(lm) and len(lm.split(".")[1]) <= 5,
+          f"(c) isotopes.tsv: {a}{sym}: Rust's mass {lm} is not AME2020's {mass} to five decimals")
+for z in sorted(S_ISO_NEW):
+    check(sum(Fraction(r[4]) for r in ISO23 if r[0] == z) == 1, f"(d) isotopes.tsv: Z = {z}'s abundances do not sum to 1")
+check(sum(Fraction(la) for la in (a_ for m_, a_ in S_ISO_LIT[16])) == Fraction(9999, 10000),
+      "spectroscopy.rs: Rust's sulfur no longer sums to 0.9999 (ADR 0002 #23's premise)")
+# CIAAW's standard atomic weight intervals (the `interval` records): each element's abundance-weighted mean mass inside.
+iv_text = []
+for sym, lo, hi in ISO23_IV:
+    recs = [r for r in ISO23 if r[2] == sym]
+    mean = sum(Fraction(r[3]) * Fraction(r[4]) for r in recs)
+    check(len(recs) > 0 and lo <= mean <= hi, f"isotopes.tsv: {sym}'s mean mass {float(mean)!r} is outside [{lo}, {hi}]")
+    iv_text.append(f"{sym} {float(mean):.6f} in [{float(lo)}, {float(hi)}]")
+print(f"spectroscopy: ADR 0002 #23: isotopes.tsv's {len(ISO23)} isotopes are Rust's {len(iso_rust)} plus ³⁶S, each mass "
+      f"its verbatim AME2020 line's, the shared abundances Rust's literals, Rust's masses the AME2020 ones to five "
+      f"decimals, each element summing to 1 exactly (Rust's sulfur 0.9999); mean masses {', '.join(iv_text)} (CIAAW)")
+zs_ = max(S_ISO_NEW) + 1
+check(zs_ == max(S_ISO) + 1, "isotopes.tsv: its last element is not Rust's")
 check(re.search(rf"^const _KM_ISOTOPE_ABUNDANCE_ZS = {zs_};$", sdata, re.M), "spectroscopy_data.cyr: _KM_ISOTOPE_ABUNDANCE_ZS")
-flat = [x for z in sorted(S_ISO) for pr in S_ISO[z] for x in pr]
-check(s_col("_KM_ISOTOPE_ABUNDANCES") == flat, "spectroscopy_data.cyr: the abundance pairs are not the literal's")
+flat = [x for z in sorted(S_ISO_NEW) for pr in S_ISO_NEW[z] for x in pr]
+check(s_col("_KM_ISOTOPE_ABUNDANCES") == flat, "spectroscopy_data.cyr: the abundance pairs are not isotopes.tsv's (ADR 0002 #23)")
+check(all(f2b(x) == f2b(y) for x, y in zip(s_col("_KM_ISOTOPE_ABUNDANCES"), flat)), "spectroscopy_data.cyr: a pair's bits")
 starts, counts, at = [], [], 0
 for z in range(zs_):
     starts.append(at)
-    counts.append(len(S_ISO.get(z, [])))
+    counts.append(len(S_ISO_NEW.get(z, [])))
     at += counts[-1]
 check(s_col("_KM_ISOTOPE_ABUNDANCE_START", int) == starts and s_col("_KM_ISOTOPE_ABUNDANCE_COUNT", int) == counts,
       "spectroscopy_data.cyr: the abundance start / count columns")
@@ -3052,8 +3124,42 @@ check(len(lyman_top) == 1 and same_bits(lyman_top[0][0][1], 1.0 / S_RYD_H)
       "spectroscopy: the Lyman line u32::MAX − 1 does not pin R_H uniquely")
 gz = {ins[0][1]: outs for ins, outs, w in srows.get("spectroscopy::isotope_abundances", [])}
 check(sorted(gz) == list(range(256)), "spectroscopy.tsv: isotope_abundances is not probed at every u8")
-print(f"spectroscopy_data.cyr checked: {len(S_SERIES)} series, {len(flat) // 2} isotope pairs over {len(S_ISO)} elements "
-      f"(every u8 probed), R_H = {S_RYD_H!r} = RYDBERG / (1 + {S_RATIO!r}), unique through the Lyman line")
+print(f"spectroscopy_data.cyr checked: {len(S_SERIES)} series, {len(flat) // 2} isotope pairs over {len(S_ISO_NEW)} elements "
+      f"(isotopes.tsv's; every u8 probed), R_H = {S_RYD_H!r} = RYDBERG / (1 + {S_RATIO!r}), unique through the Lyman line")
+# ADR 0002 #23's notes: on every isotope_abundances and isotope_pattern row, the port's result from S_ISO_NEW (the
+# replica r_pattern with the table swapped; the rows' own check above proves the replica gives the oracle's bits with
+# Rust's table) is computed; a row is noted exactly where it differs from the oracle's outputs, and the note's tokens are
+# it, bit for bit. So every unnoted row's port result is the oracle's too.
+P23_RE = re.compile(r"\[ADR 0002 #23: with the AME2020 masses and the TICE 2009 abundances, ³⁶S included, the port returns "
+                    r"(\[\d+\]|Err\(\w+\))(?:, [^()]*)? \(([^()]*)\)\]$")
+def port23(fn, ins):
+    if fn == "spectroscopy::isotope_abundances": return Pairs(S_ISO_NEW.get(ins[0][1], []))
+    return r_pattern(pattern_atoms(ins), table=S_ISO_NEW)
+def expect23(fn, ins, outs, where):
+    """The port's expected tokens for an isotope row: the #23 note's where there is one, else the oracle's outputs."""
+    m = P23_RE.search(NOTES.get(where, ""))
+    return outs if m is None else [parse_tok(t, where) for t in m.group(2).split(" ")]
+n23, ok23 = {}, {}
+for fn in ("spectroscopy::isotope_abundances", "spectroscopy::isotope_pattern"):
+    n23[fn] = ok23[fn] = 0
+    for ins, outs, where in srows.get(fn, []):
+        note = NOTES.get(where, "")
+        noted = "[ADR 0002 #23:" in note
+        port = out_toks(port23(fn, ins))
+        differs = not toks_equal(port, outs)
+        check(noted == differs, f"{where}: {fn}: the #23 note is {'missing' if differs else 'stray'}")
+        ok23[fn] += outs[0][0] == "v"
+        if noted:
+            m = P23_RE.search(note)
+            check(m is not None and toks_equal(expect23(fn, ins, outs, where), port)
+                  and m.group(1) == (f"[{port[0][1]}]" if port[0][0] == "v" else f"Err({port[0][1]})"),
+                  f"{where}: the ADR 0002 #23 note is not the port's result from isotopes.tsv")
+            check(port[0][0] == "v" and outs[0][0] == "v", f"{where}: a #23 note on an Err row")
+            n23[fn] += 1
+print(f"spectroscopy: ADR 0002 #23: {n23['spectroscopy::isotope_abundances']} isotope_abundances rows (of 256) and "
+      f"{n23['spectroscopy::isotope_pattern']} isotope_pattern rows (of {ok23['spectroscopy::isotope_pattern']} Ok, "
+      f"{len(srows.get('spectroscopy::isotope_pattern', []))} in all) noted with the port's result from isotopes.tsv "
+      f"(r_pattern with the table swapped, bit for bit); every other row's port result is the oracle's")
 # The typed constants (inline in src/spectroscopy.cyr) and the stable sort: each must change some golden row when
 # perturbed, where a row can reach it (isotope rows with at most 3,000 convolution steps, for speed).
 small_iso = [(ins, outs, w) for ins, outs, w in srows.get("spectroscopy::isotope_pattern", [])
@@ -3062,19 +3168,19 @@ def s_changes(rows_, rule):
     CALLS[0] = 0
     return sum(1 for ins, outs, where in rows_ if not toks_equal(out_toks(rule(ins)), outs))
 S_PINS = [
-    ("ISOTOPE_PRUNE_REL × 0.5", "iso", lambda a: r_pattern(pattern_atoms(a), prune=S_PRUNE * 0.5), True),
-    ("ISOTOPE_PRUNE_REL × 2", "iso", lambda a: r_pattern(pattern_atoms(a), prune=S_PRUNE * 2.0), True),
-    ("ISOTOPE_PRUNE_REL + 1 ulp", "iso", lambda a: r_pattern(pattern_atoms(a), prune=nextup(S_PRUNE)), False),
-    ("ISOTOPE_PRUNE_REL − 1 ulp", "iso", lambda a: r_pattern(pattern_atoms(a), prune=nextdown(S_PRUNE)), False),
-    ("ISOTOPE_REPORT_REL × 0.5", "iso", lambda a: r_pattern(pattern_atoms(a), report=S_REPORT * 0.5), True),
-    ("ISOTOPE_REPORT_REL × 2", "iso", lambda a: r_pattern(pattern_atoms(a), report=S_REPORT * 2.0), True),
-    ("ISOTOPE_REPORT_REL + 1 ulp", "iso", lambda a: r_pattern(pattern_atoms(a), report=nextup(S_REPORT)), False),
-    ("ISOTOPE_REPORT_REL − 1 ulp", "iso", lambda a: r_pattern(pattern_atoms(a), report=nextdown(S_REPORT)), False),
-    ("ISOTOPE_BIN_WIDTH_U × 2", "iso", lambda a: r_pattern(pattern_atoms(a), width=S_BIN * 2.0), True),
-    ("ISOTOPE_BIN_WIDTH_U × 0.5", "iso", lambda a: r_pattern(pattern_atoms(a), width=S_BIN * 0.5), False),
-    ("ISOTOPE_BIN_WIDTH_U + 1 ulp", "iso", lambda a: r_pattern(pattern_atoms(a), width=nextup(S_BIN)), False),
-    ("ISOTOPE_BIN_WIDTH_U − 1 ulp", "iso", lambda a: r_pattern(pattern_atoms(a), width=nextdown(S_BIN)), False),
-    ("the stable sort (ties reversed)", "iso", lambda a: r_pattern(pattern_atoms(a), ties_reversed=True), False),
+    ("ISOTOPE_PRUNE_REL × 0.5", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), prune=S_PRUNE * 0.5, table=t), True),
+    ("ISOTOPE_PRUNE_REL × 2", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), prune=S_PRUNE * 2.0, table=t), True),
+    ("ISOTOPE_PRUNE_REL + 1 ulp", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), prune=nextup(S_PRUNE), table=t), False),
+    ("ISOTOPE_PRUNE_REL − 1 ulp", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), prune=nextdown(S_PRUNE), table=t), False),
+    ("ISOTOPE_REPORT_REL × 0.5", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), report=S_REPORT * 0.5, table=t), True),
+    ("ISOTOPE_REPORT_REL × 2", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), report=S_REPORT * 2.0, table=t), True),
+    ("ISOTOPE_REPORT_REL + 1 ulp", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), report=nextup(S_REPORT), table=t), False),
+    ("ISOTOPE_REPORT_REL − 1 ulp", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), report=nextdown(S_REPORT), table=t), False),
+    ("ISOTOPE_BIN_WIDTH_U × 2", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), width=S_BIN * 2.0, table=t), True),
+    ("ISOTOPE_BIN_WIDTH_U × 0.5", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), width=S_BIN * 0.5, table=t), False),
+    ("ISOTOPE_BIN_WIDTH_U + 1 ulp", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), width=nextup(S_BIN), table=t), False),
+    ("ISOTOPE_BIN_WIDTH_U − 1 ulp", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), width=nextdown(S_BIN), table=t), False),
+    ("the stable sort (ties reversed)", "iso", lambda a, t=None: r_pattern(pattern_atoms(a), ties_reversed=True, table=t), False),
     ("ħ's 2.0 + 1 ulp", "spectroscopy::harmonic_oscillator_energy", lambda a: r_oscillator(*fl(a), two=nextup(2.0)), True),
     ("the oscillator's 0.5 + 1 ulp", "spectroscopy::harmonic_oscillator_energy",
      lambda a: r_oscillator(*fl(a), half=nextup(0.5)), True),
@@ -3098,6 +3204,18 @@ for label, fn, rule, must in S_PINS:
     print(f"  pinning: with {label}, {n_ch} of {len(rows_)} {what} change{why}")
     if must:
         check(n_ch > 0, f"spectroscopy: no golden row pins {label}")
+# ADR 0002 #23: the harness compares a noted isotope row with its note (the port's result from isotopes.tsv), so the
+# port's typed constants must also be pinned there: each isotope perturbation above (its rule's table swapped for the
+# #23 one) must change some row's expected port result (the note's tokens, or the oracle's outputs on an unnoted row).
+for label, fn, rule, must in S_PINS:
+    if fn != "iso": continue
+    n_ch = sum(1 for ins, outs, where in small_iso
+               if not toks_equal(out_toks(rule(ins, S_ISO_NEW)),
+                                 expect23("spectroscopy::isotope_pattern", ins, outs, where)))
+    print(f"  pinning (ADR 0002 #23's table, against the port's expected results): with {label}, {n_ch} of "
+          f"{len(small_iso)} isotope_pattern rows change")
+    if must:
+        check(n_ch > 0, f"spectroscopy: no golden row pins {label} on the port's #23 results")
 # Coverage.
 fft_lens = {ins[0][1] for ins, outs, w in srows.get("spectroscopy::fft_spectrum", [])}
 check(set(range(17)) | {1 << k for k in range(14)} <= fft_lens, f"spectroscopy.tsv: fft_spectrum lengths {sorted(fft_lens)}")
@@ -3293,9 +3411,14 @@ zn = [(fl(ins), outs) for ins, outs, w in srows.get("spectroscopy::bohr_energy_l
 zn_miss = sum(1 for a, outs in zn if not same_bits(outs[0][1], -S_RYD_EV))
 near_rep = sum(1 for ins, outs, w in srows.get("spectroscopy::isotope_pattern", []) if outs[0][0] == "v"
                for k in range(outs[0][1]) if outs[2 + 2 * k][1] == S_REPORT)
+near_rep23 = 0
+for ins, outs, w in srows.get("spectroscopy::isotope_pattern", []):
+    e23 = expect23("spectroscopy::isotope_pattern", ins, outs, w)
+    if e23[0][0] == "v":
+        near_rep23 += sum(1 for k in range(e23[0][1]) if e23[2 + 2 * k][1] == S_REPORT)
 print(f"spectroscopy: reduced_mass has {len(mass_ties)} tie rows (normal and subnormal); the oracle misses m/2 on {eq_miss} "
       f"of {len(eq_m)} equal-mass rows and −R on {zn_miss} of the {len(zn)} Z = n level rows (each noted); {near_rep} "
-      f"isotope peaks exactly at the 0.001 report threshold")
+      f"isotope peaks exactly at the 0.001 report threshold ({near_rep23} in the port's #23 results)")
 
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
              "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy"}
