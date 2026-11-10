@@ -6,7 +6,9 @@
 > **Status note (2026-11-09, M4d).** Item 1's list is complete for what the port calls today: M4a added sin, cos, sincos,
 > atan2 and acos (two-phase, as below), M4d moved gas.cyr and the `math` corpus onto them (ADR 0005's double-double acos and
 > cos removed) and added x·2^y rounded once (ADR 0002 #13) and x·2^(1/6) (ADR 0002 #16). Every class-C golden row,
-> the `math` primitives included, is gated at 0 ulp; none uses a stdlib transcendental (port-parity.md §13–§14).
+> the `math` primitives included, is gated at 0 ulp; none uses a stdlib transcendental (port-parity.md §13–§14). M4e added
+> 1/(100·x) rounded once (ADR 0002 #19) and put spectroscopy's FFT twiddles on `_km_cr_sincos` (hisab 1.4.0's FFT
+> transcribed, ADR 0003's M4e amendment, port-parity.md §15).
 
 ## Context
 

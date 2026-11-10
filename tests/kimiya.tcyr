@@ -4,8 +4,8 @@
 # It includes dist/kimiya.cyr (written by `cyrius distlib --all`; `cyrius distlib --check` proves it
 # current), not src/, so the bundle compiles warning-free as one unit and its modules work
 # together. The reference tests are tests/{error,validate,element,molecule,reaction,thermo,thermochem,
-# phase,gas,solution,electrochemistry,kinetics,organic,inorganic,potential,nuclear}.tcyr; the golden corpus is
-# tests/parity.tcyr.
+# phase,gas,solution,electrochemistry,kinetics,organic,inorganic,potential,nuclear,spectroscopy}.tcyr; the golden
+# corpus is tests/parity.tcyr.
 
 include "dist/kimiya.cyr"
 
@@ -163,6 +163,27 @@ fn main() {
     var tma, vma = morse(5.0, 1.0, 1.5, 3.0);
     var ma: f64 = vma;
     assert(is_ok(tma) == 1 && ma > 3.0 && ma < 3.05, "potential (Morse: exp, 5·(1 − e^−1.5)²)");
+    var tha, vha = spectral_series_wavelength(KM_SPECTRAL_SERIES_BALMER, 1);
+    var ha: f64 = vha;
+    assert(is_ok(tha) == 1 && ha > 0.000000656 && ha < 0.000000657, "spectroscopy_data (series, R_H): Hα 656.47 nm");
+    var twn, vwn = wavenumber_from_wavelength(17.0);
+    assert(is_ok(twn) == 1 && vwn == 0x3F434679ACE01346, "spectroscopy (ADR 0002 #19: 1/(100x) correctly rounded)");
+    var cl2: i64[2];
+    cl2[0] = 17;
+    cl2[1] = 2;
+    var iso: f64[16];
+    var tip, vip = isotope_pattern(&cl2, 1, &iso, 8);
+    assert(is_ok(tip) == 1 && vip == 3, "spectroscopy (isotope pattern: Cl₂'s three peaks)");
+    var sig: f64[8];
+    sig[0] = 1.0;
+    sig[1] = 0.0;
+    sig[2] = 0.0;
+    sig[3] = 0.0;
+    var spec: f64[8];
+    var tff, vff = fft_spectrum(&sig, 4, &spec, 8);
+    var s0: f64 = spec[0];
+    var s2: f64 = spec[2];
+    assert(is_ok(tff) == 1 && vff == 3 && s0 == 1.0 && s2 == 1.0, "spectroscopy (FFT of an impulse: flat)");
     return assert_summary();
 }
 

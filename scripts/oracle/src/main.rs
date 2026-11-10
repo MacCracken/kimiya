@@ -23,7 +23,8 @@
 //! `phase` and `gas`, with `src/phase_data.cyr` and `src/gas_data.cyr` (M2a); `thermochem`, with
 //! `src/thermochem_data.cyr` (M2b); `solution` and `electrochemistry`, with `src/electrochemistry_data.cyr` (M3a);
 //! `kinetics` (M3b); `organic` and `inorganic`, with `src/organic_data.cyr` and `src/inorganic_data.cyr` (M4b);
-//! `nuclear`, with `src/nuclear_data.cyr` (M4c); `potential` (M4d: no data file); …
+//! `nuclear`, with `src/nuclear_data.cyr` (M4c); `potential` (M4d: no data file); `spectroscopy`, with
+//! `src/spectroscopy_data.cyr` (M4e); …
 
 mod cyr;
 mod exact;
@@ -43,6 +44,7 @@ mod m_phase;
 mod m_potential;
 mod m_reaction;
 mod m_solution;
+mod m_spectroscopy;
 mod m_thermo;
 mod m_thermochem;
 mod t_constants;
@@ -53,6 +55,7 @@ mod t_inorganic;
 mod t_nuclear;
 mod t_organic;
 mod t_phase;
+mod t_spectroscopy;
 mod t_thermochem;
 mod tsv;
 
@@ -78,6 +81,7 @@ fn golden_modules() -> Vec<tsv::Module> {
         m_potential::emit(),
         m_reaction::emit(),
         m_solution::emit(),
+        m_spectroscopy::emit(),
         m_thermo::emit(),
         m_thermochem::emit(),
     ]
@@ -105,6 +109,7 @@ fn cyrius_outputs(root: &Path, prov: &str) -> Result<Vec<Output>, String> {
     let organic_src = read(&root.join("rust-old/src/organic.rs"))?;
     let inorganic_src = read(&root.join("rust-old/src/inorganic.rs"))?;
     let nuclear_src = read(&root.join("rust-old/src/nuclear.rs"))?;
+    let spectroscopy_src = read(&root.join("rust-old/src/spectroscopy.rs"))?;
     let files = [
         ("src/constants.cyr", t_constants::emit(root, prov)?),
         ("src/electrochemistry_data.cyr", t_electrochemistry::emit(&electrochemistry_src, prov)?),
@@ -114,6 +119,7 @@ fn cyrius_outputs(root: &Path, prov: &str) -> Result<Vec<Output>, String> {
         ("src/nuclear_data.cyr", t_nuclear::emit(&nuclear_src, prov)?),
         ("src/organic_data.cyr", t_organic::emit(&organic_src, prov)?),
         ("src/phase_data.cyr", t_phase::emit(root, &phase_src, prov)?),
+        ("src/spectroscopy_data.cyr", t_spectroscopy::emit(&spectroscopy_src, prov)?),
         ("src/thermochem_data.cyr", t_thermochem::emit(&thermochem_src, prov)?),
     ];
     Ok(files

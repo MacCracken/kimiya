@@ -1,0 +1,767 @@
+# spectroscopy.cyr — spectroscopy: the Beer–Lambert law, photon energy conversions, the Bohr model and the Rydberg
+# formula, vibrational and rotational levels, mass-spectrometry isotope patterns, the FFT magnitude spectrum and peak
+# detection (port of rust-old/src/spectroscopy.rs).
+#
+# SI as Rust documents it: energies in J (eV where a name says so), wavelengths in m, frequencies in Hz, wavenumbers
+# in cm⁻¹, masses in any consistent unit (kg for the oscillator and the rotor). PLANCK, SPEED_OF_LIGHT, RYDBERG and
+# RYDBERG_EV are src/constants.cyr's KM_* (generated), ELEMENTARY_CHARGE (Rust's electrochemistry::) too; the
+# SpectralSeries enum, its n_lower column, the isotope abundance table and Rust's private RYDBERG_HYDROGEN (the
+# reduced-mass-corrected R_H, read through the API) are src/spectroscopy_data.cyr (generated). Fallible functions
+# return a value-form Result whose Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs where Rust does.
+# Every expression keeps Rust's operation order, constant by constant, so the arithmetic functions are
+# bit-identical (class B: + − × ÷ and √); transmittance (10^x) and absorbance_from_transmittance (log10) are class C
+# on src/mathx.cyr's correctly rounded _km_cr_exp10 / _km_cr_log10, and fft_spectrum on its correctly rounded
+# twiddles (_km_cr_sincos), all compared exactly against the corrected oracle (docs/development/port-parity.md §15).
+#
+# - Rust's integer arguments are words, never wrapped (port plan §6.4): a u8 Z or a u32 n / line / count outside its
+#   type is Err(KM_ERR_INVALID_INPUT) at the position of Rust's first check of it (the `== 0` tests: one test
+#   `z < 1 || z > 255`), NaN for a bare f64 (harmonic_oscillator_energy, rigid_rotor_energy), the empty slice for
+#   isotope_abundances; in isotope_pattern a Z outside 0 ..= 255 is Err(KM_ERR_INVALID_ELEMENT), as an unknown Z
+#   (port plan §6.4, M1: an atomic number is never aliased mod 256), and a count outside u32 Err(KM_ERR_INVALID_INPUT).
+# - SpectralSeries is enum KmSpectralSeries (append-only, Rust's variant order); its methods are
+#   spectral_series_n_lower(s) (0 for a word that is no value, which no series has) and spectral_series_wavelength(s,
+#   line) (Err(KM_ERR_INVALID_INPUT) for such a word, checked first).
+# - Slices are a pointer and a count; a negative count, or a null pointer with values, is Err(KM_ERR_INVALID_INPUT)
+#   (every slice function here has an error channel). Rust's Vec results go to the caller's buffer `out` of `cap`
+#   elements (a negative cap or a null out holds none): Ok(count), the count written, or Err(KM_ERR_INVALID_INPUT) when
+#   the result does not fit, checked after Rust's own errors, with the buffer untouched. isotope_abundances returns its
+#   slice as (pointer, count) into the baked table.
+# - ADR 0002 #19 (the user's policy of 2026-11-09, case (a): a simple exact constant Rust misrepresents):
+#   wavenumber_from_wavelength and wavelength_from_wavenumber return the correctly rounded 1/(100·x)
+#   (src/mathx.cyr's _km_cr_hundredth_div), where Rust's `0.01 / x` rounds 1/100 and then the quotient (one ulp off on
+#   about 14 % of inputs). The golden rows keep the oracle's values; where the port's differ, the note names them and
+#   the harness maps the two (accepted under ADR 2, counted).
+# - isotope_pattern is Rust's pruned convolution operation for operation: the scratch peaks sorted by a stable
+#   insertion sort on the masses' IEEE total order (Rust's `sort_by(total_cmp)` is stable, and the binned means depend
+#   on the order of equal masses), binning, Rust's `fold(0.0, max)` (NaN-ignoring, src/mathx.cyr's _km_max), the
+#   renormalisation, `retain` in order; the count loop runs `count` times, as Rust's. The working pattern and scratch
+#   start in two stack tables of _KM_ISO_STACK records and move to the heap (lib/alloc.cyr's bump allocator, which
+#   never frees) only past that; an allocation failure is Err(KM_ERR_COMPUTATION_ERROR). Rust's private
+#   ISOTOPE_PRUNE_REL (10⁻¹²), ISOTOPE_REPORT_REL (0.001) and ISOTOPE_BIN_WIDTH_U (0.5) are typed formula constants
+#   inline in the private helpers that apply them (_km_isotope_normalize, _km_isotope_report, _km_isotope_bin), as
+#   nuclear.cyr's tolerance (port plan §6.4): pinned by golden rows where a row reaches them (× ½ and × 2) and by
+#   tests/spectroscopy.tcyr on the helpers to the ulp (no molecule puts a peak on a threshold).
+# - fft_spectrum is hisab 1.4.0's `num::fft` transcribed (ADR 0003, M4e amendment): its bit-reversal loop, its
+#   butterflies, Complex's mul / add / sub and the `w *= wn` recurrence in their operation order, no FMA, and the
+#   magnitude sqrt(re·re + im·im) (Complex::abs). The twiddle wn = (cos(−2π/len), sin(−2π/len)) is _km_cr_sincos's,
+#   correctly rounded; hisab 3.4.1's num_fft is not used (its twiddles are the stdlib's f64_cos / f64_sin, not
+#   correctly rounded, reseeded every 64 steps: other bits from n = 256 on). The n complex values live in `out` when
+#   cap ≥ 2n (no allocation; `signal` may then be `out` itself), else in 16·n heap bytes.
+# - Kept as Rust's (reviewed in M4e, reported to the user): the over- and underflow of products and quotients of
+#   inputs (ε·l·c, ε·l, m₁·m₂ and m₁ + m₂, k/μ, h·B, 8π²·I, μ·r·r, the FFT's sums and re² + im²), the cancellation in
+#   1/n₁² − 1/n₂² and E_upper − E_lower for close large n, the Bohr levels' ((−R·Z)·Z)/(n·n), one ulp from −R/k² on
+#   some Z/n = 1/k (Z = n included), reduced_mass(m, m) one ulp from m/2 on some m, find_peaks' interpolated threshold,
+#   and the thresholds 0.001 and 10⁻¹² (heuristic and numerical cutoffs, compared as Rust does): each is a chain of
+#   rounded operations on inputs and physical constants, which ADR 0002's policy leaves as Rust's sequence.
+
+include "lib/alloc.cyr"
+
+# The [lib] order lets this module call the private helpers of the modules before it (as nuclear.cyr calls thermo.cyr's
+# _km_sum): element.cyr's lookups, organic.cyr's _km_is_enum_value, inorganic.cyr's _km_is_u8 and nuclear.cyr's
+# _km_is_u32.
+
+# The isotope_pattern working tables' stack capacity, in (mass, intensity) records: the pattern and the scratch each.
+const _KM_ISO_STACK = 192;
+
+# ── Beer–Lambert law ────────────────────────────────────────────────────────────────
+
+# The Beer–Lambert law A = ε·l·c: the absorbance (dimensionless) from the molar absorptivity ε (L/(mol·cm)), the path
+# length l (cm) and the concentration c (mol/L), as Rust's (ε·l)·c. Inputs are not validated. Mirrors
+# `spectroscopy::absorbance`.
+#must_use
+fn absorbance(molar_absorptivity: f64, path_length: f64, concentration: f64): f64 {
+    var a: f64 = (molar_absorptivity * path_length) * concentration;
+    return a;
+}
+
+# The transmittance T = 10^(−A) from the absorbance A, as Rust's `10.0_f64.powf(-a)`: the correctly rounded
+# _km_cr_exp10(−A) (a correctly rounded pow(10, y) is the same value). Inputs are not validated (NaN gives NaN, A = −∞
+# gives +∞). Mirrors `spectroscopy::transmittance`.
+#must_use
+fn transmittance(absorbance: f64): f64 {
+    var na: f64 = -absorbance;
+    var t: f64 = _km_cr_exp10(na);
+    return t;
+}
+
+# The absorbance A = −log₁₀(T) from the transmittance T. Ok(A) (−0.0 for T = 1: −log₁₀ 1 is −0.0, as in Rust), or
+# Err(KM_ERR_INVALID_INPUT) if T is not in (0, 1] (NaN included). Mirrors `spectroscopy::absorbance_from_transmittance`.
+#must_use
+fn absorbance_from_transmittance(transmittance: f64): Result {
+    if (_km_is_positive(transmittance) != 1 || transmittance > 1.0) { return Err(KM_ERR_INVALID_INPUT); }
+    var l: f64 = _km_cr_log10(transmittance);
+    var a: f64 = -l;
+    return Ok(a);
+}
+
+# The concentration c = A/(ε·l) in mol/L from the absorbance A, the molar absorptivity ε (L/(mol·cm)) and the path
+# length l (cm). Ok(c), or Err(KM_ERR_INVALID_INPUT) if ε, then l, is not positive and finite; A is not validated.
+# Mirrors `spectroscopy::concentration_from_absorbance`.
+#must_use
+fn concentration_from_absorbance(absorbance: f64, molar_absorptivity: f64, path_length: f64): Result {
+    if (_km_is_positive(molar_absorptivity) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(path_length) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var el: f64 = molar_absorptivity * path_length;
+    var c: f64 = absorbance / el;
+    return Ok(c);
+}
+
+# ── photon energy, wavelength and frequency ─────────────────────────────────────────
+
+# The photon energy E = hν in J from the frequency ν (Hz). Inputs are not validated. Mirrors
+# `spectroscopy::photon_energy_from_frequency`.
+#must_use
+fn photon_energy_from_frequency(frequency_hz: f64): f64 {
+    var e: f64 = KM_PLANCK * frequency_hz;
+    return e;
+}
+
+# The photon energy E = hc/λ in J from the wavelength λ (m), as Rust's (h·c)/λ. Ok(E), or Err(KM_ERR_INVALID_INPUT) if
+# λ is not positive and finite. Mirrors `spectroscopy::photon_energy_from_wavelength`.
+#must_use
+fn photon_energy_from_wavelength(wavelength_m: f64): Result {
+    if (_km_is_positive(wavelength_m) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var hc: f64 = KM_PLANCK * KM_SPEED_OF_LIGHT;
+    var e: f64 = hc / wavelength_m;
+    return Ok(e);
+}
+
+# The wavelength λ = hc/E in m from the photon energy E (J), as Rust's (h·c)/E. Ok(λ), or Err(KM_ERR_INVALID_INPUT) if
+# E is not positive and finite. Mirrors `spectroscopy::wavelength_from_energy`.
+#must_use
+fn wavelength_from_energy(energy_j: f64): Result {
+    if (_km_is_positive(energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var hc: f64 = KM_PLANCK * KM_SPEED_OF_LIGHT;
+    var l: f64 = hc / energy_j;
+    return Ok(l);
+}
+
+# The frequency ν = c/λ in Hz from the wavelength λ (m). Ok(ν), or Err(KM_ERR_INVALID_INPUT) if λ is not positive and
+# finite. Mirrors `spectroscopy::frequency_from_wavelength`.
+#must_use
+fn frequency_from_wavelength(wavelength_m: f64): Result {
+    if (_km_is_positive(wavelength_m) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var nu: f64 = KM_SPEED_OF_LIGHT / wavelength_m;
+    return Ok(nu);
+}
+
+# An energy in J as eV: E/e (KM_ELEMENTARY_CHARGE, exact in the 2019 SI). Mirrors `spectroscopy::joules_to_ev`.
+#must_use
+fn joules_to_ev(energy_j: f64): f64 {
+    var e: f64 = energy_j / KM_ELEMENTARY_CHARGE;
+    return e;
+}
+
+# An energy in eV as J: E·e. Mirrors `spectroscopy::ev_to_joules`.
+#must_use
+fn ev_to_joules(energy_ev: f64): f64 {
+    var e: f64 = energy_ev * KM_ELEMENTARY_CHARGE;
+    return e;
+}
+
+# ── Bohr model ──────────────────────────────────────────────────────────────────────
+
+# The Bohr energy level of a hydrogen-like atom, E_n = −R∞hc·Z²/n² in eV, with RYDBERG_EV (13.6057 eV: an infinitely
+# heavy nucleus), from the nuclear charge Z (Rust's u8, 1 for hydrogen) and the principal quantum number n (Rust's
+# u32, ≥ 1), as Rust's ((−R·Z)·Z)/(n·n). Ok(E), or Err(KM_ERR_INVALID_INPUT) if Z is 0 (or outside 0 ..= 255), then
+# if n is 0 (or outside 0 ..= u32::MAX). Mirrors `spectroscopy::bohr_energy_level`.
+#must_use
+fn bohr_energy_level(z, n): Result {
+    if (z < 1 || z > 255) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n < 1 || n > 0xFFFFFFFF) { return Err(KM_ERR_INVALID_INPUT); }
+    var zf: f64 = f64_from(z);
+    var nf: f64 = f64_from(n);
+    var r: f64 = -KM_RYDBERG_EV;
+    var nn: f64 = nf * nf;
+    var e: f64 = ((r * zf) * zf) / nn;
+    return Ok(e);
+}
+
+# The energy in eV of the photon emitted in the transition n_upper → n_lower of a hydrogen-like atom (Bohr model, an
+# infinitely heavy nucleus): E(n_upper) − E(n_lower), positive. Ok(E), or Err(KM_ERR_INVALID_INPUT) from
+# bohr_energy_level(Z, n_lower), then bohr_energy_level(Z, n_upper), then if n_upper ≤ n_lower (Rust's order). Mirrors
+# `spectroscopy::bohr_transition_energy`.
+#must_use
+fn bohr_transition_energy(z, n_lower, n_upper): Result {
+    var tl, vl = bohr_energy_level(z, n_lower);
+    if (is_err_result(tl) == 1) { return Err(vl); }
+    var tu, vu = bohr_energy_level(z, n_upper);
+    if (is_err_result(tu) == 1) { return Err(vu); }
+    if (n_upper <= n_lower) { return Err(KM_ERR_INVALID_INPUT); }
+    var el: f64 = vl;
+    var eu: f64 = vu;
+    var e: f64 = eu - el;
+    return Ok(e);
+}
+
+# The vacuum wavelength in m of a hydrogen-like transition by the Rydberg formula 1/λ = R∞·Z²·(1/n₁² − 1/n₂²), with
+# RYDBERG (R∞: an infinitely heavy nucleus; for ¹H about 0.05 % short, spectral_series_wavelength applies R_H).
+# Ok(λ), or Err(KM_ERR_INVALID_INPUT) as _km_rydberg_formula. Mirrors `spectroscopy::rydberg_wavelength`.
+#must_use
+fn rydberg_wavelength(z, n_lower, n_upper): Result {
+    return _km_rydberg_formula(KM_RYDBERG, z, n_lower, n_upper);
+}
+
+# Rust's private rydberg_formula: 1/λ = ((R·Z)·Z)·(1/(n₁·n₁) − 1/(n₂·n₂)), then Ok(1/that), with the Rydberg constant
+# `rydberg` (m⁻¹). Err(KM_ERR_INVALID_INPUT) if Z is 0 (or outside u8), then if either n is 0 (or outside u32), then if
+# n_upper ≤ n_lower.
+#must_use
+fn _km_rydberg_formula(rydberg: f64, z, n_lower, n_upper): Result {
+    if (z < 1 || z > 255) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_lower < 1 || n_lower > 0xFFFFFFFF || n_upper < 1 || n_upper > 0xFFFFFFFF) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (n_upper <= n_lower) { return Err(KM_ERR_INVALID_INPUT); }
+    var zf: f64 = f64_from(z);
+    var nl: f64 = f64_from(n_lower);
+    var nu: f64 = f64_from(n_upper);
+    var ll: f64 = nl * nl;
+    var uu: f64 = nu * nu;
+    var il: f64 = 1.0 / ll;
+    var iu: f64 = 1.0 / uu;
+    var d: f64 = il - iu;
+    var inv: f64 = ((rydberg * zf) * zf) * d;
+    var lam: f64 = 1.0 / inv;
+    return Ok(lam);
+}
+
+# The lower quantum number of series s (a KmSpectralSeries value): 1 (Lyman) … 5 (Pfund); 0 for a word that is no
+# KmSpectralSeries value, which no series has. Mirrors `SpectralSeries::n_lower`.
+#must_use
+fn spectral_series_n_lower(s): i64 {
+    if (_km_is_enum_value(s, KM_SPECTRAL_SERIES_COUNT) != 1) { return 0; }
+    return KM_SPECTRAL_SERIES_N_LOWER[s];
+}
+
+# The vacuum wavelength in m of line `line` (1 = α, 2 = β, …; Rust's u32) of the ¹H series s (a KmSpectralSeries
+# value), n_upper = n_lower + line, by the Rydberg formula with the reduced-mass-corrected R_H = R∞/(1 + mₑ/mₚ)
+# (_KM_RYDBERG_HYDROGEN, Rust's const evaluation; Bohr model, no fine structure): Lyα 121.568 nm, Hα 656.470 nm.
+# Ok(λ), or Err(KM_ERR_INVALID_INPUT) if s is no KmSpectralSeries value, then if `line` is 0 (or outside u32), then
+# if n_lower + line overflows u32 (Rust's checked_add). Mirrors `SpectralSeries::wavelength`.
+#must_use
+fn spectral_series_wavelength(s, line): Result {
+    if (_km_is_enum_value(s, KM_SPECTRAL_SERIES_COUNT) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (line < 1 || line > 0xFFFFFFFF) { return Err(KM_ERR_INVALID_INPUT); }
+    var nl = KM_SPECTRAL_SERIES_N_LOWER[s];
+    var nu = nl + line;
+    if (nu > 0xFFFFFFFF) { return Err(KM_ERR_INVALID_INPUT); }
+    return _km_rydberg_formula(_KM_RYDBERG_HYDROGEN, 1, nl, nu);
+}
+
+# ── wavenumber conversions ──────────────────────────────────────────────────────────
+
+# The wavenumber ν̃ = 1/(λ in cm) in cm⁻¹ from the wavelength λ (m). ADR 0002 #19: the correctly rounded 1/(100·λ)
+# (_km_cr_hundredth_div), where Rust's `0.01 / λ` rounds 1/100 first. Ok(ν̃), or Err(KM_ERR_INVALID_INPUT) if λ is not
+# positive and finite. Mirrors `spectroscopy::wavenumber_from_wavelength`, with ADR 0002 #19.
+#must_use
+fn wavenumber_from_wavelength(wavelength_m: f64): Result {
+    if (_km_is_positive(wavelength_m) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var w: f64 = _km_cr_hundredth_div(wavelength_m);
+    return Ok(w);
+}
+
+# The wavelength λ = 1/ν̃ (in cm) in m from the wavenumber ν̃ (cm⁻¹). ADR 0002 #19: the correctly rounded 1/(100·ν̃)
+# (_km_cr_hundredth_div), where Rust's `0.01 / ν̃` rounds 1/100 first. Ok(λ), or Err(KM_ERR_INVALID_INPUT) if ν̃ is not
+# positive and finite. Mirrors `spectroscopy::wavelength_from_wavenumber`, with ADR 0002 #19.
+#must_use
+fn wavelength_from_wavenumber(wavenumber_cm_inv: f64): Result {
+    if (_km_is_positive(wavenumber_cm_inv) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var l: f64 = _km_cr_hundredth_div(wavenumber_cm_inv);
+    return Ok(l);
+}
+
+# ── harmonic oscillator ─────────────────────────────────────────────────────────────
+
+# The reduced mass of a diatomic μ = m₁·m₂/(m₁ + m₂), in the masses' unit, as Rust's (m₁·m₂)/(m₁ + m₂). Ok(μ), or
+# Err(KM_ERR_INVALID_INPUT) if either mass is not positive and finite. Mirrors `spectroscopy::reduced_mass`.
+#must_use
+fn reduced_mass(m1: f64, m2: f64): Result {
+    if (_km_is_positive(m1) != 1 || _km_is_positive(m2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var p: f64 = m1 * m2;
+    var s: f64 = m1 + m2;
+    var mu: f64 = p / s;
+    return Ok(mu);
+}
+
+# The quantum harmonic oscillator energy E_n = (n + ½)·ħω in J, from the vibrational quantum number n (Rust's u32) and
+# the angular frequency ω (rad/s), as Rust's ((n + 0.5)·ħ)·ω with ħ = h/(2π) (2π = 2·std::f64::consts::PI, exact).
+# Inputs are not validated; NaN for an n outside 0 ..= u32::MAX (there is no error channel). Mirrors
+# `spectroscopy::harmonic_oscillator_energy`.
+#must_use
+fn harmonic_oscillator_energy(n, angular_frequency: f64): f64 {
+    if (_km_is_u32(n) != 1) { return _km_nan(); }
+    var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
+    var tp: f64 = 2.0 * pi;
+    var hbar: f64 = KM_PLANCK / tp;
+    var nf: f64 = f64_from(n);
+    var nh: f64 = nf + 0.5;
+    var e: f64 = (nh * hbar) * angular_frequency;
+    return e;
+}
+
+# The angular vibrational frequency ω = √(k/μ) in rad/s from the force constant k (N/m) and the reduced mass μ (kg).
+# Ok(ω), or Err(KM_ERR_INVALID_INPUT) if k, then μ, is not positive and finite. Mirrors
+# `spectroscopy::vibrational_frequency`.
+#must_use
+fn vibrational_frequency(force_constant: f64, reduced_mass_kg: f64): Result {
+    if (_km_is_positive(force_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(reduced_mass_kg) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var q: f64 = force_constant / reduced_mass_kg;
+    var w: f64 = f64_sqrt(q);
+    return Ok(w);
+}
+
+# ── rotational spectroscopy ─────────────────────────────────────────────────────────
+
+# The rigid-rotor energy E_J = h·B·J(J + 1) in J, from the rotational quantum number J (Rust's u32) and the rotational
+# constant B (Hz), as Rust's ((h·B)·J)·(J + 1). Inputs are not validated; NaN for a J outside 0 ..= u32::MAX. Mirrors
+# `spectroscopy::rigid_rotor_energy`.
+#must_use
+fn rigid_rotor_energy(j, rotational_constant_hz: f64): f64 {
+    if (_km_is_u32(j) != 1) { return _km_nan(); }
+    var jf: f64 = f64_from(j);
+    var j1: f64 = jf + 1.0;
+    var e: f64 = ((KM_PLANCK * rotational_constant_hz) * jf) * j1;
+    return e;
+}
+
+# The rotational constant B = h/(8π²I) in Hz from the moment of inertia I (kg·m²), as Rust's h/(((8·π)·π)·I). Ok(B),
+# or Err(KM_ERR_INVALID_INPUT) if I is not positive and finite. Mirrors `spectroscopy::rotational_constant`.
+#must_use
+fn rotational_constant(moment_of_inertia: f64): Result {
+    if (_km_is_positive(moment_of_inertia) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
+    var d: f64 = ((8.0 * pi) * pi) * moment_of_inertia;
+    var b: f64 = KM_PLANCK / d;
+    return Ok(b);
+}
+
+# The moment of inertia of a diatomic I = μ·r² in kg·m² from the reduced mass μ (kg) and the bond length r (m), as
+# Rust's (μ·r)·r. Inputs are not validated. Mirrors `spectroscopy::diatomic_moment_of_inertia`.
+#must_use
+fn diatomic_moment_of_inertia(reduced_mass_kg: f64, bond_length_m: f64): f64 {
+    var i: f64 = (reduced_mass_kg * bond_length_m) * bond_length_m;
+    return i;
+}
+
+# ── mass-spectrometry isotope patterns ──────────────────────────────────────────────
+
+# The natural isotope abundances of the element with atomic number z (Rust's u8): (pointer, n) to n (isotope mass in
+# u, abundance as a mole fraction) pairs, 16 bytes each (the two f64), in the baked table (src/spectroscopy_data.cyr;
+# IUPAC 2009 representative isotopic compositions, Rust's literal). Only elements with significant isotope patterns
+# have data (H, C, N, O, S, Cl, Br); every other z, and a word outside 0 ..= 255, gives the empty slice (0, 0).
+# Mirrors `spectroscopy::isotope_abundances`.
+#must_use
+fn isotope_abundances(atomic_number): (i64, i64) {
+    if (atomic_number < 0 || atomic_number >= _KM_ISOTOPE_ABUNDANCE_ZS) { return (0, 0); }
+    var n = _KM_ISOTOPE_ABUNDANCE_COUNT[atomic_number];
+    if (n == 0) { return (0, 0); }
+    var p = &_KM_ISOTOPE_ABUNDANCES + 16 * _KM_ISOTOPE_ABUNDANCE_START[atomic_number];
+    return (p, n);
+}
+
+# The total-order key of the f64 bits b (Rust's total_cmp compares these as i64: the magnitude bits of a negative
+# pattern flipped, so −NaN < −∞ < … < −0 < +0 < … < +∞ < +NaN).
+#must_use
+fn _km_total_key(b): i64 {
+    return b ^ ((b >>> 63) >> 1);
+}
+
+# Sorts the n (mass, intensity) records at buf by mass in IEEE total order, stably (equal keys keep their order):
+# Rust's `sort_by(|a, b| a.0.total_cmp(&b.0))`, a stable sort, so the same permutation as any stable sort. Insertion
+# sort: the scratch is the pattern's sorted run interleaved with the isotopes', each record at most a few places from
+# its position, so it is near linear here.
+fn _km_isotope_sort(buf, n) {
+    var i = 1;
+    while (i < n) {
+        var mb = load64(buf + 16 * i);
+        var ib = load64(buf + 16 * i + 8);
+        var key = _km_total_key(mb);
+        var j = i;
+        while (j > 0 && _km_total_key(load64(buf + 16 * (j - 1))) > key) {
+            store64(buf + 16 * j, load64(buf + 16 * (j - 1)));
+            store64(buf + 16 * j + 8, load64(buf + 16 * (j - 1) + 8));
+            j = j - 1;
+        }
+        store64(buf + 16 * j, mb);
+        store64(buf + 16 * j + 8, ib);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Rust's binning: the n sorted records at src merged into dst, a record joining the last bin when its mass is within
+# ISOTOPE_BIN_WIDTH_U (0.5 u, typed inline) of the bin's (|m − m_last| < 0.5; NaN starts a bin) — the bin's mass then
+# the intensity-weighted mean (m_last·i_last + m·i)/total when total > 0, its intensity the sum. Returns the bin count.
+#must_use
+fn _km_isotope_bin(src, n, dst): i64 {
+    var width: f64 = 0.5;                   # ISOTOPE_BIN_WIDTH_U (u)
+    var np = 0;
+    var k = 0;
+    while (k < n) {
+        var m: f64 = load64(src + 16 * k);
+        var i: f64 = load64(src + 16 * k + 8);
+        var merged = 0;
+        if (np > 0) {
+            var lm: f64 = load64(dst + 16 * (np - 1));
+            var li: f64 = load64(dst + 16 * (np - 1) + 8);
+            var dm: f64 = m - lm;
+            var adm: f64 = f64_abs(dm);
+            if (adm < width) {
+                var total: f64 = li + i;
+                if (total > 0.0) {
+                    var mean: f64 = ((lm * li) + (m * i)) / total;
+                    store64(dst + 16 * (np - 1), mean);
+                }
+                store64(dst + 16 * (np - 1) + 8, total);
+                merged = 1;
+            }
+        }
+        if (merged == 0) {
+            store64(dst + 16 * np, m);
+            store64(dst + 16 * np + 8, i);
+            np = np + 1;
+        }
+        k = k + 1;
+    }
+    return np;
+}
+
+# Rust's renormalisation and pruning of the n records at buf: the base intensity fold(0.0, max) (NaN ignored), every
+# intensity divided by it when it is > 0, then `retain(|p| p.1 >= ISOTOPE_PRUNE_REL)` (10⁻¹², typed inline) in order.
+# Returns the count kept.
+#must_use
+fn _km_isotope_normalize(buf, n): i64 {
+    var prune: f64 = 0.000000000001;        # ISOTOPE_PRUNE_REL, 10⁻¹²
+    var mx: f64 = 0.0;
+    var k = 0;
+    while (k < n) {
+        var i: f64 = load64(buf + 16 * k + 8);
+        mx = _km_max(mx, i);
+        k = k + 1;
+    }
+    if (mx > 0.0) {
+        k = 0;
+        while (k < n) {
+            var i2: f64 = load64(buf + 16 * k + 8);
+            var r: f64 = i2 / mx;
+            store64(buf + 16 * k + 8, r);
+            k = k + 1;
+        }
+    }
+    var kept = 0;
+    k = 0;
+    while (k < n) {
+        var i3: f64 = load64(buf + 16 * k + 8);
+        if (i3 >= prune) {
+            store64(buf + 16 * kept, load64(buf + 16 * k));
+            store64(buf + 16 * kept + 8, load64(buf + 16 * k + 8));
+            kept = kept + 1;
+        }
+        k = k + 1;
+    }
+    return kept;
+}
+
+# Rust's final filter `retain(|(_, i)| *i > ISOTOPE_REPORT_REL)` (0.001, typed inline) of the n records at buf, in
+# order; returns the count kept.
+#must_use
+fn _km_isotope_report(buf, n): i64 {
+    var report: f64 = 0.001;                # ISOTOPE_REPORT_REL
+    var kept = 0;
+    var k = 0;
+    while (k < n) {
+        var i: f64 = load64(buf + 16 * k + 8);
+        if (i > report) {
+            store64(buf + 16 * kept, load64(buf + 16 * k));
+            store64(buf + 16 * kept + 8, load64(buf + 16 * k + 8));
+            kept = kept + 1;
+        }
+        k = k + 1;
+    }
+    return kept;
+}
+
+# A heap table of cap records holding the first n records of old; 0 when the allocation fails.
+#must_use
+fn _km_isotope_grow(old, n, cap): i64 {
+    if (cap > 0x0800000000000000 / 16) { return 0; }
+    var p = alloc(16 * cap);
+    if (p == 0) { return 0; }
+    var k = 0;
+    while (k < 2 * n) {
+        store64(p + 8 * k, load64(old + 8 * k));
+        k = k + 1;
+    }
+    return p;
+}
+
+# The isotope pattern (mass-spectrum envelope) of a molecule: its n (atomic number, count) records at `atoms`, 16 bytes
+# each (Z as a word, then the count as a word: Rust's `&[(u8, u32)]`), convolved atom by atom from the single peak
+# (0, 1): for an element with isotope data, `count` times, each step every peak × every isotope (masses added,
+# intensities multiplied), sorted by mass (stably), peaks within 0.5 u merged (intensity-weighted mean mass), the
+# intensities renormalised to the base peak and those below 10⁻¹² of it pruned; an element without data shifts every
+# peak by count × its standard atomic weight (not its monoisotopic mass: Rust's documented limitation). Finally peaks
+# at or below 0.1 % of the base peak are dropped. The (mass in u, relative intensity) peaks, ascending in mass, the
+# base peak 1.0, go to the caller's buffer `out` of `cap` 16-byte records (mass, then intensity): Ok(count).
+# Err(KM_ERR_INVALID_INPUT) if the molecule is empty (n = 0) or (atoms, n) is no slice; per atom in order,
+# Err(KM_ERR_INVALID_ELEMENT) for a Z outside 0 ..= 255, or with no data and no element (0, > 118), then
+# Err(KM_ERR_INVALID_INPUT) for a count outside 0 ..= u32::MAX; Err(KM_ERR_COMPUTATION_ERROR) if a working table can't
+# be allocated; Err(KM_ERR_INVALID_INPUT) if the pattern has more than cap peaks (`out` untouched). Mirrors
+# `spectroscopy::isotope_pattern`.
+#must_use
+fn isotope_pattern(atoms, n, out, cap): Result {
+    if (n < 0 || (n > 0 && atoms == 0)) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    var pst: f64[384];                      # _KM_ISO_STACK records each
+    var sst: f64[384];
+    var pat = &pst;
+    var scr = &sst;
+    var tcap = _KM_ISO_STACK;
+    var zero: f64 = 0.0;
+    var one: f64 = 1.0;
+    store64(pat, zero);                     # the single peak (0, 1)
+    store64(pat + 8, one);
+    var np = 1;
+    var a = 0;
+    while (a < n) {
+        var z = load64(atoms + 16 * a);
+        var count = load64(atoms + 16 * a + 8);
+        if (_km_is_u8(z) != 1) { return Err(KM_ERR_INVALID_ELEMENT); }
+        var ab, na = isotope_abundances(z);
+        var h = 0;
+        if (na == 0) {
+            h = element_lookup_by_number(z);
+            if (h == 0) { return Err(KM_ERR_INVALID_ELEMENT); }
+        }
+        if (_km_is_u32(count) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        if (na == 0) {
+            # No isotope data: shift every peak by count × the standard atomic weight.
+            var cf: f64 = f64_from(count);
+            var am: f64 = element_atomic_mass(h);
+            var shift: f64 = cf * am;
+            var k = 0;
+            while (k < np) {
+                var m: f64 = load64(pat + 16 * k);
+                var ms: f64 = m + shift;
+                store64(pat + 16 * k, ms);
+                k = k + 1;
+            }
+        } else {
+            var step = 0;
+            while (step < count) {
+                if (np * na > tcap) {
+                    var ncap = 2 * tcap;
+                    if (ncap < np * na) { ncap = np * na; }
+                    var npat = _km_isotope_grow(pat, np, ncap);
+                    var nscr = _km_isotope_grow(scr, 0, ncap);
+                    if (npat == 0 || nscr == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                    pat = npat;
+                    scr = nscr;
+                    tcap = ncap;
+                }
+                # Convolve with this element's isotopes: scratch[k·na + j] = (m₁ + m₂, i₁·i₂).
+                var ns = 0;
+                var k1 = 0;
+                while (k1 < np) {
+                    var m1: f64 = load64(pat + 16 * k1);
+                    var i1: f64 = load64(pat + 16 * k1 + 8);
+                    var j = 0;
+                    while (j < na) {
+                        var m2: f64 = load64(ab + 16 * j);
+                        var i2: f64 = load64(ab + 16 * j + 8);
+                        var ms2: f64 = m1 + m2;
+                        var is2: f64 = i1 * i2;
+                        store64(scr + 16 * ns, ms2);
+                        store64(scr + 16 * ns + 8, is2);
+                        ns = ns + 1;
+                        j = j + 1;
+                    }
+                    k1 = k1 + 1;
+                }
+                _km_isotope_sort(scr, ns);
+                np = _km_isotope_bin(scr, ns, pat);
+                np = _km_isotope_normalize(pat, np);
+                step = step + 1;
+            }
+        }
+        a = a + 1;
+    }
+    np = _km_isotope_report(pat, np);
+    if (cap < 0 || out == 0 || np > cap) { return Err(KM_ERR_INVALID_INPUT); }
+    var w = 0;
+    while (w < 2 * np) {
+        store64(out + 8 * w, load64(pat + 8 * w));
+        w = w + 1;
+    }
+    return Ok(np);
+}
+
+# ── Fourier-transform spectroscopy ──────────────────────────────────────────────────
+
+# hisab 1.4.0's `num::fft` (src/num/fft.rs), transcribed (ADR 0003, M4e amendment): the in-place radix-2 Cooley–Tukey
+# DFT of the n complex values at `data` (re, im: 16 bytes each), n a power of two (the caller's check; n ≤ 1 is
+# returned unchanged, as 1.4.0's `n <= 1` exit). Its bit-reversal permutation, then per stage len = 2, 4, …, n the
+# twiddle wn = (cos θ, sin θ) of θ = (−2·π)/len (π = std::f64::consts::PI; −2·π is exact, the ÷ len too) from the
+# correctly rounded _km_cr_sincos, and per block w = (1, 0), each butterfly t = w·d (Complex's mul: re = w.re·d.re −
+# w.im·d.im, im = w.re·d.im + w.im·d.re), u + t and u − t, then w *= wn (mul_assign, the same products): every
+# operation in hisab's order, no FMA, so the result is the oracle's with correctly rounded twiddles.
+fn _km_fft(data, n) {
+    if (n <= 1) { return 0; }
+    var j = 0;
+    var i = 1;
+    while (i < n) {
+        var bit = n >> 1;
+        while ((j & bit) != 0) {
+            j = j ^ bit;
+            bit = bit >> 1;
+        }
+        j = j ^ bit;
+        if (i < j) {
+            var ar = load64(data + 16 * i);
+            var ai = load64(data + 16 * i + 8);
+            store64(data + 16 * i, load64(data + 16 * j));
+            store64(data + 16 * i + 8, load64(data + 16 * j + 8));
+            store64(data + 16 * j, ar);
+            store64(data + 16 * j + 8, ai);
+        }
+        i = i + 1;
+    }
+    var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
+    var m2pi: f64 = -2.0 * pi;
+    var len = 2;
+    while (len <= n) {
+        var half = len >> 1;
+        var lf: f64 = f64_from(len);
+        var angle: f64 = m2pi / lf;
+        var wn_im, wn_re = _km_cr_sincos(angle);
+        var start = 0;
+        while (start < n) {
+            var w_re: f64 = 1.0;
+            var w_im: f64 = 0.0;
+            var k = 0;
+            while (k < half) {
+                var pu = data + 16 * (start + k);
+                var pt = data + 16 * (start + k + half);
+                var u_re: f64 = load64(pu);
+                var u_im: f64 = load64(pu + 8);
+                var d_re: f64 = load64(pt);
+                var d_im: f64 = load64(pt + 8);
+                var t_re: f64 = (w_re * d_re) - (w_im * d_im);
+                var t_im: f64 = (w_re * d_im) + (w_im * d_re);
+                var s_re: f64 = u_re + t_re;
+                var s_im: f64 = u_im + t_im;
+                var v_re: f64 = u_re - t_re;
+                var v_im: f64 = u_im - t_im;
+                store64(pu, s_re);
+                store64(pu + 8, s_im);
+                store64(pt, v_re);
+                store64(pt + 8, v_im);
+                var nw_re: f64 = (w_re * wn_re) - (w_im * wn_im);
+                var nw_im: f64 = (w_re * wn_im) + (w_im * wn_re);
+                w_re = nw_re;
+                w_im = nw_im;
+                k = k + 1;
+            }
+            start = start + len;
+        }
+        len = len << 1;
+    }
+    return 0;
+}
+
+# The magnitude spectrum of a real signal (an interferogram → its spectrum): the n values at `signal`, n a non-zero
+# power of two, as complex numbers (x, +0.0) (Complex::from_real), transformed by the FFT (_km_fft, hisab 1.4.0's),
+# then the first n/2 + 1 magnitudes √(re·re + im·im) (Complex::abs: DC up to the Nyquist bin) to the caller's buffer
+# `out` of `cap` f64: Ok(n/2 + 1). Err(KM_ERR_INVALID_INPUT) if n is not a non-zero power of two (Rust's check), then if
+# `signal` is null, then if out holds fewer than n/2 + 1 values; Err(KM_ERR_COMPUTATION_ERROR) if the 16·n-byte work
+# table can't be allocated (Rust's FFT error maps there too, unreachable). With cap ≥ 2n the transform runs in `out`
+# itself and nothing is allocated (`signal` may then be `out`: it is read from the end); otherwise it allocates 16·n
+# bytes from the bump allocator, which never frees them. Mirrors `spectroscopy::fft_spectrum`.
+#must_use
+fn fft_spectrum(signal, n, out, cap): Result {
+    if (n <= 0 || (n & (n - 1)) != 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (signal == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    var m = n / 2 + 1;
+    if (out == 0 || cap < m) { return Err(KM_ERR_INVALID_INPUT); }
+    var data = out;
+    if (cap < 2 * n) {
+        if (n > 0x0080000000000000) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        data = alloc(16 * n);
+        if (data == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    }
+    var zero: f64 = 0.0;                    # Complex::from_real's +0.0
+    var i = n - 1;
+    while (i >= 0) {
+        var x = load64(signal + 8 * i);
+        store64(data + 16 * i + 8, zero);
+        store64(data + 16 * i, x);
+        i = i - 1;
+    }
+    _km_fft(data, n);
+    var k = 0;
+    while (k < m) {
+        var re: f64 = load64(data + 16 * k);
+        var im: f64 = load64(data + 16 * k + 8);
+        var s: f64 = (re * re) + (im * im);
+        var mag: f64 = f64_sqrt(s);
+        store64(out + 8 * k, mag);
+        k = k + 1;
+    }
+    return Ok(m);
+}
+
+# ── peak detection ──────────────────────────────────────────────────────────────────
+
+# Strict local maxima above a threshold: the indices i (1 ≤ i ≤ n − 2: end points are never peaks) of the n values at
+# `data` with data[i] > data[i − 1], data[i] > data[i + 1] and data[i] > min·(1 − t) + max·t, min and max taken over
+# the finite values (Rust's fold from (+∞, −∞) with its NaN-ignoring min / max; the interpolation never forms
+# max − min, which can overflow), t = `threshold`, a fraction of the range. NaN comparisons are false. The indices, in
+# ascending order, go to the caller's buffer `out` of `cap` i64 words: Ok(count); Ok(0) when n < 3, t is not in
+# [0, 1] (NaN included) or no value is finite, as Rust's empty Vec. Err(KM_ERR_INVALID_INPUT) if (data, n) is no
+# slice, or if more peaks are found than cap holds (`out` untouched; at most (n − 1)/2 can be). Mirrors
+# `spectroscopy::find_peaks`.
+#must_use
+fn find_peaks(data, n, threshold: f64, out, cap): Result {
+    if (n < 0 || (n > 0 && data == 0)) { return Err(KM_ERR_INVALID_INPUT); }
+    var in_range = 0;                       # (0.0..=1.0).contains(&threshold): false for NaN
+    if (threshold >= 0.0 && threshold <= 1.0) { in_range = 1; }
+    if (n < 3 || in_range != 1) { return Ok(0); }
+    var lo: f64 = _KM_INF;
+    var hi: f64 = -lo;
+    var k = 0;
+    while (k < n) {
+        var v: f64 = load64(data + 8 * k);
+        if (_km_is_finite(v) == 1) {
+            lo = _km_min(lo, v);
+            hi = _km_max(hi, v);
+        }
+        k = k + 1;
+    }
+    if (lo > hi) { return Ok(0); }          # no finite values
+    var omt: f64 = 1.0 - threshold;
+    var abs_threshold: f64 = (lo * omt) + (hi * threshold);
+    var room = cap;
+    if (out == 0 || room < 0) { room = 0; }
+    var count_first = 0;
+    if (room < (n - 1) / 2) { count_first = 1; }
+    var pass = count_first;                 # pass 1 counts (only when the buffer might be too small), pass 0 writes
+    while (pass >= 0) {
+        var cnt = 0;
+        var i = 1;
+        while (i < n - 1) {
+            var w0: f64 = load64(data + 8 * (i - 1));
+            var w1: f64 = load64(data + 8 * i);
+            var w2: f64 = load64(data + 8 * (i + 1));
+            if (w1 > w0 && w1 > w2 && w1 > abs_threshold) {
+                if (pass == 0) { store64(out + 8 * cnt, i); }
+                cnt = cnt + 1;
+            }
+            i = i + 1;
+        }
+        if (pass == 0) { return Ok(cnt); }
+        if (cnt > room) { return Err(KM_ERR_INVALID_INPUT); }
+        pass = pass - 1;
+    }
+    return Ok(0);
+}

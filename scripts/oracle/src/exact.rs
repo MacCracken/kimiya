@@ -1,7 +1,7 @@
-//! Exact integer arithmetic for the exact values ADR 0002 #13 and #16 name (M4c, M4d): binary64 rounding of
-//! m·2^e for a mantissa of any size, and the two irrational factors the port rounds once, 2⁻ᶠ (N₀/2ⁿ for a fractional
-//! n) and 2^(1/6) (σ·2^(1/6)). Integer arithmetic only, independent of the port's double-word code (`validate.py`
-//! checks every value again, with `Fraction` and MPFR).
+//! Exact integer arithmetic for the exact values ADR 0002 #13, #16 and #19 name (M4c, M4d, M4e): binary64 rounding of
+//! m·2^e for a mantissa of any size, the two irrational factors the port rounds once, 2⁻ᶠ (N₀/2ⁿ for a fractional
+//! n) and 2^(1/6) (σ·2^(1/6)), and the rational 1/(100·x) (the wavenumber conversions). Integer arithmetic only,
+//! independent of the port's double-word code (`validate.py` checks every value again, with `Fraction` and MPFR).
 
 /// A finite nonzero |x| as (mant, exp) with |x| = mant·2^exp exactly, mant < 2^53.
 pub fn decompose(x: f64) -> (u64, i64) {
@@ -294,4 +294,308 @@ pub fn cr_root6_2_mul(x: f64, rust: f64) -> f64 {
             return if neg { -v } else { v };
         }
     }
+}
+
+/// ADR 0002 #19 (M4e): RN(1/(100·x)), the exact (1/100)/x rounded once, for any x: ±0 gives ±∞, ±∞ ±0, NaN NaN (Rust's
+/// 0.01/x there). |x| = m·2^e; q = ⌊2^120/(100·m)⌋ (at least 2^60, so at least 8 bits below the result's last) and the
+/// remainder as a sticky bit, (2q + sticky)·2^(−121 − e) rounded by `round_scaled`. Integer arithmetic only, independent of
+/// the port's double-double fast path (`validate.py` checks every value again with `Fraction`).
+pub fn cr_hundredth_div(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { 0.0 } else { -0.0 };
+    }
+    if x == 0.0 {
+        return if x.is_sign_negative() { f64::NEG_INFINITY } else { f64::INFINITY };
+    }
+    let (m, e) = decompose(x);
+    let d = u128::from(m) * 100;
+    let num = 1_u128 << 120;
+    let q = num / d;
+    let sticky = u128::from(!num.is_multiple_of(d));
+    round_scaled(2 * q + sticky, -121 - e, x < 0.0)
+}
+
+// ── ADR 0002 #20 (M4e-2): binary64 with an unbounded exponent ──────────────────────────────────────────────
+
+/// A binary64 value with an unbounded exponent range: ±m·2^e, with m = 0 (a signed zero) or 2^52 ≤ m < 2^53. The
+/// generator's reference for ADR 0002 #20 (potential's geometry): Rust's operation sequence with every operation's exact
+/// result rounded to 53 bits, nearest-even, and no overflow or underflow. Integer arithmetic only, independent of the
+/// port's (significand, exponent) doubles (`validate.py` checks every value again with MPFR at an unbounded exponent).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ux {
+    neg: bool,
+    m: u64,
+    e: i64,
+}
+
+/// ⌊√n⌋ (Newton's iteration from above).
+fn isqrt(n: u128) -> u128 {
+    if n < 2 {
+        return n;
+    }
+    let mut x: u128 = 1 << (128 - n.leading_zeros()).div_ceil(2);
+    loop {
+        let y = (x + n / x) / 2;
+        if y >= x {
+            return x;
+        }
+        x = y;
+    }
+}
+
+impl Ux {
+    /// The exact value of a finite double.
+    pub fn from_f64(x: f64) -> Self {
+        assert!(x.is_finite(), "Ux::from_f64({x:?})");
+        let neg = x.is_sign_negative();
+        if x == 0.0 {
+            return Self { neg, m: 0, e: 0 };
+        }
+        let (m, e) = decompose(x);
+        Self::round(neg, u128::from(m), e)
+    }
+
+    pub fn is_zero(self) -> bool {
+        self.m == 0
+    }
+
+    /// ±mant·2^exp rounded to 53 bits, to nearest with ties to even, at any exponent. A caller with a nonzero part below
+    /// `mant` passes it as a sticky low bit, with at least two bits between it and the 53rd.
+    fn round(neg: bool, mant: u128, exp: i64) -> Self {
+        if mant == 0 {
+            return Self { neg, m: 0, e: 0 };
+        }
+        let b = 128 - mant.leading_zeros();
+        if b <= 53 {
+            let s = 53 - b;
+            return Self { neg, m: u64::try_from(mant << s).unwrap_or(0), e: exp - i64::from(s) };
+        }
+        let s = b - 53;
+        let mut q = mant >> s;
+        let rem = mant & ((1_u128 << s) - 1);
+        let half = 1_u128 << (s - 1);
+        if rem > half || (rem == half && q & 1 == 1) {
+            q += 1;
+        }
+        let mut e = exp + i64::from(s);
+        if q == 1 << 53 {
+            q >>= 1;
+            e += 1;
+        }
+        Self { neg, m: u64::try_from(q).unwrap_or(0), e }
+    }
+
+    pub fn neg(self) -> Self {
+        Self { neg: !self.neg, ..self }
+    }
+
+    /// RN53(x·y).
+    pub fn mul(self, o: Self) -> Self {
+        let neg = self.neg != o.neg;
+        if self.is_zero() || o.is_zero() {
+            return Self { neg, m: 0, e: 0 };
+        }
+        Self::round(neg, u128::from(self.m) * u128::from(o.m), self.e + o.e)
+    }
+
+    /// RN53(x + y), with IEEE's signed zeros (an exact cancellation is +0).
+    pub fn add(self, o: Self) -> Self {
+        if self.is_zero() && o.is_zero() {
+            return Self { neg: self.neg && o.neg, m: 0, e: 0 };
+        }
+        if self.is_zero() {
+            return o;
+        }
+        if o.is_zero() {
+            return self;
+        }
+        let (h, l) = if self.e >= o.e { (self, o) } else { (o, self) };
+        let d = h.e - l.e;
+        if d > 72 {
+            // l is below 2^-19 of h's last place: a sticky bit three places below it decides every rounding
+            let base = u128::from(h.m) << 3;
+            let mant = if h.neg == l.neg { base | 1 } else { base - 1 };
+            return Self::round(h.neg, mant, h.e - 3);
+        }
+        let hm = u128::from(h.m) << u32::try_from(d).unwrap_or(0);
+        let lm = u128::from(l.m);
+        if h.neg == l.neg {
+            return Self::round(h.neg, hm + lm, l.e);
+        }
+        match hm.cmp(&lm) {
+            std::cmp::Ordering::Equal => Self { neg: false, m: 0, e: 0 },
+            std::cmp::Ordering::Greater => Self::round(h.neg, hm - lm, l.e),
+            std::cmp::Ordering::Less => Self::round(l.neg, lm - hm, l.e),
+        }
+    }
+
+    pub fn sub(self, o: Self) -> Self {
+        self.add(o.neg())
+    }
+
+    /// (M, e') with √(m·2^e) = √M·2^e', M ≥ 2^112 (so ⌊√M⌋ has at least 56 bits).
+    fn sqrt_parts(self) -> (u128, i64) {
+        assert!(!self.neg || self.is_zero(), "Ux::sqrt of a negative value");
+        let k: u32 = if (self.e - 60).rem_euclid(2) == 0 { 60 } else { 61 };
+        let mm = u128::from(self.m) << k;
+        (mm, (self.e - i64::from(k)) / 2)
+    }
+
+    /// RN53(√x) for x ≥ 0 (√±0 = ±0).
+    pub fn sqrt(self) -> Self {
+        if self.is_zero() {
+            return self;
+        }
+        let (mm, e) = self.sqrt_parts();
+        let r = isqrt(mm);
+        let sticky = u128::from(r * r != mm);
+        Self::round(false, (r << 1) | sticky, e - 1)
+    }
+
+    /// The exact order of two values (zeros equal whatever their signs).
+    pub fn cmp(self, o: Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        let (sz, oz) = (self.is_zero(), o.is_zero());
+        if sz && oz {
+            return Ordering::Equal;
+        }
+        let sgn = |v: Self, z: bool| if z { 0 } else if v.neg { -1 } else { 1 };
+        let (ss, os) = (sgn(self, sz), sgn(o, oz));
+        if ss != os {
+            return ss.cmp(&os);
+        }
+        let mag = (self.e, self.m).cmp(&(o.e, o.m));
+        if ss < 0 { mag.reverse() } else { mag }
+    }
+
+    pub fn le(self, o: Self) -> bool {
+        self.cmp(o) != std::cmp::Ordering::Greater
+    }
+
+    /// Rust's `x.max(y)` on the exact values: x where x > y, y otherwise.
+    pub fn max(self, o: Self) -> Self {
+        if self.cmp(o) == std::cmp::Ordering::Greater { self } else { o }
+    }
+
+    pub fn is_positive(self) -> bool {
+        !self.neg && !self.is_zero()
+    }
+
+    /// √x rounded once into binary64, for x ≥ 0: ⌊√M⌋ and a sticky bit, then `round_scaled` (which drops at least
+    /// five bits, so the sticky bit decides every midpoint).
+    pub fn sqrt_f64(self) -> f64 {
+        if self.is_zero() {
+            return if self.neg { -0.0 } else { 0.0 };
+        }
+        let (mm, e) = self.sqrt_parts();
+        let r = isqrt(mm);
+        let sticky = u128::from(r * r != mm);
+        round_scaled((r << 1) | sticky, e - 1, false)
+    }
+
+    /// Whether this is exactly the double x (a finite x; zeros by sign too).
+    pub fn is(self, x: f64) -> bool {
+        x.is_finite() && Self::from_f64(x) == self
+    }
+}
+
+impl Big {
+    fn bit(&self, k: u64) -> bool {
+        let w = usize::try_from(k / 64).unwrap_or(usize::MAX);
+        self.0.get(w).is_some_and(|&x| (x >> (k % 64)) & 1 == 1)
+    }
+
+    /// (⌊self / d⌋, self mod d) for d > 0: binary long division.
+    fn divrem(&self, d: &Self) -> (Self, Self) {
+        assert!(!d.is_zero(), "Big::divrem by zero");
+        let mut q = vec![0_u64; self.0.len()];
+        let mut r = Self(Vec::new());
+        for k in (0..self.bits()).rev() {
+            r = r.shl(1);
+            if self.bit(k) {
+                r = r.add(&Self::new(1));
+            }
+            if r.cmp(d) != std::cmp::Ordering::Less {
+                r = r.sub(d);
+                let w = usize::try_from(k / 64).unwrap_or(0);
+                q[w] |= 1 << (k % 64);
+            }
+        }
+        (Self(q).norm(), r)
+    }
+}
+
+/// The fixed-point precision of the atan2 reference: θ to 2⁻⁴⁰⁰.
+const APREC: u64 = 400;
+
+/// atan(z)·2^APREC for z = zf·2^-APREC in [0, 1], within 2^11 units: Euler's series atan z = Σₖ cₖ·u·ρᵏ with
+/// u = z/(1 + z²), ρ = z²/(1 + z²) ≤ ½, c₀ = 1, cₖ = cₖ₋₁·2k/(2k + 1), each from zf exactly (one division each) and
+/// floored; every term's error stays below 4 units, the terms fall below one unit within about 420, and zf's own unit
+/// moves the sum by at most 6.
+fn atan_fixed(zf: &Big) -> Big {
+    let one2 = Big::new(1).shl(2 * APREC);
+    let den = one2.add(&zf.mul(zf));
+    let (rho, _) = zf.mul(zf).shl(APREC).divrem(&den);
+    let (u, _) = zf.shl(2 * APREC).divrem(&den);
+    let mut term = u.clone();
+    let mut sum = u;
+    let mut k = 1_u64;
+    while !term.is_zero() {
+        term = term.mul(&rho).shr(APREC).mul(&Big::new(u128::from(2 * k))).div_word(2 * k + 1);
+        sum = sum.add(&term);
+        k += 1;
+    }
+    sum
+}
+
+/// atan2(y, x), correctly rounded in binary64, of two unbounded-exponent values (the angle of (x, y) in [−π, π]).
+/// A zero argument has C99's special values (glibc's atan2 of ±0 and ±1 gives them exactly). Otherwise the octant
+/// reduction: θ = atan(n/d) with n ≤ d, the result θ, π − θ, π/2 − θ or π/2 + θ with y's sign, in fixed point to 2⁻⁴⁰⁰
+/// with a proven error below 2^14 units; both ends of ± 2^20 must round to the same double (Ziv), which they do unless
+/// the result is within 2⁻³⁷⁰ of a midpoint (atan of a nonzero rational is transcendental, and so are π ± it). For
+/// n/d < 2⁻⁶⁰ with x > 0 the result is atan(z) ∈ (z − z³/3, z), bracketed from z itself at 200 bits (z is never within
+/// 2⁻¹⁰⁷ of a midpoint unless it is one, when atan(z) lies just below it).
+pub fn ux_atan2_f64(y: Ux, x: Ux) -> f64 {
+    if y.is_zero() || x.is_zero() {
+        let py = if y.neg { -1.0 } else { 1.0 } * if y.is_zero() { 0.0 } else { 1.0 };
+        let px = if x.neg { -1.0 } else { 1.0 } * if x.is_zero() { 0.0 } else { 1.0 };
+        return f64::atan2(py, px);
+    }
+    let (ym, xm) = ((y.e, y.m), (x.e, x.m));
+    let swap = ym > xm;
+    let (n, d) = if swap { (x, y) } else { (y, x) };
+    let oct = u32::from(x.neg) + 2 * u32::from(swap);
+    let k = n.e - d.e;
+    let (mn, md) = (Big::new(u128::from(n.m)), Big::new(u128::from(d.m)));
+    let p = i64::try_from(APREC).unwrap_or(0);
+    if oct == 0 && k <= -61 {
+        // atan(z) ∈ (z − z³/3, z), z = n/d < 2^-60: Z = ⌊mn·2^200/md⌋, so z·2^(200 − k) ∈ [Z, Z + 1); in units of
+        // 2^(k − 202): atan(z) ∈ (4Z − 2^83, 4Z) (z³/3 < z·2^-119), and below 4Z + 4 when Z is not exact
+        let (zq, rem) = mn.shl(200).divrem(&md);
+        let base = zq.shl(2);
+        let lo = base.sub(&Big::new(1 << 83));
+        let hi = if rem.is_zero() { base.sub(&Big::new(1)) } else { base.add(&Big::new(4)) };
+        let (a, b) = (round_big(&lo, k - 202, y.neg), round_big(&hi, k - 202, y.neg));
+        assert!(a.to_bits() == b.to_bits(), "ADR 0002 #20: tiny atan2 undecided ({y:?}, {x:?})");
+        return a;
+    }
+    let zf = if p + k >= 0 { mn.shl(u64::try_from(p + k).unwrap_or(0)).divrem(&md).0 } else { Big::new(0) };
+    let theta = atan_fixed(&zf);
+    static PI4: std::sync::OnceLock<Big> = std::sync::OnceLock::new();
+    let pi4 = PI4.get_or_init(|| atan_fixed(&Big::new(1).shl(APREC)));
+    let v = match oct {
+        0 => theta,
+        1 => pi4.shl(2).sub(&theta),
+        2 => pi4.shl(1).sub(&theta),
+        _ => pi4.shl(1).add(&theta),
+    };
+    let slack = Big::new(1 << 20);
+    let lo = if v.cmp(&slack) == std::cmp::Ordering::Greater { v.sub(&slack) } else { Big::new(0) };
+    let hi = v.add(&slack);
+    let (a, b) = (round_big(&lo, -p, y.neg), round_big(&hi, -p, y.neg));
+    assert!(a.to_bits() == b.to_bits(), "ADR 0002 #20: atan2 undecided at 2^-380 ({y:?}, {x:?})");
+    a
 }

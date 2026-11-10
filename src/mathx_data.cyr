@@ -1882,3 +1882,8 @@ var _KM_CR_ATAN_ACC: i64[24] = {
 var _KM_CR_ROOT6_2_H = 0x3FF1F59AC3C7D6C0;   # 1.122462048309373
 var _KM_CR_ROOT6_2_M = 0xBC84A0F1C3F06A03;   # -3.578507116853557e-17
 var _KM_CR_ROOT6_2_L = 0x3905491C0902AFC5;   # 5.124317959154468e-34
+
+# 1/100 = H + L to 2^-116 (M4e, ADR 0002 #19: spectroscopy.cyr's wavenumber conversions through
+# _km_cr_hundredth_div, the correctly rounded 1/(100·x)), from the exact rational; H is Rust's 0.01.
+var _KM_CR_HUNDREDTH_H = 0x3F847AE147AE147B;   # 0.01
+var _KM_CR_HUNDREDTH_L = 0xBC0EB851EB851EB8;   # -2.0816681711721684e-19

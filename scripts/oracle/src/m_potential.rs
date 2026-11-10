@@ -20,12 +20,20 @@
 //!   scale, near-coincident atoms **on Rust's 10⁻¹² tolerance to the ulp** and near-collinear atoms **on its 10⁻²⁰
 //!   tolerance to the ulp**, every Err path, ±0, NaN, ±∞, DBL_MAX and subnormal coordinates, geometries scaled until
 //!   their squares over- or underflow, seeded).
+//! - **ADR 0002 #20** (M4e-2): `distance_3d`, `bond_angle` and `dihedral_angle` are Rust's sequence evaluated in binary64
+//!   with an unbounded exponent range (every operation rounded to 53 bits, nothing over- or underflowing; the final √ or
+//!   atan2 rounded once into binary64). Where Rust's chain is not that evaluation (an intermediate left the normal range)
+//!   and the result differs, the row keeps the oracle's value and its note names the port's, computed here in exact
+//!   integer arithmetic (`exact::Ux`, `exact::ux_atan2_f64`); every row's replica of Rust's chain is checked against the
+//!   oracle. The edge grids: coordinates near 2^±(500…1074), mixed magnitudes and subnormal coordinates, differences that
+//!   overflow, the tolerance scans at extreme scales, tiny angles with subnormal results, trans and cis dihedrals at
+//!   scale, seeded geometries at random scales.
 //!
 //! Every input goes through `black_box`; grid inputs use only exact or correctly rounded operations (`grids.rs`).
 
 use std::hint::black_box as bb;
 
-use crate::exact::cr_root6_2_mul;
+use crate::exact::{Ux, cr_root6_2_mul, ux_atan2_f64};
 use crate::grids::{Rng, decades, pow2};
 use crate::m_reaction::{edges, res};
 use crate::tsv::{Class, Module, Tok, f};
@@ -127,19 +135,203 @@ fn coul(m: &mut Module, q1: f64, q2: f64, r: f64) {
     m.row("potential::coulomb_force", Class::B, &[f(q1), f(q2), f(r)], &[fv]);
 }
 
+// ── ADR 0002 #20: Rust's geometry sequences, on f64 (the replica, checked against the oracle on every row) and with an
+// unbounded exponent (exact integer arithmetic) ──
+
+fn vsub(a: P3, b: P3) -> P3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn vdot(a: P3, b: P3) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn vcross(a: P3, b: P3) -> P3 {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+type U3 = [Ux; 3];
+
+fn u3(p: P3) -> U3 {
+    p.map(Ux::from_f64)
+}
+
+fn usub(a: U3, b: U3) -> U3 {
+    [a[0].sub(b[0]), a[1].sub(b[1]), a[2].sub(b[2])]
+}
+
+fn udot(a: U3, b: U3) -> Ux {
+    a[0].mul(b[0]).add(a[1].mul(b[1])).add(a[2].mul(b[2]))
+}
+
+fn ucross(a: U3, b: U3) -> U3 {
+    [
+        a[1].mul(b[2]).sub(a[2].mul(b[1])),
+        a[2].mul(b[0]).sub(a[0].mul(b[2])),
+        a[0].mul(b[1]).sub(a[1].mul(b[0])),
+    ]
+}
+
+fn finite(ps: &[P3]) -> bool {
+    ps.iter().flatten().all(|x| x.is_finite())
+}
+
+const COINCIDENT_REL_TOL: f64 = 1e-12;
+const COLLINEAR_SIN_SQ_TOL: f64 = 1e-20;
+
+/// Rust's `bond_angle` up to atan2's arguments: `None` for its Err, `Some((y, x))` otherwise.
+fn bond_parts(a: P3, b: P3, c: P3, tol: f64) -> Option<(f64, f64)> {
+    let ok = |x: f64| x > 0.0 && x.is_finite();
+    let (ba, bc) = (vsub(a, b), vsub(c, b));
+    let (ba_sq, bc_sq) = (vdot(ba, ba), vdot(bc, bc));
+    let tol_sq = tol * tol;
+    let b_sq = vdot(b, b);
+    if !ok(ba_sq) || !ok(bc_sq) || ba_sq <= tol_sq * vdot(a, a).max(b_sq) || bc_sq <= tol_sq * vdot(c, c).max(b_sq) {
+        return None;
+    }
+    let cr = vcross(ba, bc);
+    Some((vdot(cr, cr).sqrt(), vdot(ba, bc)))
+}
+
+/// The same sequence with an unbounded exponent.
+fn bond_parts_ux(a: P3, b: P3, c: P3, tol: f64) -> Option<(Ux, Ux)> {
+    let (ua, ub, uc) = (u3(a), u3(b), u3(c));
+    let (ba, bc) = (usub(ua, ub), usub(uc, ub));
+    let (ba_sq, bc_sq) = (udot(ba, ba), udot(bc, bc));
+    let t = Ux::from_f64(tol);
+    let tol_sq = t.mul(t);
+    let b_sq = udot(ub, ub);
+    if !ba_sq.is_positive()
+        || !bc_sq.is_positive()
+        || ba_sq.le(tol_sq.mul(udot(ua, ua).max(b_sq)))
+        || bc_sq.le(tol_sq.mul(udot(uc, uc).max(b_sq)))
+    {
+        return None;
+    }
+    let cr = ucross(ba, bc);
+    Some((udot(cr, cr).sqrt(), udot(ba, bc)))
+}
+
+/// Rust's `dihedral_angle` up to atan2's arguments: `None` for its Err, `Some((y, x))` otherwise.
+fn dihedral_parts(a: P3, b: P3, c: P3, d: P3, tol: f64) -> Option<(f64, f64)> {
+    let ok = |x: f64| x > 0.0 && x.is_finite();
+    let (b1, b2, b3) = (vsub(b, a), vsub(c, b), vsub(d, c));
+    let (n1, n2) = (vcross(b1, b2), vcross(b2, b3));
+    let (n1_sq, n2_sq, b2_sq) = (vdot(n1, n1), vdot(n2, n2), vdot(b2, b2));
+    if !ok(n1_sq) || !ok(n2_sq) || n1_sq <= tol * vdot(b1, b1) * b2_sq || n2_sq <= tol * b2_sq * vdot(b3, b3) {
+        return None;
+    }
+    Some((b2_sq.sqrt() * vdot(b1, n2), vdot(n1, n2)))
+}
+
+/// The same sequence with an unbounded exponent.
+fn dihedral_parts_ux(a: P3, b: P3, c: P3, d: P3, tol: f64) -> Option<(Ux, Ux)> {
+    let (ua, ub, uc, ud) = (u3(a), u3(b), u3(c), u3(d));
+    let (b1, b2, b3) = (usub(ub, ua), usub(uc, ub), usub(ud, uc));
+    let (n1, n2) = (ucross(b1, b2), ucross(b2, b3));
+    let (n1_sq, n2_sq, b2_sq) = (udot(n1, n1), udot(n2, n2), udot(b2, b2));
+    let t = Ux::from_f64(tol);
+    if !n1_sq.is_positive()
+        || !n2_sq.is_positive()
+        || n1_sq.le(t.mul(udot(b1, b1)).mul(b2_sq))
+        || n2_sq.le(t.mul(b2_sq).mul(udot(b3, b3)))
+    {
+        return None;
+    }
+    Some((b2_sq.sqrt().mul(udot(b1, n2)), udot(n1, n2)))
+}
+
+/// Rust's −π → π (dihedral_angle reports (−π, π]).
+fn dihedral_map(phi: f64) -> f64 {
+    if phi <= -std::f64::consts::PI { std::f64::consts::PI } else { phi }
+}
+
+/// ADR 0002 #20: where Rust's chain is not the unbounded-exponent evaluation (an Err decision or atan2's arguments
+/// differ), the port's result (`None` for Err), else `None` from the outer Option (the port's value is Rust's sequence
+/// with a correctly rounded atan2, the corrected oracle's).
+fn port_angle(rust: Option<(f64, f64)>, ux: Option<(Ux, Ux)>, map: fn(f64) -> f64) -> Option<Option<f64>> {
+    let same = match (rust, ux) {
+        (None, None) => true,
+        (Some((y, x)), Some((uy, ux_))) => uy.is(y) && ux_.is(x),
+        _ => false,
+    };
+    if same {
+        return None;
+    }
+    Some(ux.map(|(uy, ux_)| map(ux_atan2_f64(uy, ux_))))
+}
+
+const P20: &str = "ADR 0002 #20: the port returns Rust's sequence evaluated with an unbounded exponent";
+
+/// The #20 note for an angle row where the port's result differs from the oracle's `out`, or `None`.
+fn angle_note(out: &Result<f64, kimiya::error::KimiyaError>, port: Option<Option<f64>>) -> Option<String> {
+    let port = port?;
+    match (out.as_ref().ok(), port) {
+        (None, None) => None,
+        (Some(&v), Some(x)) if v.to_bits() == x.to_bits() => None,
+        (_, Some(x)) => Some(format!("{P20} (atan2 rounded once) = Ok({x:?}) (f:{:016x})", x.to_bits())),
+        (Some(_), None) => Some(format!("{P20} = Err(InvalidInput) (E:InvalidInput)")),
+    }
+}
+
 fn dist(m: &mut Module, p1: P3, p2: P3) {
     let d = distance_3d(bb(p1), bb(p2));
-    m.row("potential::distance_3d", Class::B, &toks(&[p1, p2]), &[f(d)]);
+    let name = "potential::distance_3d";
+    let ins = toks(&[p1, p2]);
+    let dd = vsub(p2, p1);
+    let s = vdot(dd, dd);
+    assert!(s.sqrt().to_bits() == d.to_bits() || d.is_nan(), "distance_3d replica");
+    if finite(&[p1, p2]) {
+        let du = usub(u3(p2), u3(p1));
+        let us = udot(du, du);
+        let x = us.sqrt_f64();
+        if !us.is(s) && x.to_bits() != d.to_bits() {
+            let note = format!("{P20} (√ rounded once) = {x:?} (f:{:016x})", x.to_bits());
+            m.row_noted(name, Class::B, &ins, &[f(d)], &note);
+            return;
+        }
+    }
+    m.row(name, Class::B, &ins, &[f(d)]);
 }
 
 fn angle(m: &mut Module, a: P3, b: P3, c: P3) {
-    let out = res(bond_angle(bb(a), bb(b), bb(c)));
-    m.row("potential::bond_angle", Class::C, &toks(&[a, b, c]), &[out]);
+    let out = bond_angle(bb(a), bb(b), bb(c));
+    let name = "potential::bond_angle";
+    let ins = toks(&[a, b, c]);
+    let rust = bond_parts(a, b, c, COINCIDENT_REL_TOL);
+    match (&out, rust) {
+        (Err(_), None) => {}
+        (Ok(v), Some((y, x))) => assert!(v.to_bits() == y.atan2(x).to_bits(), "bond_angle replica"),
+        _ => panic!("bond_angle replica: {a:?} {b:?} {c:?}"),
+    }
+    if finite(&[a, b, c]) {
+        let port = port_angle(rust, bond_parts_ux(a, b, c, COINCIDENT_REL_TOL), |x| x);
+        if let Some(note) = angle_note(&out, port) {
+            m.row_noted(name, Class::C, &ins, &[res(out)], &note);
+            return;
+        }
+    }
+    m.row(name, Class::C, &ins, &[res(out)]);
 }
 
 fn dihedral(m: &mut Module, a: P3, b: P3, c: P3, d: P3) {
-    let out = res(dihedral_angle(bb(a), bb(b), bb(c), bb(d)));
-    m.row("potential::dihedral_angle", Class::C, &toks(&[a, b, c, d]), &[out]);
+    let out = dihedral_angle(bb(a), bb(b), bb(c), bb(d));
+    let name = "potential::dihedral_angle";
+    let ins = toks(&[a, b, c, d]);
+    let rust = dihedral_parts(a, b, c, d, COLLINEAR_SIN_SQ_TOL);
+    match (&out, rust) {
+        (Err(_), None) => {}
+        (Ok(v), Some((y, x))) => assert!(v.to_bits() == dihedral_map(y.atan2(x)).to_bits(), "dihedral replica"),
+        _ => panic!("dihedral_angle replica: {a:?} {b:?} {c:?} {d:?}"),
+    }
+    if finite(&[a, b, c, d]) {
+        let port = port_angle(rust, dihedral_parts_ux(a, b, c, d, COLLINEAR_SIN_SQ_TOL), dihedral_map);
+        if let Some(note) = angle_note(&out, port) {
+            m.row_noted(name, Class::C, &ins, &[res(out)], &note);
+            return;
+        }
+    }
+    m.row(name, Class::C, &ins, &[res(out)]);
 }
 
 /// A point with coordinates uniform in [−s, s].
@@ -154,22 +346,30 @@ fn add(a: P3, b: P3) -> P3 {
 /// Rust's bond-angle coincidence test for A against B (`ba_sq <= tol² · max(|a|², |b|²)`, the `is_positive` checks
 /// aside), with the tolerance `tol`: the replica that finds the rows on the threshold.
 fn coincident(a: P3, b: P3, tol: f64) -> bool {
-    let dot = |x: P3, y: P3| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
-    let ba = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-    let ba_sq = dot(ba, ba);
-    let b_sq = dot(b, b);
-    ba_sq <= tol * tol * dot(a, a).max(b_sq)
+    let ba = vsub(a, b);
+    vdot(ba, ba) <= tol * tol * vdot(a, a).max(vdot(b, b))
+}
+
+/// The same test with an unbounded exponent (ADR 0002 #20: the port's, at any scale).
+fn coincident_ux(a: P3, b: P3, tol: f64) -> bool {
+    let (ua, ub) = (u3(a), u3(b));
+    let ba = usub(ua, ub);
+    let t = Ux::from_f64(tol);
+    udot(ba, ba).le(t.mul(t).mul(udot(ua, ua).max(udot(ub, ub))))
 }
 
 /// Rust's dihedral collinearity test for A-B-C (`n1_sq <= tol · |b1|² · |b2|²`), with the tolerance `tol`.
 fn collinear(a: P3, b: P3, c: P3, tol: f64) -> bool {
-    let dot = |x: P3, y: P3| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
-    let sub = |x: P3, y: P3| [x[0] - y[0], x[1] - y[1], x[2] - y[2]];
-    let cross = |x: P3, y: P3| [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
-    let b1 = sub(b, a);
-    let b2 = sub(c, b);
-    let n1 = cross(b1, b2);
-    dot(n1, n1) <= tol * dot(b1, b1) * dot(b2, b2)
+    let (b1, b2) = (vsub(b, a), vsub(c, b));
+    let n1 = vcross(b1, b2);
+    vdot(n1, n1) <= tol * vdot(b1, b1) * vdot(b2, b2)
+}
+
+/// The same test with an unbounded exponent (ADR 0002 #20).
+fn collinear_ux(a: P3, b: P3, c: P3, tol: f64) -> bool {
+    let (b1, b2) = (usub(u3(b), u3(a)), usub(u3(c), u3(b)));
+    let n1 = ucross(b1, b2);
+    udot(n1, n1).le(Ux::from_f64(tol).mul(udot(b1, b1)).mul(udot(b2, b2)))
 }
 
 #[allow(clippy::too_many_lines)] // one function after another, in source order
@@ -611,5 +811,327 @@ pub fn emit() -> Module {
         let c = add(b, rpt(&mut rng, s));
         dihedral(&mut m, add(b, rpt(&mut rng, s)), b, c, add(c, rpt(&mut rng, s)));
     }
+    edges20(&mut m);
     m
+}
+
+/// x·2^k for any k, in at most two exact scalings (the second one rounds once where the result is subnormal).
+fn sc2(x: f64, k: i32) -> f64 {
+    if k > 1023 {
+        x * pow2(1023) * pow2(k - 1023)
+    } else if k < -1022 {
+        x * pow2(-1022) * pow2((k + 1022).max(-1074))
+    } else {
+        x * pow2(k)
+    }
+}
+
+fn sc(p: P3, k: i32) -> P3 {
+    p.map(|x| sc2(x, k))
+}
+
+/// A double with a uniformly random binade in [2^lo, 2^hi] (lo ≥ −1074, the subnormal binades included), a random
+/// significand and sign.
+fn binade(rng: &mut Rng, lo: i32, hi: i32) -> f64 {
+    let e = i32::try_from(rng.int(i64::from(lo), i64::from(hi))).unwrap_or(0);
+    let sig = 1.0 + rng.unit();
+    let x = if e < -1022 { f64::from_bits(u64::try_from(rng.int(1, (1_i64 << (e + 1075)) - 1)).unwrap_or(1)) } else { sig * pow2(e) };
+    if rng.unit() < 0.5 { -x } else { x }
+}
+
+/// The least positive double x in (lo, hi] with `test(x)` false, for a test true at lo, false at hi and monotone
+/// between (bisection on the bit patterns); `None` when the ends don't bracket a turn.
+fn crossing(test: impl Fn(f64) -> bool, lo: f64, hi: f64) -> Option<f64> {
+    if !test(lo) || test(hi) {
+        return None;
+    }
+    let (mut a, mut b) = (lo.to_bits(), hi.to_bits());
+    while b - a > 1 {
+        let mid = a + (b - a) / 2;
+        if test(f64::from_bits(mid)) { a = mid } else { b = mid }
+    }
+    Some(f64::from_bits(b))
+}
+
+/// The doubles two ulps either side of each crossing, and three between them (none if they coincide).
+fn around_crossings(port: Option<f64>, rust: Option<f64>) -> Vec<f64> {
+    let mut out = Vec::new();
+    for x in [port, rust].into_iter().flatten() {
+        let mut y = x.next_down().next_down();
+        for _ in 0..4 {
+            out.push(y);
+            y = y.next_up();
+        }
+    }
+    if let (Some(p), Some(r)) = (port, rust) {
+        let (a, b) = if p.to_bits() < r.to_bits() { (p.to_bits(), r.to_bits()) } else { (r.to_bits(), p.to_bits()) };
+        if b - a > 4 {
+            for q in 1..4_u64 {
+                out.push(f64::from_bits(a + (b - a) * q / 4));
+            }
+        }
+    }
+    out.sort_by(f64::total_cmp);
+    out.dedup_by(|x, y| x.to_bits() == y.to_bits());
+    out
+}
+
+/// ADR 0002 #20 (M4e-2): the geometry where Rust's squares, cross products and dot products leave the normal range.
+#[allow(clippy::too_many_lines)] // one grid after another
+fn edges20(m: &mut Module) {
+    let mut rng = Rng::new(0x9020);
+    let big = f64::MAX;
+    let o: P3 = [0.0; 3];
+    let x1: P3 = [1.0, 0.0, 0.0];
+    let y1: P3 = [0.0, 1.0, 0.0];
+    // binary exponents near both ends: the squares (2^±511), the fourth powers (2^±255), the subnormal range
+    let ks: [i32; 36] = [
+        -1074, -1070, -1060, -1050, -1040, -1030, -1023, -1022, -1000, -950, -900, -800, -700, -600, -540, -538, -537,
+        -520, -512, -511, -510, -500, -300, -256, -255, -230, 230, 254, 255, 256, 500, 511, 512, 600, 800, 1000,
+    ];
+    let ks_top: [i32; 4] = [1010, 1016, 1019, 1020];
+
+    // ── distance_3d ──
+    let pairs: [(P3, P3); 4] = [
+        ([1.0, 2.0, 2.0], o),
+        ([-1.0, 0.5, 2.0], [2.0, -3.0, 0.25]),
+        ([3.0, 4.0, 12.0], o),
+        (x1, y1),
+    ];
+    for &k in ks.iter().chain(&ks_top) {
+        for &(p, q) in &pairs {
+            dist(m, sc(p, k), sc(q, k));
+        }
+    }
+    // one geometry at every seventh binary scale (the distance scales by exactly 2^k wherever it is normal)
+    let mut k = -1074;
+    while k <= 1019 {
+        dist(m, sc([-1.0, 0.5, 2.0], k), sc([2.0, -3.0, 0.25], k));
+        k += 7;
+    }
+    // differences that overflow, and their neighbours
+    for (p, q) in [
+        ([big, 0.0, 0.0], [-big, 0.0, 0.0]),
+        ([big, big, big], [-big, -big, -big]),
+        ([1e308, -1e308, 1e308], [-1e308, 1e308, -1e308]),
+        ([big, 0.0, 0.0], [-big / 2.0, 0.0, 0.0]),
+        ([big / 2.0, big / 2.0, 0.0], [-big / 2.0, -big / 2.0, 0.0]),
+        ([big, 1.0, -1.0], [0.0, -big, big]),
+        ([big, 0.0, 0.0], [0.0, 0.0, 0.0]),
+        ([big, big, 0.0], [0.0, 0.0, 0.0]),
+    ] {
+        dist(m, p, q);
+    }
+    // mixed magnitudes and subnormal coordinates, seeded
+    for _ in 0..300 {
+        let p = [binade(&mut rng, -1074, 1020), binade(&mut rng, -1074, 1020), binade(&mut rng, -1074, 1020)];
+        let q = [binade(&mut rng, -1074, 1020), binade(&mut rng, -1074, 1020), binade(&mut rng, -1074, 1020)];
+        dist(m, p, q);
+    }
+    for _ in 0..150 {
+        let p = [binade(&mut rng, -1074, -1023), binade(&mut rng, -1074, -1023), binade(&mut rng, -1074, -1023)];
+        let q = [binade(&mut rng, -1074, -1023), 0.0, binade(&mut rng, -1074, -1023)];
+        dist(m, p, q);
+    }
+    for _ in 0..150 {
+        let s = rng.int(-1074, 1018);
+        let k = i32::try_from(s).unwrap_or(0);
+        let p = rpt(&mut rng, 1.0);
+        dist(m, sc(p, k), sc(add(p, rpt(&mut rng, 1e-6)), k)); // near points at a random scale
+    }
+
+    // ── bond_angle ──
+    let tris: [(P3, P3, P3); 5] = [
+        ([1.0, 0.25, 0.0], o, [-0.5, 1.0, 0.0]),
+        ([2.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 2.0, -1.0]),
+        (x1, o, y1),
+        (x1, o, [-1.0, 0.0, 0.0]),
+        ([1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0009765625, 0.0]),
+    ];
+    for &k in ks.iter().chain(&ks_top) {
+        for &(a, b, c) in &tris {
+            angle(m, sc(a, k), sc(b, k), sc(c, k));
+        }
+    }
+    // mixed magnitudes: the two bonds, or the coordinates of one point, at very different scales
+    for (a, b, c) in [
+        ([pow2(600), 0.0, 0.0], o, [pow2(-600), pow2(-600), 0.0]),
+        (x1, o, [pow2(-700), pow2(-800), 0.0]),
+        ([pow2(1000), pow2(1000), 0.0], o, [pow2(-1000), 0.0, 0.0]),
+        ([pow2(1000), 1.0, 0.0], o, [1.0, pow2(-1000), 0.0]),
+        ([pow2(-1074), 0.0, 0.0], o, [0.0, pow2(-1074), 0.0]),
+        ([pow2(-1074), 0.0, 0.0], o, [-pow2(-1074), pow2(-1074), 0.0]),
+        ([3.0 * pow2(-1074), pow2(-1074), 0.0], o, [pow2(-1073), 5.0 * pow2(-1074), 0.0]),
+        ([pow2(-1074), pow2(-1074), pow2(-1074)], o, [pow2(-1074), 0.0, 0.0]),
+        ([big, 0.0, 0.0], [-big, 0.0, 0.0], [-big, big, 0.0]),
+        ([big, big, 0.0], o, [-big, big, 0.0]),
+        ([big, 0.0, 0.0], o, [0.0, big, 0.0]),
+        ([big, 0.0, 0.0], [big / 2.0, 0.0, 0.0], [big, big / 4.0, 0.0]),
+        ([1e300, 1e-300, 0.0], [0.0, 0.0, 0.0], [1e-300, 1e300, 0.0]),
+    ] {
+        angle(m, a, b, c);
+        angle(m, c, b, a);
+    }
+    // tiny angles (results near and in the subnormal range) and angles near π: A = (1, 0, 0)·2^s, C = (±1, t, 0)·2^s
+    for &s in &[0, -300, -500, 300, 500, 1000] {
+        for &t in &[-1022, -1030, -1040, -1050, -1060, -1070, -1074, -1075, -1076, -1100, -1500] {
+            let tv = if t + s >= -1074 { sc2(1.0, t + s) } else { 0.0 };
+            let tv3 = if t + s >= -1072 { sc2(3.0, t + s) } else { tv };
+            for &cx in &[1.0, -1.0] {
+                angle(m, sc(x1, s), o, [sc2(cx, s), tv, 0.0]);
+                angle(m, sc(x1, s), o, [sc2(cx, s), tv3, 0.0]);
+            }
+        }
+    }
+    for _ in 0..120 {
+        let s = i32::try_from(rng.int(-500, 1000)).unwrap_or(0);
+        let t = binade(&mut rng, -1074, -1000).abs();
+        angle(m, sc(x1, s), o, [sc2(1.0, s), sc2(t, s.min(0)), 0.0]);
+    }
+    // the coincidence tolerance to the ulp at extreme scales: B and A − B = (0, 0, δ) scaled by 2^k exactly, δ found by
+    // bisection where the port's exact test turns (the unit-scale one) and where Rust's turns (its squares over- or
+    // underflow, or are rounded at the subnormal grid for k near −480 … −520, or |b|² overflows near 2^512), the rows
+    // around both and between them, where the two disagree
+    for &k in &[-1000, -900, -700, -600, -540, -520, -500, -490, -480, -470, 508, 511, 512, 514, 600, 700, 900, 1000] {
+        for _ in 0..3 {
+            let sz = rng.log_uniform(-1.0, 1.0);
+            let b0: P3 = [rng.uniform(-sz, sz), rng.uniform(-sz, sz), 0.0];
+            let far0: P3 = [b0[0] + sz, b0[1] - 0.5 * sz, sz];
+            let bn = (b0[0] * b0[0] + b0[1] * b0[1]).sqrt();
+            let (b, far) = (sc(b0, k), sc(far0, k));
+            let at = |d: f64| sc([b0[0], b0[1], d], k);
+            let (lo, hi) = (bn * COINCIDENT_REL_TOL * 0.25, bn * COINCIDENT_REL_TOL * 4.0);
+            let port = crossing(|d| coincident_ux(at(d), b, COINCIDENT_REL_TOL), lo, hi);
+            let rust = crossing(|d| bond_parts(at(d), b, far, COINCIDENT_REL_TOL).is_none(), lo, hi);
+            for d in around_crossings(port, rust) {
+                angle(m, at(d), b, far);
+                angle(m, far, b, at(d));
+            }
+        }
+    }
+    // seeded geometries at random scales, and with subnormal coordinates
+    for _ in 0..300 {
+        let k = i32::try_from(rng.int(-1074, 1018)).unwrap_or(0);
+        let b = rpt(&mut rng, 1.0);
+        angle(m, sc(add(b, rpt(&mut rng, 1.0)), k), sc(b, k), sc(add(b, rpt(&mut rng, 1.0)), k));
+    }
+    for _ in 0..100 {
+        let a = [binade(&mut rng, -1074, -1023), binade(&mut rng, -1074, -1023), binade(&mut rng, -1074, -1023)];
+        let c = [binade(&mut rng, -1074, -1023), binade(&mut rng, -1074, -1023), 0.0];
+        angle(m, a, o, c);
+    }
+    for _ in 0..100 {
+        let a = [binade(&mut rng, -1074, 1020), binade(&mut rng, -1074, 1020), binade(&mut rng, -1074, 1020)];
+        let b = [binade(&mut rng, -1074, 1020), binade(&mut rng, -1074, 1020), binade(&mut rng, -1074, 1020)];
+        let c = [binade(&mut rng, -1074, 1020), binade(&mut rng, -1074, 1020), binade(&mut rng, -1074, 1020)];
+        angle(m, a, b, c);
+    }
+
+    // ── dihedral_angle ──
+    let b0: P3 = [1.0, 0.0, 0.0];
+    let quads: [[P3; 4]; 5] = [
+        [[1.0, 1.0, 0.0], o, [1.5, 0.0, 0.0], [2.5, 0.0, 1.0]], // gauche (Rust's bench)
+        [o, b0, [2.0, 1.0, 0.0], [3.0, 1.0, 0.0]],              // trans
+        [o, b0, [2.0, -1.0, 0.0], [3.0, -1.0, 0.0]],            // trans, mirrored (atan2's −π)
+        [[0.0, 1.0, 0.0], o, b0, [1.0, 1.0, 0.0]],              // cis
+        [b0, o, y1, [0.0, 1.0, 1.0]],                           // −90°
+    ];
+    for &k in ks.iter().chain(&ks_top[..3]) {
+        for q in &quads {
+            dihedral(m, sc(q[0], k), sc(q[1], k), sc(q[2], k), sc(q[3], k));
+        }
+    }
+    // trans and cis with every sign of their zero coordinates at extreme scales (Rust's −π → π)
+    for &k in &[-1000, -600, -400, 400, 600, 1000] {
+        for mask in (0..128_u32).step_by(5) {
+            let z = |j: u32| if mask >> j & 1 == 1 { -0.0 } else { 0.0 };
+            for &yc in &[1.0, -1.0] {
+                dihedral(m, sc([z(0), z(1), z(2)], k), sc([1.0, z(3), z(4)], k), sc([2.0, yc, z(5)], k), sc([3.0, yc, z(6)], k));
+            }
+            dihedral(m, sc([z(0), 1.0, z(1)], k), sc([z(2), z(3), z(4)], k), sc([1.0, z(5), z(6)], k), sc([1.0, 1.0, 0.0], k));
+        }
+    }
+    // tiny dihedrals with results near and in the subnormal range: A = (0, 1, 0), B = 0, C = (1, 0, 0), D = (1, 1, t),
+    // all scaled by 2^s (φ ≈ t; Rust's b₁ · n₂ underflows)
+    for &s in &[-500, -400, -300, -200, 200, 300, 400] {
+        for &t in &[-1000, -1022, -1030, -1050, -1070, -1074] {
+            for &mant in &[1.0, 3.0, -5.0] {
+                let tv = sc2(mant, t);
+                dihedral(m, sc(y1, s), o, sc(b0, s), [sc2(1.0, s), sc2(1.0, s), sc2(tv, s)]);
+            }
+        }
+    }
+    // the collinearity tolerance to the ulp at extreme scales (A = (−L, h, 0), B = 0, C = (L, 0, 0), scaled by 2^k), h
+    // found by bisection where the port's exact test turns and where Rust's does (|n₁|² and its threshold subnormal for
+    // k near −240 … −255, overflowing near 272 … 280), the rows around both and between them; B-C-D bent instead too
+    for &k in &[-900, -700, -500, -300, -255, -250, -245, -240, 272, 274, 276, 280, 300, 500, 700, 900] {
+        for _ in 0..3 {
+            let len = rng.log_uniform(-1.0, 1.0);
+            let c = sc([len, 0.0, 0.0], k);
+            let d1 = sc([2.0 * len, 0.0, len], k);
+            let at = |h: f64| sc([-len, h, 0.0], k);
+            let (lo, hi) = (len * 1e-10 * 0.25, len * 1e-10 * 4.0);
+            let port = crossing(|h| collinear_ux(at(h), o, c, COLLINEAR_SIN_SQ_TOL), lo, hi);
+            let rust = crossing(|h| dihedral_parts(at(h), o, c, d1, COLLINEAR_SIN_SQ_TOL).is_none(), lo, hi);
+            for h in around_crossings(port, rust) {
+                dihedral(m, at(h), o, c, d1);
+                // B-C-D bent instead: A = (−L, 0, L) and D = C + (L, h, 0)
+                dihedral(m, sc([-len, 0.0, len], k), o, c, sc([2.0 * len, h, 0.0], k));
+            }
+        }
+    }
+    // the collinearity tolerance with b₁ tiny and b₂ huge: Rust's threshold (10⁻²⁰·|b₁|²)·|b₂|² rounds 10⁻²⁰·|b₁|² at the
+    // subnormal grid (a few bits) before |b₂|² scales it back up, so its turn is far from the exact one, on either side:
+    // between the two crossings Rust says Ok where the port says Err, or the reverse. A = (−L₁, h, 0), B = 0,
+    // C = (L₂, 0, 0), D = (2L₂, 0, L₂); and the mirror image for B-C-D (A = (−L₁, 0, L₁), D = C + (L₁, h, 0))
+    for &(k1, k2) in &[(-500, 300), (-505, 250), (-510, 200), (-515, 150), (-520, 100), (-498, 400)] {
+        for _ in 0..4 {
+            let l1 = sc2(1.0 + rng.unit(), k1);
+            let l2 = sc2(1.0 + rng.unit(), k2);
+            let c = [l2, 0.0, 0.0];
+            let d1 = [2.0 * l2, 0.0, l2];
+            let (lo, hi) = (l1 * 1e-10 * 0.25, l1 * 1e-10 * 4.0);
+            let at = |h: f64| [-l1, h, 0.0];
+            let port = crossing(|h| collinear_ux(at(h), o, c, COLLINEAR_SIN_SQ_TOL), lo, hi);
+            let rust = crossing(|h| dihedral_parts(at(h), o, c, d1, COLLINEAR_SIN_SQ_TOL).is_none(), lo, hi);
+            for h in around_crossings(port, rust) {
+                dihedral(m, at(h), o, c, d1);
+            }
+            // B-C-D: b₂ = C − B tiny, b₃ = D − C huge: A = (−L₂, 0, L₂), B = 0, C = (L₁, 0, 0), D = (L₁ + L₂, h·L₂/L₁, 0)
+            let c2 = [l1, 0.0, 0.0];
+            let a2 = [-l2, 0.0, l2];
+            let at2 = |h: f64| [l1 + l2, h * (l2 / l1), 0.0];
+            let port2 = crossing(|h| collinear_ux(o, c2, at2(h), COLLINEAR_SIN_SQ_TOL), lo, hi);
+            let rust2 = crossing(|h| dihedral_parts(a2, o, c2, at2(h), COLLINEAR_SIN_SQ_TOL).is_none(), lo, hi);
+            for h in around_crossings(port2, rust2) {
+                dihedral(m, a2, o, c2, at2(h));
+            }
+        }
+    }
+    // mixed magnitudes, overflowing differences, subnormal coordinates, seeded scales
+    for q in [
+        [[big, 0.0, 0.0], [-big, 0.0, 0.0], [-big, big, 0.0], [big, big, big]],
+        [[big, big, 0.0], o, [big, 0.0, 0.0], [big, 0.0, big]],
+        [[pow2(600), pow2(600), 0.0], o, [pow2(-600), 0.0, 0.0], [pow2(-600), 0.0, pow2(-600)]],
+        [[1.0, 1.0, 0.0], o, [pow2(-700), 0.0, 0.0], [1.0, 0.0, 1.0]],
+        [[pow2(-1074), pow2(-1074), 0.0], o, [pow2(-1073), 0.0, 0.0], [pow2(-1072), 0.0, pow2(-1074)]],
+        [[1e300, 1e300, 0.0], o, [1e-300, 0.0, 0.0], [1e300, 0.0, 1e300]],
+    ] {
+        dihedral(m, q[0], q[1], q[2], q[3]);
+        dihedral(m, q[3], q[2], q[1], q[0]);
+    }
+    for _ in 0..300 {
+        let k = i32::try_from(rng.int(-1074, 1018)).unwrap_or(0);
+        let b = rpt(&mut rng, 1.0);
+        let c = add(b, rpt(&mut rng, 1.0));
+        dihedral(m, sc(add(b, rpt(&mut rng, 1.0)), k), sc(b, k), sc(c, k), sc(add(c, rpt(&mut rng, 1.0)), k));
+    }
+    for _ in 0..100 {
+        let p: [P3; 4] = std::array::from_fn(|_| [binade(&mut rng, -1074, -1023), binade(&mut rng, -1074, -1023), binade(&mut rng, -1074, -1023)]);
+        dihedral(m, p[0], p[1], p[2], p[3]);
+    }
+    for _ in 0..100 {
+        let p: [P3; 4] = std::array::from_fn(|_| [binade(&mut rng, -1074, 1020), binade(&mut rng, -1074, 1020), binade(&mut rng, -1074, 1020)]);
+        dihedral(m, p[0], p[1], p[2], p[3]);
+    }
 }

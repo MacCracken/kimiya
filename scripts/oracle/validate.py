@@ -80,7 +80,19 @@ and no Python packages. Usage, from the repo root:
    2⁻ᶠ).
 16. potential.tsv (M4d), every row recomputed from rust-old/src/potential.rs (glibc's exp, atan2 and exp2), ADR 0002
    #16's correctly rounded σ·2^(1/6) proven with exact sixth powers, #17's RN(4·ε·d) and #18's RN(μ/(2·D_e)) with
-   Fraction, Rust's forms proven equal to them where they don't overflow, and both private tolerances pinned to the ulp.
+   Fraction, Rust's forms proven equal to them where they don't overflow, and both private tolerances pinned to the ulp;
+   since M4e-2, ADR 0002 #20: distance_3d, bond_angle and dihedral_angle evaluated through MPFR at an unbounded exponent
+   (mpfr_ref.UX, mpfr_ref.potential_*) on every row with finite coordinates — each #20 note is that value, each unnoted
+   row's expected result equals it, no row whose f64 chain stays in the normal range is noted — and their scale
+   invariance through the same evaluator.
+17. spectroscopy.tsv (M4e), every row recomputed from rust-old/src/spectroscopy.rs (glibc's pow(10, ·), log10, and the
+   FFT twiddles' cos and sin, which the release oracle calls as sincos: the rows prove its bits are glibc's sin and cos),
+   with hisab 1.4.0's num::fft transcribed and the isotope pattern's stable sort; ADR 0002 #19's correctly rounded
+   1/(100·x) proven with Fraction on every wavenumber row; src/spectroscopy_data.cyr against the literal (the
+   SpectralSeries enum and n_lower, the isotope table) and R_H against RYDBERG / (1 + the private mass ratio) and the
+   API; the typed thresholds' and constants' pinning where a row can reach them (the rest, and the stable order of
+   equal masses, which no natural molecule's scratch shows with unequal intensities, are pinned by tests/spectroscopy.tcyr
+   on the private helpers); the grids' coverage; and the diagnostics of the formulas kept as Rust's.
 Every function in every .tsv must have a rule here: a new one fails until it gets one.
 
     python3 -I scripts/oracle/validate.py . --write-corrections
@@ -544,7 +556,7 @@ def running_platform():
     return f"{lib} {ver} {arch} {cpu}"
 
 LIBM_EXACT = all(recorded_platform(n) == running_platform() for n in ("reaction", "phase", "gas", "thermochem", "solution", "electrochemistry",
-                                                                     "kinetics", "nuclear", "potential"))
+                                                                     "kinetics", "nuclear", "potential", "spectroscopy"))
 print(f"M2a class-C recompute: {'bit-exact' if LIBM_EXACT else 'shape only'} (corpus libm "
       f"{recorded_platform('gas')}, running {running_platform()})")
 
@@ -586,8 +598,10 @@ def cbrt_cr(x):
 # _km_cr_exp, "expm1" _km_cr_expm1, "ln" _km_cr_ln, "log10" _km_cr_log10, "pow" _km_cr_pow, "pow10"
 # _km_cr_exp10 (= a correctly rounded pow(10, y)), "pow25" _km_cr_pow(x, 2.5), "cos" _km_cr_cos and "acos" _km_cr_acos
 # (since M4d; ADR 0005's double-double _km_cos and _km_acos until then), (M4c) "exp2", glibc's exp2 in the release
-# oracle (LLVM's rewrite of 2.0_f64.powf(y)), _km_cr_pow(2, y) in the port: the same real 2^y, and (M4d) "atan2"
-# _km_cr_atan2 (potential's angles; its args are (y, x)).
+# oracle (LLVM's rewrite of 2.0_f64.powf(y)), _km_cr_pow(2, y) in the port: the same real 2^y, (M4d) "atan2"
+# _km_cr_atan2 (potential's angles; its args are (y, x)), and (M4e) "sin" with "cos", the FFT's twiddles: the release
+# oracle calls glibc's sincos (LLVM joins hisab's angle.cos() and angle.sin()), whose bits are glibc's sin and cos (the
+# golden rows prove it), and the port _km_cr_sincos.
 # With CORRECT[0] set (the corrected oracle, ADR 0006), every result is replaced by its correctly rounded
 # value from MPFR before it is logged or used. cbrt is not logged: the oracle's (Rust's) is correctly rounded.
 CALLS = [0]
@@ -596,7 +610,7 @@ CORRECT = [False]
 CALL_LOG = []
 # The MPFR function each kind rounds; pow10's arguments are (10.0, y) and pow25's (x, 2.5).
 KIND_MPFR = {"exp": "exp", "expm1": "expm1", "ln": "log", "log10": "log10", "pow": "pow", "pow10": "pow",
-             "pow25": "pow", "cos": "cos", "acos": "acos", "exp2": "exp2", "atan2": "atan2"}
+             "pow25": "pow", "cos": "cos", "acos": "acos", "exp2": "exp2", "atan2": "atan2", "sin": "sin"}
 def _prim(y, kind, args):
     k = CALLS[0]
     CALLS[0] += 1
@@ -842,9 +856,15 @@ def r_rk(tc, pc, t, v):
     if not is_finite(v) or v <= b: return Err("InvalidInput")
     return dv(R_GAS * t, v - b) - dv(a, math.sqrt(t) * v * (v + b))
 
+class Pairs(list):
+    """A Vec<(f64, f64)> (M4e: the isotope pattern and abundances): `v:n`, then each pair's two floats."""
+class Ints(list):
+    """A Vec<usize> (M4e: find_peaks' indices): `v:n`, then n `i:` tokens."""
 def out_toks(x):
     """The golden tokens of a Rust result: Err, a root list (`v:n` + floats), an int, or a float."""
     if isinstance(x, Err): return [("E", x.name, None)]
+    if isinstance(x, Pairs): return [("v", len(x), None)] + [("f", z, f2b(z)) for pr in x for z in pr]
+    if isinstance(x, Ints): return [("v", len(x), None)] + [("i", z, None) for z in x]
     if isinstance(x, list): return [("v", len(x), None)] + [("f", z, f2b(z)) for z in x]
     if isinstance(x, tuple): return [("f", z, f2b(z)) for z in x]     # a Rust tuple: its fields in order (M3b)
     if isinstance(x, bool): return [("i", int(x), None)]
@@ -1380,6 +1400,170 @@ def r_dihedral(v, tol=None, pi=math.pi):
         return pi
     return phi
 
+# M4e: spectroscopy.rs, transcribed in its operation order. The private constants are parsed from the source (the
+# typed thresholds, which the replicas take as parameters for the pinning checks, and ELECTRON_PROTON_MASS_RATIO, whose
+# const expression RYDBERG / (1.0 + ratio) is evaluated here as Rust's const evaluation does, in IEEE f64); the isotope
+# table is the source's `match atomic_number` literal; hisab 1.4.0's fft (src/num/fft.rs) is transcribed for
+# fft_spectrum, its twiddles glibc's cos and sin (the release oracle's sincos) through _prim.
+ssrc = (root / "rust-old/src/spectroscopy.rs").read_text()
+def s_private(name):
+    return float(re.search(rf"^const {name}: f64 = ([0-9_.e-]+);", ssrc, re.M).group(1).replace("_", ""))
+S_PRUNE = s_private("ISOTOPE_PRUNE_REL")
+S_REPORT = s_private("ISOTOPE_REPORT_REL")
+S_BIN = s_private("ISOTOPE_BIN_WIDTH_U")
+S_RATIO = s_private("ELECTRON_PROTON_MASS_RATIO")
+check(re.search(r"^const RYDBERG_HYDROGEN: f64 = RYDBERG / \(1\.0 \+ ELECTRON_PROTON_MASS_RATIO\);$", ssrc, re.M),
+      "spectroscopy.rs: RYDBERG_HYDROGEN is not RYDBERG / (1.0 + ELECTRON_PROTON_MASS_RATIO)")
+S_C = b2f(golden_consts["spectroscopy::SPEED_OF_LIGHT"])
+S_RYD = b2f(golden_consts["spectroscopy::RYDBERG"])
+S_RYD_EV = b2f(golden_consts["spectroscopy::RYDBERG_EV"])
+S_QE = b2f(golden_consts["electrochemistry::ELEMENTARY_CHARGE"])
+S_RYD_H = S_RYD / (1.0 + S_RATIO)
+S_ISO = {}
+_iso_body = ssrc[ssrc.index("pub fn isotope_abundances("):]
+_iso_body = _iso_body[_iso_body.index("match atomic_number {"):_iso_body.index("_ => &[],")]
+for _z, _arm in re.findall(r"(\d+) => &\[(.*?)\]", _iso_body, re.S):
+    S_ISO[int(_z)] = [(float(m_.replace("_", "")), float(a_.replace("_", "")))
+                      for m_, a_ in re.findall(r"\(([0-9_.]+), ([0-9_.]+)\)", _arm)]
+S_SERIES_SRC = ssrc[ssrc.index("pub enum SpectralSeries {"):]
+S_SERIES = re.findall(r"^    ([A-Z]\w*),$", S_SERIES_SRC[:S_SERIES_SRC.index("\n}")], re.M)
+_nl = ssrc[ssrc.index("pub const fn n_lower("):]
+S_N_LOWER = {v: int(x) for v, x in re.findall(r"Self::(\w+) => (\d+),", _nl[:_nl.index("\n    }\n")])}
+def p_sin(x):
+    if not math.isfinite(x): return _prim(math.nan, "sin", (x,))
+    return _prim(math.sin(x), "sin", (x,))
+def r_transmittance(a): return p_pow(10.0, -a)
+def r_aft(tt):
+    if not is_positive(tt) or tt > 1.0: return Err("InvalidInput")
+    return -p_log10(tt)
+def r_conc(a, e_, l_):
+    if not is_positive(e_) or not is_positive(l_): return Err("InvalidInput")
+    return dv(a, e_ * l_)
+def r_by_wavelength(x, num):
+    if not is_positive(x): return Err("InvalidInput")
+    return dv(num, x)
+def r_bohr(z, n):
+    if z == 0 or n == 0: return Err("InvalidInput")
+    return dv(-S_RYD_EV * float(z) * float(z), float(n) * float(n))
+def r_transition(z, lo, hi):
+    el = r_bohr(z, lo)
+    if isinstance(el, Err): return el
+    eu = r_bohr(z, hi)
+    if isinstance(eu, Err): return eu
+    if hi <= lo: return Err("InvalidInput")
+    return eu - el
+def r_rydberg_formula(r, z, lo, hi):
+    if z == 0 or lo == 0 or hi == 0 or hi <= lo: return Err("InvalidInput")
+    inv = r * float(z) * float(z) * (dv(1.0, float(lo) * float(lo)) - dv(1.0, float(hi) * float(hi)))
+    return dv(1.0, inv)
+def r_series(name, line, rh=None):
+    nl = S_N_LOWER[name.split(".", 1)[1]]
+    if line == 0 or nl + line > 0xFFFFFFFF: return Err("InvalidInput")
+    return r_rydberg_formula(S_RYD_H if rh is None else rh, 1, nl, nl + line)
+def r_wavenumber(x, hundredth=0.01): return r_by_wavelength(x, hundredth)
+def r_reduced(m1, m2):
+    if not is_positive(m1) or not is_positive(m2): return Err("InvalidInput")
+    return dv(m1 * m2, m1 + m2)
+def r_oscillator(n, w, two=2.0, half=0.5): return (float(n) + half) * dv(PLANCK, two * math.pi) * w
+def r_vibrational(k, mu):
+    if not is_positive(k) or not is_positive(mu): return Err("InvalidInput")
+    return r_sqrt(dv(k, mu))
+def r_rotor(j, b_, one=1.0): return PLANCK * b_ * float(j) * (float(j) + one)
+def r_rot_const(i_, eight=8.0):
+    if not is_positive(i_): return Err("InvalidInput")
+    return dv(PLANCK, eight * math.pi * math.pi * i_)
+def total_key(x):
+    """Rust's total_cmp key of x: the bits as i64, the magnitude bits of a negative pattern flipped."""
+    b = f2b(x)
+    s = b - (1 << 64) if b >> 63 else b
+    return s ^ 0x7FFFFFFFFFFFFFFF if s < 0 else s
+def r_pattern(atoms, prune=None, report=None, width=None, ties_reversed=False):
+    """Rust's isotope_pattern: the pruned convolution with a stable sort (Python's is stable) on total_cmp's key.
+    ties_reversed puts equal masses in the reverse order (an unstable sort's possible result), for the check that the
+    corpus pins the stable order."""
+    prune = S_PRUNE if prune is None else prune
+    report = S_REPORT if report is None else report
+    width = S_BIN if width is None else width
+    if not atoms: return Err("InvalidInput")
+    pattern = [(0.0, 1.0)]
+    for z, count in atoms:
+        ab = S_ISO.get(z, [])
+        if not ab:
+            if z not in ELEMS: return Err("InvalidElement")
+            shift = float(count) * ELEMS[z][3]
+            pattern = [(m_ + shift, i_) for m_, i_ in pattern]
+            continue
+        for _ in range(count):
+            scratch = [(m1 + m2, i1 * i2) for m1, i1 in pattern for m2, i2 in ab]
+            if ties_reversed:
+                scratch = [pr for _, pr in sorted(enumerate(scratch), key=lambda kp: (total_key(kp[1][0]), -kp[0]))]
+            else:
+                scratch.sort(key=lambda pr: total_key(pr[0]))
+            pattern = []
+            for m_, i_ in scratch:
+                if pattern and abs(m_ - pattern[-1][0]) < width:
+                    lm, li = pattern[-1]
+                    total = li + i_
+                    if total > 0.0: lm = (lm * li + m_ * i_) / total
+                    pattern[-1] = (lm, total)
+                    continue
+                pattern.append((m_, i_))
+            mx = 0.0
+            for pr in pattern: mx = r_max(mx, pr[1])
+            if mx > 0.0: pattern = [(m_, i_ / mx) for m_, i_ in pattern]
+            pattern = [pr for pr in pattern if pr[1] >= prune]
+    return Pairs([pr for pr in pattern if pr[1] > report])
+def pattern_atoms(ins):
+    n = ins[0][1]
+    return [(ins[1 + 2 * k][1], ins[2 + 2 * k][1]) for k in range(n)]
+def r_fft(sig, m2=-2.0):
+    """Rust's fft_spectrum: hisab 1.4.0's num::fft transcribed (bit reversal, butterflies, w *= wn), then
+    Complex::abs = sqrt(re·re + im·im) of the first n/2 + 1 bins."""
+    n = len(sig)
+    if n == 0 or n & (n - 1): return Err("InvalidInput")
+    re_, im_ = list(sig), [0.0] * n
+    if n > 1:
+        j = 0
+        for i_ in range(1, n):
+            bit = n >> 1
+            while j & bit:
+                j ^= bit
+                bit >>= 1
+            j ^= bit
+            if i_ < j:
+                re_[i_], re_[j] = re_[j], re_[i_]
+                im_[i_], im_[j] = im_[j], im_[i_]
+        length = 2
+        while length <= n:
+            half = length >> 1
+            angle = m2 * math.pi / float(length)
+            wr, wi = p_cos(angle), p_sin(angle)
+            for start in range(0, n, length):
+                w_re, w_im = 1.0, 0.0
+                for k in range(half):
+                    a_, b_ = start + k, start + k + half
+                    t_re = w_re * re_[b_] - w_im * im_[b_]
+                    t_im = w_re * im_[b_] + w_im * re_[b_]
+                    u_re, u_im = re_[a_], im_[a_]
+                    re_[a_], im_[a_] = u_re + t_re, u_im + t_im
+                    re_[b_], im_[b_] = u_re - t_re, u_im - t_im
+                    w_re, w_im = w_re * wr - w_im * wi, w_re * wi + w_im * wr
+            length <<= 1
+    return [r_sqrt(re_[k] * re_[k] + im_[k] * im_[k]) for k in range(n // 2 + 1)]
+def r_find_peaks(data, th, one=1.0):
+    if len(data) < 3 or not (0.0 <= th <= 1.0): return Ints([])
+    lo, hi = math.inf, -math.inf
+    for v in data:
+        if math.isfinite(v):
+            lo, hi = r_min(lo, v), r_max(hi, v)
+    if lo > hi: return Ints([])
+    thr = lo * (one - th) + hi * th
+    return Ints([k + 1 for k in range(len(data) - 2) if data[k + 1] > data[k] and data[k + 1] > data[k + 2]
+                 and data[k + 1] > thr])
+def peaks_args(ins):
+    n = ins[0][1]
+    return [t_[1] for t_ in ins[1:1 + n]], ins[1 + n][1]
+
 RULES = {
     "reaction::gibbs_free_energy": ("B", lambda a: r_gibbs(*fl(a))),
     "reaction::equilibrium_constant": ("C", lambda a: r_keq(*fl(a))),
@@ -1483,6 +1667,33 @@ RULES = {
     "potential::distance_3d": ("B", lambda a: r_distance(fl(a))),
     "potential::bond_angle": ("C", lambda a: r_bond_angle(fl(a))),
     "potential::dihedral_angle": ("C", lambda a: r_dihedral(fl(a))),
+    "spectroscopy::absorbance": ("B", lambda a: fl(a)[0] * fl(a)[1] * fl(a)[2]),
+    "spectroscopy::transmittance": ("C", lambda a: r_transmittance(fl(a)[0])),
+    "spectroscopy::absorbance_from_transmittance": ("C", lambda a: r_aft(fl(a)[0])),
+    "spectroscopy::concentration_from_absorbance": ("B", lambda a: r_conc(*fl(a))),
+    "spectroscopy::photon_energy_from_frequency": ("B", lambda a: PLANCK * fl(a)[0]),
+    "spectroscopy::photon_energy_from_wavelength": ("B", lambda a: r_by_wavelength(fl(a)[0], PLANCK * S_C)),
+    "spectroscopy::wavelength_from_energy": ("B", lambda a: r_by_wavelength(fl(a)[0], PLANCK * S_C)),
+    "spectroscopy::frequency_from_wavelength": ("B", lambda a: r_by_wavelength(fl(a)[0], S_C)),
+    "spectroscopy::joules_to_ev": ("B", lambda a: dv(fl(a)[0], S_QE)),
+    "spectroscopy::ev_to_joules": ("B", lambda a: fl(a)[0] * S_QE),
+    "spectroscopy::bohr_energy_level": ("B", lambda a: r_bohr(*fl(a))),
+    "spectroscopy::bohr_transition_energy": ("B", lambda a: r_transition(*fl(a))),
+    "spectroscopy::rydberg_wavelength": ("B", lambda a: r_rydberg_formula(S_RYD, *fl(a))),
+    "SpectralSeries::n_lower": ("A", lambda a: S_N_LOWER[fl(a)[0].split(".", 1)[1]]),
+    "SpectralSeries::wavelength": ("B", lambda a: r_series(*fl(a))),
+    "spectroscopy::wavenumber_from_wavelength": ("B", lambda a: r_wavenumber(fl(a)[0])),
+    "spectroscopy::wavelength_from_wavenumber": ("B", lambda a: r_wavenumber(fl(a)[0])),
+    "spectroscopy::reduced_mass": ("B", lambda a: r_reduced(*fl(a))),
+    "spectroscopy::harmonic_oscillator_energy": ("B", lambda a: r_oscillator(*fl(a))),
+    "spectroscopy::vibrational_frequency": ("B", lambda a: r_vibrational(*fl(a))),
+    "spectroscopy::rigid_rotor_energy": ("B", lambda a: r_rotor(*fl(a))),
+    "spectroscopy::rotational_constant": ("B", lambda a: r_rot_const(fl(a)[0])),
+    "spectroscopy::diatomic_moment_of_inertia": ("B", lambda a: fl(a)[0] * fl(a)[1] * fl(a)[1]),
+    "spectroscopy::isotope_abundances": ("A", lambda a: Pairs(S_ISO.get(fl(a)[0], []))),
+    "spectroscopy::isotope_pattern": ("B", lambda a: r_pattern(pattern_atoms(a))),
+    "spectroscopy::fft_spectrum": ("C", lambda a: r_fft(fl(a)[1:])),
+    "spectroscopy::find_peaks": ("A", lambda a: r_find_peaks(*peaks_args(a))),
 }
 TABLE_RULES = {}
 for name, v in PRESETS.items():
@@ -1571,7 +1782,7 @@ sens = {}       # fn -> [S, rows nudged, branch flips, worst row]
 sens_rows = {}  # fn -> [(row S, branch flips, a nudged result is subnormal, inputs)] (M3b: the rows past K = 64)
 flame_paths = {}  # "newton" / "bisection" / "err" -> rows
 for mod in ("reaction", "thermo", "phase", "gas", "thermochem", "solution", "electrochemistry", "kinetics", "nuclear",
-            "potential"):
+            "potential", "spectroscopy"):
     for fn, cls, ins, outs, where in R.get(mod, []):
         m2a_counts[fn] = m2a_counts.get(fn, 0) + 1
         if fn in TABLE_RULES:
@@ -2585,6 +2796,142 @@ print(f"potential: ADR 0002 #16: {n16} lj_equilibrium_distance rows noted with t
       f"{n17} of {edge17} lennard_jones Ok rows with ε ≥ 2¹⁰²² noted with RN(4·ε·d), which Rust's (4·ε)·d is on every "
       f"other finite row; #18: {n18} of {edge18} morse_width_parameter Ok rows with D_e ≥ 2¹⁰²³ noted, (μ·½)/D_e proven "
       f"RN(μ/(2·D_e)) there and on 20,000 seeded pairs")
+# ADR 0002 #20 (M4e-2): distance_3d, bond_angle and dihedral_angle are Rust's sequence evaluated in binary64 with an
+# unbounded exponent range (every operation rounded to 53 bits, nothing over- or underflowing), the final √ or atan2
+# rounded once into binary64. The evaluator is MPFR's (mpfr_ref.UX: 53 bits at MPFR's widest exponent range; the final
+# operation by mpfr_check_range and mpfr_subnormalize), independent of the port's doubles and of the generator's
+# integers, with Rust's sequences transcribed in mpfr_ref.potential_* (sub3 / cross / dot3 in Rust's order; the
+# tolerances are the ones parsed from the source above). On every row with finite coordinates: a noted row's port
+# result is the evaluator's and differs from the oracle's; an unnoted row's expected result (the corrected oracle's
+# where there is one, else the oracle's) is the evaluator's. A row whose f64 chain stays in the normal range (no product
+# or sum non-finite or below 2^-1022, no zero product of nonzero factors) is never noted: there Rust's bits are the
+# port's.
+def _e20(r): return Err("InvalidInput") if r is None else r
+def e20_distance(v): return MPFR.potential_distance_3d(v)
+def e20_bond(v): return _e20(MPFR.potential_bond_angle(v, P_TOL))
+def e20_dihedral(v): return _e20(MPFR.potential_dihedral_angle(v, P_CTOL))
+# Rust's f64 chains, traced: OOR[0] is set when a product or sum leaves the normal range.
+OOR = [False]
+def _t_chk(r, *fs):
+    if not math.isfinite(r) or (r != 0.0 and abs(r) < 2.0 ** -1022) or (r == 0.0 and fs and all(x != 0.0 for x in fs)):
+        OOR[0] = True
+    return r
+def tm(x, y): return _t_chk(x * y, x, y)
+def ta(x, y): return _t_chk(x + y)
+def ts(x, y): return _t_chk(x - y)
+def t_sub(a, b): return [ts(a[0], b[0]), ts(a[1], b[1]), ts(a[2], b[2])]
+def t_dot(a, b): return ta(ta(tm(a[0], b[0]), tm(a[1], b[1])), tm(a[2], b[2]))
+def t_cross(a, b):
+    return [ts(tm(a[1], b[2]), tm(a[2], b[1])), ts(tm(a[2], b[0]), tm(a[0], b[2])), ts(tm(a[0], b[1]), tm(a[1], b[0]))]
+def t_sqrt(x): return _t_chk(r_sqrt(x)) if x != 0.0 else x
+def in_range_distance(v):
+    OOR[0] = False
+    d = t_sub(v[3:6], v[0:3])
+    t_sqrt(t_dot(d, d))
+    return not OOR[0]
+def in_range_bond(v):
+    OOR[0] = False
+    a, b, c = v[0:3], v[3:6], v[6:9]
+    ba, bc = t_sub(a, b), t_sub(c, b)
+    ba_sq, bc_sq = t_dot(ba, ba), t_dot(bc, bc)
+    tol_sq = tm(P_TOL, P_TOL)
+    b_sq = t_dot(b, b)
+    if (not is_positive(ba_sq) or not is_positive(bc_sq) or ba_sq <= tm(tol_sq, r_max(t_dot(a, a), b_sq))
+            or bc_sq <= tm(tol_sq, r_max(t_dot(c, c), b_sq))):
+        return not OOR[0]
+    cr = t_cross(ba, bc)
+    t_sqrt(t_dot(cr, cr))
+    t_dot(ba, bc)
+    return not OOR[0]
+def in_range_dihedral(v):
+    OOR[0] = False
+    a, b, c, d = v[0:3], v[3:6], v[6:9], v[9:12]
+    b1, b2, b3 = t_sub(b, a), t_sub(c, b), t_sub(d, c)
+    n1, n2 = t_cross(b1, b2), t_cross(b2, b3)
+    n1_sq, n2_sq, b2_sq = t_dot(n1, n1), t_dot(n2, n2), t_dot(b2, b2)
+    if (not is_positive(n1_sq) or not is_positive(n2_sq) or n1_sq <= tm(tm(P_CTOL, t_dot(b1, b1)), b2_sq)
+            or n2_sq <= tm(tm(P_CTOL, b2_sq), t_dot(b3, b3))):
+        return not OOR[0]
+    tm(t_sqrt(b2_sq), t_dot(b1, n2))
+    t_dot(n1, n2)
+    return not OOR[0]
+P20_RE = re.compile(r"\[ADR 0002 #20: the port returns Rust's sequence evaluated with an unbounded exponent(?: \((?:√|atan2) "
+                    r"rounded once\))? = (?:(Ok\()?(\S+?)\)? \(f:([0-9a-f]{16})\)|Err\(InvalidInput\) \(E:InvalidInput\))\]$")
+CORR_POT = {w: ct for w, ct, _ in CORRECTIONS.get("potential", [])}
+E20 = {"potential::distance_3d": (e20_distance, in_range_distance, False),
+       "potential::bond_angle": (e20_bond, in_range_bond, True),
+       "potential::dihedral_angle": (e20_dihedral, in_range_dihedral, True)}
+n20 = {fn: [0, 0, 0, 0] for fn in E20}     # rows with finite coordinates, in range, noted, noted Err
+e20_vals = {}
+for fn, (ev, inr, isres) in E20.items():
+    for ins, outs, where in prows.get(fn, []):
+        v = fl(ins)
+        note = NOTES.get(where, "")
+        noted = "[ADR 0002 #20:" in note
+        if not all(math.isfinite(x) for x in v):
+            check(not noted, f"{where}: an ADR 0002 #20 note on a row with a non-finite coordinate (Rust's result stays)")
+            continue
+        n20[fn][0] += 1
+        with MPFR.unbounded():
+            u = ev(v)
+        e20_vals[where] = u
+        utoks = out_toks(u)
+        expect = CORR_POT.get(where, outs)
+        in_range = inr(v)
+        n20[fn][1] += in_range
+        if in_range:
+            check(not noted and toks_equal(utoks, expect), f"{where}: {fn}{tuple(v)}: Rust's chain stays in the normal "
+                  f"range, so the unbounded evaluation {u!r} must be the expected result {expect}, unnoted")
+        if not noted:
+            check(toks_equal(utoks, expect), f"{where}: {fn}{tuple(v)}: the unbounded evaluation {u!r} differs from the "
+                  f"expected {expect}, and the row has no ADR 0002 #20 note")
+            continue
+        mm = P20_RE.search(note)
+        check(mm is not None, f"{where}: malformed ADR 0002 #20 note")
+        if mm is None: continue
+        if mm.group(3) is None:
+            check(isinstance(u, Err), f"{where}: the #20 note says Err, the unbounded evaluation gives {u!r}")
+            n20[fn][3] += 1
+        else:
+            nv = b2f(int(mm.group(3), 16))
+            check(not isinstance(u, Err) and same_bits(nv, u), f"{where}: the #20 note names {nv!r}, the unbounded "
+                  f"evaluation gives {u!r}")
+            check((mm.group(1) is not None) == isres and same_bits(float(mm.group(2)), nv), f"{where}: the #20 note's "
+                  f"value text")
+        check(not toks_equal(utoks, outs), f"{where}: an ADR 0002 #20 note where the port's result is the oracle's")
+        n20[fn][2] += 1
+# Scale invariance through the reference (the property the port's tests check bit for bit): each angle row with
+# finite coordinates, scaled by 2^k for three k where every scaled coordinate is exact, gives the same result; a
+# distance gives 2^k times it where both are normal.
+_r20 = random.Random(0x9020)
+inv20 = 0
+def exact_scale(v, k):
+    try:
+        w = [math.ldexp(x, k) for x in v]
+    except OverflowError:
+        return None
+    return w if all(math.isfinite(y) and math.ldexp(y, -k) == x for x, y in zip(v, w)) else None
+for fn, (ev, inr, isres) in E20.items():
+    for ins, outs, where in prows.get(fn, []):
+        if where not in e20_vals or _r20.random() > 0.25: continue
+        v, u = fl(ins), e20_vals[where]
+        for _ in range(3):
+            k = _r20.randint(-1100, 1100)
+            w = exact_scale(v, k)
+            if w is None: continue
+            with MPFR.unbounded():
+                us = ev(w)
+            if isres:
+                check(toks_equal(out_toks(us), out_toks(u)), f"{where}: {fn} is not scale-invariant at 2^{k}: {us!r}, {u!r}")
+            elif (u == 0.0 or 2.0 ** -1022 <= u <= sys.float_info.max) and (us == 0.0 or 2.0 ** -1022 <= us < math.inf):
+                check(same_bits(us, math.ldexp(u, k)), f"{where}: distance_3d at 2^{k} is {us!r}, not 2^{k}·{u!r}")
+            inv20 += 1
+for fn, (a_, b_, c_, d_) in n20.items():
+    print(f"potential: ADR 0002 #20: {fn.split('::')[1]}: {a_} rows with finite coordinates, {b_} with Rust's chain in "
+          f"the normal range (all unnoted, Rust's bits); {c_} noted with the unbounded evaluation ({d_} of them Err), each "
+          f"proven against MPFR, and every other row's expected result is MPFR's")
+print(f"potential: ADR 0002 #20: scale invariance through MPFR on {inv20} scaled rows")
+check(all(n20[fn][2] > 0 for fn in n20), "potential: ADR 0002 #20 has no noted row for some function")
 # The typed tolerances (src/potential.cyr has them inline): each must change some golden row when perturbed.
 def p_changes(fn, rule):
     return sum(1 for ins, outs, where in prows.get(fn, []) if not toks_equal(out_toks(rule(ins)), outs))
@@ -2619,8 +2966,175 @@ for fn, need in (("potential::bond_angle", [[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 
     check(all(tuple(v) in have for v in need), f"potential: {fn} misses a Rust test's geometry")
 print(f"potential: dihedral_angle: {mapped_pi} rows where atan2 gives −π and Rust reports π, {neg_zero} rows of −0.0")
 
+# ── 17. spectroscopy.tsv (M4e): beyond the row recomputation ──────────────────────────────────────────
+# Every spectroscopy row was recomputed in the M2/M3 loop above (Rust 1.2.0's spectroscopy.rs transcribed in its operation
+# order, with hisab 1.4.0's fft for fft_spectrum; glibc's pow(10, ·), log10, cos and sin via Python, the corrected oracle
+# through _prim). Here: ADR 0002 #19's notes, proven exactly; the generated data against the literal; the typed constants'
+# pinning; the stable sort's pinning; the grids' coverage; and the diagnostics of the formulas left as Rust's (the
+# borderline cases reported to the user).
+srows = {}
+for fn, cls, ins, outs, where in R.get("spectroscopy", []):
+    srows.setdefault(fn, []).append((ins, outs, where))
+# ADR 0002 #19: RN(1/(100·x)) against Rust's RN(RN(0.01)/x).
+def note_val19(where, var):
+    m = re.search(rf"\[ADR 0002 #19: the port returns the correctly rounded 1/\(100·{var}\) = (\S+) \(f:([0-9a-f]+)\)\]$",
+                  NOTES.get(where, ""))
+    return None if m is None else b2f(int(m.group(2), 16))
+n19, ok19 = {}, {}
+for fn, var in (("spectroscopy::wavenumber_from_wavelength", "λ"), ("spectroscopy::wavelength_from_wavenumber", "ν̃")):
+    n19[fn] = ok19[fn] = 0
+    for ins, outs, where in srows.get(fn, []):
+        x = ins[0][1]
+        noted = "[ADR 0002 #19:" in NOTES.get(where, "")
+        if outs[0][0] != "f":
+            check(not noted and not is_positive(x), f"{where}: {fn}({x!r}): an Err row on a positive finite input, or noted")
+            continue
+        ok19[fn] += 1
+        exact = rn_frac(Fraction(1, 100) / Fraction(x))
+        differs = not same_bits(exact, outs[0][1])
+        check(noted == differs, f"{where}: {fn}({x!r}): exact {exact!r}, oracle {outs[0][1]!r}: the #19 note is "
+              f"{'missing' if differs else 'stray'}")
+        if noted:
+            nv = note_val19(where, var)
+            check(nv is not None and same_bits(nv, exact), f"{where}: the ADR 0002 #19 note does not name {exact!r}")
+            n19[fn] += 1
+            check(ulp_dist(f2b(exact), outs[0][2]) <= 1 or not math.isfinite(exact) or exact == 0.0 or abs(exact) < 2.0 ** -1022,
+                  f"{where}: Rust's 0.01/x is more than one ulp from RN(1/(100x)) on a normal result")
+_r19 = random.Random(0x9019)
+sw19 = 0
+for _ in range(20000):
+    x = b2f(_r19.randrange(1, 0x7FEFFFFFFFFFFFFF))
+    sw19 += not same_bits(rn_frac(Fraction(1, 100) / Fraction(x)), dv(0.01, x))
+check(f2b(0.01) == 0x3F847AE147AE147B and Fraction(0.01) != Fraction(1, 100), "0.01 is not RN(1/100), or is exact")
+print(f"spectroscopy: ADR 0002 #19: {n19['spectroscopy::wavenumber_from_wavelength']} of "
+      f"{ok19['spectroscopy::wavenumber_from_wavelength']} wavenumber_from_wavelength and "
+      f"{n19['spectroscopy::wavelength_from_wavenumber']} of {ok19['spectroscopy::wavelength_from_wavenumber']} "
+      f"wavelength_from_wavenumber Ok rows noted with RN(1/(100·x)) (proven with Fraction); Rust's 0.01/x differs from it "
+      f"on {sw19} of 20,000 seeded x over every binade")
+# The generated data (src/spectroscopy_data.cyr) against the literal and the API.
+sdata = (root / "src/spectroscopy_data.cyr").read_text()
+def s_col(name, kind=float):
+    m = re.search(rf"^var {name}: \w+\[(\d+)\] = \{{(.*?)\}};", sdata, re.M | re.S)
+    check(m is not None, f"spectroscopy_data.cyr: no {name}")
+    if m is None: return []
+    vals = [kind(x) for line in m.group(2).splitlines() for x in re.findall(r"(-?[0-9.]+),", line.split("#", 1)[0])]
+    check(len(vals) == int(m.group(1)), f"spectroscopy_data.cyr: {name} declares {m.group(1)}, holds {len(vals)}")
+    return vals
+s_members = re.findall(r"^    (KM_SPECTRAL_SERIES_[A-Z_]+) = (\d+);", sdata, re.M)
+check(s_members == [(f"KM_SPECTRAL_SERIES_{snake_t(v)}", str(k)) for k, v in enumerate(S_SERIES)],
+      f"spectroscopy_data.cyr: KmSpectralSeries {s_members} is not SpectralSeries {S_SERIES} in order")
+check(re.search(rf"^const KM_SPECTRAL_SERIES_COUNT = {len(S_SERIES)};$", sdata, re.M), "spectroscopy_data.cyr: the count")
+check(s_col("KM_SPECTRAL_SERIES_N_LOWER", int) == [S_N_LOWER[v] for v in S_SERIES], "spectroscopy_data.cyr: n_lower")
+zs_ = max(S_ISO) + 1
+check(re.search(rf"^const _KM_ISOTOPE_ABUNDANCE_ZS = {zs_};$", sdata, re.M), "spectroscopy_data.cyr: _KM_ISOTOPE_ABUNDANCE_ZS")
+flat = [x for z in sorted(S_ISO) for pr in S_ISO[z] for x in pr]
+check(s_col("_KM_ISOTOPE_ABUNDANCES") == flat, "spectroscopy_data.cyr: the abundance pairs are not the literal's")
+starts, counts, at = [], [], 0
+for z in range(zs_):
+    starts.append(at)
+    counts.append(len(S_ISO.get(z, [])))
+    at += counts[-1]
+check(s_col("_KM_ISOTOPE_ABUNDANCE_START", int) == starts and s_col("_KM_ISOTOPE_ABUNDANCE_COUNT", int) == counts,
+      "spectroscopy_data.cyr: the abundance start / count columns")
+def s_const(name):
+    m = re.search(rf"^const {name} = ([0-9.]+);$", sdata, re.M)
+    check(m is not None and re.fullmatch(r"[0-9]+\.[0-9]+", m.group(1)), f"spectroscopy_data.cyr: {name}")
+    return float(m.group(1)) if m else math.nan
+check(same_bits(s_const("_KM_ELECTRON_PROTON_MASS_RATIO"), S_RATIO), "spectroscopy_data.cyr: the mass ratio literal")
+check(same_bits(s_const("_KM_RYDBERG_HYDROGEN"), S_RYD_H), "spectroscopy_data.cyr: R_H is not RYDBERG / (1 + ratio)")
+lyman_top = [outs for ins, outs, w in srows.get("SpectralSeries::wavelength", [])
+             if ins[0][1] == "SpectralSeries.Lyman" and ins[1][1] == 0xFFFFFFFE]
+check(len(lyman_top) == 1 and same_bits(lyman_top[0][0][1], 1.0 / S_RYD_H)
+      and sum(1 for x in (nextdown(S_RYD_H), S_RYD_H, nextup(S_RYD_H)) if same_bits(1.0 / x, 1.0 / S_RYD_H)) == 1,
+      "spectroscopy: the Lyman line u32::MAX − 1 does not pin R_H uniquely")
+gz = {ins[0][1]: outs for ins, outs, w in srows.get("spectroscopy::isotope_abundances", [])}
+check(sorted(gz) == list(range(256)), "spectroscopy.tsv: isotope_abundances is not probed at every u8")
+print(f"spectroscopy_data.cyr checked: {len(S_SERIES)} series, {len(flat) // 2} isotope pairs over {len(S_ISO)} elements "
+      f"(every u8 probed), R_H = {S_RYD_H!r} = RYDBERG / (1 + {S_RATIO!r}), unique through the Lyman line")
+# The typed constants (inline in src/spectroscopy.cyr) and the stable sort: each must change some golden row when
+# perturbed, where a row can reach it (isotope rows with at most 3,000 convolution steps, for speed).
+small_iso = [(ins, outs, w) for ins, outs, w in srows.get("spectroscopy::isotope_pattern", [])
+             if sum(c for z, c in pattern_atoms(ins) if z in S_ISO) <= 3000]
+def s_changes(rows_, rule):
+    CALLS[0] = 0
+    return sum(1 for ins, outs, where in rows_ if not toks_equal(out_toks(rule(ins)), outs))
+S_PINS = [
+    ("ISOTOPE_PRUNE_REL × 0.5", "iso", lambda a: r_pattern(pattern_atoms(a), prune=S_PRUNE * 0.5), True),
+    ("ISOTOPE_PRUNE_REL × 2", "iso", lambda a: r_pattern(pattern_atoms(a), prune=S_PRUNE * 2.0), True),
+    ("ISOTOPE_PRUNE_REL + 1 ulp", "iso", lambda a: r_pattern(pattern_atoms(a), prune=nextup(S_PRUNE)), False),
+    ("ISOTOPE_PRUNE_REL − 1 ulp", "iso", lambda a: r_pattern(pattern_atoms(a), prune=nextdown(S_PRUNE)), False),
+    ("ISOTOPE_REPORT_REL × 0.5", "iso", lambda a: r_pattern(pattern_atoms(a), report=S_REPORT * 0.5), True),
+    ("ISOTOPE_REPORT_REL × 2", "iso", lambda a: r_pattern(pattern_atoms(a), report=S_REPORT * 2.0), True),
+    ("ISOTOPE_REPORT_REL + 1 ulp", "iso", lambda a: r_pattern(pattern_atoms(a), report=nextup(S_REPORT)), False),
+    ("ISOTOPE_REPORT_REL − 1 ulp", "iso", lambda a: r_pattern(pattern_atoms(a), report=nextdown(S_REPORT)), False),
+    ("ISOTOPE_BIN_WIDTH_U × 2", "iso", lambda a: r_pattern(pattern_atoms(a), width=S_BIN * 2.0), True),
+    ("ISOTOPE_BIN_WIDTH_U × 0.5", "iso", lambda a: r_pattern(pattern_atoms(a), width=S_BIN * 0.5), False),
+    ("ISOTOPE_BIN_WIDTH_U + 1 ulp", "iso", lambda a: r_pattern(pattern_atoms(a), width=nextup(S_BIN)), False),
+    ("ISOTOPE_BIN_WIDTH_U − 1 ulp", "iso", lambda a: r_pattern(pattern_atoms(a), width=nextdown(S_BIN)), False),
+    ("the stable sort (ties reversed)", "iso", lambda a: r_pattern(pattern_atoms(a), ties_reversed=True), False),
+    ("ħ's 2.0 + 1 ulp", "spectroscopy::harmonic_oscillator_energy", lambda a: r_oscillator(*fl(a), two=nextup(2.0)), True),
+    ("the oscillator's 0.5 + 1 ulp", "spectroscopy::harmonic_oscillator_energy",
+     lambda a: r_oscillator(*fl(a), half=nextup(0.5)), True),
+    ("B's 8.0 + 1 ulp", "spectroscopy::rotational_constant", lambda a: r_rot_const(fl(a)[0], eight=nextup(8.0)), True),
+    ("the rotor's 1.0 + 1 ulp", "spectroscopy::rigid_rotor_energy", lambda a: r_rotor(*fl(a), one=nextup(1.0)), None),
+    ("R_H + 1 ulp", "SpectralSeries::wavelength", lambda a: r_series(*fl(a), rh=nextup(S_RYD_H)), True),
+    ("R_H − 1 ulp", "SpectralSeries::wavelength", lambda a: r_series(*fl(a), rh=nextdown(S_RYD_H)), True),
+    ("the FFT's −2.0 − 1 ulp", "spectroscopy::fft_spectrum", lambda a: r_fft(fl(a)[1:], m2=nextdown(-2.0)), True),
+    ("find_peaks' 1.0 − 1 ulp", "spectroscopy::find_peaks", lambda a: r_find_peaks(*peaks_args(a), one=nextdown(1.0)),
+     False),
+]
+for label, fn, rule, must in S_PINS:
+    rows_ = small_iso if fn == "iso" else srows.get(fn, [])
+    n_ch = s_changes(rows_, rule)
+    what = "isotope_pattern rows (≤ 3,000 steps)" if fn == "iso" else f"{fn.split('::')[1]} rows"
+    why = ""
+    if must is None and n_ch == 0:
+        why = " (unobservable on every input: j + 1 + 2⁻⁵² rounds back to j + 1 for j ≥ 1, and j = 0 multiplies by 0)"
+    elif not must and n_ch == 0:
+        why = " (no row can reach it: tests/spectroscopy.tcyr pins it on the private helper)"
+    print(f"  pinning: with {label}, {n_ch} of {len(rows_)} {what} change{why}")
+    if must:
+        check(n_ch > 0, f"spectroscopy: no golden row pins {label}")
+# Coverage.
+fft_lens = {ins[0][1] for ins, outs, w in srows.get("spectroscopy::fft_spectrum", [])}
+check(set(range(17)) | {1 << k for k in range(14)} <= fft_lens, f"spectroscopy.tsv: fft_spectrum lengths {sorted(fft_lens)}")
+fft_ok = [fl(ins)[1:] for ins, outs, w in srows.get("spectroscopy::fft_spectrum", []) if outs[0][0] == "v"]
+check(any(any(math.isnan(v) for v in s_) for s_ in fft_ok) and any(any(math.isinf(v) for v in s_) for s_ in fft_ok)
+      and any(any(0 < abs(v) < 2.0 ** -1022 for v in s_) for s_ in fft_ok) and any(any(abs(v) > 1e300 for v in s_) for s_ in fft_ok),
+      "spectroscopy.tsv: fft_spectrum misses NaN, ±∞, subnormal or huge samples")
+th_seen = {f2b(peaks_args(ins)[1]) for ins, outs, w in srows.get("spectroscopy::find_peaks", [])}
+check({f2b(0.0), f2b(1.0), f2b(-0.0), f2b(math.inf)} <= th_seen and any(isnan_b(b) for b in th_seen),
+      "spectroscopy.tsv: find_peaks misses a threshold edge")
+check({(z, n) for z in range(256) for n in (0, 1, 0xFFFFFFFF)} <= {tuple(fl(ins)) for ins, o, w in srows.get("spectroscopy::bohr_energy_level", [])},
+      "spectroscopy.tsv: bohr_energy_level misses a u8 Z")
+iso_atoms = [pattern_atoms(ins) for ins, outs, w in srows.get("spectroscopy::isotope_pattern", [])]
+check([] in iso_atoms and [(0, 1)] in iso_atoms and all([(z, 1)] in iso_atoms for z in range(256)),
+      "spectroscopy.tsv: isotope_pattern misses the empty molecule or a u8 Z")
+print(f"spectroscopy rows checked: {sum(len(v) for v in srows.values())} ({', '.join(f'{k} {len(v)}' for k, v in srows.items())})")
+# Diagnostics of what stays Rust's (port-parity.md §15; the report's borderline cases): reduced_mass(m, m) against m/2,
+# the Bohr levels with Z/n = 1 against −R, the Rydberg factor's cancellation for close large n against the exact
+# (n₂² − n₁²)/(n₁²n₂²) (the rest of Rust's chain kept), and the isotope intensities at the report threshold.
+eq_m = [(fl(ins), outs) for ins, outs, w in srows.get("spectroscopy::reduced_mass", []) if outs[0][0] == "f" and fl(ins)[0] == fl(ins)[1]]
+eq_miss = sum(1 for (a, b_), outs in eq_m if not same_bits(outs[0][1], a * 0.5))
+zn = [(fl(ins), outs) for ins, outs, w in srows.get("spectroscopy::bohr_energy_level", []) if outs[0][0] == "f" and fl(ins)[0] == fl(ins)[1]]
+zn_miss = sum(1 for a, outs in zn if not same_bits(outs[0][1], -S_RYD_EV))
+ryd_worst = (0, None)
+for ins, outs, w in srows.get("spectroscopy::rydberg_wavelength", []):
+    if outs[0][0] != "f": continue
+    z, lo, hi = fl(ins)
+    exact_d = rn_frac(Fraction(hi * hi - lo * lo, lo * lo * hi * hi))
+    alt = dv(1.0, S_RYD * float(z) * float(z) * exact_d)
+    d_ = ulp_dist(f2b(alt), outs[0][2])
+    if d_ > ryd_worst[0]: ryd_worst = (d_, (z, lo, hi))
+near_rep = sum(1 for ins, outs, w in srows.get("spectroscopy::isotope_pattern", []) if outs[0][0] == "v"
+               for k in range(outs[0][1]) if outs[2 + 2 * k][1] == S_REPORT)
+print(f"spectroscopy: kept as Rust's — reduced_mass(m, m) misses m/2 on {eq_miss} of {len(eq_m)} equal-mass rows; "
+      f"bohr_energy_level(Z, Z) misses −R on {zn_miss} of {len(zn)}; the Rydberg factor computed exactly would move "
+      f"rydberg_wavelength by up to {ryd_worst[0]} ulp ({ryd_worst[1]}); {near_rep} isotope peaks exactly at the 0.001 "
+      f"report threshold")
+
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
-             "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential"}
+             "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy"}
 check(set(tsvs) == VALIDATED, f"golden modules with no section here: {sorted(set(tsvs) - VALIDATED)}; "
       f"sections with no module: {sorted(VALIDATED - set(tsvs))}")
 

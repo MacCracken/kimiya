@@ -1,5 +1,6 @@
 # mathx.tcyr — the correctly rounded exp, exp10, expm1, ln, log10 (M3c-2a), pow (M3c-2b), sin, cos, sincos,
-# atan2 and acos (M4a) and x·2^y (M4d) of src/mathx.cyr (ADR 0006).
+# atan2 and acos (M4a), x·2^y (M4d) and 1/(100·x) (M4e) of src/mathx.cyr (ADR 0006), and the unbounded-exponent
+# arithmetic (M4e-2, ADR 0002 #20).
 #
 # Special values, the exact and tie cases, the thresholds, subnormal results (rounded once), the known
 # hardest-to-round arguments (Lefèvre–Muller's binary64 worst cases for exp, ln, sin, cos, arctan and arccos),
@@ -1074,6 +1075,343 @@ fn _t_exp2_scaled_agrees() {
     assert_eq(bad, 0, "fast and accurate paths agree on 4,000 seeded pairs");
 }
 
+# 1/(100·x) rounded once (M4e, ADR 0002 #19: spectroscopy's wavenumber conversions): (x, expected) with MPFR's bits
+# (mpfr_ref.hundredth_div). The fast path covers 2^-900 ≤ |x| ≤ 2^900, the exact integer path everything (and the edges
+# past it: the subnormal results, the overflow end, the ±0 / ±∞ / NaN specials).
+var _T_H100: i64[56] = {
+    0x0000000000000000, 0x7FF0000000000000,   # +0: +∞
+    0x8000000000000000, 0xFFF0000000000000,   # −0: −∞
+    0x7FF0000000000000, 0x0000000000000000,   # +∞: +0
+    0xFFF0000000000000, 0x8000000000000000,   # −∞: −0
+    0x7FF8000000000000, 0xFFF8000000000000,   # NaN
+    0x3FF0000000000000, 0x3F847AE147AE147B,   # 1/100
+    0xBFF0000000000000, 0xBF847AE147AE147B,   # −1/100
+    0x4031000000000000, 0x3F434679ACE01346,   # 1/1700 (Rust's 0.01/17: …47)
+    0x403D000000000000, 0x3F36993F349CC726,   # 1/2900 (Rust's: …27)
+    0x4041000000000000, 0x3F334679ACE01346,   # 1/3400
+    0x404B800000000000, 0x3F27D4CE4A19B16E,   # 1/5500
+    0x3FD0000000000000, 0x3FA47AE147AE147B,   # exactly 0.04
+    0x3EA0C6F7A0B5ED8D, 0x40D3880000000000,   # 500 nm: exactly 20000
+    0x3EE4F8B588E368F1, 0x408F3FFFFFFFFFFF,   # 10 µm: 1000 − 1 ulp
+    0x3F847AE147AE147B, 0x3FF0000000000000,   # RN(0.01): 1/(100·RN(0.01)) rounds to 1
+    0x7FEFFFFFFFFFFFFF, 0x00000A3D70A3D70A,   # DBL_MAX: subnormal
+    0x0010000000000000, 0x7F647AE147AE147B,   # DBL_MIN
+    0x0000000000000001, 0x7FF0000000000000,   # 2^−1074: +∞
+    0x000FFFFFFFFFFFFF, 0x7F647AE147AE147C,   # largest subnormal
+    0x7830000000000000, 0x07447AE147AE147B,   # 2^900: the fast path's top
+    0x7830000000000001, 0x07447AE147AE147A,   # 2^900 + 1 ulp: integer path
+    0x07B0000000000000, 0x77C47AE147AE147B,   # 2^−900: the fast path's bottom
+    0x07AFFFFFFFFFFFFF, 0x77C47AE147AE147C,   # 2^−900 − 1 ulp: integer path
+    0x7F647AE147AE147B, 0x0010000000000000,   # the subnormal-result edge
+    0x7F647AE147AE147C, 0x000FFFFFFFFFFFFF,   # one ulp past it
+    0x7F647AE147AE147A, 0x0010000000000001,   # one ulp before it
+    0x00000A3D70A3D70B, 0x7FEFFFFFFFFFFDA0,   # the smallest x with a finite 1/(100x)
+    0x00000A3D70A3D70A, 0x7FF0000000000000    # its predecessor: +∞
+};
+
+# Checks 1/(100·x) = want, by the full function and the accurate (integer) path alone, and the fast path wherever its
+# test passes (it must fail outside [2^-900, 2^900]).
+fn _t_hundredth_values() {
+    test_group("cr_hundredth_div_values");
+    var k = 0;
+    while (k < 28) {
+        var x: f64 = from_bits(load64(&_T_H100 + 16 * k));
+        var want = load64(&_T_H100 + 16 * k + 8);
+        var r: f64 = _km_cr_hundredth_div(x);
+        assert_bits_eq(r, want, "1/(100x)");
+        var a: f64 = _km_cr_hundredth_div_acc(x);
+        assert_bits_eq(a, want, "1/(100x), accurate path");
+        var rf, ok = _km_cr_hundredth_div_fast(x);
+        if (ok == 1) { assert_bits_eq(rf, want, "1/(100x), fast path"); }
+        k = k + 1;
+    }
+    var top: f64 = from_bits(0x7830000000000001);
+    var f1, o1 = _km_cr_hundredth_div_fast(top);
+    var bot: f64 = from_bits(0x07AFFFFFFFFFFFFF);
+    var f2, o2 = _km_cr_hundredth_div_fast(bot);
+    assert(o1 == 0 && o2 == 0, "the fast path declines past 2^±900");
+}
+
+# The fast path agrees with the exact integer path on 4,000 seeded doubles of every binade (both signs), and Rust's
+# 0.01/x is within one ulp of the correctly rounded value wherever that is normal.
+fn _t_hundredth_agrees() {
+    test_group("cr_hundredth_div_agrees");
+    var st = 0x9E3779B97F4A7C15;
+    var bad = 0;
+    var far = 0;
+    var k = 0;
+    while (k < 4000) {
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var xb = ((st >> 1) % 0x7FF0000000000000) | (st & 0x8000000000000000);
+        var x: f64 = from_bits(xb);
+        var r: f64 = _km_cr_hundredth_div(x);
+        var a: f64 = _km_cr_hundredth_div_acc(x);
+        if (ulp_bits_match(_km_bits(r), _km_bits(a)) != 1) { bad = bad + 1; }
+        var rust: f64 = 0.01 / x;
+        var ab = _km_bits(r) & 0x7FFFFFFFFFFFFFFF;
+        if (ab >= 0x0010000000000000 && ab < 0x7FF0000000000000) {
+            if (ulp_distance(_km_bits(rust), _km_bits(r)) > 1) { far = far + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "fast and accurate paths agree on 4,000 seeded doubles");
+    assert_eq(far, 0, "Rust's 0.01/x is within one ulp of RN(1/(100x)) on normal results");
+}
+
+# ── binary64 with an unbounded exponent (M4e-2): ADR 0002 #20 ───────────────────────────────────────────────
+
+# The final operation `op` (0 √ of the first, 1 ×, 2 ÷, 3 +, 4 atan2(first, second)) of s1·2^e1 and s2·2^e2.
+#must_use
+fn uxf(op, s1b, e1, s2b, e2): f64 {
+    var s1: f64 = from_bits(s1b);
+    var s2: f64 = from_bits(s2b);
+    if (op == 0) { var a: f64 = _km_ux_sqrt_f64(s1, e1); return a; }
+    if (op == 1) { var b: f64 = _km_ux_mul_f64(s1, e1, s2, e2); return b; }
+    if (op == 2) { var c: f64 = _km_ux_div_f64(s1, e1, s2, e2); return c; }
+    if (op == 3) { var d: f64 = _km_ux_add_f64(s1, e1, s2, e2); return d; }
+    var f: f64 = _km_ux_atan2_f64(s1, e1, s2, e2);
+    return f;
+}
+
+# (op, s1 bits, e1 + 8192, s2 bits, e2 + 8192, expected bits): MPFR 4.2.2's exact operation on values far outside
+# binary64's range, rounded once into binary64 (scripts/oracle/mpfr_ref.py's UX at MPFR's widest exponent range, then
+# mpfr_check_range and mpfr_subnormalize): subnormal results and their ties (2^-1075 to 0; a sticky term above it to
+# 2^-1074), overflow, a sum whose smaller term only breaks a tie, atan2 of exponent differences past 2^±2000.
+var _T_UX: i64[288] = {
+    0, 0x3FF0000000000000, 6042, 0x0000000000000000, 8192, 0x0000000000000000,     # sqrt: 0.0
+    0, 0x3FF0000000000004, 6042, 0x0000000000000000, 8192, 0x0000000000000001,     # sqrt: 5e-324
+    0, 0x3FF0000000000000, 6044, 0x0000000000000000, 8192, 0x0000000000000001,     # sqrt: 5e-324
+    0, 0x3FF8000000000000, 6043, 0x0000000000000000, 8192, 0x0000000000000001,     # sqrt: 5e-324
+    0, 0x3FF0000000000000, 10240, 0x0000000000000000, 8192, 0x7FF0000000000000,     # sqrt: inf
+    0, 0x3FFFFFFFFFFFFFFF, 10239, 0x0000000000000000, 8192, 0x7FEFFFFFFFFFFFFF,     # sqrt: 1.7976931348623157e+308
+    0, 0x3FF0000000000000, 10238, 0x0000000000000000, 8192, 0x7FE0000000000000,     # sqrt: 8.98846567431158e+307
+    0, 0x3FF4000000000000, 6092, 0x0000000000000000, 8192, 0x00000000011E377A,     # sqrt: 9.2674354e-317
+    0, 0x3FF0000000000000, 5992, 0x0000000000000000, 8192, 0x0000000000000000,     # sqrt: 0.0
+    0, 0x3FF0000000000000, 7192, 0x0000000000000000, 8192, 0x20B0000000000000,     # sqrt: 3.054936363499605e-151
+    0, 0x3FFC000000000000, 8293, 0x0000000000000000, 8192, 0x431DEEEA11683F49,     # sqrt: 2106365851602898.2
+    1, 0x3FF8000000000000, 7118, 0x3FF0000000000000, 8191, 0x0000000000000001,     # mul: 5e-324
+    1, 0x3FF0000000000000, 7117, 0x3FF0000000000000, 8192, 0x0000000000000000,     # mul: 0.0
+    1, 0x3FF8000000000000, 7116, 0x3FF0000000000000, 8192, 0x0000000000000000,     # mul: 0.0
+    1, 0x3FF4000000000000, 7116, 0x3FF0000000000000, 8192, 0x0000000000000000,     # mul: 0.0
+    1, 0x3FF0000000000001, 7654, 0x3FF0000000000000, 7654, 0x0000000000000000,     # mul: 0.0
+    1, 0x3FFFFFFFFFFFFFFF, 8792, 0x3FFFFFFFFFFFFFFF, 8615, 0x7FF0000000000000,     # mul: inf
+    1, 0x3FF0000000000000, 10192, 0x3FF0000000000000, 7192, 0x7E70000000000000,     # mul: 1.0715086071862673e+301
+    1, 0x3FF0000000000000, 6192, 0x3FF0000000000000, 9692, 0x20B0000000000000,     # mul: 3.054936363499605e-151
+    1, 0x3FF8000000000000, 9215, 0x3FF8000000000000, 8192, 0x7FF0000000000000,     # mul: inf
+    1, 0x3FF4CCCCCCCCCCCD, 7592, 0x3FFB333333333333, 7692, 0x0000000000000000,     # mul: 0.0
+    1, 0xBFF199999999999A, 7492, 0x3FFE666666666666, 7819, 0x8000000000000004,     # mul: -2e-323
+    2, 0x3FF0000000000000, 7192, 0x3FF8000000000000, 8266, 0x0000000000000001,     # div: 5e-324
+    2, 0x3FF0000000000000, 7192, 0x3FF8000000000000, 8268, 0x0000000000000000,     # div: 0.0
+    2, 0x3FF0000000000000, 10192, 0x3FF0000000000000, 9169, 0x7FE0000000000000,     # div: 8.98846567431158e+307
+    2, 0x3FF0000000000000, 11192, 0x3FF0000000000000, 10169, 0x7FE0000000000000,     # div: 8.98846567431158e+307
+    2, 0x3FFB333333333333, 8182, 0x3FF4CCCCCCCCCCCD, 9292, 0x0000000000000000,     # div: 0.0
+    2, 0xBFF4000000000000, 7118, 0x3FF0000000000000, 8193, 0x8000000000000001,     # div: -5e-324
+    3, 0x3FF0000000000000, 7117, 0x3FF0000000000000, 6992, 0x0000000000000001,     # add: 5e-324
+    3, 0x3FF0000000000000, 7117, 0xBFF0000000000000, 6992, 0x0000000000000000,     # add: 0.0
+    3, 0x3FF0000000000000, 7117, 0x3FF0000000000000, 7117, 0x0000000000000001,     # add: 5e-324
+    3, 0x3FF8000000000000, 7117, 0x3FF0000000000000, 7116, 0x0000000000000001,     # add: 5e-324
+    3, 0x3FF0000000000000, 9215, 0x3FF0000000000000, 9215, 0x7FF0000000000000,     # add: inf
+    3, 0x3FFFFFFFFFFFFFFF, 9215, 0x3FF0000000000000, 9162, 0x7FF0000000000000,     # add: inf
+    3, 0x3FFFFFFFFFFFFFFF, 9215, 0x3FF0000000000000, 9161, 0x7FEFFFFFFFFFFFFF,     # add: 1.7976931348623157e+308
+    3, 0x3FF0000000000000, 8192, 0xBFF0000000000000, 8192, 0x0000000000000000,     # add: 0.0
+    3, 0x3FF0000000000000, 13192, 0xBFF0000000000000, 13192, 0x0000000000000000,     # add: 0.0
+    3, 0x3FF0000000000000, 5192, 0x3FF0000000000000, 5192, 0x0000000000000000,     # add: 0.0
+    4, 0x3FF8000000000000, 7418, 0x3FF0000000000000, 8492, 0x0000000000000001,     # atan2: 5e-324
+    4, 0x3FF0000000000000, 8192, 0x3FF0000000000000, 6192, 0x3FF921FB54442D18,     # atan2: 1.5707963267948966
+    4, 0x3FF0000000000000, 6192, 0x3FF0000000000000, 8192, 0x0000000000000000,     # atan2: 0.0
+    4, 0x3FF0000000000000, 6192, 0xBFF0000000000000, 8192, 0x400921FB54442D18,     # atan2: 3.141592653589793
+    4, 0xBFF0000000000000, 13192, 0xBFF0000000000000, 13192, 0xC002D97C7F3321D2,     # atan2: -2.356194490192345
+    4, 0x3FF0000000000000, 13192, 0x3FF8000000000000, 13192, 0x3FE2D0EAD6066395,     # atan2: 0.5880026035475675
+    4, 0x3FF0000000000000, 7192, 0x3FF0000000000000, 8252, 0x0000000000004000,     # atan2: 8.095e-320
+    4, 0x3FF4CCCCCCCCCCCD, 7057, 0x3FF199999999999A, 8132, 0x0000000000000001,     # atan2: 5e-324
+    4, 0x3FF0000000000000, 11192, 0xBFF0000000000000, 5192, 0x3FF921FB54442D18,     # atan2: 1.5707963267948966
+    4, 0xBFFB333333333333, 4192, 0x3FF3333333333333, 4191, 0xBFF3B43D3C96813B     # atan2: -1.2315037123408519
+};
+
+fn _t_ux_values() {
+    test_group("ux_values (ADR 0002 #20)");
+    var k = 0;
+    while (k < 48) {
+        var at = &_T_UX + 48 * k;
+        var r: f64 = uxf(load64(at), load64(at + 8), load64(at + 16) - 8192, load64(at + 24), load64(at + 32) - 8192);
+        assert_bits_eq(r, load64(at + 40), "an unbounded-exponent final operation against MPFR");
+        if (load64(at) == 4) {
+            var s1: f64 = from_bits(load64(at + 8));
+            var s2: f64 = from_bits(load64(at + 24));
+            var a: f64 = _km_ux_atan2_acc(s1, load64(at + 16) - 8192, s2, load64(at + 32) - 8192);
+            assert_bits_eq(a, load64(at + 40), "ux atan2, accurate path");
+        }
+        k = k + 1;
+    }
+    # _km_ux_from: a subnormal's exact pair, zeros and specials as they are; _km_ux_round back to the double.
+    var sub: f64 = from_bits(0x0000000000000003);
+    var ss, se = _km_ux_from(sub);
+    assert_bits_eq(ss, 0x3FF8000000000000, "3·2^-1074 = 1.5·2^-1073: the significand");
+    assert_eq(se, 0 - 1073, "3·2^-1074 = 1.5·2^-1073: the exponent");
+    var back: f64 = _km_ux_round(ss, se, 0.0);
+    assert_bits_eq(back, 0x0000000000000003, "the subnormal round-trips");
+    var nz: f64 = from_bits(0x8000000000000000);
+    var zs, ze = _km_ux_from(nz);
+    assert(_km_bits(zs) == 0x8000000000000000 && ze == 0, "−0 is (−0, 0)");
+    var inf: f64 = from_bits(0x7FF0000000000000);
+    var is, ie = _km_ux_from(inf);
+    assert(_km_bits(is) == 0x7FF0000000000000 && ie == 0, "+∞ is (+∞, 0)");
+    # signed zeros: x − x = +0, (−0)·x = −0, √−0 = −0, (−0) + (−0) = −0
+    var one: f64 = 1.0;
+    var cs, ce = _km_ux_sub(one, 3000, one, 3000);
+    assert(_km_bits(cs) == 0 && ce == 0, "x − x = +0 at 2^3000");
+    var ms, me = _km_ux_mul(nz, 0, one, 5000);
+    assert(_km_bits(ms) == 0x8000000000000000, "(−0)·2^5000 = −0");
+    var qs, qe = _km_ux_sqrt(nz, 0);
+    assert(_km_bits(qs) == 0x8000000000000000, "√−0 = −0");
+    var as2, ae2 = _km_ux_add(nz, 0, nz, 0);
+    assert(_km_bits(as2) == 0x8000000000000000, "(−0) + (−0) = −0");
+    # comparisons and max past binary64's range, and Rust's max on equal values (the second)
+    var m15: f64 = 1.5;
+    var m11: f64 = -1.1;
+    assert(_km_ux_cmp(one, 3000, m15, 2999) == 1, "2^3000 > 1.5·2^2999");
+    assert(_km_ux_cmp(m11, 0 - 3000, one, 0 - 5000) == 0 - 1, "−1.1·2^-3000 < 2^-5000");
+    assert(_km_ux_cmp(m11, 3000, m11, 2999) == 0 - 1, "−1.1·2^3000 < −1.1·2^2999");
+    assert(_km_ux_cmp(nz, 0, one, 0 - 9000) == 0 - 1, "−0 < 2^-9000");
+    var pz: f64 = 0.0;
+    assert(_km_ux_cmp(nz, 0, pz, 0) == 0, "−0 = +0");
+    assert(_km_ux_le(m15, 4000, m15, 4000) == 1 && _km_ux_le(m15, 4001, m15, 4000) == 0, "≤ at 2^4000");
+    var xs, xe = _km_ux_max(m15, 0 - 2000, one, 0 - 1999);
+    assert(_km_bits(xs) == 0x3FF0000000000000 && xe == 0 - 1999, "max picks 2^-1999 over 1.5·2^-2000");
+    var ps, pe = _km_ux_max(pz, 0, nz, 0);
+    assert(_km_bits(ps) == 0x8000000000000000, "max(+0, −0) is the second, as Rust's");
+    assert(_km_ux_is_positive(one, 0 - 9000) == 1 && _km_ux_is_positive(pz, 0) == 0, "is_positive");
+    # IEEE's specials through the significands: ∞ and NaN propagate, x/0, 0·∞, ∞ − ∞, √ of a negative
+    var ninf: f64 = -inf;
+    var f1: f64 = _km_ux_mul_f64(inf, 0, m15, 7000);
+    assert(f1 == inf, "∞·1.5·2^7000 = ∞");
+    var f2: f64 = _km_ux_mul_f64(pz, 0, inf, 0);
+    assert(f2 != f2, "0·∞ = NaN");
+    var f3: f64 = _km_ux_div_f64(m11, 0 - 7000, nz, 0);
+    assert(f3 == inf, "−1.1·2^-7000 / −0 = +∞");
+    var f4: f64 = _km_ux_div_f64(pz, 0, pz, 0);
+    assert(f4 != f4, "0/0 = NaN");
+    var f5: f64 = _km_ux_add_f64(inf, 0, ninf, 0);
+    assert(f5 != f5, "∞ − ∞ = NaN");
+    var f6: f64 = _km_ux_sqrt_f64(m11, 3);
+    assert(f6 != f6, "√ of a negative = NaN");
+    var f7: f64 = _km_ux_sqrt_f64(nz, 0);
+    assert_bits_eq(f7, 0x8000000000000000, "√−0 = −0");
+    var f8: f64 = _km_ux_atan2_f64(inf, 0, inf, 0);
+    assert_bits_eq(f8, 0x3FE921FB54442D18, "atan2(+∞, +∞) = π/4");
+    var f9: f64 = _km_ux_atan2_f64(nz, 0, m11, 9000);
+    assert_bits_eq(f9, 0xC00921FB54442D18, "atan2(−0, −1.1·2^9000) = −π");
+    var f10: f64 = _km_ux_add_f64(m15, 0 - 1100, nz, 0);
+    assert_bits_eq(f10, 0, "1.5·2^-1100 + (−0) rounds once to +0");
+    var us, ue = _km_ux_mul(inf, 0, m11, 5);
+    assert(_km_bits(us) == 0xFFF0000000000000 && ue == 0, "∞·(−1.1·2^5) = (−∞, 0)");
+}
+
+# A seeded double of a random class: every bit pattern (both signs, subnormals, a few specials), or a moderate one.
+#must_use
+fn ux_rand(st, wide): f64 {
+    var b = (st >> 1) % 0x7FF0000000000000;
+    if (wide == 0) { b = 0x3000000000000000 + ((st >> 3) % 0x1C00000000000000); }
+    b = b | (st & 0x8000000000000000);
+    var x: f64 = from_bits(b);
+    return x;
+}
+
+# The unbounded-exponent operations against IEEE's own on 20,000 seeded pairs of doubles: the final ×, ÷, +, −, √
+# are IEEE's (one rounding, subnormal results and overflow included) at the doubles' own exponents and after shifting
+# them by opposite or equal amounts past binary64's range; the 53-bit +, ×, ÷, √ round back to IEEE's wherever that is
+# normal; cmp, ≤ and max agree with f64's; atan2 is _km_cr_atan2 at any common shift.
+fn _t_ux_ieee() {
+    test_group("ux_ieee (ADR 0002 #20)");
+    var st = 0x2545F4914F6CDD1D;
+    var bad_f = 0;
+    var bad_s = 0;
+    var bad_c = 0;
+    var bad_a = 0;
+    var k = 0;
+    while (k < 20000) {
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var x: f64 = ux_rand(st, k % 2);
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var y: f64 = ux_rand(st, k % 2);
+        var sh = (st >> 11) % 6001;
+        sh = sh - 3000;
+        var xs, xe = _km_ux_from(x);
+        var ys, ye = _km_ux_from(y);
+        var p: f64 = x * y;
+        var q: f64 = x / y;
+        var s: f64 = x + y;
+        var d: f64 = x - y;
+        var ax: f64 = x;
+        if (x < 0.0) { ax = -x; }
+        var r: f64 = f64_sqrt(ax);
+        var ux1: f64 = _km_ux_mul_f64(xs, xe, ys, ye);
+        var ux2: f64 = _km_ux_mul_f64(xs, xe + sh, ys, ye - sh);
+        var ux3: f64 = _km_ux_div_f64(xs, xe + sh, ys, ye + sh);
+        var ux4: f64 = _km_ux_add_f64(xs, xe, ys, ye);
+        var ux5: f64 = _km_ux_sub_f64(xs, xe, ys, ye);
+        var axs, axe = _km_ux_from(ax);
+        var ux6: f64 = _km_ux_sqrt_f64(axs, axe);
+        if (ulp_bits_match(_km_bits(ux1), _km_bits(p)) != 1) { bad_f = bad_f + 1; }
+        if (ulp_bits_match(_km_bits(ux2), _km_bits(p)) != 1) { bad_f = bad_f + 1; }
+        if (ulp_bits_match(_km_bits(ux3), _km_bits(q)) != 1) { bad_f = bad_f + 1; }
+        if (ulp_bits_match(_km_bits(ux4), _km_bits(s)) != 1) { bad_f = bad_f + 1; }
+        if (ulp_bits_match(_km_bits(ux5), _km_bits(d)) != 1) { bad_f = bad_f + 1; }
+        if (ulp_bits_match(_km_bits(ux6), _km_bits(r)) != 1) { bad_f = bad_f + 1; }
+        # the 53-bit operations, shifted and shifted back
+        var as1, ae1 = _km_ux_add(xs, xe + sh, ys, ye + sh);
+        var a1: f64 = _km_ux_round(as1, ae1 - sh, 0.0);
+        if (ulp_bits_match(_km_bits(a1), _km_bits(s)) != 1) { bad_s = bad_s + 1; }
+        var abs_p = _km_bits(p) & 0x7FFFFFFFFFFFFFFF;
+        if (abs_p >= 0x0010000000000000) {
+            var mps, mpe = _km_ux_mul(xs, xe + sh, ys, ye - sh);
+            var m1: f64 = _km_ux_round(mps, mpe, 0.0);
+            if (ulp_bits_match(_km_bits(m1), _km_bits(p)) != 1) { bad_s = bad_s + 1; }
+        }
+        var abs_q = _km_bits(q) & 0x7FFFFFFFFFFFFFFF;
+        if (abs_q >= 0x0010000000000000) {
+            var dqs, dqe = _km_ux_div(xs, xe - sh, ys, ye - sh);
+            var d1: f64 = _km_ux_round(dqs, dqe, 0.0);
+            if (ulp_bits_match(_km_bits(d1), _km_bits(q)) != 1) { bad_s = bad_s + 1; }
+        }
+        var rts, rte = _km_ux_sqrt(axs, axe + 2 * sh);
+        var r1: f64 = _km_ux_round(rts, rte - sh, 0.0);
+        if (ulp_bits_match(_km_bits(r1), _km_bits(r)) != 1) { bad_s = bad_s + 1; }
+        # order, ≤ and Rust's max, at the doubles' exponents and shifted together
+        var want = 0;
+        if (x < y) { want = 0 - 1; }
+        if (x > y) { want = 1; }
+        if (x != x || y != y) { want = 2; }
+        if (_km_ux_cmp(xs, xe, ys, ye) != want || _km_ux_cmp(xs, xe + sh, ys, ye + sh) != want) { bad_c = bad_c + 1; }
+        var le = 0;
+        if (x <= y) { le = 1; }
+        if (_km_ux_le(xs, xe - sh, ys, ye - sh) != le) { bad_c = bad_c + 1; }
+        var mx: f64 = _km_max(x, y);
+        var uxs, uxe = _km_ux_max(xs, xe, ys, ye);
+        var mr: f64 = _km_ux_round(uxs, uxe, 0.0);
+        if (ulp_bits_match(_km_bits(mr), _km_bits(mx)) != 1) { bad_c = bad_c + 1; }
+        # atan2: the correctly rounded atan2 of the doubles, and of the pair shifted by any common amount
+        var t0: f64 = _km_cr_atan2(y, x);
+        var t1: f64 = _km_ux_atan2_f64(ys, ye, xs, xe);
+        var t2: f64 = _km_ux_atan2_f64(ys, ye + sh, xs, xe + sh);
+        var t3: f64 = _km_ux_atan2_acc(ys, ye + sh, xs, xe + sh);
+        if (ulp_bits_match(_km_bits(t1), _km_bits(t0)) != 1) { bad_a = bad_a + 1; }
+        if (ulp_bits_match(_km_bits(t2), _km_bits(t0)) != 1) { bad_a = bad_a + 1; }
+        if (ulp_bits_match(_km_bits(t3), _km_bits(t0)) != 1) { bad_a = bad_a + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad_f, 0, "final ×, ÷, +, −, √ = IEEE's on 20,000 seeded pairs, at their exponents and shifted");
+    assert_eq(bad_s, 0, "53-bit +, ×, ÷, √ shifted past binary64's range and back = IEEE's where normal");
+    assert_eq(bad_c, 0, "cmp, ≤ and max = f64's, at the doubles' exponents and shifted");
+    assert_eq(bad_a, 0, "ux atan2 = _km_cr_atan2 at any common shift (fast and accurate paths)");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_special_values();
@@ -1096,6 +1434,10 @@ fn main() {
     _t_trig_accurate_path_agrees();
     _t_exp2_scaled_values();
     _t_exp2_scaled_agrees();
+    _t_hundredth_values();
+    _t_hundredth_agrees();
+    _t_ux_values();
+    _t_ux_ieee();
     return assert_summary();
 }
 

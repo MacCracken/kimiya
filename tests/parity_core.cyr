@@ -26,10 +26,11 @@
 # its module.
 
 # ── tokens ──────────────────────────────────────────────────────────────────────────
-# Three token lists of up to _PAR_MAX tokens: the row's inputs, its wanted outputs, and what the port returned.
+# Three token lists of up to _PAR_MAX tokens (M4e: 8448, for fft_spectrum's rows of 2^13 samples): the row's inputs,
+# its wanted outputs, and what the port returned.
 # Each slot is a kind byte ('f' 'i' 'e' 's' 'n' 'E' 'v'), a value word (f64 bits, an
 # integer, or a pointer to text) and a text length.
-var _PAR_MAX = 1024;
+var _PAR_MAX = 8448;
 var _par_in_k = 0;
 var _par_in_v = 0;
 var _par_in_l = 0;
@@ -52,6 +53,10 @@ var _par_alt_n = 0;
 # not derivable from the oracle's reads it from the note: #13, #14, #15).
 var _par_note_p = 0;
 var _par_note_l = 0;
+# 1 when the dispatcher mapped the current row to an ADR's exact value that differs from the oracle's (an ADR 0002 note
+# names the port's value): the row is then an accepted divergence even where its class's tolerance would pass it (M4e:
+# ADR 0002 #19's one-ulp class-B rows), so it is reported as accepted, never as ok. Reset before each dispatch.
+var _par_force_map = 0;
 
 # 1 if text [p, p + len) equals the C string `s`.
 #must_use
@@ -734,11 +739,13 @@ fn _par_module(mp, ml): i64 {
             _par_bump(_par_fn_rows, slot);
             var outcome = 0;
             var handled = 0;
+            _par_force_map = 0;
             if (bad == 0) {
                 handled = _par_dispatch(mp, ml, fp, fl);
                 if (handled == 0) { outcome = 3; }
                 elif (handled == 1) { outcome = _par_compare(slot, cls, fp, fl); }
             }
+            if (outcome == 1 && _par_force_map == 1) { outcome = 0; }   # an ADR-mapped value: accepted, not ok
             # A corrected row: is the port bit-identical to the corrected outputs, to the oracle's? And, when it fails
             # against the corrected outputs: does it match the oracle's misrounded outputs under the same class and
             # bound? Then its primitive is glibc-like, not correctly rounded: a failure, reported as glibc-matching.

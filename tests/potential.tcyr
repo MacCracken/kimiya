@@ -1,13 +1,15 @@
 # potential.tcyr — the tests of rust-old/src/potential.rs, ported one for one (each test_group is the Rust test's name;
 # all 33), plus Cyrius-only tests of the pointer arguments (null pointers, the 24-byte point layout), the private
-# helpers' operation order, the typed tolerances on their thresholds, the −π → π mapping, and ADR 0002 #16, #17 and
-# #18's exact values. The golden corpus separately checks every function over its grid (tests/parity.tcyr).
+# helpers' operation order, the typed tolerances on their thresholds, the −π → π mapping, ADR 0002 #16, #17 and #18's
+# exact values, and ADR 0002 #20 (M4e-2): the geometry's unbounded-exponent results against MPFR, its scale invariance
+# bit for bit, and its slow path against the fast one where Rust's chain stays in range. The golden corpus separately
+# checks every function over its grid (tests/parity.tcyr).
 #
 # Adapted beyond the port's form (port plan §6.4: `Result::unwrap` is `is_ok` + the payload, a Rust `[f64; 3]` the
 # address of a three-f64 buffer, `x.cos()` / `x.sin()` the correctly rounded _km_cr_cos / _km_cr_sin, `x.to_radians()`
-# Rust's x·(π/180)), one test only: `morse_width_parameter_matches_force_constant` calls
-# `spectroscopy::vibrational_frequency`, which ports in M4e; its value, √(k/μ) after the positivity checks, is
-# computed inline. ADR 0002 #16, #17 and #18 change none of the Rust tests' cases beyond their tolerances (#16 moves
+# Rust's x·(π/180)); no test needed more. `morse_width_parameter_matches_force_constant` calls
+# `spectroscopy::vibrational_frequency` as Rust's does (src/spectroscopy.cyr since M4e; until then its √(k/μ) was
+# computed inline). ADR 0002 #16, #17 and #18 change none of the Rust tests' cases beyond their tolerances (#16 moves
 # Ar's r_min by at most an ulp; #17 and #18 need ε ≥ 2¹⁰²² J or D_e ≥ 2¹⁰²³ J).
 
 include "tests/ulp.cyr"
@@ -17,6 +19,17 @@ include "src/mathx_data.cyr"
 include "src/mathx.cyr"
 include "src/validate.cyr"
 include "src/potential.cyr"
+include "src/element_data.cyr"
+include "src/element.cyr"
+include "src/thermo.cyr"
+include "src/organic_data.cyr"
+include "src/organic.cyr"
+include "src/inorganic_data.cyr"
+include "src/inorganic.cyr"
+include "src/nuclear_data.cyr"
+include "src/nuclear.cyr"
+include "src/spectroscopy_data.cyr"
+include "src/spectroscopy.cyr"
 
 alloc_init();
 
@@ -208,11 +221,12 @@ fn _t_morse_width_parameter_hcl() {
 
 fn _t_morse_width_parameter_matches_force_constant() {
     test_group("morse_width_parameter_matches_force_constant");
-    # 2·D_e·a² must equal the harmonic k = μω²; ω is spectroscopy::vibrational_frequency(k, μ) = √(k/μ) (M4e).
+    # 2·D_e·a² must equal the harmonic k = μω² that spectroscopy::vibrational_frequency inverts.
     var k: f64 = 516.0;
     var mu: f64 = 0.0000000000000000000000000016267;
     var d_e: f64 = 0.0000000000000000007399;
-    var omega: f64 = f64_sqrt(k / mu);
+    var to, vo = vibrational_frequency(k, mu);
+    var omega: f64 = ok_f(to, vo, "vibrational_frequency: Ok");
     var t, v = morse_width_parameter(omega, mu, d_e);
     var a: f64 = ok_f(t, v, "morse_width_parameter: Ok");
     var c: f64 = (((2.0 * d_e) * a) * a) / k;
@@ -589,6 +603,280 @@ fn _t_cyrius_exact_overflow_edges() {
     assert_bits_eq(a6, 0, "μ = 2⁻¹⁰⁷⁴: μ/(2·D_e) < 2⁻²⁰⁹⁷ rounds to 0");
 }
 
+# ── ADR 0002 #20 (M4e-2): the geometry with an unbounded exponent ──────────────────────────────────────────────
+
+# Where Rust's squares, cross products or dot products over- or underflow, the port returns Rust's sequence evaluated
+# with an unbounded exponent (the final √ or atan2 rounded once). Expected values: MPFR's (validate.py's evaluator,
+# scripts/oracle/mpfr_ref.py's UX). Non-finite coordinates keep Rust's results.
+fn _t_cyrius_unbounded_edges() {
+    test_group("cyrius_unbounded_edges (ADR 0002 #20)");
+    var big: f64 = 0x7FEFFFFFFFFFFFFF;
+    var nb: f64 = -big;
+    var sub: f64 = from_bits(1);
+    var d1: f64 = distance_3d(pt(0, big, 0.0, 0.0), pt(1, 0.0, 0.0, 0.0));
+    assert_bits_eq(d1, 0x7FEFFFFFFFFFFFFF, "|(DBL_MAX, 0, 0)| = DBL_MAX (Rust: DBL_MAX² overflows, +∞)");
+    var d2: f64 = distance_3d(pt(0, big, 0.0, 0.0), pt(1, nb, 0.0, 0.0));
+    assert(d2 == _KM_INF, "2·DBL_MAX overflows the result itself: +∞");
+    var d3: f64 = distance_3d(pt(0, sub, 0.0, 0.0), pt(1, 0.0, 0.0, 0.0));
+    assert_bits_eq(d3, 1, "|(2⁻¹⁰⁷⁴, 0, 0)| = 2⁻¹⁰⁷⁴ (Rust: the square underflows, 0)");
+    var s3: f64 = from_bits(3);
+    var s4: f64 = from_bits(4);
+    var d4: f64 = distance_3d(pt(0, s3, s4, 0.0), pt(1, 0.0, 0.0, 0.0));
+    assert_bits_eq(d4, 5, "|(3, 4, 0)·2⁻¹⁰⁷⁴| = 5·2⁻¹⁰⁷⁴");
+    var e300: f64 = 0x7E37E43C8800759C;      # 1e300
+    var d5: f64 = distance_3d(pt(0, e300, e300, e300), pt(1, 0.0, 0.0, 0.0));
+    assert_bits_eq(d5, 0x7E44B0D0EEA55018, "|(1e300, 1e300, 1e300)| = √3·1e300 (Rust: +∞)");
+    var nan: f64 = _km_nan();
+    var d6: f64 = distance_3d(pt(0, nan, 0.0, 0.0), pt(1, 0.0, 0.0, 0.0));
+    assert(is_nan(d6) == 1, "a NaN coordinate: Rust's NaN");
+    var d7: f64 = distance_3d(pt(0, _KM_INF, 0.0, 0.0), pt(1, 0.0, 0.0, 0.0));
+    assert(d7 == _KM_INF, "an infinite coordinate: Rust's +∞");
+    var t: f64 = from_bits(0x4000);          # 2^-1060
+    var t1, v1 = angle3(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, t, 0.0);
+    var a1: f64 = ok_f(t1, v1, "a tiny angle: Ok");
+    assert_bits_eq(a1, 0x4000, "the angle of (1, 2⁻¹⁰⁶⁰) is 2⁻¹⁰⁶⁰, a subnormal (Rust: |ba × bc|² underflows, 0)");
+    var t2, v2 = angle3(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, t, 0.0);
+    var a2: f64 = ok_f(t2, v2, "near π: Ok");
+    assert_bits_eq(a2, 0x400921FB54442D18, "π − 2⁻¹⁰⁶⁰ rounds to π");
+    var t3, v3 = angle3(big, 0.0, 0.0, nb, 0.0, 0.0, nb, big, 0.0);
+    var a3: f64 = ok_f(t3, v3, "ba = (2·DBL_MAX, 0, 0): Ok");
+    assert_bits_eq(a3, 0x3FF921FB54442D18, "perpendicular bonds past DBL_MAX: π/2 (Rust: |ba|² = +∞, Err)");
+    var t4, v4 = angle3(sub, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, sub, 0.0);
+    var a4: f64 = ok_f(t4, v4, "subnormal bonds: Ok");
+    assert_bits_eq(a4, 0x3FF921FB54442D18, "perpendicular subnormal bonds: π/2 (Rust: the squares underflow, Err)");
+    var s1: f64 = from_bits(2);
+    var s5: f64 = from_bits(5);
+    var t5, v5 = angle3(s3, sub, 0.0, 0.0, 0.0, 0.0, s1, s5, 0.0);
+    var a5: f64 = ok_f(t5, v5, "subnormal coordinates: Ok");
+    assert_bits_eq(a5, 0x3FEBCB1321414BE0, "the angle of (3, 1) and (2, 5)·2⁻¹⁰⁷⁴");
+    var t6, v6 = angle3(nan, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    assert(is_invalid(t6, v6) == 1, "a NaN coordinate: Rust's Err");
+    var t7, v7 = angle3(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, _KM_INF, 0.0, 0.0);
+    assert(is_invalid(t7, v7) == 1, "an infinite coordinate: Rust's Err");
+    var k700: f64 = 0x6BB0000000000000;      # 2^700
+    var h1t, h1v = dih(k700, k700, 0.0, 0.0, 0.0, 0.0, 1.5 * k700, 0.0, 0.0, 2.5 * k700, 0.0, k700);
+    var h1: f64 = ok_f(h1t, h1v, "gauche at 2^700: Ok");
+    assert_bits_eq(h1, 0x3FF921FB54442D18, "the gauche dihedral at 2^700 is its unit-scale π/2 (Rust: Err)");
+    var m700: f64 = 0x1430000000000000;      # 2^-700
+    var h2t, h2v = dih(m700, m700, 0.0, 0.0, 0.0, 0.0, 1.5 * m700, 0.0, 0.0, 2.5 * m700, 0.0, m700);
+    var h2: f64 = ok_f(h2t, h2v, "gauche at 2^-700: Ok");
+    assert_bits_eq(h2, 0x3FF921FB54442D18, "… and at 2^-700");
+    var m400: f64 = 0x26F0000000000000;      # 2^-400
+    var h3t, h3v = dih(0.0, m400, 0.0, 0.0, 0.0, 0.0, m400, 0.0, 0.0, m400, m400, t);
+    var h3: f64 = ok_f(h3t, h3v, "a tiny dihedral: Ok");
+    assert_bits_eq(h3, 0x16B0000000000000, "the dihedral 2^-660 (Rust: b₁ · n₂ underflows, 0)");
+    var k900: f64 = 0x7830000000000000;      # 2^900
+    var nz: f64 = -0.0;
+    var h4t, h4v = dih(0.0, 0.0, 0.0, k900, nz, nz, 2.0 * k900, -k900, 0.0, 3.0 * k900, -k900, 0.0);
+    var h4: f64 = ok_f(h4t, h4v, "trans at 2^900: Ok");
+    assert_bits_eq(h4, 0x400921FB54442D18, "the mirrored trans at 2^900: atan2's −π reported as π (Rust: Err)");
+    var h5t, h5v = dih(nan, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0);
+    assert(is_invalid(h5t, h5v) == 1, "a NaN coordinate: Rust's Err");
+}
+
+# A seeded xorshift state's next value (the state is at p).
+#must_use
+fn rnd(p): i64 {
+    var st = load64(p);
+    st = st ^ (st << 13);
+    st = st ^ (st >> 7);
+    st = st ^ (st << 17);
+    store64(p, st);
+    return st;
+}
+
+# A uniform double in [−1, 1) from the state at p.
+#must_use
+fn rndu(p): f64 {
+    var u: f64 = f64_from(rnd(p) >> 11);
+    var h: f64 = 0x3CA0000000000000;          # 2^-53
+    var r: f64 = (u * h) * 2.0 - 1.0;
+    return r;
+}
+
+# 2^k as two normal factors, for −2044 ≤ k ≤ 2046.
+#must_use
+fn p2(k): (f64, f64) {
+    var a = k;
+    var b = 0;
+    if (k > 1023) {
+        a = 1023;
+        b = k - 1023;
+    }
+    if (k < 0 - 1022) {
+        a = 0 - 1022;
+        b = k + 1022;
+    }
+    var f1: f64 = _km_cr_pow2(a);
+    var f2: f64 = _km_cr_pow2(b);
+    return (f1, f2);
+}
+
+# dst := 2^k·src for n f64; 1 if every scaled value is finite and scales back exactly (no rounding).
+#must_use
+fn scale_pts(src, dst, n, k): i64 {
+    var f1, f2 = p2(k);
+    var g1, g2 = p2(0 - k);
+    var ok = 1;
+    var j = 0;
+    while (j < n) {
+        var x: f64 = load64(src + 8 * j);
+        var y: f64 = (x * f1) * f2;
+        var z: f64 = (y * g2) * g1;
+        if (_km_is_finite(y) != 1 || _km_bits(z) != _km_bits(x)) { ok = 0; }
+        store64(dst + 8 * j, y);
+        j = j + 1;
+    }
+    return ok;
+}
+
+# Random geometry kind g into the 12 f64 at p: g 0 four unit-scale points; 1 points with exact zero coordinates (a
+# planar molecule); 2 near-coincident A and B (A − B along z at about 10⁻¹² of |B|); 3 near-collinear A-B-C (A off
+# the B-C line by about 10⁻¹⁰); 4 coordinates of mixed binary scales 2^±60.
+fn rnd_geom(st, p, g) {
+    var j = 0;
+    while (j < 12) {
+        var x: f64 = rndu(st);
+        if (g == 1 && (j % 3) == 2) { x = 0.0; }
+        if (g == 4) {
+            var e = (rnd(st) >> 20) % 121;
+            var f1, f2 = p2(e - 60);
+            x = x * f1;
+        }
+        store64(p + 8 * j, x);
+        j = j + 1;
+    }
+    if (g == 2) {
+        var b2: f64 = load64(p + 40);
+        var d: f64 = 0.000000000001 * (1.0 + rndu(st));
+        store64(p, load64(p + 24));
+        store64(p + 8, load64(p + 32));
+        var az: f64 = b2 + d;
+        store64(p + 16, az);
+    }
+    if (g == 3) {
+        var h: f64 = 0.0000000001 * (1.0 + rndu(st));
+        store64(p, 0xBFF0000000000000);     # A = (−1, h, 0), B = 0, C = (1, 0, 0)
+        store64(p + 8, h);
+        store64(p + 16, 0);
+        store64(p + 24, 0);
+        store64(p + 32, 0);
+        store64(p + 40, 0);
+        store64(p + 48, 0x3FF0000000000000);
+        store64(p + 56, 0);
+        store64(p + 64, 0);
+    }
+}
+
+# Scale invariance (ADR 0002 #20): bond_angle and dihedral_angle of 2^k times every coordinate equal the unscaled
+# results bit for bit (Ok and Err alike) for every k with all scaled coordinates exact; distance_3d scales by exactly
+# 2^k wherever both results are normal. 600 random geometries of five kinds × 75 k from −1100 to 1100.
+fn _t_cyrius_scale_invariance() {
+    test_group("cyrius_scale_invariance (ADR 0002 #20)");
+    var st = 0x9E3779B97F4A7C15;
+    var g: f64[12];
+    var h: f64[12];
+    var bad = 0;
+    var n = 0;
+    var nd = 0;
+    var gi = 0;
+    while (gi < 600) {
+        rnd_geom(&st, &g, gi % 5);
+        var ta, va = bond_angle(&g, &g + 24, &g + 48);
+        var td, vd = dihedral_angle(&g, &g + 24, &g + 48, &g + 72);
+        var d0: f64 = distance_3d(&g, &g + 72);
+        var ki = 0;
+        while (ki < 75) {
+            var k = ((rnd(&st) >> 17) % 2201) - 1100;
+            if (scale_pts(&g, &h, 12, k) == 1) {
+                var tb, vb = bond_angle(&h, &h + 24, &h + 48);
+                if (tb != ta || vb != va) { bad = bad + 1; }
+                var te, ve = dihedral_angle(&h, &h + 24, &h + 48, &h + 72);
+                if (te != td || ve != vd) { bad = bad + 1; }
+                var d1: f64 = distance_3d(&h, &h + 72);
+                var f1, f2 = p2(k);
+                var want: f64 = (d0 * f1) * f2;
+                var ad = _km_bits(d1) & 0x7FFFFFFFFFFFFFFF;
+                var aw = _km_bits(want) & 0x7FFFFFFFFFFFFFFF;
+                var a0 = _km_bits(d0) & 0x7FFFFFFFFFFFFFFF;
+                var normal = 0;
+                if (ad >= 0x0010000000000000 && ad < 0x7FF0000000000000 && a0 >= 0x0010000000000000) { normal = 1; }
+                if (aw < 0x0010000000000000 || aw >= 0x7FF0000000000000) { normal = 0; }
+                if (normal == 1) {
+                    if (_km_bits(d1) != _km_bits(want)) { bad = bad + 1; }
+                    nd = nd + 1;
+                }
+                n = n + 1;
+            }
+            ki = ki + 1;
+        }
+        gi = gi + 1;
+    }
+    assert_eq(bad, 0, "angles scale-invariant bit for bit, distances scaled by exactly 2^k");
+    assert(n > 30000 && nd > 20000, "most of the 45,000 scaled geometries are exact");
+}
+
+# The slow path is Rust's chain wherever that stays in range: the unbounded-exponent evaluation forced (_km_*_ux) on
+# 5,000 random in-range geometries (unit scale, exact zeros, near-coincident, near-collinear, mixed 2^±60 scales; and
+# each again in metres, ×2^-33) gives the fast path's bits, Ok and Err alike.
+fn _t_cyrius_slow_path_agrees() {
+    test_group("cyrius_slow_path_agrees (ADR 0002 #20)");
+    var st = 0xD1B54A32D192ED03;
+    var g: f64[12];
+    var h: f64[12];
+    var bad = 0;
+    var errs = 0;
+    var gi = 0;
+    while (gi < 5000) {
+        rnd_geom(&st, &g, gi % 5);
+        var q = &g;
+        if ((gi % 2) == 1 && scale_pts(&g, &h, 12, 0 - 33) == 1) { q = &h; }
+        var ta, va = bond_angle(q, q + 24, q + 48);
+        var tb, vb = _km_bond_angle_ux(q, q + 24, q + 48);
+        if (ta != tb || va != vb) { bad = bad + 1; }
+        var td, vd = dihedral_angle(q, q + 24, q + 48, q + 72);
+        var te, ve = _km_dihedral_angle_ux(q, q + 24, q + 48, q + 72);
+        if (td != te || vd != ve) { bad = bad + 1; }
+        if (is_ok(ta) != 1) { errs = errs + 1; }
+        if (is_ok(td) != 1) { errs = errs + 1; }
+        var d0: f64 = distance_3d(q, q + 72);
+        var d1: f64 = _km_distance_3d_ux(q, q + 72);
+        if (_km_bits(d0) != _km_bits(d1)) { bad = bad + 1; }
+        gi = gi + 1;
+    }
+    assert_eq(bad, 0, "the unbounded evaluation is Rust's chain on 5,000 in-range geometries");
+    assert(errs > 500, "the near-coincident and near-collinear kinds reach Rust's Err on both paths");
+}
+
+# ADR 0002 #20's shortcut for an exactly linear or zero-angle geometry (ba × bc exactly 0, so |ba × bc|² = 0 is below
+# the fast path's range test): CO₂ in metres on an axis, a linear chain off the axes in Å, and A = C give RN(π), RN(π)
+# and +0, the unbounded evaluation's bits; a component below 2^-511 (products that could underflow) is left to the
+# slow path, with the same result.
+fn _t_cyrius_bond_angle_exactly_linear() {
+    test_group("cyrius_bond_angle_exactly_linear (ADR 0002 #20)");
+    var pib = 0x400921FB54442D18;
+    var mcs: f64 = 0.000000000116;               # C=O, 1.16 Å in metres
+    var ncs: f64 = -mcs;
+    var t1, v1 = bond_angle(pt(0, ncs, 0.0, 0.0), pt(1, 0.0, 0.0, 0.0), pt(2, mcs, 0.0, 0.0));
+    assert(is_ok(t1) == 1 && v1 == pib, "CO2 on an axis: RN(pi)");
+    var u1, w1 = _km_bond_angle_ux(&_pts, &_pts + 24, &_pts + 48);
+    assert(u1 == t1 && w1 == v1, "CO2: the unbounded evaluation's bits");
+    var t2, v2 = angle3(1.0, 2.0, 3.0, 2.0, 3.0, 4.0, 3.0, 4.0, 5.0);
+    assert(is_ok(t2) == 1 && v2 == pib, "a linear chain off the axes: RN(pi)");
+    var u2, w2 = _km_bond_angle_ux(&_pts, &_pts + 24, &_pts + 48);
+    assert(u2 == t2 && w2 == v2, "linear chain: the unbounded evaluation's bits");
+    var t3, v3 = angle3(1.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0, 0.5, 0.0);
+    assert(is_ok(t3) == 1 && v3 == 0, "A = C: +0");
+    var u3, w3 = _km_bond_angle_ux(&_pts, &_pts + 24, &_pts + 48);
+    assert(u3 == t3 && w3 == v3, "A = C: the unbounded evaluation's bits");
+    var e600: f64 = 0x1A70000000000000;          # 2^-600
+    var n600: f64 = -e600;
+    var t4, v4 = angle3(1.0, e600, 0.0, 0.0, 0.0, 0.0, -1.0, n600, 0.0);
+    assert(is_ok(t4) == 1 && v4 == pib, "components of 2^-600 (the slow path): RN(pi)");
+    var u4, w4 = _km_bond_angle_ux(&_pts, &_pts + 24, &_pts + 48);
+    assert(u4 == t4 && w4 == v4, "2^-600 components: the unbounded evaluation's bits");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_lj_at_equilibrium_is_negative();
@@ -629,6 +917,10 @@ fn main() {
     _t_cyrius_tolerances();
     _t_cyrius_exact_rmin();
     _t_cyrius_exact_overflow_edges();
+    _t_cyrius_unbounded_edges();
+    _t_cyrius_scale_invariance();
+    _t_cyrius_slow_path_agrees();
+    _t_cyrius_bond_angle_exactly_linear();
     return assert_summary();
 }
 

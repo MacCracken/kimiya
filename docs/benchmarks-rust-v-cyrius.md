@@ -243,3 +243,46 @@ The same run's M4a trig benches matched the M4a figures within 2 % (`cr_sin` 74 
 142), and the other benches were within 5 % of their M4c figures but `thermochem/adiabatic_flame_ch4_air` (3.80 µs against
 3.24; nothing on its path changed, + − × ÷ only) and `gas/peng_robinson_z_n2_1mpa` (283 ns against 270; the one-root
 branch, which calls no trig): host noise, as M4b's note describes.
+
+## M4e spectroscopy (2026-11-09)
+
+`rust-old/benches/benchmarks.rs` has three spectroscopy benches, ported with the same inputs; the others are Cyrius-only
+(Rust has no FFT, peak-detection or wavenumber bench).
+
+| Bench | Body | Rust | Cyrius | Cyrius / Rust |
+|---|---|---|---|---|
+| `spectroscopy/absorbance` | `absorbance(100, 1, 0.01)`: two multiplies | 0.98 ns | 11 ns | 11× |
+| `spectroscopy/bohr_energy_level` | `bohr_energy_level(1, 3)`: two range checks, ((−R·Z)·Z)/(n·n), a `Result` | 1.21 ns | 16 ns | 13× |
+| `spectroscopy/isotope_pattern_glucose` | C₆H₁₂O₆: 24 convolution steps (the scratch at most 30 records), each a stable insertion sort, the binning, the renormalisation and the pruning, on the two stack tables (nothing allocated); the result into a 64-record buffer | 2.80 µs | 16.8 µs | 6.0× |
+| `spectroscopy/fft_spectrum_256` | a seeded signal of 256 samples, in place (cap = 2n): hisab 1.4.0's radix-2 loop, 8 `_km_cr_sincos` twiddles, 129 magnitudes | — | 28.2 µs | — |
+| `spectroscopy/fft_spectrum_1024` | the same, 1,024 samples | — | 134 µs | — |
+| `spectroscopy/fft_spectrum_4096` | the same, 4,096 samples | — | 628 µs | — |
+| `spectroscopy/find_peaks_1000` | 1,000 values at threshold 0.1: the finite min / max pass, the interpolated threshold, the window pass (cap 1000: written in one pass) | — | 22.5 µs | — |
+| `spectroscopy/wavenumber_from_wavelength` | Hα (656.47 nm): the guard and ADR 0002 #19's `_km_cr_hundredth_div` fast path (a TwoProduct residual and a rounding test) | — | 58 ns | — |
+
+The FFT costs about 26 ns per butterfly (n/2·log₂n of them: 1,024 at n = 256, 24,576 at 4,096), each 4 multiplies and 6
+adds through memory plus the twiddle recurrence's 4 multiplies and 2 adds; the twiddles themselves (one `_km_cr_sincos`,
+116 ns, per stage) are under 0.5 % of it. The isotope pattern's 6× is the same shape as the other loops' (each operation
+a load and a store); Rust's 2.80 µs is its post-audit sort and binning.
+
+## M4e-2 potential's geometry with an unbounded exponent (2026-11-10)
+
+ADR 0002 #20 adds a range test to Rust's chain (the fast path) and an unbounded-exponent re-evaluation where it fails.
+Before → after, the same host, back to back (`cyrius bench tests/kimiya.bcyr`):
+
+| Bench | Body | Rust | Before | After |
+|---|---|---|---|---|
+| `potential/dihedral_angle` | Rust's gauche geometry: the chain, and the window test on b₁, b₂, b₃ (each component's square against 2⁻⁴⁵⁸ with its zero test, the three \|b\|² against 2⁵⁰⁶; the squares computed inline instead of three `_km_dot3` calls) | 20.35 ns | 131 ns | 133 ns |
+| `potential/bond_angle` | water at metre scale: \|ba\|², \|bc\|², the two maxima and \|ba × bc\|² against [2⁻⁹⁰⁰, DBL_MAX] (in place of Rust's two `is_positive` calls), ba · bc finite | — | 213 ns | 213 ns |
+| `potential/distance_3d` | water's H–H distance in metres: s against [2⁻⁹⁰⁰, DBL_MAX] | — | 14 ns | 16 ns |
+| `potential/distance_3d_2p600` | the same points × 2⁶⁰⁰: the squares overflow, so the slow path (`_km_distance_3d_ux`: six conversions, three subtractions, a dot product, the final √) | — | 14 ns (Rust's +∞) | 314 ns |
+| `potential/bond_angle_2p600` | water × 2⁶⁰⁰: the slow path (`_km_bond_angle_ux`: five dot products, a cross product, the final atan2) | — | 52 ns (Rust's Err) | 1.13 µs |
+| `potential/dihedral_angle_2p600` | the gauche geometry × 2⁶⁰⁰: the slow path (`_km_dihedral_angle_ux`) | — | 80 ns (Rust's Err) | 1.31 µs |
+| `potential/bond_angle_linear` | CO₂ in metres on an axis: ba × bc is exactly 0, so \|ba × bc\|² = 0 fails the window; the linear shortcut (each component of ba and bc 0 or at least 2⁻⁵¹¹, then atan2(+0, ba · bc)) | — | 1.06 µs (the slow path; a 2M-call loop, before the shortcut) | 135 ns |
+
+The slow path runs only where Rust's chain leaves the normal range (no physical geometry; an exactly linear one, whose
+\|ba × bc\|² is 0, takes the shortcut above instead); each unbounded operation is a call on (significand, exponent) pairs
+and a renormalisation, about 25 ns. The other benches were within noise of the
+before run (nothing else changed). A first version tested every coordinate's bit pattern against a window through calls
+(+19–21 ns on the two angles); the terminal sums for `distance_3d` and `bond_angle` and the inline squares for the
+dihedral brought it to the figures above.

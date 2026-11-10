@@ -1,0 +1,1299 @@
+# spectroscopy.tcyr — the tests of rust-old/src/spectroscopy.rs, ported one for one (each test_group is the Rust test's
+# name; all 62), the two spectroscopy tests of rust-old/tests/integration.rs, plus Cyrius-only tests of Rust's integers
+# as words (u8 Z, u32 n / line / count outside their types), the caller buffers (too small, null, the FFT's in-place
+# work table), the private helpers (the isotope pattern's stable sort, its typed thresholds on the ulp, the FFT
+# transcription), ADR 0002 #19's correctly rounded 1/(100·x) and the generated R_H. The golden corpus separately checks
+# every function over its grid (tests/parity.tcyr).
+#
+# Adapted beyond the port's form (port plan §6.4: `Result::unwrap` is `is_ok` + the payload, a Vec the caller's buffer
+# and its count, a slice a pointer and a count, `SpectralSeries::X.wavelength(l)` spectral_series_wavelength(KM_…, l),
+# `x.sin()` the correctly rounded _km_cr_sin, `RYDBERG_HYDROGEN` the generated _KM_RYDBERG_HYDROGEN); no test needed
+# more. ADR 0002 #19 changes none of the Rust tests' cases (500 nm, 10 µm and their round trips are equal in both).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/element_data.cyr"
+include "src/element.cyr"
+include "src/thermo.cyr"
+include "src/organic_data.cyr"
+include "src/organic.cyr"
+include "src/inorganic_data.cyr"
+include "src/inorganic.cyr"
+include "src/nuclear_data.cyr"
+include "src/nuclear.cyr"
+include "src/spectroscopy_data.cyr"
+include "src/spectroscopy.cyr"
+
+alloc_init();
+
+# |x|.
+#must_use
+fn absf(x: f64): f64 {
+    var a: f64 = f64_abs(x);
+    return a;
+}
+
+# 1 if |a − b| < eps.
+#must_use
+fn near(a: f64, b: f64, eps: f64): i64 {
+    var d: f64 = f64_abs(a - b);
+    if (d < eps) { return 1; }
+    return 0;
+}
+
+# f64::EPSILON.
+#must_use
+fn eps64(): f64 {
+    var e: f64 = 0.0000000000000002220446049250313;
+    return e;
+}
+
+# 1 if x is NaN.
+#must_use
+fn is_nan(x: f64): i64 {
+    if (x != x) { return 1; }
+    return 0;
+}
+
+# The f64 with bit pattern b.
+#must_use
+fn from_bits(b): f64 {
+    var x: f64 = 0.0;
+    store64(&x, b);
+    return x;
+}
+
+# The bit pattern of x.
+#must_use
+fn bits(x: f64): i64 {
+    return load64(&x);
+}
+
+# std::f64::consts::PI.
+#must_use
+fn pi(): f64 {
+    var p: f64 = 0x400921FB54442D18;
+    return p;
+}
+
+# A Result's Ok payload as an f64 (the test fails on Err).
+#must_use
+fn ok_f(t, v, name): f64 {
+    assert(is_ok(t) == 1, name);
+    var x: f64 = v;
+    return x;
+}
+
+# 1 if the Result (t, v) is Err(code).
+#must_use
+fn is_err_code(t, v, code): i64 {
+    if (is_err_result(t) == 1 && v == code) { return 1; }
+    return 0;
+}
+
+# 1 if the Result (t, v) is Err(InvalidInput).
+#must_use
+fn is_invalid(t, v): i64 {
+    return is_err_code(t, v, KM_ERR_INVALID_INPUT);
+}
+
+# A buffer of n f64 / words.
+#must_use
+fn buf(n): i64 {
+    return alloc(8 * n + 8);
+}
+
+# The f64 at index k of buf p.
+#must_use
+fn at(p, k): f64 {
+    var x: f64 = load64(p + 8 * k);
+    return x;
+}
+
+# Stores the f64 x at index k of buf p.
+fn put(p, k, x: f64) {
+    store64(p + 8 * k, x);
+    return 0;
+}
+
+# Stores the record (m, i) at index k of a 16-byte-record buffer p.
+fn rec(p, k, m: f64, i: f64) {
+    store64(p + 16 * k, m);
+    store64(p + 16 * k + 8, i);
+    return 0;
+}
+
+# The isotope pattern of the n (z, count) pairs at pairs (a flat array of 2n words), into out (cap records): its Result.
+#must_use
+fn pattern_of(pairs, n, out, cap): Result {
+    var recs = alloc(16 * n + 16);
+    var k = 0;
+    while (k < n) {
+        store64(recs + 16 * k, load64(pairs + 16 * k));
+        store64(recs + 16 * k + 8, load64(pairs + 16 * k + 8));
+        k = k + 1;
+    }
+    return isotope_pattern(recs, n, out, cap);
+}
+
+# The mass of record k of a pattern buffer.
+#must_use
+fn pm(p, k): f64 {
+    var x: f64 = load64(p + 16 * k);
+    return x;
+}
+
+# The intensity of record k of a pattern buffer.
+#must_use
+fn pi_(p, k): f64 {
+    var x: f64 = load64(p + 16 * k + 8);
+    return x;
+}
+
+# The peaks of find_peaks(data, n, t) into out (cap n); its count, -1 on Err.
+#must_use
+fn peaks_of(data, n, t: f64, out): i64 {
+    var tk, vk = find_peaks(data, n, t, out, n);
+    if (is_err_result(tk) == 1) { return 0 - 1; }
+    return vk;
+}
+
+# 1 if the word k is among the first n words at p.
+#must_use
+fn contains(p, n, k): i64 {
+    var j = 0;
+    while (j < n) {
+        if (load64(p + 8 * j) == k) { return 1; }
+        j = j + 1;
+    }
+    return 0;
+}
+
+# The data of the Rust tests, as f64 buffers.
+var _t_data_basic: f64[8] = { 0.0, 1.0, 3.0, 1.0, 0.5, 2.0, 0.5, 0.0 };
+var _t_data_filter: f64[8] = { 0.0, 1.0, 3.0, 1.0, 0.5, 0.6, 0.5, 0.0 };
+var _t_data_neg: f64[7] = { -5.0, -3.0, -1.0, -3.0, -5.0, -4.0, -5.0 };
+var _t_data_offset: f64[5] = { 10.0, 10.2, 10.0, 11.0, 10.0 };
+var _t_data_small: f64[5] = { 0.0, 1.0, 3.0, 1.0, 0.0 };
+var _t_data_two: f64[2] = { 1.0, 2.0 };
+
+# Test inputs (a local array can't have an initializer).
+var _t_zs: i64[6] = { 1, 6, 7, 8, 17, 35 };
+var _t_em: f64[3] = { 69.9377, 71.9348, 73.9318 };
+var _t_ei: f64[3] = { 1.0, 0.6399, 0.1024 };
+var _t_a1: i64[2] = { 262, 1 };
+var _t_a2: i64[2] = { 6, 0x100000000 };
+var _t_a3: i64[2] = { 26, -1 };
+var _t_a4: i64[4] = { 0, -1, 6, 1 };
+var _t_a0: i64[2] = { 6, 0 };
+var _t_want: f64[8] = { 0.7, 0.4, 0.5, 0.2, 0.1, 0.3, 0.8, 0.6 };   # −NaN, −0, +0, 1, 2 (in input order), +NaN
+
+# ── Beer–Lambert ──
+
+fn _t_beer_lambert_basic() {
+    test_group("beer_lambert_basic");
+    var a: f64 = absorbance(100.0, 1.0, 0.01);
+    assert(near(a, 1.0, eps64()) == 1, "ε=100, l=1, c=0.01 → A = 1");
+}
+
+fn _t_transmittance_at_a1() {
+    test_group("transmittance_at_a1");
+    var t: f64 = transmittance(1.0);
+    assert(near(t, 0.1, 0.001) == 1, "A = 1 → T = 0.1");
+}
+
+fn _t_transmittance_at_a0() {
+    test_group("transmittance_at_a0");
+    var t: f64 = transmittance(0.0);
+    assert(near(t, 1.0, eps64()) == 1, "A = 0 → T = 1");
+}
+
+fn _t_absorbance_transmittance_roundtrip() {
+    test_group("absorbance_transmittance_roundtrip");
+    var a: f64 = 0.75;
+    var t: f64 = transmittance(a);
+    var tb, vb = absorbance_from_transmittance(t);
+    var back: f64 = ok_f(tb, vb, "absorbance_from_transmittance: Ok");
+    assert(near(back, a, 0.0000000001) == 1, "A → T → A");
+}
+
+fn _t_absorbance_from_transmittance_zero_is_error() {
+    test_group("absorbance_from_transmittance_zero_is_error");
+    var t, v = absorbance_from_transmittance(0.0);
+    assert(is_err_result(t) == 1, "T = 0");
+}
+
+fn _t_absorbance_from_transmittance_over_one_is_error() {
+    test_group("absorbance_from_transmittance_over_one_is_error");
+    var t, v = absorbance_from_transmittance(1.5);
+    assert(is_err_result(t) == 1, "T = 1.5");
+}
+
+fn _t_concentration_from_absorbance_basic() {
+    test_group("concentration_from_absorbance_basic");
+    var t, v = concentration_from_absorbance(1.0, 100.0, 1.0);
+    var c: f64 = ok_f(t, v, "Ok");
+    assert(near(c, 0.01, 0.0000000001) == 1, "c = A/(εl) = 0.01");
+}
+
+fn _t_beer_lambert_nan_is_error() {
+    test_group("beer_lambert_nan_is_error");
+    var inf: f64 = _KM_INF;
+    var t1, v1 = absorbance_from_transmittance(_km_nan());
+    assert(is_err_result(t1) == 1, "T = NaN");
+    var t2, v2 = concentration_from_absorbance(1.0, _km_nan(), 1.0);
+    assert(is_err_result(t2) == 1, "ε = NaN");
+    var t3, v3 = concentration_from_absorbance(1.0, 100.0, _km_nan());
+    assert(is_err_result(t3) == 1, "l = NaN");
+    var t4, v4 = concentration_from_absorbance(1.0, inf, 1.0);
+    assert(is_err_result(t4) == 1, "ε = ∞");
+}
+
+# ── photon conversions ──
+
+fn _t_photon_energy_wavelength_roundtrip() {
+    test_group("photon_energy_wavelength_roundtrip");
+    var lambda: f64 = 0.0000005;
+    var te, ve = photon_energy_from_wavelength(lambda);
+    var e: f64 = ok_f(te, ve, "E(λ): Ok");
+    var tb, vb = wavelength_from_energy(e);
+    var back: f64 = ok_f(tb, vb, "λ(E): Ok");
+    var rel: f64 = absf(back - lambda) / lambda;
+    assert(rel < 0.0000000001, "λ → E → λ");
+}
+
+fn _t_visible_light_energy_range() {
+    test_group("visible_light_energy_range");
+    var tr, vr = photon_energy_from_wavelength(0.0000007);
+    var er: f64 = ok_f(tr, vr, "700 nm: Ok");
+    var e_red: f64 = joules_to_ev(er);
+    var tv, vv = photon_energy_from_wavelength(0.0000004);
+    var ev: f64 = ok_f(tv, vv, "400 nm: Ok");
+    var e_violet: f64 = joules_to_ev(ev);
+    assert(e_red > 1.7 && e_red < 1.85, "red ≈ 1.77 eV");
+    assert(e_violet > 3.0 && e_violet < 3.2, "violet ≈ 3.10 eV");
+}
+
+fn _t_ev_joules_roundtrip() {
+    test_group("ev_joules_roundtrip");
+    var ev: f64 = 13.6;
+    var j: f64 = ev_to_joules(ev);
+    var back: f64 = joules_to_ev(j);
+    assert(near(back, ev, 0.0000000001) == 1, "eV → J → eV");
+}
+
+fn _t_frequency_wavelength_roundtrip() {
+    test_group("frequency_wavelength_roundtrip");
+    var lambda: f64 = 0.0000005;
+    var tf, vf = frequency_from_wavelength(lambda);
+    var freq: f64 = ok_f(tf, vf, "ν(λ): Ok");
+    var back: f64 = KM_SPEED_OF_LIGHT / freq;
+    var rel: f64 = absf(back - lambda) / lambda;
+    assert(rel < 0.0000000001, "λ → ν → λ");
+}
+
+fn _t_zero_wavelength_is_error() {
+    test_group("zero_wavelength_is_error");
+    var t1, v1 = photon_energy_from_wavelength(0.0);
+    assert(is_err_result(t1) == 1, "E(0)");
+    var t2, v2 = frequency_from_wavelength(0.0);
+    assert(is_err_result(t2) == 1, "ν(0)");
+}
+
+fn _t_zero_energy_is_error() {
+    test_group("zero_energy_is_error");
+    var t, v = wavelength_from_energy(0.0);
+    assert(is_err_result(t) == 1, "λ(0)");
+}
+
+fn _t_photon_nan_inf_is_error() {
+    test_group("photon_nan_inf_is_error");
+    var inf: f64 = _KM_INF;
+    var nan: f64 = _km_nan();
+    var t1, v1 = photon_energy_from_wavelength(nan);
+    assert(is_err_result(t1) == 1, "E(NaN)");
+    var t2, v2 = photon_energy_from_wavelength(inf);
+    assert(is_err_result(t2) == 1, "E(∞)");
+    var t3, v3 = wavelength_from_energy(nan);
+    assert(is_err_result(t3) == 1, "λ(NaN)");
+    var t4, v4 = frequency_from_wavelength(nan);
+    assert(is_err_result(t4) == 1, "ν(NaN)");
+    var t5, v5 = wavenumber_from_wavelength(nan);
+    assert(is_err_result(t5) == 1, "ν̃(NaN)");
+    var t6, v6 = wavelength_from_wavenumber(nan);
+    assert(is_err_result(t6) == 1, "λ(ν̃ = NaN)");
+    var t7, v7 = wavelength_from_wavenumber(inf);
+    assert(is_err_result(t7) == 1, "λ(ν̃ = ∞)");
+}
+
+# ── Bohr model ──
+
+fn _t_hydrogen_ground_state() {
+    test_group("hydrogen_ground_state");
+    var t, v = bohr_energy_level(1, 1);
+    var e: f64 = ok_f(t, v, "Ok");
+    assert(near(e, -13.6, 0.01) == 1, "H ground state ≈ −13.6 eV");
+}
+
+fn _t_hydrogen_n2() {
+    test_group("hydrogen_n2");
+    var t, v = bohr_energy_level(1, 2);
+    var e: f64 = ok_f(t, v, "Ok");
+    assert(near(e, -3.4, 0.01) == 1, "H n = 2 ≈ −3.4 eV");
+}
+
+fn _t_helium_ion_ground_state() {
+    test_group("helium_ion_ground_state");
+    var t, v = bohr_energy_level(2, 1);
+    var e: f64 = ok_f(t, v, "Ok");
+    assert(near(e, -54.4, 0.1) == 1, "He⁺ ground state ≈ −54.4 eV");
+}
+
+fn _t_bohr_zero_n_is_error() {
+    test_group("bohr_zero_n_is_error");
+    var t, v = bohr_energy_level(1, 0);
+    assert(is_err_result(t) == 1, "n = 0");
+}
+
+fn _t_bohr_zero_z_is_error() {
+    test_group("bohr_zero_z_is_error");
+    var t, v = bohr_energy_level(0, 1);
+    assert(is_err_result(t) == 1, "Z = 0");
+}
+
+fn _t_hydrogen_lyman_alpha() {
+    test_group("hydrogen_lyman_alpha");
+    var t, v = rydberg_wavelength(1, 1, 2);
+    var lambda: f64 = ok_f(t, v, "Ok");
+    var nm: f64 = lambda * 1000000000.0;
+    assert(near(nm, 121.502, 0.01) == 1, "R∞ Lyman-α = 121.502 nm");
+}
+
+fn _t_hydrogen_balmer_alpha() {
+    test_group("hydrogen_balmer_alpha");
+    var t, v = rydberg_wavelength(1, 2, 3);
+    var lambda: f64 = ok_f(t, v, "Ok");
+    var nm: f64 = lambda * 1000000000.0;
+    assert(near(nm, 656.112, 0.01) == 1, "R∞ Hα = 656.112 nm");
+}
+
+fn _t_rydberg_invalid_quantum_numbers() {
+    test_group("rydberg_invalid_quantum_numbers");
+    var t1, v1 = rydberg_wavelength(1, 0, 2);
+    assert(is_err_result(t1) == 1, "n_lower = 0");
+    var t2, v2 = rydberg_wavelength(1, 2, 2);
+    assert(is_err_result(t2) == 1, "n_upper = n_lower");
+    var t3, v3 = rydberg_wavelength(1, 3, 2);
+    assert(is_err_result(t3) == 1, "n_upper < n_lower");
+}
+
+fn _t_transition_energy_emission_positive() {
+    test_group("transition_energy_emission_positive");
+    var t, v = bohr_transition_energy(1, 1, 3);
+    var e: f64 = ok_f(t, v, "Ok");
+    assert(e > 0.0, "emission energy > 0");
+}
+
+fn _t_transition_energy_requires_upper_above_lower() {
+    test_group("transition_energy_requires_upper_above_lower");
+    var t1, v1 = bohr_transition_energy(1, 3, 1);
+    assert(is_err_result(t1) == 1, "3 → 1 as lower 3");
+    var t2, v2 = bohr_transition_energy(1, 2, 2);
+    assert(is_err_result(t2) == 1, "2 → 2");
+    var t3, v3 = bohr_transition_energy(1, 0, 2);
+    assert(is_err_result(t3) == 1, "n_lower = 0");
+}
+
+# ── spectral series ──
+
+fn _t_lyman_alpha_from_series() {
+    test_group("lyman_alpha_from_series");
+    var t, v = spectral_series_wavelength(KM_SPECTRAL_SERIES_LYMAN, 1);
+    var nm_ok: f64 = ok_f(t, v, "Ok");
+    var nm: f64 = nm_ok * 1000000000.0;
+    assert(near(nm, 121.568, 0.01) == 1, "Lyα = 121.568 nm (R_H)");
+}
+
+fn _t_balmer_alpha_from_series() {
+    test_group("balmer_alpha_from_series");
+    var t, v = spectral_series_wavelength(KM_SPECTRAL_SERIES_BALMER, 1);
+    var nm_ok: f64 = ok_f(t, v, "Ok");
+    var nm: f64 = nm_ok * 1000000000.0;
+    assert(near(nm, 656.470, 0.01) == 1, "Hα = 656.470 nm (R_H)");
+}
+
+fn _t_balmer_beta_and_paschen_alpha_from_series() {
+    test_group("balmer_beta_and_paschen_alpha_from_series");
+    var tb, vb = spectral_series_wavelength(KM_SPECTRAL_SERIES_BALMER, 2);
+    var hb_ok: f64 = ok_f(tb, vb, "Hβ: Ok");
+    var hb: f64 = hb_ok * 1000000000.0;
+    assert(near(hb, 486.274, 0.01) == 1, "Hβ = 486.274 nm");
+    var tp, vp = spectral_series_wavelength(KM_SPECTRAL_SERIES_PASCHEN, 1);
+    var pa_ok: f64 = ok_f(tp, vp, "Paα: Ok");
+    var pa: f64 = pa_ok * 1000000000.0;
+    assert(near(pa, 1875.627, 0.01) == 1, "Paα = 1875.627 nm");
+}
+
+fn _t_rydberg_hydrogen_value() {
+    test_group("rydberg_hydrogen_value");
+    var rh: f64 = _KM_RYDBERG_HYDROGEN;
+    assert(near(rh, 10967758.34, 0.01) == 1, "R_H = 10 967 758.34 m⁻¹");
+}
+
+fn _t_series_zero_line_is_error() {
+    test_group("series_zero_line_is_error");
+    var t, v = spectral_series_wavelength(KM_SPECTRAL_SERIES_LYMAN, 0);
+    assert(is_err_result(t) == 1, "line 0");
+}
+
+fn _t_series_line_overflow_is_error() {
+    test_group("series_line_overflow_is_error");
+    var t1, v1 = spectral_series_wavelength(KM_SPECTRAL_SERIES_PFUND, 0xFFFFFFFF);
+    assert(is_err_result(t1) == 1, "Pfund, u32::MAX: 5 + line overflows");
+    var t2, v2 = spectral_series_wavelength(KM_SPECTRAL_SERIES_LYMAN, 0xFFFFFFFE);
+    assert(is_ok(t2) == 1, "Lyman, u32::MAX − 1: 1 + line = u32::MAX");
+}
+
+fn _t_balmer_series_is_visible() {
+    test_group("balmer_series_is_visible");
+    var line = 1;
+    while (line <= 4) {
+        var t, v = spectral_series_wavelength(KM_SPECTRAL_SERIES_BALMER, line);
+        var nm_ok: f64 = ok_f(t, v, "Ok");
+        var nm: f64 = nm_ok * 1000000000.0;
+        assert(nm > 380.0 && nm < 700.0, "Balmer line visible");
+        line = line + 1;
+    }
+}
+
+# ── wavenumber ──
+
+fn _t_wavenumber_roundtrip() {
+    test_group("wavenumber_roundtrip");
+    var lambda: f64 = 0.0000005;
+    var tw, vw = wavenumber_from_wavelength(lambda);
+    var wn: f64 = ok_f(tw, vw, "ν̃(λ): Ok");
+    var tb, vb = wavelength_from_wavenumber(wn);
+    var back: f64 = ok_f(tb, vb, "λ(ν̃): Ok");
+    var rel: f64 = absf(back - lambda) / lambda;
+    assert(rel < 0.0000000001, "λ → ν̃ → λ");
+}
+
+fn _t_wavenumber_ir_range() {
+    test_group("wavenumber_ir_range");
+    var t, v = wavenumber_from_wavelength(0.00001);
+    var wn: f64 = ok_f(t, v, "Ok");
+    assert(near(wn, 1000.0, 0.1) == 1, "10 µm → 1000 cm⁻¹");
+}
+
+# ── harmonic oscillator ──
+
+fn _t_reduced_mass_equal_masses() {
+    test_group("reduced_mass_equal_masses");
+    var t, v = reduced_mass(1.0, 1.0);
+    var mu: f64 = ok_f(t, v, "Ok");
+    assert(near(mu, 0.5, eps64()) == 1, "μ(1, 1) = 0.5");
+}
+
+fn _t_oscillator_rotor_nan_is_error() {
+    test_group("oscillator_rotor_nan_is_error");
+    var inf: f64 = _KM_INF;
+    var nan: f64 = _km_nan();
+    var t1, v1 = reduced_mass(nan, 1.0);
+    assert(is_err_result(t1) == 1, "μ(NaN, 1)");
+    var t2, v2 = reduced_mass(1.0, inf);
+    assert(is_err_result(t2) == 1, "μ(1, ∞)");
+    var t3, v3 = vibrational_frequency(nan, 1.0);
+    assert(is_err_result(t3) == 1, "ω(k = NaN)");
+    var t4, v4 = vibrational_frequency(1.0, nan);
+    assert(is_err_result(t4) == 1, "ω(μ = NaN)");
+    var t5, v5 = rotational_constant(nan);
+    assert(is_err_result(t5) == 1, "B(NaN)");
+}
+
+fn _t_reduced_mass_heavy_light() {
+    test_group("reduced_mass_heavy_light");
+    var t, v = reduced_mass(1.0, 1000000.0);
+    var mu: f64 = ok_f(t, v, "Ok");
+    assert(near(mu, 1.0, 0.001) == 1, "μ ≈ m_light");
+}
+
+fn _t_harmonic_oscillator_ground_state() {
+    test_group("harmonic_oscillator_ground_state");
+    var tp: f64 = 2.0 * pi();
+    var hbar: f64 = KM_PLANCK / tp;
+    var omega: f64 = 100000000000000.0;
+    var e0: f64 = harmonic_oscillator_energy(0, omega);
+    var want: f64 = (0.5 * hbar) * omega;
+    assert(near(e0, want, 0.000000000000000000000000000001) == 1, "E₀ = ½ħω");
+}
+
+fn _t_harmonic_oscillator_spacing() {
+    test_group("harmonic_oscillator_spacing");
+    var omega: f64 = 100000000000000.0;
+    var e0: f64 = harmonic_oscillator_energy(0, omega);
+    var e1: f64 = harmonic_oscillator_energy(1, omega);
+    var e2: f64 = harmonic_oscillator_energy(2, omega);
+    var d: f64 = (e1 - e0) - (e2 - e1);
+    assert(absf(d) < 0.000000000000000000000000000001, "equal spacing");
+}
+
+fn _t_vibrational_frequency_basic() {
+    test_group("vibrational_frequency_basic");
+    var t, v = vibrational_frequency(500.0, 0.00000000000000000000000000166);
+    var omega: f64 = ok_f(t, v, "Ok");
+    assert(omega > 500000000000000.0 && omega < 600000000000000.0, "5e14 < ω < 6e14");
+}
+
+# ── rotational spectroscopy ──
+
+fn _t_rigid_rotor_j0_is_zero() {
+    test_group("rigid_rotor_j0_is_zero");
+    var e: f64 = rigid_rotor_energy(0, 10000000000.0);
+    assert(absf(e) < eps64(), "E₀ = 0");
+}
+
+fn _t_rigid_rotor_increases_with_j() {
+    test_group("rigid_rotor_increases_with_j");
+    var e1: f64 = rigid_rotor_energy(1, 10000000000.0);
+    var e2: f64 = rigid_rotor_energy(2, 10000000000.0);
+    assert(e2 > e1, "E₂ > E₁");
+}
+
+fn _t_rotational_constant_positive() {
+    test_group("rotational_constant_positive");
+    var t, v = rotational_constant(0.0000000000000000000000000000000000000000000001);
+    var b: f64 = ok_f(t, v, "Ok");
+    assert(b > 0.0, "B > 0");
+}
+
+fn _t_rotational_constant_zero_inertia_is_error() {
+    test_group("rotational_constant_zero_inertia_is_error");
+    var t, v = rotational_constant(0.0);
+    assert(is_err_result(t) == 1, "I = 0");
+}
+
+fn _t_diatomic_moment_of_inertia_basic() {
+    test_group("diatomic_moment_of_inertia_basic");
+    var i: f64 = diatomic_moment_of_inertia(0.00000000000000000000000001, 0.0000000001);
+    var want: f64 = 0.0000000000000000000000000000000000000000000001;
+    assert(absf(i - want) < 0.000000000000000000000000000000000000000000000001, "I = μr²");
+}
+
+# ── isotope patterns ──
+
+var _t_ch4: i64[4] = { 6, 1, 1, 4 };
+var _t_cl2: i64[2] = { 17, 2 };
+var _t_h88: i64[2] = { 1, 88 };
+var _t_c168: i64[2] = { 6, 168 };
+var _t_big: i64[10] = { 6, 1000, 1, 2000, 8, 500, 16, 50, 35, 20 };
+var _t_z0: i64[2] = { 0, 1 };
+var _t_z119: i64[4] = { 6, 1, 119, 2 };
+var _t_fe2: i64[2] = { 26, 2 };
+
+fn _t_isotope_pattern_ch4() {
+    test_group("isotope_pattern_ch4");
+    var out = alloc(16 * 64);
+    var t, n = pattern_of(&_t_ch4, 2, out, 64);
+    assert(is_ok(t) == 1 && n > 0, "Ok, not empty");
+    assert(near(pm(out, 0), 16.0, 0.1) == 1, "base peak near 16");
+    assert(near(pi_(out, 0), 1.0, eps64()) == 1, "normalised to 1");
+    assert(n == 2, "M and M+1 only");
+    assert(near(pi_(out, 1), 0.011276, 0.000001) == 1, "M+1/M = 0.011276 (IUPAC 2009)");
+}
+
+fn _t_hydrogen_abundances_iupac_2009() {
+    test_group("hydrogen_abundances_iupac_2009");
+    var p, n = isotope_abundances(1);
+    assert(n == 2, "two hydrogen isotopes");
+    assert(bits(at(p, 0)) == bits(1.00783) && bits(at(p, 1)) == bits(0.999885), "¹H (1.00783, 0.999885)");
+    assert(bits(at(p, 2)) == bits(2.0141) && bits(at(p, 3)) == bits(0.000115), "²H (2.01410, 0.000115)");
+    var k = 0;
+    while (k < 6) {
+        var q, m = isotope_abundances(_t_zs[k]);
+        var total: f64 = -0.0;              # Rust's `.sum()`
+        var j = 0;
+        while (j < m) {
+            total = total + at(q, 2 * j + 1);
+            j = j + 1;
+        }
+        assert(near(total, 1.0, 0.000000001) == 1, "Σ abundances = 1");
+        k = k + 1;
+    }
+}
+
+fn _t_isotope_pattern_chlorine_doublet() {
+    test_group("isotope_pattern_chlorine_doublet");
+    var out = alloc(16 * 64);
+    var t, n = pattern_of(&_t_cl2, 1, out, 64);
+    assert(is_ok(t) == 1 && n == 3, "three peaks");
+    var k = 0;
+    while (k < 3) {
+        assert(near(pm(out, k), _t_em[k], 0.001) == 1, "mass");
+        assert(near(pi_(out, k), _t_ei[k], 0.0001) == 1, "intensity");
+        k = k + 1;
+    }
+}
+
+fn _t_isotope_pattern_empty_is_error() {
+    test_group("isotope_pattern_empty_is_error");
+    var out = alloc(16 * 8);
+    var t, v = isotope_pattern(out, 0, out, 8);
+    assert(is_invalid(t, v) == 1, "no atoms");
+}
+
+fn _t_isotope_pattern_large_molecules_do_not_panic() {
+    test_group("isotope_pattern_large_molecules_do_not_panic");
+    var out = alloc(16 * 1024);
+    var which = 0;
+    while (which < 3) {
+        var pairs = &_t_h88;
+        var np = 1;
+        if (which == 1) { pairs = &_t_c168; }
+        if (which == 2) {
+            pairs = &_t_big;
+            np = 5;
+        }
+        var t, n = pattern_of(pairs, np, out, 1024);
+        assert(is_ok(t) == 1 && n > 0, "Ok, not empty");
+        var finite = 1;
+        var sorted = 1;
+        var base: f64 = 0.0;
+        var k = 0;
+        while (k < n) {
+            if (_km_is_finite(pm(out, k)) != 1 || _km_is_finite(pi_(out, k)) != 1) { finite = 0; }
+            if (k > 0) {
+                var m0: f64 = pm(out, k - 1);
+                var m1: f64 = pm(out, k);
+                if (m0 >= m1) { sorted = 0; }
+            }
+            base = _km_max(base, pi_(out, k));
+            k = k + 1;
+        }
+        assert(finite == 1, "every mass and intensity finite");
+        assert(sorted == 1, "sorted by mass");
+        assert(near(base, 1.0, eps64()) == 1, "base peak 1");
+        which = which + 1;
+    }
+}
+
+fn _t_isotope_pattern_c168_matches_binomial() {
+    test_group("isotope_pattern_c168_matches_binomial");
+    var out = alloc(16 * 256);
+    var t, n = pattern_of(&_t_c168, 1, out, 256);
+    assert(is_ok(t) == 1 && n >= 2, "Ok");
+    var r: f64 = 0.0107 / 0.9893;
+    var m0: f64 = 1.0 / (168.0 * r);
+    assert(near(pi_(out, 0), m0, 0.000000001) == 1, "M = 1/(168·r)");
+    assert(near(pi_(out, 1), 1.0, eps64()) == 1, "M+1 is the base peak");
+}
+
+fn _t_isotope_pattern_unknown_element_is_error() {
+    test_group("isotope_pattern_unknown_element_is_error");
+    var out = alloc(16 * 8);
+    var t1, v1 = pattern_of(&_t_z0, 1, out, 8);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_ELEMENT) == 1, "Z = 0");
+    var t2, v2 = pattern_of(&_t_z119, 2, out, 8);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_ELEMENT) == 1, "Z = 119");
+}
+
+fn _t_isotope_pattern_element_without_data_uses_standard_weight() {
+    test_group("isotope_pattern_element_without_data_uses_standard_weight");
+    var fe: f64 = element_atomic_mass(element_lookup_by_number(26));
+    var out = alloc(16 * 8);
+    var t, n = pattern_of(&_t_fe2, 1, out, 8);
+    assert(is_ok(t) == 1 && n == 1, "one peak");
+    var d: f64 = pm(out, 0) - (2.0 * fe);
+    assert(absf(d) < 0.000000000001, "at 2 × 55.845");
+}
+
+# ── FFT spectroscopy, peak detection ──
+
+fn _t_fft_spectrum_sine_wave() {
+    test_group("fft_spectrum_sine_wave");
+    var n = 64;
+    var freq: f64 = 4.0;
+    var sig = buf(n);
+    var i = 0;
+    while (i < n) {
+        var tp: f64 = 2.0 * pi();
+        var fi: f64 = f64_from(i);
+        var fn_: f64 = f64_from(n);
+        var x: f64 = ((tp * freq) * fi) / fn_;
+        put(sig, i, _km_cr_sin(x));
+        i = i + 1;
+    }
+    var out = buf(n);
+    var t, m = fft_spectrum(sig, n, out, n);
+    assert(is_ok(t) == 1 && m == 33, "n/2 + 1 bins");
+    var best = 0;
+    var k = 1;
+    while (k < m) {
+        if (at(out, k) >= at(out, best)) { best = k; }     # Rust's max_by: the last maximum
+        k = k + 1;
+    }
+    assert(best == 4, "peak at frequency bin 4");
+}
+
+fn _t_fft_spectrum_non_power_of_2_is_error() {
+    test_group("fft_spectrum_non_power_of_2_is_error");
+    var sig = buf(10);
+    var k = 0;
+    while (k < 10) { put(sig, k, 1.0); k = k + 1; }
+    var out = buf(20);
+    var t, v = fft_spectrum(sig, 10, out, 20);
+    assert(is_invalid(t, v) == 1, "n = 10");
+}
+
+fn _t_find_peaks_basic() {
+    test_group("find_peaks_basic");
+    var out = buf(8);
+    var n = peaks_of(&_t_data_basic, 8, 0.1, out);
+    assert(contains(out, n, 2) == 1, "peak at 2 (3.0)");
+    assert(contains(out, n, 5) == 1, "peak at 5 (2.0)");
+}
+
+fn _t_find_peaks_threshold_filters() {
+    test_group("find_peaks_threshold_filters");
+    var out = buf(8);
+    var n = peaks_of(&_t_data_filter, 8, 0.5, out);
+    assert(contains(out, n, 2) == 1, "3.0 > 1.5");
+    assert(contains(out, n, 5) == 0, "0.6 < 1.5");
+}
+
+fn _t_find_peaks_empty() {
+    test_group("find_peaks_empty");
+    var out = buf(4);
+    assert(peaks_of(&_t_data_two, 2, 0.1, out) == 0, "two points");
+    assert(peaks_of(&_t_data_two, 0, 0.1, out) == 0, "no points");
+}
+
+fn _t_find_peaks_all_negative() {
+    test_group("find_peaks_all_negative");
+    var out = buf(7);
+    var n = peaks_of(&_t_data_neg, 7, 0.5, out);
+    assert(n == 1 && load64(out) == 2, "[2]: −4 < −5 + 0.5·4");
+    var m = peaks_of(&_t_data_neg, 7, 0.0, out);
+    assert(m == 2 && load64(out) == 2 && load64(out + 8) == 5, "[2, 5]");
+}
+
+fn _t_find_peaks_threshold_relative_to_range() {
+    test_group("find_peaks_threshold_relative_to_range");
+    var out = buf(5);
+    var n = peaks_of(&_t_data_offset, 5, 0.5, out);
+    assert(n == 1 && load64(out) == 3, "[3]: 10.2 < 10.5");
+}
+
+fn _t_find_peaks_invalid_threshold_is_empty() {
+    test_group("find_peaks_invalid_threshold_is_empty");
+    var out = buf(5);
+    var inf: f64 = _KM_INF;
+    assert(peaks_of(&_t_data_small, 5, _km_nan(), out) == 0, "NaN");
+    assert(peaks_of(&_t_data_small, 5, -0.1, out) == 0, "−0.1");
+    assert(peaks_of(&_t_data_small, 5, 1.5, out) == 0, "1.5");
+    assert(peaks_of(&_t_data_small, 5, inf, out) == 0, "∞");
+    assert(peaks_of(&_t_data_small, 5, 1.0, out) == 0, "1.0: nothing exceeds max");
+}
+
+fn _t_find_peaks_ignores_non_finite() {
+    test_group("find_peaks_ignores_non_finite");
+    var d = buf(7);
+    put(d, 0, 0.0);
+    put(d, 1, _km_nan());
+    put(d, 2, 0.0);
+    put(d, 3, 2.0);
+    put(d, 4, 0.0);
+    put(d, 5, 1.0);
+    put(d, 6, 0.0);
+    var out = buf(7);
+    var n = peaks_of(d, 7, 0.25, out);
+    assert(n == 2 && load64(out) == 3 && load64(out + 8) == 5, "[3, 5]");
+    var nans = buf(4);
+    var k = 0;
+    while (k < 4) { put(nans, k, _km_nan()); k = k + 1; }
+    assert(peaks_of(nans, 4, 0.5, out) == 0, "all NaN");
+}
+
+# ── rust-old/tests/integration.rs (the spectroscopy ones) ──
+
+fn _t_beer_lambert_and_transmittance() {
+    test_group("beer_lambert_and_transmittance (integration)");
+    var a: f64 = absorbance(100.0, 1.0, 0.01);
+    var t: f64 = transmittance(a);
+    assert(near(t, 0.1, 0.001) == 1, "A = 1 → T ≈ 0.1");
+}
+
+fn _t_hydrogen_balmer_series_visible() {
+    test_group("hydrogen_balmer_series_visible (integration)");
+    var t, v = spectral_series_wavelength(KM_SPECTRAL_SERIES_BALMER, 1);
+    var nm_ok: f64 = ok_f(t, v, "Ok");
+    var nm: f64 = nm_ok * 1000000000.0;
+    assert(nm > 600.0 && nm < 700.0, "Hα is red");
+}
+
+# ── Cyrius-only ──
+
+# Rust's integers as words: never wrapped (port plan §6.4).
+fn _t_cyrius_out_of_type() {
+    test_group("cyrius: u8 / u32 arguments outside their types");
+    var t1, v1 = bohr_energy_level(256, 1);
+    assert(is_invalid(t1, v1) == 1, "Z = 256 (not Z = 0 mod 256)");
+    var t2, v2 = bohr_energy_level(0 - 1, 1);
+    assert(is_invalid(t2, v2) == 1, "Z = −1");
+    var t3, v3 = bohr_energy_level(1, 0x100000000);
+    assert(is_invalid(t3, v3) == 1, "n = 2³² (not n = 0)");
+    var t3b, v3b = bohr_energy_level(1, 0x100000001);
+    assert(is_invalid(t3b, v3b) == 1, "n = 2³² + 1 (not n = 1)");
+    var t4, v4 = bohr_energy_level(255, 0xFFFFFFFF);
+    assert(is_ok(t4) == 1, "Z = 255, n = u32::MAX: in range");
+    var t5, v5 = rydberg_wavelength(257, 1, 2);
+    assert(is_invalid(t5, v5) == 1, "rydberg Z = 257");
+    var t6, v6 = rydberg_wavelength(1, 1, 0x100000002);
+    assert(is_invalid(t6, v6) == 1, "rydberg n_upper = 2³² + 2");
+    var t7, v7 = bohr_transition_energy(1, 1, 0 - 3);
+    assert(is_invalid(t7, v7) == 1, "transition n_upper = −3");
+    var t8, v8 = spectral_series_wavelength(KM_SPECTRAL_SERIES_LYMAN, 0x100000000);
+    assert(is_invalid(t8, v8) == 1, "line = 2³²");
+    var t9, v9 = spectral_series_wavelength(KM_SPECTRAL_SERIES_COUNT, 1);
+    assert(is_invalid(t9, v9) == 1, "a word that is no KmSpectralSeries value");
+    var t10, v10 = spectral_series_wavelength(0 - 1, 0);
+    assert(is_invalid(t10, v10) == 1, "an invalid series is checked first");
+    assert(spectral_series_n_lower(KM_SPECTRAL_SERIES_COUNT) == 0, "n_lower of no series: 0");
+    assert(spectral_series_n_lower(KM_SPECTRAL_SERIES_PFUND) == 5, "Pfund: 5");
+    assert(is_nan(harmonic_oscillator_energy(0 - 1, 1.0)) == 1, "oscillator n = −1: NaN");
+    assert(is_nan(harmonic_oscillator_energy(0x100000000, 1.0)) == 1, "oscillator n = 2³²: NaN");
+    assert(is_nan(rigid_rotor_energy(0x100000000, 1.0)) == 1, "rotor J = 2³²: NaN");
+    var e: f64 = rigid_rotor_energy(0xFFFFFFFF, 1.0);
+    assert(is_nan(e) == 0, "rotor J = u32::MAX: a value");
+    var p1, n1 = isotope_abundances(256 + 1);
+    assert(p1 == 0 && n1 == 0, "isotope_abundances(257): empty (not Z = 1)");
+    var p2, n2 = isotope_abundances(0 - 1);
+    assert(p2 == 0 && n2 == 0, "isotope_abundances(−1): empty");
+    var p3, n3 = isotope_abundances(26);
+    assert(p3 == 0 && n3 == 0, "isotope_abundances(26): no data");
+    var p4, n4 = isotope_abundances(35);
+    assert(p4 != 0 && n4 == 2, "isotope_abundances(35): Br's two");
+    var out = alloc(16 * 64);
+    var ta, va = pattern_of(&_t_a1, 1, out, 64);
+    assert(is_err_code(ta, va, KM_ERR_INVALID_ELEMENT) == 1, "pattern Z = 262 (not C): InvalidElement");
+    var tb, vb = pattern_of(&_t_a2, 1, out, 64);
+    assert(is_invalid(tb, vb) == 1, "pattern count = 2³² (not 0): InvalidInput");
+    var tc, vc = pattern_of(&_t_a3, 1, out, 64);
+    assert(is_invalid(tc, vc) == 1, "pattern count = −1 on an element without data");
+    var td, vd = pattern_of(&_t_a4, 2, out, 64);
+    assert(is_err_code(td, vd, KM_ERR_INVALID_ELEMENT) == 1, "Z first, then the count, per atom in order");
+}
+
+# The caller buffers and slices.
+fn _t_cyrius_buffers() {
+    test_group("cyrius: caller buffers, slices");
+    # isotope_pattern: Cl₂ has 3 peaks.
+    var out = alloc(16 * 8);
+    store64(out, 0x1234);
+    var t1, v1 = pattern_of(&_t_cl2, 1, out, 2);
+    assert(is_invalid(t1, v1) == 1 && load64(out) == 0x1234, "cap 2 < 3 peaks: Err, buffer untouched");
+    var t2, v2 = pattern_of(&_t_cl2, 1, 0, 0);
+    assert(is_invalid(t2, v2) == 1, "no buffer");
+    var t3, v3 = pattern_of(&_t_cl2, 1, out, 0 - 5);
+    assert(is_invalid(t3, v3) == 1, "negative cap");
+    var t4, v4 = pattern_of(&_t_cl2, 1, out, 3);
+    assert(is_ok(t4) == 1 && v4 == 3, "cap 3: Ok(3)");
+    var t5, v5 = isotope_pattern(0, 1, out, 8);
+    assert(is_invalid(t5, v5) == 1, "null atoms with n = 1");
+    var t6, v6 = isotope_pattern(out, 0 - 1, out, 8);
+    assert(is_invalid(t6, v6) == 1, "n = −1");
+    var t7, v7 = pattern_of(&_t_a0, 1, out, 8);
+    assert(is_ok(t7) == 1 && v7 == 1 && bits(pm(out, 0)) == 0 && bits(pi_(out, 0)) == bits(1.0),
+      "C₀: the initial peak (0, 1) unconvolved");
+    # fft_spectrum
+    var sig = buf(16);
+    var k = 0;
+    while (k < 16) { put(sig, k, 1.0 + f64_from(k)); k = k + 1; }
+    var o = buf(64);
+    store64(o, 0x5678);
+    var f1, w1 = fft_spectrum(sig, 16, o, 8);
+    assert(is_invalid(f1, w1) == 1 && load64(o) == 0x5678, "cap 8 < 9 bins: Err, untouched");
+    var f2, w2 = fft_spectrum(0, 16, o, 64);
+    assert(is_invalid(f2, w2) == 1, "null signal");
+    var f3, w3 = fft_spectrum(sig, 16, 0, 64);
+    assert(is_invalid(f3, w3) == 1, "null out");
+    var f4, w4 = fft_spectrum(sig, 0 - 16, o, 64);
+    assert(is_invalid(f4, w4) == 1, "n = −16");
+    var f5, w5 = fft_spectrum(sig, 0, o, 64);
+    assert(is_invalid(f5, w5) == 1, "n = 0");
+    var heap = buf(16);
+    var f6, w6 = fft_spectrum(sig, 16, heap, 9);
+    assert(is_ok(f6) == 1 && w6 == 9, "cap 9: the heap work table");
+    var inpl = buf(32);
+    var f7, w7 = fft_spectrum(sig, 16, inpl, 32);
+    assert(is_ok(f7) == 1 && w7 == 9, "cap 32 = 2n: in place");
+    var same = 1;
+    k = 0;
+    while (k < 9) {
+        if (load64(heap + 8 * k) != load64(inpl + 8 * k)) { same = 0; }
+        k = k + 1;
+    }
+    assert(same == 1, "the heap and in-place paths give the same bits");
+    var self_ = buf(32);
+    k = 0;
+    while (k < 16) { put(self_, k, 1.0 + f64_from(k)); k = k + 1; }
+    var f8, w8 = fft_spectrum(self_, 16, self_, 32);
+    assert(is_ok(f8) == 1 && w8 == 9, "signal = out: in place");
+    same = 1;
+    k = 0;
+    while (k < 9) {
+        if (load64(self_ + 8 * k) != load64(inpl + 8 * k)) { same = 0; }
+        k = k + 1;
+    }
+    assert(same == 1, "signal = out gives the same bits");
+    var one = buf(1);
+    put(one, 0, -3.0);
+    var f9, w9 = fft_spectrum(one, 1, o, 1);
+    assert(is_ok(f9) == 1 && w9 == 1 && bits(at(o, 0)) == bits(3.0), "n = 1: |x|");
+    # find_peaks: _t_data_basic has peaks 2 and 5.
+    var pk = buf(8);
+    store64(pk, 0x9abc);
+    var p1, q1 = find_peaks(&_t_data_basic, 8, 0.1, pk, 1);
+    assert(is_invalid(p1, q1) == 1 && load64(pk) == 0x9abc, "cap 1 < 2 peaks: Err, untouched");
+    var p2, q2 = find_peaks(&_t_data_basic, 8, 0.1, pk, 2);
+    assert(is_ok(p2) == 1 && q2 == 2 && load64(pk) == 2 && load64(pk + 8) == 5, "cap 2: Ok(2), counted first");
+    var p3, q3 = find_peaks(&_t_data_basic, 8, 0.1, pk, 3);
+    assert(is_ok(p3) == 1 && q3 == 2, "cap 3 = (n − 1)/2: written in one pass");
+    var p4, q4 = find_peaks(&_t_data_basic, 8, 1.0, 0, 0);
+    assert(is_ok(p4) == 1 && q4 == 0, "no peak above the maximum: Ok(0) with no buffer");
+    var p5, q5 = find_peaks(&_t_data_basic, 8, 0.1, 0, 0);
+    assert(is_invalid(p5, q5) == 1, "peaks but no buffer");
+    var p6, q6 = find_peaks(0, 3, 0.1, pk, 8);
+    assert(is_invalid(p6, q6) == 1, "null data with n = 3");
+    var p7, q7 = find_peaks(&_t_data_basic, 0 - 1, 0.1, pk, 8);
+    assert(is_invalid(p7, q7) == 1, "n = −1");
+    var p8, q8 = find_peaks(0, 0, 0.1, 0, 0);
+    assert(is_ok(p8) == 1 && q8 == 0, "the empty slice: Ok(0)");
+}
+
+# The isotope pattern's private helpers: the stable total-order sort and the typed thresholds, to the ulp.
+fn _t_cyrius_isotope_helpers() {
+    test_group("cyrius: isotope helpers (stable sort, thresholds)");
+    var r = alloc(16 * 8);
+    var nz: f64 = from_bits(0x8000000000000000);    # −0.0
+    var pz: f64 = from_bits(0x0000000000000000);    # +0.0
+    var pn: f64 = from_bits(0x7FF8000000000000);    # +NaN
+    var mn: f64 = from_bits(0xFFF8000000000000);    # −NaN
+    rec(r, 0, 2.0, 0.1);
+    rec(r, 1, 1.0, 0.2);
+    rec(r, 2, 2.0, 0.3);
+    rec(r, 3, nz, 0.4);
+    rec(r, 4, pz, 0.5);
+    rec(r, 5, pn, 0.6);
+    rec(r, 6, mn, 0.7);
+    rec(r, 7, 2.0, 0.8);
+    _km_isotope_sort(r, 8);
+    var ok = 1;
+    var k = 0;
+    while (k < 8) {
+        if (bits(pi_(r, k)) != bits(_t_want[k])) { ok = 0; }
+        k = k + 1;
+    }
+    assert(ok == 1, "total_cmp order, equal masses in input order (Rust's stable sort)");
+    # The binned mean depends on the order of equal masses: (m, a) then (m, b) is (m·a + m·b)/(a + b).
+    var s1 = alloc(16 * 2);
+    var d1 = alloc(16 * 2);
+    var mm: f64 = 0.1;
+    rec(s1, 0, mm, 0.3);
+    rec(s1, 1, mm, 0.7);
+    assert(_km_isotope_bin(s1, 2, d1) == 1, "equal masses merge");
+    var ia: f64 = 0.3;
+    var ib: f64 = 0.7;
+    var tot: f64 = ia + ib;
+    var mean: f64 = ((mm * ia) + (mm * ib)) / tot;
+    assert(bits(pm(d1, 0)) == bits(mean) && bits(pi_(d1, 0)) == bits(tot), "Rust's mean, in order");
+    # ISOTOPE_BIN_WIDTH_U = 0.5: |Δm| = 0.5 starts a bin, its predecessor merges.
+    var s2 = alloc(16 * 2);
+    rec(s2, 0, 0.0, 1.0);
+    rec(s2, 1, 0.5, 1.0);
+    assert(_km_isotope_bin(s2, 2, d1) == 2, "Δm = 0.5: two bins (0.5 + 1 ulp would merge)");
+    rec(s2, 1, from_bits(0x3FDFFFFFFFFFFFFF), 1.0);    # 0.5 − 1 ulp
+    assert(_km_isotope_bin(s2, 2, d1) == 1, "Δm = 0.5 − 1 ulp: one bin (0.5 − 1 ulp would not)");
+    # total ≤ 0 keeps the bin's mass; NaN starts a bin.
+    rec(s2, 0, 1.0, 0.0);
+    rec(s2, 1, 1.25, 0.0);
+    assert(_km_isotope_bin(s2, 2, d1) == 1 && bits(pm(d1, 0)) == bits(1.0) && bits(pi_(d1, 0)) == 0,
+      "total 0: the mass is kept");
+    rec(s2, 1, pn, 0.0);
+    assert(_km_isotope_bin(s2, 2, d1) == 2, "a NaN mass starts a bin");
+    # ISOTOPE_PRUNE_REL = 1e-12: kept from RN(1e-12) on (>=), its predecessor dropped.
+    var b = alloc(16 * 3);
+    var tol: f64 = 0.000000000001;
+    rec(b, 0, 1.0, 1.0);
+    rec(b, 1, 2.0, tol);
+    assert(_km_isotope_normalize(b, 2) == 2, "RN(1e-12) is kept");
+    rec(b, 0, 1.0, 1.0);
+    rec(b, 1, 2.0, from_bits(bits(tol) - 1));
+    assert(_km_isotope_normalize(b, 2) == 1, "RN(1e-12) − 1 ulp is pruned");
+    rec(b, 0, 1.0, pn);
+    rec(b, 1, 2.0, 0.5);
+    assert(_km_isotope_normalize(b, 2) == 1 && bits(pi_(b, 0)) == bits(1.0) && bits(pm(b, 0)) == bits(2.0),
+      "fold(0.0, max) ignores NaN; NaN / max is pruned");
+    rec(b, 0, 1.0, 0.0);
+    rec(b, 1, 2.0, 0.0);
+    assert(_km_isotope_normalize(b, 2) == 0, "all-zero intensities: no division, all pruned");
+    # ISOTOPE_REPORT_REL = 0.001: dropped at RN(0.001) (>), kept from its successor.
+    var rep: f64 = 0.001;
+    rec(b, 0, 1.0, 1.0);
+    rec(b, 1, 2.0, rep);
+    assert(_km_isotope_report(b, 2) == 1, "RN(0.001) is dropped");
+    rec(b, 0, 1.0, 1.0);
+    rec(b, 1, 2.0, from_bits(bits(rep) + 1));
+    assert(_km_isotope_report(b, 2) == 2, "RN(0.001) + 1 ulp is reported");
+    assert(_km_total_key(0x8000000000000000) < _km_total_key(0), "total_cmp: −0 < +0");
+}
+
+# The FFT transcription: exact transforms, the two work-table paths, Parseval, larger n.
+fn _t_cyrius_fft() {
+    test_group("cyrius: the FFT (hisab 1.4.0's num::fft)");
+    var e = 0;
+    while (e <= 16) {
+        var n = 1 << e;
+        var sig = buf(n);
+        var k = 0;
+        while (k < n) { put(sig, k, 0.0); k = k + 1; }
+        put(sig, 0, 1.0);
+        var out = buf(2 * n);
+        var t, m = fft_spectrum(sig, n, out, 2 * n);
+        var flat = 1;
+        k = 0;
+        while (k < m) {
+            if (bits(at(out, k)) != bits(1.0)) { flat = 0; }
+            k = k + 1;
+        }
+        assert(is_ok(t) == 1 && m == n / 2 + 1 && flat == 1, "an impulse: every bin exactly 1");
+        k = 0;
+        while (k < n) { put(sig, k, 2.5); k = k + 1; }
+        var t2, m2 = fft_spectrum(sig, n, out, 2 * n);
+        var dc: f64 = 2.5 * f64_from(n);
+        var lim: f64 = dc * 0.000000000000001;
+        var small = 1;
+        k = 1;
+        while (k < m2) {
+            var ak: f64 = at(out, k);
+            if (ak > lim) { small = 0; }
+            k = k + 1;
+        }
+        assert(bits(at(out, 0)) == bits(dc) && small == 1, "a constant: DC = n·c exactly, the rest below 10⁻¹⁵ of it");
+        e = e + 2;
+    }
+    # random signals: heap and in-place paths bit-identical; Parseval to 1e-10
+    var seed = 0x2545F4914F6CDD1D;
+    e = 1;
+    while (e <= 14) {
+        var n2 = 1 << e;
+        var s2 = buf(n2);
+        var energy: f64 = 0.0;
+        var j = 0;
+        while (j < n2) {
+            seed = seed ^ (seed << 13);
+            seed = seed ^ (seed >> 7);
+            seed = seed ^ (seed << 17);
+            var u: f64 = f64_from((seed >> 11) & 0xFFFFFFFFFF);
+            var x: f64 = u / 1099511627776.0 - 0.5;
+            put(s2, j, x);
+            energy = energy + x * x;
+            j = j + 1;
+        }
+        var oh = buf(n2 / 2 + 1);
+        var oi = buf(2 * n2);
+        var th, mh = fft_spectrum(s2, n2, oh, n2 / 2 + 1);
+        var ti, mi = fft_spectrum(s2, n2, oi, 2 * n2);
+        var same = 1;
+        j = 0;
+        while (j < mh) {
+            if (load64(oh + 8 * j) != load64(oi + 8 * j)) { same = 0; }
+            j = j + 1;
+        }
+        assert(is_ok(th) == 1 && is_ok(ti) == 1 && same == 1, "heap and in-place paths bit-identical");
+        var a0: f64 = at(oh, 0);
+        var an: f64 = at(oh, n2 / 2);
+        var ps: f64 = (a0 * a0) + (an * an);
+        j = 1;
+        while (j < n2 / 2) {
+            var aj: f64 = at(oh, j);
+            ps = ps + 2.0 * (aj * aj);
+            j = j + 1;
+        }
+        var want: f64 = f64_from(n2) * energy;
+        var rel: f64 = absf(ps - want) / want;
+        assert(rel < 0.0000000001, "Parseval: Σ|X|² = n·Σx²");
+        e = e + 1;
+    }
+    # The transcription's twiddles: the n = 4 stage's wn is (cos(−π/2), sin(−π/2)) correctly rounded (6.1e-17, −1).
+    var s4 = buf(4);
+    put(s4, 0, 1.0);
+    put(s4, 1, 2.0);
+    put(s4, 2, 3.0);
+    put(s4, 3, 4.0);
+    var o4 = buf(8);
+    var t4, m4 = fft_spectrum(s4, 4, o4, 8);
+    assert(is_ok(t4) == 1 && m4 == 3 && bits(at(o4, 0)) == bits(10.0) && bits(at(o4, 2)) == bits(2.0),
+      "[1, 2, 3, 4]: |X₀| = 10, |X₂| = 2");
+    var x1: f64 = at(o4, 1);
+    assert(near(x1, 2.8284271247461903, 0.000000000000001) == 1, "|X₁| = 2√2");
+    var hp: f64 = pi();
+    var ang: f64 = -hp / 2.0;
+    var s, c = _km_cr_sincos(ang);
+    assert(bits(s) == bits(-1.0) && bits(c) == 0x3C91A62633145C07, "the twiddle is correctly rounded");
+}
+
+# ADR 0002 #19: the correctly rounded 1/(100·x), against Rust's 0.01/x.
+fn _t_cyrius_adr19() {
+    test_group("cyrius: ADR 0002 #19 (1/(100·x))");
+    var t1, v1 = wavenumber_from_wavelength(17.0);
+    assert(is_ok(t1) == 1 && v1 == 0x3F434679ACE01346, "1/1700: RN (Rust's 0.01/17 is 0x…47)");
+    var r1: f64 = 0.01 / 17.0;
+    assert(bits(r1) == 0x3F434679ACE01347, "Rust's value, one ulp off");
+    var t2, v2 = wavelength_from_wavenumber(29.0);
+    assert(is_ok(t2) == 1 && v2 == 0x3F36993F349CC726, "1/2900");
+    var t3, v3 = wavenumber_from_wavelength(0.0000005);
+    assert(is_ok(t3) == 1 && v3 == 0x40D3880000000000, "500 nm → 20000 cm⁻¹ (equal in both)");
+    var big: f64 = 0x7FEFFFFFFFFFFFFF;
+    var t4, v4 = wavenumber_from_wavelength(big);
+    assert(is_ok(t4) == 1 && v4 == 0x00000A3D70A3D70A, "DBL_MAX: a subnormal result, rounded once");
+    var tiny: f64 = from_bits(1);
+    var t5, v5 = wavenumber_from_wavelength(tiny);
+    assert(is_ok(t5) == 1 && v5 == 0x7FF0000000000000, "the smallest subnormal: +∞, as Rust");
+    var nz: f64 = -0.0;
+    var z1: f64 = _km_cr_hundredth_div(nz);
+    assert(bits(z1) == 0xFFF0000000000000, "−0 → −∞");
+    var inf: f64 = _KM_INF;
+    var z2: f64 = _km_cr_hundredth_div(inf);
+    assert(bits(z2) == 0, "+∞ → +0");
+    var z3: f64 = _km_cr_hundredth_div(-17.0);
+    assert(bits(z3) == (0x3F434679ACE01346 | 0x8000000000000000), "the sign is x's");
+    var z4: f64 = _km_cr_hundredth_div(_km_nan());
+    assert(is_nan(z4) == 1, "NaN → NaN");
+    # the fast path agrees with the exact integer path wherever its test passes
+    var seed = 0x9E3779B97F4A7C15;
+    var agree = 1;
+    var passed = 0;
+    var k = 0;
+    while (k < 20000) {
+        seed = seed ^ (seed << 13);
+        seed = seed ^ (seed >> 7);
+        seed = seed ^ (seed << 17);
+        var b = (seed & 0x7FFFFFFFFFFFFFFF) % 0x7FF0000000000000;
+        var x: f64 = from_bits(b);
+        var f, ok = _km_cr_hundredth_div_fast(x);
+        var a: f64 = _km_cr_hundredth_div_acc(x);
+        if (ok == 1) {
+            passed = passed + 1;
+            if (bits(f) != bits(a)) { agree = 0; }
+        }
+        k = k + 1;
+    }
+    assert(agree == 1 && passed > 10000, "fast = accurate on 20,000 seeded doubles");
+}
+
+# The generated constants: R_H is Rust's const evaluation; the thresholds are pinned above.
+fn _t_cyrius_constants() {
+    test_group("cyrius: R_H and the generated data");
+    var one: f64 = 1.0;
+    var den: f64 = one + _KM_ELECTRON_PROTON_MASS_RATIO;
+    var rh: f64 = KM_RYDBERG / den;
+    var g: f64 = _KM_RYDBERG_HYDROGEN;
+    assert(bits(rh) == bits(g), "_KM_RYDBERG_HYDROGEN = RYDBERG / (1 + mₑ/mₚ), Rust's const evaluation");
+    var t, v = spectral_series_wavelength(KM_SPECTRAL_SERIES_LYMAN, 0xFFFFFFFE);
+    var inv: f64 = 1.0 / g;
+    assert(is_ok(t) == 1 && v == bits(inv), "Lyman line u32::MAX − 1 = 1/R_H exactly");
+    assert(KM_SPECTRAL_SERIES_COUNT == 5 && KM_SPECTRAL_SERIES_LYMAN == 0 && KM_SPECTRAL_SERIES_PFUND == 4,
+      "KmSpectralSeries: append-only values in Rust's order");
+    var z = 0;
+    var with_data = 0;
+    while (z < 256) {
+        var p, n = isotope_abundances(z);
+        if (n > 0) { with_data = with_data + 1; }
+        z = z + 1;
+    }
+    assert(with_data == 7, "seven elements with isotope data (H, C, N, O, S, Cl, Br)");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main(): i64 {
+    _t_beer_lambert_basic();
+    _t_transmittance_at_a1();
+    _t_transmittance_at_a0();
+    _t_absorbance_transmittance_roundtrip();
+    _t_absorbance_from_transmittance_zero_is_error();
+    _t_absorbance_from_transmittance_over_one_is_error();
+    _t_concentration_from_absorbance_basic();
+    _t_beer_lambert_nan_is_error();
+    _t_photon_energy_wavelength_roundtrip();
+    _t_visible_light_energy_range();
+    _t_ev_joules_roundtrip();
+    _t_frequency_wavelength_roundtrip();
+    _t_zero_wavelength_is_error();
+    _t_zero_energy_is_error();
+    _t_photon_nan_inf_is_error();
+    _t_hydrogen_ground_state();
+    _t_hydrogen_n2();
+    _t_helium_ion_ground_state();
+    _t_bohr_zero_n_is_error();
+    _t_bohr_zero_z_is_error();
+    _t_hydrogen_lyman_alpha();
+    _t_hydrogen_balmer_alpha();
+    _t_rydberg_invalid_quantum_numbers();
+    _t_transition_energy_emission_positive();
+    _t_transition_energy_requires_upper_above_lower();
+    _t_lyman_alpha_from_series();
+    _t_balmer_alpha_from_series();
+    _t_balmer_beta_and_paschen_alpha_from_series();
+    _t_rydberg_hydrogen_value();
+    _t_series_zero_line_is_error();
+    _t_series_line_overflow_is_error();
+    _t_balmer_series_is_visible();
+    _t_wavenumber_roundtrip();
+    _t_wavenumber_ir_range();
+    _t_reduced_mass_equal_masses();
+    _t_oscillator_rotor_nan_is_error();
+    _t_reduced_mass_heavy_light();
+    _t_harmonic_oscillator_ground_state();
+    _t_harmonic_oscillator_spacing();
+    _t_vibrational_frequency_basic();
+    _t_rigid_rotor_j0_is_zero();
+    _t_rigid_rotor_increases_with_j();
+    _t_rotational_constant_positive();
+    _t_rotational_constant_zero_inertia_is_error();
+    _t_diatomic_moment_of_inertia_basic();
+    _t_isotope_pattern_ch4();
+    _t_hydrogen_abundances_iupac_2009();
+    _t_isotope_pattern_chlorine_doublet();
+    _t_isotope_pattern_empty_is_error();
+    _t_isotope_pattern_large_molecules_do_not_panic();
+    _t_isotope_pattern_c168_matches_binomial();
+    _t_isotope_pattern_unknown_element_is_error();
+    _t_isotope_pattern_element_without_data_uses_standard_weight();
+    _t_fft_spectrum_sine_wave();
+    _t_fft_spectrum_non_power_of_2_is_error();
+    _t_find_peaks_basic();
+    _t_find_peaks_threshold_filters();
+    _t_find_peaks_empty();
+    _t_find_peaks_all_negative();
+    _t_find_peaks_threshold_relative_to_range();
+    _t_find_peaks_invalid_threshold_is_empty();
+    _t_find_peaks_ignores_non_finite();
+    _t_beer_lambert_and_transmittance();
+    _t_hydrogen_balmer_series_visible();
+    _t_cyrius_out_of_type();
+    _t_cyrius_buffers();
+    _t_cyrius_isotope_helpers();
+    _t_cyrius_fft();
+    _t_cyrius_adr19();
+    _t_cyrius_constants();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

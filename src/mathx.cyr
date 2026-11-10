@@ -24,7 +24,9 @@
 # trigonometry onto them (and potential.cyr's angles, on _km_cr_atan2), and removed ADR 0005's double-double
 # _km_acos and _km_cos (M2a) and their helpers, so no stdlib transcendental is called here any more and
 # lib/math.cyr is no longer included; and added _km_cr_exp2_scaled, the correctly rounded s·2^y·2^e of ADR
-# 0002 #13 (nuclear.cyr's N₀/2ⁿ past the normal range).
+# 0002 #13 (nuclear.cyr's N₀/2ⁿ past the normal range). M4e added _km_cr_hundredth_div (ADR 0002 #19), and M4e-2
+# binary64 with an unbounded exponent (_km_ux_*, at the end of this file: potential.cyr's geometry under ADR 0002 #20,
+# and the machinery of the library-wide audit of intermediate over- and underflow after M4).
 # The coefficients and constants are bit patterns in typed f64 locals (never a hex `const`).
 
 # +∞ (0x7FF0000000000000), a compile-time constant.
@@ -3209,4 +3211,575 @@ fn _km_cr_sixth_root2_mul(x: f64): f64 {
     var r: f64 = _km_cr_finish(ex, h, m, l);
     if (ux < 0) { r = -r; }
     return r;
+}
+
+# ── 1/(100·x), correctly rounded (M4e): ADR 0002 #19 ──────────────────────────────────────────────────
+#
+# RN(1/(100·x)), the exact (1/100)/x rounded once: spectroscopy.cyr's wavenumber conversions, ν̃ = 1/(λ in cm) =
+# (1/100)/λ_m, where Rust's `0.01 / x` rounds the constant 1/100 (0.01 is 1/100 + 2.08·10⁻¹⁹) and then the quotient.
+# 1/(100·x) is never a midpoint: 100·x = 4·25·m·2^e, and the odd factor 25 keeps it from dividing any power of two.
+# - Fast path, 2^-900 ≤ |x| ≤ 2^900 (the result, y0 and every intermediate below are normal): y0 = RN(H/|x|) with
+#   1/100 = H + L + t (_KM_CR_HUNDREDTH_H, _L, |t| < 2^-116); y0·|x| = p + e exactly (TwoProduct); H − p is exact
+#   (Sterbenz: p is within 2^-52 of H); r = ((H − p) − e) + L, the residual 1/100 − y0·|x| to 2^-110.2 (two roundings
+#   of values below 2^-58.2, and t); d = RN(r/|x|), so y0 + d is 1/(100·|x|) to 2^-102.9 relative. The rounding test
+#   uses ε = 2^-100·y0 (covering also the roundings of d ± ε, 2^-105.2): RN(y0 + (d − ε)) = RN(y0 + (d + ε)) means
+#   every value between, the true one included, rounds to it. It fails with probability about 2^-47.
+# - Accurate path (every finite x ≠ 0, and the fast path's fallback): exact integer arithmetic. |x| = m·2^ex (m < 2^53,
+#   subnormals included), D = 100·m < 2^60 with bit length b; q = ⌊2^(b + 53)/D⌋ in [2^53, 2^54) by 53 steps of
+#   restoring division from 2^b = D + (2^b − D), and its remainder; 1/(100·|x|) = (q + rem/D)·2^(−b − 53 − ex), rounded
+#   once to nearest even at its binade's grid (normal) or the 2^-1074 grid (subnormal), the remainder as the sticky
+#   bit; ±∞ past DBL_MAX.
+# ±0 gives ±∞, ±∞ gives ±0 and NaN NaN, as Rust's 0.01/x. The sign is x's.
+
+# The fast path alone: (RN(1/(100·x)), 1), or (0, 0) when |x| is outside [2^-900, 2^900] or the rounding test fails.
+#must_use
+fn _km_cr_hundredth_div_fast(x: f64): (f64, i64) {
+    var ux = load64(&x);
+    var ax = ux & 0x7FFFFFFFFFFFFFFF;
+    if (ax < 0x07B0000000000000 || ax > 0x7830000000000000) { return (0.0, 0); }   # |x| < 2^-900 or > 2^900
+    var a: f64 = ax;
+    var ch: f64 = _KM_CR_HUNDREDTH_H;
+    var cl: f64 = _KM_CR_HUNDREDTH_L;
+    var y0: f64 = ch / a;
+    var p, e = _km_two_prod(y0, a);
+    var s: f64 = ch - p;
+    var t: f64 = s - e;
+    var r: f64 = t + cl;
+    var d: f64 = r / a;
+    var k100: f64 = 0x39B0000000000000;          # 2^-100
+    var eps: f64 = y0 * k100;
+    var lo: f64 = d - eps;
+    var hi: f64 = d + eps;
+    var z1: f64 = y0 + lo;
+    var z2: f64 = y0 + hi;
+    if (z1 != z2) { return (0.0, 0); }
+    if (ux < 0) { z1 = -z1; }
+    return (z1, 1);
+}
+
+# RN(1/(100·x)) by the accurate path alone: exact integer arithmetic (the section comment), every x.
+#must_use
+fn _km_cr_hundredth_div_acc(x: f64): f64 {
+    var ux = load64(&x);
+    var ax = ux & 0x7FFFFFFFFFFFFFFF;
+    var sign = ux & 0x8000000000000000;
+    if (ax > 0x7FF0000000000000) { return x; }                    # NaN
+    if (ax == 0x7FF0000000000000) {                               # ±∞ → ±0
+        var z: f64 = sign;
+        return z;
+    }
+    if (ax == 0) {                                                # ±0 → ±∞
+        var w: f64 = sign | 0x7FF0000000000000;
+        return w;
+    }
+    var be = ax >> 52;
+    var m = ax & 0x000FFFFFFFFFFFFF;
+    var ex = 0 - 1074;
+    if (be != 0) {
+        m = m | 0x0010000000000000;
+        ex = be - 1075;
+    }
+    var dd = m * 100;                                             # 100·m < 2^60
+    var b = 0;
+    var tb = dd;
+    while (tb != 0) { b = b + 1; tb = tb >> 1; }                  # bit length: 2^(b − 1) < D < 2^b
+    var rem = (1 << b) - dd;                                      # 2^b = 1·D + rem, rem < D
+    var q = 1;
+    var i = 0;
+    while (i < 53) {
+        rem = rem << 1;
+        q = q << 1;
+        if (rem >= dd) {
+            rem = rem - dd;
+            q = q + 1;
+        }
+        i = i + 1;
+    }
+    var sticky = 0;
+    if (rem != 0) { sticky = 1; }
+    var e2 = 0 - b - 53 - ex;                                     # the weight of q's last bit
+    var top = e2 + 53;                                            # the value is in [2^top, 2^(top + 1))
+    if (top >= 1024) {
+        var o: f64 = sign | 0x7FF0000000000000;
+        return o;
+    }
+    var lsb = top - 52;
+    if (top < 0 - 1022) { lsb = 0 - 1074; }
+    var sh = lsb - e2;                                            # 1 for a normal result, more for a subnormal one
+    if (sh >= 55) {
+        var u: f64 = sign;                                        # below half the smallest subnormal
+        return u;
+    }
+    var q0 = q >> sh;
+    var low = q & ((1 << sh) - 1);
+    var half = 1 << (sh - 1);
+    if (low > half || (low == half && (sticky == 1 || (q0 & 1) == 1))) { q0 = q0 + 1; }
+    var rb = q0;                                                  # subnormal: q0 units of 2^-1074 (2^52 is DBL_MIN)
+    if (top >= 0 - 1022) {
+        if (q0 == 0x0020000000000000) {
+            q0 = q0 >> 1;
+            lsb = lsb + 1;
+        }
+        if (lsb + 52 >= 1024) {
+            var o2: f64 = sign | 0x7FF0000000000000;
+            return o2;
+        }
+        rb = ((lsb + 52 + 1023) << 52) | (q0 & 0x000FFFFFFFFFFFFF);
+    }
+    var res: f64 = sign | rb;
+    return res;
+}
+
+# RN(1/(100·x)): the correctly rounded (1/100)/x (ADR 0002 #19). See the section comment.
+#must_use
+fn _km_cr_hundredth_div(x: f64): f64 {
+    var r, ok = _km_cr_hundredth_div_fast(x);
+    if (ok == 1) { return r; }
+    var a: f64 = _km_cr_hundredth_div_acc(x);
+    return a;
+}
+
+# ── binary64 with an unbounded exponent (M4e-2): ADR 0002 #20 ──────────────────────────────────────────────
+#
+# Rust evaluates a chain of + − × ÷ √ in IEEE binary64, so a product or quotient of inputs can overflow to ±∞ or
+# underflow to a subnormal or 0 although the chain's result is representable (potential.cyr's squared coordinates: an
+# Err, 0, ±∞ or a degraded angle where the true one is an ordinary double). The helpers here evaluate such a chain in
+# binary64 round-to-nearest-even with an UNBOUNDED exponent range: every operation rounds its exact result to 53 bits,
+# as IEEE does, and nothing overflows or underflows; the final operation is then rounded once into binary64 itself
+# (its subnormal grid, or ±∞). Where Rust's chain stays in the normal range the two are the same operations on the same
+# values, so the bits are Rust's; outside it they are what Rust's sequence means. ADR 0002 #20 adopts them for
+# potential.cyr's geometry (M4e-2); the library-wide audit of intermediate over- and underflow after M4 uses them for
+# every edge it fixes.
+#
+# A value is a pair (s, e) = s·2^e (two words: an f64 and an i64), normalised:
+# - s finite and nonzero with 1 ≤ |s| < 2 (s carries the sign), e any i64;
+# - or s = ±0, ±∞ or NaN with e = 0 (a zero keeps its IEEE sign; a special only comes from a special operand or a
+#   division by zero, and propagates as IEEE's does).
+# Exponents add per product and halve per √, so the chains here stay far inside ±2^62 (a degree-4 polynomial of
+# doubles has |e| < 4,400).
+#
+# Exactness. Each operation is ONE IEEE operation on the significands whose exact result lies far inside binary64's
+# normal range (or is exactly 0), so IEEE's rounding of it is the 53-bit rounding of the exact value; scaling by 2^e
+# commutes with 53-bit rounding when no exponent bound intervenes:
+# - ×: s₁·s₂ in [1, 4); ÷: s₁/s₂ in (½, 2); √: √s (e even) or √(2s) (e odd) in [1, 2], the exponent halved exactly;
+# - +, −: with e₁ ≥ e₂ and d = e₁ − e₂ ≤ 55, s₂·2^-d is exact (at least 2^-55), and s₁ + s₂·2^-d is a multiple of
+#   2^-107 below 4 in magnitude: one IEEE addition, never subnormal (an exact 0 is IEEE's +0). For d ≥ 56 the smaller
+#   term is below 2^(e₁ − 55), under a quarter ulp of the larger (which is what a power of two needs below it), so the
+#   53-bit sum IS the larger term;
+# - the result's significand is renormalised by its own exponent field (exact).
+# Comparisons and max act on the exact values (e then s); IEEE's signed-zero rules hold throughout (x − x = +0 under
+# round-to-nearest, a product's sign is the xor, √−0 = −0).
+#
+# Final operations, rounded ONCE into binary64. A 53-bit result s·2^e is exact in binary64 when 2^-1022 ≤ |s·2^e| ≤
+# DBL_MAX; past e = 1023 it overflows to ±∞ (IEEE overflow is "the 53-bit rounding exceeds DBL_MAX", so this is the IEEE
+# result); below 2^-1022 it must be rounded again at the 2^-1074 grid, and a second rounding of an already rounded
+# value can be wrong exactly when the 53-bit value is a midpoint of that grid. Every such midpoint is itself a 53-bit
+# number (an odd multiple of 2^-1075 below 2^-1022), so the 53-bit rounding s never crosses one: the grid's rounding of
+# the exact value is the grid's rounding of s, except when s·2^e IS a midpoint, where the exact error t (value =
+# (s + t)·2^e) decides the side. _km_ux_round takes that error from each operation's error-free transformation and
+# rounds once with _km_cr_finish (the subnormal grid, ties to even when t = 0): _km_ux_mul_f64 (TwoProduct),
+# _km_ux_div_f64 (the exact remainder), _km_ux_add_f64 (TwoSum, or a sticky ±2^-60 for a term below a quarter ulp),
+# _km_ux_sqrt_f64 (the residual s − r²), and _km_ux_atan2_f64, which needs no scaling at all: atan2 depends only on
+# the ratio, and _km_cr_atan2's core already works on (significand, exponent difference) pairs (_km_atan2_tiny rounds
+# a quotient below 2^-59 once at whatever exponent, the subnormal grid included, with its exact midpoints broken toward
+# zero).
+#
+# Entry points: _km_ux_from (a double), _km_ux_neg, _km_ux_add, _km_ux_sub, _km_ux_mul, _km_ux_div, _km_ux_sqrt,
+# _km_ux_cmp, _km_ux_le, _km_ux_max (Rust's f64::max), _km_ux_is_positive (validate.cyr's is_positive), _km_ux_round
+# (the round-once conversion), the final _km_ux_add_f64, _km_ux_sub_f64, _km_ux_mul_f64, _km_ux_div_f64,
+# _km_ux_sqrt_f64 and _km_ux_atan2_f64 (with _km_ux_atan2_fast and _km_ux_atan2_acc for the tests and cr_verify.py).
+# tests/mathx.tcyr checks each against IEEE's own operation wherever binary64's range suffices (every pair of doubles,
+# subnormal results included) and against MPFR's values beyond it; scripts/oracle/cr_verify.py checks the final
+# operations against MPFR with an unbounded intermediate exponent (mpfr_ref.py's ux_* functions) on x86_64 ELF,
+# x86_64 PE and aarch64.
+
+# (s, e) for a double r whose magnitude is normal, times 2^e: s is r with its exponent field set to 0 (1 ≤ |s| < 2), e
+# plus r's exponent. A zero or a special gives (r, 0). r is never subnormal here (every caller's r is a significand
+# operation's result, at least 2^-107 in magnitude, or a value _km_ux_from has scaled).
+#must_use
+fn _km_ux_norm(r: f64, e): (f64, i64) {
+    var b = load64(&r);
+    var be = (b >> 52) & 0x7FF;
+    if (be == 0 || be == 0x7FF) { return (r, 0); }
+    var sb = (b & 0x800FFFFFFFFFFFFF) | 0x3FF0000000000000;
+    var s: f64 = sb;
+    return (s, e + be - 1023);
+}
+
+# The unbounded-exponent value of a double x: (s, e) with x = s·2^e exactly (subnormals included); ±0, ±∞ and NaN give
+# (x, 0).
+#must_use
+fn _km_ux_from(x: f64): (f64, i64) {
+    var b = load64(&x);
+    if ((b & 0x7FF0000000000000) == 0 && (b & 0x7FFFFFFFFFFFFFFF) != 0) {
+        var p54: f64 = 0x4350000000000000;           # 2^54: a subnormal scaled into the normal range, exactly
+        var y: f64 = x * p54;
+        var s, e = _km_ux_norm(y, 0 - 54);
+        return (s, e);
+    }
+    var s2, e2 = _km_ux_norm(x, 0);
+    return (s2, e2);
+}
+
+# −x.
+#must_use
+fn _km_ux_neg(xs: f64, xe): (f64, i64) {
+    var n: f64 = -xs;
+    return (n, xe);
+}
+
+# x·y, rounded to 53 bits with an unbounded exponent.
+#must_use
+fn _km_ux_mul(xs: f64, xe, ys: f64, ye): (f64, i64) {
+    var p: f64 = xs * ys;
+    var s, e = _km_ux_norm(p, xe + ye);
+    return (s, e);
+}
+
+# x/y, rounded to 53 bits with an unbounded exponent (y = ±0 gives IEEE's ±∞ or NaN).
+#must_use
+fn _km_ux_div(xs: f64, xe, ys: f64, ye): (f64, i64) {
+    var q: f64 = xs / ys;
+    var s, e = _km_ux_norm(q, xe - ye);
+    return (s, e);
+}
+
+# √x, rounded to 53 bits with an unbounded exponent: √s·2^(e/2), or √(2s)·2^((e − 1)/2) for an odd e (2s exact).
+# ±0, a negative x, ±∞ and NaN as IEEE's √ (√−0 = −0).
+#must_use
+fn _km_ux_sqrt(xs: f64, xe): (f64, i64) {
+    if (xs <= 0.0 || xs != xs || xs == _KM_INF) {
+        var z: f64 = f64_sqrt(xs);
+        return (z, 0);
+    }
+    var odd = xe & 1;
+    var w: f64 = xs;
+    if (odd != 0) { w = xs * 2.0; }
+    var r: f64 = f64_sqrt(w);
+    var s, e = _km_ux_norm(r, (xe - odd) / 2);
+    return (s, e);
+}
+
+# x + y, rounded to 53 bits with an unbounded exponent (the section comment's argument). A zero operand contributes
+# nothing (x + ±0 = x); two zeros, or a special, add as IEEE's significands do.
+#must_use
+fn _km_ux_add(xs: f64, xe, ys: f64, ye): (f64, i64) {
+    var dx: f64 = xs - xs;
+    var dy: f64 = ys - ys;
+    if (xs == 0.0 || ys == 0.0 || dx != 0.0 || dy != 0.0) {
+        if (ys == 0.0 && xs != 0.0 && dx == 0.0) { return (xs, xe); }
+        if (xs == 0.0 && ys != 0.0 && dy == 0.0) { return (ys, ye); }
+        var z: f64 = xs + ys;
+        return (z, 0);
+    }
+    var hs: f64 = xs;
+    var he = xe;
+    var ls: f64 = ys;
+    var le = ye;
+    if (ye > xe) {
+        hs = ys;
+        he = ye;
+        ls = xs;
+        le = xe;
+    }
+    var d = he - le;
+    if (d > 55) { return (hs, he); }
+    var sc: f64 = _km_cr_pow2(0 - d);
+    var t: f64 = ls * sc;                           # exact: at least 2^-55
+    var r: f64 = hs + t;
+    var s, e = _km_ux_norm(r, he);
+    return (s, e);
+}
+
+# x − y, rounded to 53 bits with an unbounded exponent: x + (−y) (IEEE's x − y, signed zeros included).
+#must_use
+fn _km_ux_sub(xs: f64, xe, ys: f64, ye): (f64, i64) {
+    var ny: f64 = -ys;
+    var s, e = _km_ux_add(xs, xe, ny, ye);
+    return (s, e);
+}
+
+# −1, 0 or 1 as x <, =, > y in exact value; 2 when either is NaN. Zeros are equal whatever their signs.
+#must_use
+fn _km_ux_cmp(xs: f64, xe, ys: f64, ye): i64 {
+    if (xs != xs || ys != ys) { return 2; }
+    var dx: f64 = xs - xs;
+    var dy: f64 = ys - ys;
+    if (xs == 0.0 || ys == 0.0 || dx != 0.0 || dy != 0.0) {
+        # a zero or ±∞ against anything: the significands order the values (a finite nonzero one is 1 ≤ |s| < 2)
+        if (xs < ys) { return 0 - 1; }
+        if (xs > ys) { return 1; }
+        return 0;
+    }
+    if ((xs < 0.0) != (ys < 0.0)) {
+        if (xs < 0.0) { return 0 - 1; }
+        return 1;
+    }
+    if (xe == ye) {
+        if (xs < ys) { return 0 - 1; }
+        if (xs > ys) { return 1; }
+        return 0;
+    }
+    var c = 1;
+    if (xe < ye) { c = 0 - 1; }
+    if (xs < 0.0) { c = 0 - c; }
+    return c;
+}
+
+# 1 if x ≤ y (false for a NaN), as f64's `<=` on the exact values.
+#must_use
+fn _km_ux_le(xs: f64, xe, ys: f64, ye): i64 {
+    var c = _km_ux_cmp(xs, xe, ys, ye);
+    if (c == 0 - 1 || c == 0) { return 1; }
+    return 0;
+}
+
+# Rust's x.max(y) on the exact values (_km_max's semantics): a NaN operand is ignored, equal operands give y.
+#must_use
+fn _km_ux_max(xs: f64, xe, ys: f64, ye): (f64, i64) {
+    if (xs != xs) { return (ys, ye); }
+    if (ys != ys) { return (xs, xe); }
+    if (_km_ux_cmp(xs, xe, ys, ye) == 1) { return (xs, xe); }
+    return (ys, ye);
+}
+
+# 1 if 0 < x < +∞ (validate.cyr's _km_is_positive on the exact value): a normalised value's sign and class are its
+# significand's.
+#must_use
+fn _km_ux_is_positive(xs: f64, xe): i64 {
+    if (xs > 0.0 && xs < _KM_INF) { return 1; }
+    return 0;
+}
+
+# RN((s + t)·2^e) in binary64, rounded once, for a normalised s with s = RN53(s + t) (|t| at most half an ulp of s: t
+# is the exact error of the operation that produced s, or 0 for an exact value): s·2^e itself when it is normal
+# (2^-1022 ≤ |s·2^e|, e ≤ 1023); ±∞ past e = 1023; at the 2^-1074 grid by _km_cr_finish (|s| + ±t, scaled once) below
+# 2^-1022, where t breaks a midpoint s·2^e toward the exact value (the section comment); ±0 below 2^-1100 (under a
+# quarter of 2^-1074). A zero or a special s is returned as it is.
+#must_use
+fn _km_ux_round(s: f64, e, t: f64): f64 {
+    var ds: f64 = s - s;
+    if (s == 0.0 || ds != 0.0) { return s; }
+    if (e > 1023) {
+        var inf: f64 = _KM_INF;
+        if (s < 0.0) { inf = -inf; }
+        return inf;
+    }
+    if (e >= 0 - 1022) {
+        var sc: f64 = _km_cr_pow2(e);
+        var y: f64 = s * sc;
+        return y;
+    }
+    if (e < 0 - 1100) {
+        var z: f64 = s * 0.0;
+        return z;
+    }
+    var h: f64 = s;
+    var m: f64 = t;
+    if (s < 0.0) {
+        h = -s;
+        m = -t;
+    }
+    var r: f64 = _km_cr_finish(e, h, m, 0.0);
+    if (s < 0.0) { r = -r; }
+    return r;
+}
+
+# RN(x·y) in binary64, rounded once: the 53-bit product (TwoProduct of the significands, its exact error), then
+# _km_ux_round. A zero or special operand gives IEEE's product of the significands.
+#must_use
+fn _km_ux_mul_f64(xs: f64, xe, ys: f64, ye): f64 {
+    var p: f64 = xs * ys;
+    var dp: f64 = p - p;
+    if (p == 0.0 || dp != 0.0) { return p; }
+    var ph, pe = _km_two_prod(xs, ys);
+    var e = xe + ye;
+    if (ph >= 2.0 || ph <= -2.0) {
+        ph = ph * 0.5;
+        pe = pe * 0.5;
+        e = e + 1;
+    }
+    var r: f64 = _km_ux_round(ph, e, pe);
+    return r;
+}
+
+# RN(x/y) in binary64, rounded once: q = RN(s₁/s₂), the remainder s₁ − q·s₂ (s₁ − p exact by Sterbenz, p = RN(q·s₂),
+# then − pe: the sign is exact), its quotient by s₂ as the error, then _km_ux_round. A zero dividend, a zero divisor
+# or a special gives IEEE's quotient of the significands.
+#must_use
+fn _km_ux_div_f64(xs: f64, xe, ys: f64, ye): f64 {
+    var q: f64 = xs / ys;
+    var dq: f64 = q - q;
+    var dy: f64 = ys - ys;
+    if (q == 0.0 || dq != 0.0 || dy != 0.0) { return q; }
+    var p, pe = _km_two_prod(q, ys);
+    var rem: f64 = (xs - p) - pe;
+    var t: f64 = rem / ys;
+    var e = xe - ye;
+    if (q < 1.0 && q > -1.0) {
+        q = q * 2.0;
+        t = t * 2.0;
+        e = e - 1;
+    }
+    var r: f64 = _km_ux_round(q, e, t);
+    return r;
+}
+
+# RN(x + y) in binary64, rounded once: TwoSum of the aligned significands (d ≤ 55), its sum renormalised with its error;
+# for d ≥ 56 the larger term with a sticky ±2^-60 in the smaller's direction (below a quarter ulp, so it moves only a
+# midpoint, which is where the exact sum's side matters). A zero operand gives the other rounded once; two zeros or a
+# special, IEEE's sum.
+#must_use
+fn _km_ux_add_f64(xs: f64, xe, ys: f64, ye): f64 {
+    var dx: f64 = xs - xs;
+    var dy: f64 = ys - ys;
+    if (dx != 0.0 || dy != 0.0 || (xs == 0.0 && ys == 0.0)) {
+        var z: f64 = xs + ys;
+        return z;
+    }
+    if (xs == 0.0) {
+        var ry: f64 = _km_ux_round(ys, ye, 0.0);
+        return ry;
+    }
+    if (ys == 0.0) {
+        var rx: f64 = _km_ux_round(xs, xe, 0.0);
+        return rx;
+    }
+    var hs: f64 = xs;
+    var he = xe;
+    var ls: f64 = ys;
+    var le = ye;
+    if (ye > xe) {
+        hs = ys;
+        he = ye;
+        ls = xs;
+        le = xe;
+    }
+    var d = he - le;
+    if (d > 55) {
+        var st: f64 = 0x3C30000000000000;           # 2^-60
+        if (ls < 0.0) { st = -st; }
+        var rs: f64 = _km_ux_round(hs, he, st);
+        return rs;
+    }
+    var sc: f64 = _km_cr_pow2(0 - d);
+    var t: f64 = ls * sc;                           # exact
+    var r, err = _km_two_sum(hs, t);
+    if (r == 0.0) { return r; }                     # an exact cancellation: +0
+    var s, e = _km_ux_norm(r, he);
+    var k = e - he;                                 # r = s·2^k, −107 ≤ k ≤ 1
+    var ks: f64 = _km_cr_pow2(0 - k);
+    var te: f64 = err * ks;                         # exact (err is a multiple of 2^-107)
+    var y: f64 = _km_ux_round(s, e, te);
+    return y;
+}
+
+# RN(x − y) in binary64, rounded once.
+#must_use
+fn _km_ux_sub_f64(xs: f64, xe, ys: f64, ye): f64 {
+    var ny: f64 = -ys;
+    var r: f64 = _km_ux_add_f64(xs, xe, ny, ye);
+    return r;
+}
+
+# RN(√x) in binary64, rounded once: r = RN(√w) (w = s or 2s, in [1, 4)), the residual w − r² (r² = p + pe by
+# TwoProduct, w − p exact by Sterbenz, then − pe: its sign is exact), its quotient by 2r as the error, then
+# _km_ux_round. √x is either exact (a 27-bit significand) or irrational, so a midpoint is only ever an exact one,
+# broken to even. ±0, a negative x, ±∞ and NaN as IEEE's √.
+#must_use
+fn _km_ux_sqrt_f64(xs: f64, xe): f64 {
+    if (xs <= 0.0 || xs != xs || xs == _KM_INF) {
+        var z: f64 = f64_sqrt(xs);
+        return z;
+    }
+    var odd = xe & 1;
+    var w: f64 = xs;
+    if (odd != 0) { w = xs * 2.0; }
+    var r: f64 = f64_sqrt(w);
+    var p, pe = _km_two_prod(r, r);
+    var rem: f64 = (w - p) - pe;
+    var tr: f64 = r + r;
+    var t: f64 = rem / tr;
+    var k = (xe - odd) / 2;
+    if (r >= 2.0) {                                 # √w rounded up to 2: (1, k + 1)
+        r = r * 0.5;
+        t = t * 0.5;
+        k = k + 1;
+    }
+    var y: f64 = _km_ux_round(r, k, t);
+    return y;
+}
+
+# atan2(y, x) of two unbounded-exponent values, by the fast core (acc = 0: (result, 1), or (0, 0) when its rounding test
+# fails) or the accurate one (acc = 1): _km_atan2_pos's octant reduction on the pairs themselves, so n/d (0 < n ≤ d) is
+# mn·2^k / md with k = en − ed ≤ 0 whatever the exponents; k ≤ −60 is _km_atan2_tiny's (π/2, π, or the quotient rounded
+# once at any exponent), otherwise mn·2^k is an exact double and the core is _km_cr_atan2's. A zero or special operand:
+# _km_cr_atan2 of the significands (its result depends only on their signs and classes).
+#must_use
+fn _km_ux_atan2_any(ys: f64, ye, xs: f64, xe, acc): (f64, i64) {
+    var dy: f64 = ys - ys;
+    var dx: f64 = xs - xs;
+    if (ys == 0.0 || xs == 0.0 || dy != 0.0 || dx != 0.0) {
+        var sp: f64 = _km_cr_atan2(ys, xs);
+        return (sp, 1);
+    }
+    var my: f64 = ys;
+    if (ys < 0.0) { my = -ys; }
+    var mx: f64 = xs;
+    if (xs < 0.0) { mx = -xs; }
+    var oct = 0;
+    if (xs < 0.0) { oct = 1; }
+    var mn: f64 = my;
+    var en = ye;
+    var md: f64 = mx;
+    var ed = xe;
+    if (ye > xe || (ye == xe && my > mx)) {
+        mn = mx;
+        en = xe;
+        md = my;
+        ed = ye;
+        oct = oct + 2;
+    }
+    var k = en - ed;
+    var r: f64 = 0.0;
+    var ok = 1;
+    if (k <= 0 - 60) {
+        r = _km_atan2_tiny(mn, md, k, oct);
+    } else {
+        var sc: f64 = _km_cr_pow2(k);
+        var n: f64 = mn * sc;                       # exact: n/d ≥ 2^-60
+        if (acc == 1) {
+            r = _km_atan_acc(n, 0.0, 0.0, md, 0.0, 0.0, oct);
+        } else {
+            var rf, okf = _km_atan_fast(n, 0.0, md, 0.0, oct);
+            r = rf;
+            ok = okf;
+        }
+    }
+    if (ok == 0) { return (0.0, 0); }
+    if (ys < 0.0) { r = -r; }
+    return (r, 1);
+}
+
+# atan2(y, x), correctly rounded in binary64, of two unbounded-exponent values (the angle of (x, y) in [−π, π]).
+#must_use
+fn _km_ux_atan2_f64(ys: f64, ye, xs: f64, xe): f64 {
+    var r, ok = _km_ux_atan2_any(ys, ye, xs, xe, 0);
+    if (ok == 1) { return r; }
+    var a, oka = _km_ux_atan2_any(ys, ye, xs, xe, 1);
+    return a;
+}
+
+# The fast path alone: (atan2(y, x), 1), or (0, 0) when its rounding test fails.
+#must_use
+fn _km_ux_atan2_fast(ys: f64, ye, xs: f64, xe): (f64, i64) {
+    var r, ok = _km_ux_atan2_any(ys, ye, xs, xe, 0);
+    return (r, ok);
+}
+
+# atan2(y, x) by the accurate path alone.
+#must_use
+fn _km_ux_atan2_acc(ys: f64, ye, xs: f64, xe): f64 {
+    var a, ok = _km_ux_atan2_any(ys, ye, xs, xe, 1);
+    return a;
 }

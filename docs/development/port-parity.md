@@ -964,7 +964,7 @@ By class: B 11,320, C 15,618 rows.
   a = 0), proven on them and on 20,000 seeded pairs.
 - **Reviewed and kept as Rust's** (no single exact value; reported to the user): (σ/r)⁶ and (σ/r)¹²'s over- and
   underflow, k·q₁·q₂ and r·r's, the squared coordinates' in the geometry, `morse`'s r − r_e overflow and subnormal D_e·x.
-  The grids include them, so a later decision can be measured.
+  The grids include them, so a later decision can be measured. (The geometry's: fixed in M4e-2 as ADR 0002 #20, §16.)
 
 ### ADR 0002 #13 completed
 
@@ -1002,6 +1002,151 @@ Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **16 modules, 0 faili
 **A note for CI.** Two `cyrius test --win` runs at once under wine have printed a truncated parity run and still exited 0.
 The harness can't tell (its exit status and output are what wine hands back), so a gate must check that the summary line
 above is present; M4d's runs were made one target at a time.
+
+## 15. M4e: spectroscopy, the FFT transcription, ADR 0002 #19 (2026-11-09)
+
+One new golden module, 52,985 rows, every row 0 ulp from its reference on x86_64 ELF, x86_64 PE and aarch64: the oracle's
+value, the corrected oracle's on 118 rows (ADR 6), or the exact value the note names on 1,654 rows (ADR 0002 #19). The
+three class-C functions are on correctly rounded primitives (exp10, log10, and sin / cos for the FFT's twiddles), in
+Rust's and hisab 1.4.0's operation order, at **bound 0**; the class-B ones use + − × ÷ and √ only (the Rydberg formula
+and the isotope pattern included: no transcendental, §5's examples notwithstanding).
+
+| Function | Class | Rows | Grid | ADR | ulp (every target) |
+|---|---|---|---|---|---|
+| `spectroscopy::absorbance` | B | 560 | each argument over the edges, the Rust tests' ε = 100, l = 1, c = 0.01, the products' over- and underflow, seeded | — | 0 |
+| `spectroscopy::transmittance` | C (pow(10, ·)) | 2,587 | the edges, every integer −330 … 330 (10⁰ … 10²² exact, 10²³ a tie), A over exp10's range in steps of 0.8, **subnormal results** (A in 307.6 … 323.6), the Rust tests' values, seeded | **ADR 6: 3** (glibc's pow) | 0 |
+| `spectroscopy::absorbance_from_transmittance` | C (log10) | 2,515 | the edges, every decade × 4, 1 and the 40 ulps below it (A ≈ 0), the round trips T(A) for A = −10 … 165, (0, 1] seeded uniformly and log-uniformly | **ADR 6: 115** (glibc's log10) | 0 |
+| `spectroscopy::concentration_from_absorbance` | B | 564 | each argument over the edges (the guards' order), the Rust tests' values, ε·l over- and underflowing, seeded | — | 0 |
+| `spectroscopy::photon_energy_from_frequency`, `photon_energy_from_wavelength`, `wavelength_from_energy`, `frequency_from_wavelength`, `joules_to_ev`, `ev_to_joules` | B | 1,890 each | the edges, every decade × 1 and 5 from 10⁻³²³ to 10³⁰⁸, the visible 380–780 nm, the Rust tests' values, seeded | — | 0 |
+| `spectroscopy::bohr_energy_level` | B | 5,120 | **every u8 Z × 20 u32 n** (0 … 12, 100 … 10⁶, 2³¹, u32::MAX − 2 … u32::MAX) | — | 0 |
+| `spectroscopy::bohr_transition_energy`, `rydberg_wavelength` | B | 1,816 each | 8 Z (0, 1, 2, 3, 26, 92, 118, 255) × 13 × 13 (n₁, n₂) with every Err path in Rust's order, the Rust tests' values, **close large n** (n₂ = n₁ + 1 … 7 for n₁ from 10 to 2³¹), seeded | — | 0 |
+| `SpectralSeries::n_lower`, `::wavelength` | A, B | 5, 195 | every series × lines 0 … 24, 50 … 2³¹ and u32::MAX − 8 … u32::MAX (**the `checked_add` overflow**; Lyman at u32::MAX − 1 is 1/R_H, which pins R_H) | — | 0 |
+| `spectroscopy::wavenumber_from_wavelength`, `wavelength_from_wavenumber` | B | 8,119 each | the edges, every decade × 1, 2.5, 5, **every power of two 2⁻¹⁰⁷⁴ … 2¹⁰²³**, the subnormal-result end (x past 2¹⁰¹⁵) and the overflow end (subnormal x), 3,000 seeded over every binade, IR and radio wavelengths | **#19: 827 each** | 0 (from the oracle or the note) |
+| `spectroscopy::reduced_mass` | B | 966 | each argument over the edges, both and **equal masses** (300 seeded m), the Rust tests' values, H³⁵Cl in u and kg, the product's and sum's over- and underflow, seeded | — | 0 |
+| `spectroscopy::harmonic_oscillator_energy`, `rigid_rotor_energy` | B | 1,015 each | the 20 u32 probes × the Rust tests' ω / B, the edges, every decade, seeded | — | 0 |
+| `spectroscopy::vibrational_frequency` | B | 3,047 | each argument over the edges and every decade, the Rust tests' (500, 1.66 × 10⁻²⁷) and potential's HCl (516, 1.6267 × 10⁻²⁷), k/μ over- and underflowing, seeded | — | 0 |
+| `spectroscopy::rotational_constant`, `diatomic_moment_of_inertia` | B | 1,587, 440 | the edges, every decade, the Rust tests' values, HCl and CO, seeded | — | 0 |
+| `spectroscopy::isotope_abundances` | A | 256 | **every u8** | — | — (32 floats, 0) |
+| `spectroscopy::isotope_pattern` | B | 696 | the Rust tests' molecules (CH₄, Cl₂, H₈₈, C₁₆₈, C₁₀₀₀H₂₀₀₀O₅₀₀S₅₀Br₂₀, glucose, the unknown and data-less elements), the empty molecule, **every u8 Z alone**, every element with data × 15 counts to 2,000 and singles to 5,000 (the pruning keeps the peak count near 7.4·σ), elements without data to u32::MAX, count 0, repeated entries, H₂ … (commutative ties), the Err position in a list, 300 seeded molecules | — | 0 (12,526 floats) |
+| `spectroscopy::fft_spectrum` | C (cos, sin) | 213 | **every length 0 … 16**, the Rust test's [1; 10], 2^k ± 1 for k = 5 … 9 and 2¹² + 1 (Err); **every power of two 2⁰ … 2¹³** with impulses, constants, ±0, alternating (Nyquist), sinusoids on a bin and off, random, huge (the sums overflow), subnormal, NaN and ±∞ samples (20 kinds to 2⁶, 9 to 2¹⁰, 3 to 2¹², 2 at 2¹³) | — | 0 (27,512 floats) |
+| `spectroscopy::find_peaks` | A | 994 | the Rust tests' data × 16 thresholds (0, 1, −0.0, the ulps inside [0, 1] and every way out, NaN, ±∞), plateaus, flat and monotone data, NaN and ±∞ in the data, all non-finite, ±0, DBL_MAX ranges, **thresholds landing on a data value to the ulp**, 500 seeded sequences | — | — (integers) |
+
+By class: A 1,255, B 46,415, C 5,315 rows.
+
+- **The corrected oracle.** glibc's pow(10, ·) misrounds 3 transmittance rows (10^23, the exact midpoint, among them) and
+  its log10 115 absorbance rows; they go to `tests/golden/spectroscopy.cr.tsv`, and the port is bit-identical to the
+  corrected outputs on all 118 (0 match glibc's). glibc's cos and sin are correctly rounded at the 13 FFT angles
+  −2π/2^k (and to k = 20), so no FFT row changes. The release oracle calls glibc's `sincos` for hisab's twiddles (LLVM
+  joins `angle.cos()` and `angle.sin()`; the binary imports it once `fft_spectrum` is called): `validate.py`'s replica,
+  with Python's `math.cos` and `math.sin`, gives every golden FFT row's bits, so `sincos` is glibc's sin and cos there.
+- **The FFT** (ADR 0003 amendment M4e). `_km_fft` is hisab 1.4.0's `num::fft` transcribed — the bit reversal, the
+  butterflies with Complex's mul / add / sub, the `w *= wn` recurrence, no FMA — with `_km_cr_sincos` twiddles; hisab
+  3.4.1's `num_fft` (stdlib twiddles, reseeded every 64 steps) would differ from n = 256 on. `fft_spectrum` replays the
+  rows through the heap work table up to n = 64 and in place above; `tests/spectroscopy.tcyr` checks the two paths
+  bit-identical to 2¹⁴, impulses flat to 2¹⁶ and Parseval to 10⁻¹⁰. `--sensitivity`: S = 1 on 129 of the 168 rows with a
+  nudged twiddle, ∞ on 39 (a nudged twiddle turns an infinite or overflowing sum into another: the huge, ±∞ and DBL_MAX
+  signals); gated at 0 like every row.
+- **ADR 0002 #19.** Rust's `0.01 / x` is one ulp from RN(1/(100·x)) on 827 of the 8,107 Ok rows of each function (and
+  on 2,748 of 20,000 seeded x over every binade, 14 %); `validate.py` proves every note with `Fraction`, and Rust's value
+  is within one ulp everywhere the result is normal. The rows differ by one ulp, inside class B, so the harness marks a
+  noted row as mapped (`_par_force_map`) and counts it as accepted under ADR 2, never as a plain ok. `_km_cr_hundredth_div`
+  is verified by `cr_verify.py` (`h100`, below), `tests/mathx.tcyr` (28 MPFR values, 4,000 seeded fast / exact pairs) and
+  `tests/spectroscopy.tcyr` (20,000 seeded).
+- **The typed constants** (`validate.py`'s pinning): the isotope thresholds × ½ / × 2 change 110 / 117 (10⁻¹²), 153 / 173
+  (0.001) and 173 (0.5 × 2) of the 693 pattern rows with at most 3,000 steps, ± 1 ulp none (no peak lands on a
+  threshold, no mass difference is near 0.5), so `tests/spectroscopy.tcyr` pins each to the ulp on its helper; ħ's 2.0
+  + 1 ulp changes 942 oscillator rows, the 0.5 12, B's 8.0 1,331 rotational-constant rows, R_H ± 1 ulp 157 / 166 series
+  rows, the FFT's −2.0 − 1 ulp 41 FFT rows; the rotor's (J + 1.0) is unobservable on every input (J + 1 + 2⁻⁵² rounds back
+  for J ≥ 1, and J = 0 multiplies by 0).
+- **The stable sort.** No natural molecule's scratch holds equal masses with unequal intensities (the ties from
+  m₁ + m₂ = m₂ + m₁ are identical records), so reversing the ties changes no golden row; `tests/spectroscopy.tcyr` pins the
+  order on `_km_isotope_sort` with −NaN, ±0, +NaN and equal masses of different intensities, and the binned mean's order.
+- **Reviewed and kept as Rust's** (ADR 0002's M4e addition; reported to the user): `reduced_mass(m, m)` misses m/2 on 33 of
+  the 315 equal-mass rows; `bohr_energy_level(Z, Z)` misses −R on 3 of 12; computing the Rydberg factor 1/n₁² − 1/n₂²
+  exactly would move `rydberg_wavelength` by up to 38,777,186 ulp ((255, 2³¹, 2³¹ + 7)); no isotope peak sits exactly on
+  RN(0.001). The grids include them, so a later decision can be measured.
+
+**Verification of `_km_cr_hundredth_div`** (`scripts/oracle/cr_verify.py`'s `h100`, against `mpfr_ref.hundredth_div`):
+
+| Arguments | Integer path forced | Mismatches (ELF · PE · aarch64) | Fast path declines |
+|---|---|---|---|
+| 1,049,032 (specials; the fast path's edges 2^±900, the overflow end and the subnormal-result end, ±3,000 ulps each; the integers 1 … 150,000; 150,000 decimal wavelengths k·10⁻ʲ; 700,000 binade-uniform of both signs) | 100,018 | 0 · 0 · 0 (the same bits and flags) | 135,071 (12.9 %: outside [2⁻⁹⁰⁰, 2⁹⁰⁰], by design; inside, none of the 300,000 integers and decimals) |
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **17 modules, 0 failing; 296,016 ok, 0 failed, 0 measured,
+0 pending, 6,416 accepted (807 under ADR 6; under ADR 2, 440 #4 Antoine, 13 #12 CFSE, 23 #3 SEMF, 1,810 #13, 208 #14,
+59 #15, 1,041 #16, 180 #17, 181 #18 and 1,654 #19 rows), 0 glibc-matching.**
+
+```text
+=== parity summary: 17 modules, 0 failing | rows: 296016 ok, 0 failed, 0 measured, 0 pending, 6416 accepted (ADR 6: 807), 0 glibc-matching (failed) ===
+```
+
+The harness's token lists hold 8,448 tokens since M4e (`_PAR_MAX`, for the 2¹³-sample FFT rows: 8,193 input tokens).
+Every target ran one at a time (§14's note for CI).
+
+## 16. M4e-2: potential's geometry with an unbounded exponent, ADR 0002 #20 (2026-11-10)
+
+The user's decision of 2026-11-09 ("Yes, prescale") on M4d's report: `distance_3d`, `bond_angle` and `dihedral_angle`
+are Rust's own operation sequence evaluated in binary64 with an unbounded exponent range (every + − × ÷ √ rounded to 53
+bits, nothing over- or underflowing, comparisons and Err checks on those values), the final √ or atan2 rounded once into
+binary64 (ADR 0002's M4e-2 addition has the target, the fast-path tests and the helpers' exactness argument). Non-finite
+coordinates keep Rust's results.
+
+| Function | Class | Rows (M4d → M4e-2) | Finite coordinates | Rust's chain in the normal range | #20 noted (Err) | ulp (every target) |
+|---|---|---|---|---|---|---|
+| `potential::distance_3d` | B | 846 → 1,914 | 1,896 | 1,000 | 854 (0) | 0 |
+| `potential::bond_angle` | C (atan2) | 3,156 → 4,838 | 4,809 | 3,172 | 1,205 (0) | 0 |
+| `potential::dihedral_angle` | C (atan2) | 2,921 → 4,994 | 4,957 | 2,892 | 1,546 (91) | 0 |
+
+- **Only edge rows change.** 314 of M4d's 26,938 rows take a note (the scales 2^±511 and beyond, subnormal and DBL_MAX
+  coordinates); `validate.py` proves that no row whose f64 chain stays in the normal range (no product or sum non-finite
+  or below 2⁻¹⁰²², no zero product of nonzero factors) is noted, and that every unnoted row's expected result — the
+  corrected oracle's where glibc's atan2 misrounded, else the oracle's — is MPFR's unbounded evaluation.
+- **The new edge grids** (4,823 rows, `m_potential.rs`'s `edges20`): each geometry family at 2^k for k in ±(230 … 1074),
+  one distance at every seventh binary scale, differences that overflow (DBL_MAX against −DBL_MAX), mixed magnitudes and
+  subnormal coordinates (seeded, binade-uniform), tiny angles (1, 2^t) for t down to −1500 at six scales (subnormal results,
+  their midpoints, and π − t near π), the coincidence and collinearity tolerances at extreme scales with the port's and
+  Rust's crossings found by bisection (Rust's squares rounded at the subnormal grid near 2⁻⁴⁸⁰ and 2⁻²⁴⁵, overflowing near
+  2⁵¹² and 2²⁷⁶), b₁ tiny (2⁻⁵⁰⁰) against b₂ huge (2³⁰⁰), where Rust's threshold rounds 10⁻²⁰·|b₁|² to a few subnormal
+  bits before |b₂|² scales it up (the 91 rows where the port says collinear and Rust does not), trans and cis dihedrals
+  with every sign of their zeros at 2^±400 … 2^±1000, and 300 seeded geometries per function at random scales.
+- **Two new ADR 6 rows** (`potential.cr.tsv`, 1 → 3): tiny bond angles whose quotient is the subnormal midpoint
+  1.5·2⁻¹⁰⁷⁴; glibc's atan2 rounds it to even (2·2⁻¹⁰⁷⁴), the correctly rounded atan2 lies just below it (1·2⁻¹⁰⁷⁴). In
+  both rows Rust's chain is in range, so the port's value is the corrected oracle's (no #20 note).
+- **The generator** computes the port's result in exact integer arithmetic (`exact::Ux`; `exact::ux_atan2_f64`, a 400-bit
+  fixed-point atan with Ziv's test) and notes a row where the unbounded chain differs from its f64 replica of Rust's
+  (an Err decision or atan2's arguments) and the result from the oracle's; the replica is checked against the oracle on
+  every row.
+- **Scale invariance**: `validate.py` evaluates 6,853 rows again at an exact random scale 2^k through MPFR (the angles the
+  same bits, distances 2^k times); `tests/potential.tcyr` checks the port bit for bit on 600 random geometries × 75 scales
+  from 2⁻¹¹⁰⁰ to 2¹¹⁰⁰ (unit-scale, planar, near-coincident, near-collinear and mixed-scale ones), and the forced slow path
+  against the fast one on 5,000 in-range geometries.
+
+**Verification of the helpers and the slow path** (`scripts/oracle/cr_verify.py`, against `mpfr_ref.UX`: 53 bits at MPFR's
+widest exponent range, the final operation by `mpfr_check_range` and `mpfr_subnormalize`):
+
+| Family | Arguments | Mismatches (ELF · PE · aarch64) |
+|---|---|---|
+| `uxsqrt` (`_km_ux_sqrt_f64`) | 200,009 (subnormal results and exact-square ties, the overflow end, every exponent to ±5000) | 0 · 0 · 0 |
+| `uxmul`, `uxdiv` | 180,006, 180,005 (subnormal results and short-significand ties, the overflow end, results below 2⁻¹¹³⁰) | 0 · 0 · 0 |
+| `uxadd` | 200,011 (near the subnormal range, sticky exponent gaps 56 … 200, cancellations, midpoints and a breaking term) | 0 · 0 · 0 |
+| `uxatan2` (accurate path forced on 100,008) | 280,008 (exponent differences to ±2300 at common exponents to ±5000, subnormal and exact quotients) | 0 · 0 · 0 |
+| `dist`, `bond`, `dih` (public function and forced slow path) | 38,000 each (random scales 2⁻¹⁰⁷⁴ … 2¹⁰¹⁸, mixed magnitudes, subnormal coordinates, near coincidence and collinearity at scale, overflowing differences) | 0 · 0 · 0 |
+
+`tests/mathx.tcyr` adds 48 MPFR values past binary64's range and 20,000 seeded pairs against IEEE's own operations (at the
+doubles' exponents and shifted past the range and back), and atan2 against `_km_cr_atan2` at any common shift.
+
+**Cost** (`tests/kimiya.bcyr`, same host, before → after): `potential/dihedral_angle` 131 → 133 ns (Rust 20.35), `potential/
+bond_angle` 213 → 213, `potential/distance_3d` 14 → 16; the slow path on the same geometries scaled by 2⁶⁰⁰ (Rust's
+squares overflow): `distance_3d_2p600` 314 ns, `bond_angle_2p600` 1.13 µs, `dihedral_angle_2p600` 1.31 µs (Rust's chain gave
++∞ or an Err there in 14, 52 and 80 ns).
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **17 modules, 0 failing; 297,232 ok, 0 failed, 0 measured,
+0 pending, 10,023 accepted (809 under ADR 6; under ADR 2, 440 #4 Antoine, 13 #12 CFSE, 23 #3 SEMF, 1,810 #13, 208 #14,
+59 #15, 1,041 #16, 180 #17, 181 #18, 1,654 #19 and 3,605 #20 rows), 0 glibc-matching.**
+
+```text
+=== parity summary: 17 modules, 0 failing | rows: 297232 ok, 0 failed, 0 measured, 0 pending, 10023 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
+```
 
 ## How to reproduce
 

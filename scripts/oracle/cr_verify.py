@@ -1,5 +1,6 @@
-"""Verify the correctly rounded exp, exp10, expm1, ln, log10, pow, sin, cos, atan2, acos and x·2^y of src/mathx.cyr
-against MPFR (ADR 0006).
+"""Verify the correctly rounded exp, exp10, expm1, ln, log10, pow, sin, cos, atan2, acos, x·2^y and 1/(100·x) of
+src/mathx.cyr against MPFR (ADR 0006), and its unbounded-exponent final operations with potential's geometry (ADR 0002
+#20).
 
 For each primitive it generates seeded arguments (deterministic: random.Random with fixed seeds), builds
 a probe program that calls the Cyrius function on every argument, runs it on each target, and compares
@@ -34,6 +35,19 @@ exp2s, _km_cr_exp2_scaled(x, y) = x*2^y rounded once (M4d, ADR 0002 #13: nuclear
 range and at the overflow end, exact scalings and their ties (integer y), tiny and subnormal |y|, |y| near 2200, every
 binade of x with y over [-2300, 2300], and the special pairs; the reference is mpfr_ref.scaled_exp2 (2^f to 400 bits,
 bounded from both sides).
+h100, _km_cr_hundredth_div(x) = 1/(100*x) rounded once (M4e, ADR 0002 #19: spectroscopy's wavenumber conversions), gets
+>= 1,000,000 arguments: every binade of both signs, the fast path's edges 2^+-900, the overflow end (the subnormal x
+whose 1/(100*x) passes DBL_MAX) and the subnormal-result end (x near 2^1022/100^-1), the integers, decimal wavelengths
+k*10^-j, and the special values; the reference is mpfr_ref.hundredth_div.
+M4e-2 (ADR 0002 #20) adds the unbounded-exponent final operations of src/mathx.cyr, each on (significand, exponent) pairs
+far outside binary64's range: uxsqrt (_km_ux_sqrt_f64), uxmul, uxdiv, uxadd (_km_ux_mul_f64, _km_ux_div_f64,
+_km_ux_add_f64) and uxatan2 (_km_ux_atan2_f64, its accurate path forced through _km_ux_atan2_acc), with subnormal results
+and their ties (short significands), the overflow end, sticky exponent gaps, cancellations and every exponent difference;
+and potential's distance_3d, bond_angle and dihedral_angle (dist, bond, dih) on edge geometries (random points at
+scales 2^-1074 ... 2^1018, mixed magnitudes, subnormal coordinates, near coincidence and collinearity at scale,
+overflowing differences), the public function and the forced slow path (_km_*_ux) both. The references are mpfr_ref's
+UX (53 bits at MPFR's widest exponent range; the final operation by mpfr_check_range and mpfr_subnormalize) and
+mpfr_ref.potential_* (Rust's sequence on UX).
 Through each function's _km_cr_<f>_fast entry it reports the fast path's fallback rate per region, and
 checks the fast path's result equals the function's wherever its test passes. It checks that the three
 targets give identical bits and flags.
@@ -43,7 +57,8 @@ Usage, from the repo root:
     python3 -I scripts/oracle/cr_verify.py --targets elf   # one target
     python3 -I scripts/oracle/cr_verify.py --big           # also 10,000,000 more per primitive on ELF
     python3 -I scripts/oracle/cr_verify.py --only pow,exp  # some functions (exp exp10 expm1 ln log10 pow sin cos
-                                                           # atan2 acos exp2s)
+                                                           # atan2 acos exp2s h100 uxsqrt uxmul uxdiv uxadd
+                                                           # uxatan2 dist bond dih)
     python3 -I scripts/oracle/cr_verify.py --work DIR      # probe sources and binaries in DIR
                                                            # (default build/cr-verify, gitignored)
 Exit status 1 on any mismatch or cross-target difference, 2 on a build or run failure.
@@ -72,8 +87,20 @@ FUNCS = [  # (id, name, fast entry, accurate entry, MPFR reference)
     (8, "atan2", "_km_cr_atan2", "_km_cr_atan2_acc", mpfr_ref.atan2),
     (9, "acos", "_km_cr_acos", "_km_cr_acos_acc", mpfr_ref.acos),
     (11, "exp2s", "_km_cr_exp2_scaled", "_km_cr_exp2_scaled_acc", None),   # the reference is ref_exp2s, below
+    (12, "h100", "_km_cr_hundredth_div", "_km_cr_hundredth_div_acc", mpfr_ref.hundredth_div),
+    # ADR 0002 #20 (M4e-2): the unbounded-exponent final operations ((significand, exponent) pairs in, binary64 out) and
+    # potential's geometry by its forced slow path; the references are below (ref_ux)
+    (13, "uxsqrt", "_km_ux_sqrt_f64", "_km_ux_sqrt_f64", None),
+    (14, "uxmul", "_km_ux_mul_f64", "_km_ux_mul_f64", None),
+    (15, "uxdiv", "_km_ux_div_f64", "_km_ux_div_f64", None),
+    (16, "uxadd", "_km_ux_add_f64", "_km_ux_add_f64", None),
+    (17, "uxatan2", "_km_ux_atan2_f64", "_km_ux_atan2_acc", None),
+    (18, "dist", "distance_3d", "_km_distance_3d_ux", None),
+    (19, "bond", "bond_angle", "_km_bond_angle_ux", None),
+    (20, "dih", "dihedral_angle", "_km_dihedral_angle_ux", None),
 ]
-PAIRS = (5, 8, 11)   # the functions of two arguments
+ARITY = {5: 2, 8: 2, 11: 2, 13: 2, 14: 4, 15: 4, 16: 4, 17: 4, 18: 6, 19: 9, 20: 12}   # argument words; 1 elsewhere
+UX_NAMES = ("uxsqrt", "uxmul", "uxdiv", "uxadd", "uxatan2", "dist", "bond", "dih")
 FID_SINCOS = 10      # probe-only id: _km_cr_sincos
 N_UNIFORM = 700_000
 N_ACC = 100_000
@@ -628,9 +655,211 @@ def args_exp2s(rng):
     ]
 
 
+def args_h100(rng):
+    """Arguments for 1/(100*x) (M4e)."""
+    sp = [0.0, -0.0, INF, -INF, NAN, fb(1), -fb(1), fb(0x0010000000000000), fb(0x7FEFFFFFFFFFFFFF),
+          -fb(0x7FEFFFFFFFFFFFFF), 1.0, -1.0, 17.0, 29.0, 100.0, 0.01, 0.5e-6, 1e-5]
+    edges = []
+    for x in (2.0 ** 900, 2.0 ** -900, fb(0x7FEFFFFFFFFFFFFF), 1.0 / (100.0 * fb(0x7FEFFFFFFFFFFFFF)),
+              1.0 / (100.0 * 2.0 ** -1022), 2.0 ** -1022, 1.0 / 100.0):
+        edges += around(x, 3000)
+        edges += [-v for v in around(x, 500)]
+    ints = [float(k) for k in range(1, 150_001)]
+    dec = [rng.randint(1, 9999) * 10.0 ** -rng.randint(0, 22) for _ in range(150_000)]
+    return [
+        ("special", sp),
+        ("fast-path edges, overflow and subnormal-result ends", edges),
+        ("integers 1 .. 150000", ints),
+        ("decimal wavelengths k*10^-j", dec),
+        ("binade-uniform", binade_uniform(rng, 700_000, -1074, 1023)),
+    ]
+
+
+def _sig(rng, neg_ok=True):
+    """A random significand in [1, 2), of either sign."""
+    x = fb((0x3FF << 52) | rng.randrange(0, 1 << 52))
+    return -x if neg_ok and rng.random() < 0.5 else x
+
+
+def _short_sig(rng):
+    """A significand of at most 12 bits: exact products, quotients and square roots, and their ties."""
+    k = rng.randint(1 << 11, (1 << 12) - 1)
+    return k / 2048.0
+
+
+def args_uxsqrt(rng):
+    """(s, e) for RN(√(s·2^e)) (M4e-2): subnormal results and their ties, the overflow end, exact squares, every e."""
+    sub = [(_sig(rng, False), rng.randint(-2200, -2040)) for _ in range(60_000)]
+    top = [(_sig(rng, False), rng.randint(2040, 2050)) for _ in range(20_000)]
+    exact = []
+    for _ in range(40_000):            # (k/2048)² with k < 2^12, so the root is exact: ties at the subnormal grid
+        r = _short_sig(rng)
+        e = rng.randint(-2200, -2100) if rng.random() < 0.7 else rng.randint(-2000, 2000)
+        q, ee = r * r, 2 * e
+        if q >= 2.0:
+            q, ee = q / 2.0, ee + 1
+        exact.append((q, ee))
+    every = [(_sig(rng, False), rng.randint(-5000, 5000)) for _ in range(80_000)]
+    sp = [(1.0, -2150), (1.0, -2148), (1.0, 2048), (fb(0x3FFFFFFFFFFFFFFF), 2047), (1.0, 2046), (0.0, 0), (-0.0, 0),
+          (1.5, -2149), (1.0 + 2.0 ** -52, -2150)]
+    return [("special", sp), ("subnormal results", sub), ("the overflow end", top), ("exact squares", exact),
+            ("every exponent", every)]
+
+
+def _ux_pairs(rng, n, targets, exact=False, combine="mul"):
+    """(s1, e1, s2, e2) whose product (combine = mul) or quotient (div) lands at 2^t for t in targets (a range)."""
+    out = []
+    for _ in range(n):
+        t = rng.randint(*targets)
+        e1 = rng.randint(-5000, 5000)
+        s1 = _short_sig(rng) if exact else _sig(rng)
+        s2 = _short_sig(rng) if exact else _sig(rng)
+        if exact and rng.random() < 0.5:
+            s1 = -s1
+        e2 = t - e1 if combine == "mul" else e1 - t
+        out.append((s1, e1, s2, e2))
+    return out
+
+
+def args_uxmul(rng):
+    return [("special", [(1.5, -1074, 1.0, -1), (1.0, -1075, 1.0, 0), (1.5, 1023, 1.5, 0), (0.0, 0, 1.5, 9000),
+                         (-0.0, 0, 1.5, -9000), (1.0, 2000, 1.0, -1000)]),
+            ("subnormal results", _ux_pairs(rng, 70_000, (-1130, -1020))),
+            ("subnormal ties (short significands)", _ux_pairs(rng, 40_000, (-1090, -1060), exact=True)),
+            ("the overflow end", _ux_pairs(rng, 20_000, (1020, 1025))),
+            ("normal results", _ux_pairs(rng, 40_000, (-1020, 1020))),
+            ("below 2^-1130", _ux_pairs(rng, 10_000, (-3000, -1131)))]
+
+
+def args_uxdiv(rng):
+    return [("special", [(1.0, -1000, 1.5, 74), (1.0, 2000, 1.0, 977), (0.0, 0, 1.5, 5), (1.5, 5, 0.0, 0),
+                         (-1.25, -1074, 1.0, 1)]),
+            ("subnormal results", _ux_pairs(rng, 70_000, (-1130, -1020), combine="div")),
+            ("subnormal ties (short significands)", _ux_pairs(rng, 40_000, (-1090, -1060), exact=True, combine="div")),
+            ("the overflow end", _ux_pairs(rng, 20_000, (1020, 1025), combine="div")),
+            ("normal results", _ux_pairs(rng, 40_000, (-1020, 1020), combine="div")),
+            ("below 2^-1130", _ux_pairs(rng, 10_000, (-3000, -1131), combine="div"))]
+
+
+def args_uxadd(rng):
+    """(s1, e1, s2, e2) for RN(x + y): results near and in the subnormal range, exponent gaps past the 55 where the
+    smaller term becomes a sticky bit, cancellations, the overflow end."""
+    def gap(lo, hi, n, emin, emax):
+        out = []
+        for _ in range(n):
+            e1 = rng.randint(emin, emax)
+            out.append((_sig(rng), e1, _sig(rng), e1 - rng.randint(lo, hi)))
+        return out
+    canc = []
+    for _ in range(30_000):
+        s1 = _sig(rng)
+        e1 = rng.randint(-1200, 1200)
+        s2 = -ulps(abs(s1), rng.randint(-2000, 2000)) * math.copysign(1.0, s1)
+        canc.append((s1, e1, s2 if 1.0 <= abs(s2) < 2.0 else -s1, e1 - rng.randint(0, 1)))
+    ties = []
+    for _ in range(30_000):             # 2^-1075-scale midpoints and a smaller term that breaks them
+        e1 = rng.randint(-1080, -1070)
+        ties.append((_short_sig(rng), e1, _sig(rng), e1 - rng.randint(50, 200)))
+    sp = [(1.0, -1075, 1.0, -1200), (1.0, -1075, -1.0, -1200), (1.0, -1075, 1.0, -1075), (1.0, 1023, 1.0, 1023),
+          (fb(0x3FFFFFFFFFFFFFFF), 1023, 1.0, 970), (fb(0x3FFFFFFFFFFFFFFF), 1023, 1.0, 969), (1.0, 0, -1.0, 0),
+          (0.0, 0, -0.0, 0), (-0.0, 0, -0.0, 0), (0.0, 0, 1.5, -1100), (-1.5, -1100, 0.0, 0)]
+    return [("special", sp), ("near the subnormal range", gap(0, 70, 60_000, -1130, -1015)),
+            ("sticky gaps (56 ... 200)", gap(56, 200, 30_000, -1100, 1023)), ("cancellations", canc),
+            ("midpoints and a breaking term", ties), ("the overflow end", gap(0, 60, 20_000, 1020, 1024)),
+            ("every exponent", gap(0, 120, 30_000, -5000, 5000))]
+
+
+def args_uxatan2(rng):
+    """(ys, ye, xs, xe) for atan2 of two unbounded-exponent values: every exponent difference to ±2300 at any common
+    exponent, quotients in and below the subnormal range (x > 0), equal exponents, zeros."""
+    diffs = [(_sig(rng), (c := rng.randint(-5000, 5000)) + rng.randint(-2300, 2300), _sig(rng), c)
+             for _ in range(120_000)]
+    sub = []
+    for _ in range(80_000):
+        c = rng.randint(-5000, 5000)
+        sub.append((_sig(rng), c + rng.randint(-1140, -1010), _sig(rng, False), c))
+    exact = []
+    for _ in range(20_000):             # short significands: exact quotients, subnormal midpoints among them
+        c = rng.randint(-5000, 5000)
+        exact.append((_short_sig(rng), c + rng.randint(-1080, -1065), 1.0, c))
+    eq = [(_sig(rng), (c := rng.randint(-5000, 5000)), _sig(rng), c) for _ in range(60_000)]
+    sp = [(0.0, 0, 1.0, 5000), (-0.0, 0, -1.0, -5000), (1.0, 7000, 0.0, 0), (-1.5, -7000, -0.0, 0), (0.0, 0, -0.0, 0),
+          (1.5, -774, 1.0, 300), (1.0, 0, 1.0, -2000), (1.0, -2000, -1.0, 0)]
+    return [("special", sp), ("every exponent difference", diffs), ("subnormal quotients", sub),
+            ("exact quotients", exact), ("equal exponents", eq)]
+
+
+def _geom_point(rng, k):
+    return [math.ldexp(rng.uniform(-1.0, 1.0), k) for _ in range(3)]
+
+
+def _binade_any(rng):
+    return binade_uniform(rng, 1, -1074, 1020)[0]
+
+
+def args_geom(rng, n_pts):
+    """Edge geometries for potential's distance_3d (2 points), bond_angle (3), dihedral_angle (4), finite coordinates:
+    random points at a random scale 2^k (k from -1074 to 1018: Rust's squares, fourth powers and cross products over-
+    and underflow), mixed binary magnitudes, subnormal coordinates, points near coincidence and collinearity at random
+    scales, and overflowing differences."""
+    def scaled(n):
+        out = []
+        for _ in range(n):
+            k = rng.randint(-1074, 1018)
+            out.append(tuple(x for _ in range(n_pts) for x in _geom_point(rng, k)))
+        return out
+    def mixed(n):
+        return [tuple(_binade_any(rng) for _ in range(3 * n_pts)) for _ in range(n)]
+    def subn(n):
+        return [tuple(binade_uniform(rng, 1, -1074, -1023)[0] for _ in range(3 * n_pts)) for _ in range(n)]
+    def near(n):
+        out = []
+        for _ in range(n):
+            k = rng.randint(-1074, 1018)
+            p = [rng.uniform(-1.0, 1.0) for _ in range(3)]
+            pts = [p]
+            for j in range(1, n_pts):
+                if j == 1:          # B near A (coincidence) or the points near a line (collinearity)
+                    off = 2.0 ** rng.uniform(-44, -30)
+                    pts.append([p[0] + off * rng.uniform(-1, 1), p[1] + off * rng.uniform(-1, 1), p[2]])
+                else:
+                    t = rng.uniform(1.0, 2.0)
+                    off = 2.0 ** rng.uniform(-40, -26)
+                    pts.append([p[0] + t * (pts[1][0] - p[0] + 1.0), p[1] + t * (pts[1][1] - p[1]) + off, p[2]])
+            out.append(tuple(math.ldexp(x, k) for q in pts for x in q))
+        return out
+    big = fb(0x7FEFFFFFFFFFFFFF)
+    over = []
+    for _ in range(2_000):
+        pts = [[rng.choice((big, -big, big / 2.0, -big / 3.0, 0.0, 1.0)) for _ in range(3)] for _ in range(n_pts)]
+        over.append(tuple(x for q in pts for x in q))
+    return [("scaled", scaled(14_000)), ("mixed magnitudes", mixed(8_000)), ("subnormal coordinates", subn(4_000)),
+            ("near coincidence / collinearity at scale", near(10_000)), ("overflowing differences", over)]
+
+
+def ref_ux(name, a):
+    """The MPFR reference for ADR 0002 #20's functions (mpfr_ref.UX at MPFR's widest exponent range, the final
+    operation rounded once into binary64); Err (bond and dihedral) encoded as +inf, as the probe does."""
+    S = mpfr_ref.ux_scaled
+    if name == "uxsqrt":
+        return mpfr_ref.ux_sqrt_final(S(a[0], a[1]))
+    if name in ("uxmul", "uxdiv", "uxadd"):
+        f = {"uxmul": mpfr_ref.ux_mul_final, "uxdiv": mpfr_ref.ux_div_final, "uxadd": mpfr_ref.ux_add_final}[name]
+        return f(S(a[0], a[1]), S(a[2], a[3]))
+    if name == "uxatan2":
+        return mpfr_ref.ux_atan2_final(S(a[0], a[1]), S(a[2], a[3]))
+    if name == "dist":
+        return mpfr_ref.potential_distance_3d(list(a))
+    r = mpfr_ref.potential_bond_angle(list(a), 1e-12) if name == "bond" else \
+        mpfr_ref.potential_dihedral_angle(list(a), 1e-20)
+    return INF if r is None else r
+
+
 def gen_args(name, lim):
     rng = random.Random({"exp": 1001, "exp10": 1002, "expm1": 1003, "ln": 1004, "log10": 1005, "pow": 1006,
-                         "sin": 1007, "cos": 1008, "atan2": 1009, "acos": 1010, "exp2s": 1011}[name])
+                         "sin": 1007, "cos": 1008, "atan2": 1009, "acos": 1010, "exp2s": 1011, "h100": 1012,
+                         "uxsqrt": 1013, "uxmul": 1014, "uxdiv": 1015, "uxadd": 1016, "uxatan2": 1017, "dist": 1018,
+                         "bond": 1019, "dih": 1020}[name])
     if name == "exp":
         sections = args_exp(rng, lim)
     elif name == "exp10":
@@ -647,6 +876,13 @@ def gen_args(name, lim):
         sections = args_acos(rng, lim)
     elif name == "exp2s":
         sections = args_exp2s(rng)
+    elif name == "h100":
+        sections = args_h100(rng)
+    elif name in ("uxsqrt", "uxmul", "uxdiv", "uxadd", "uxatan2"):
+        sections = {"uxsqrt": args_uxsqrt, "uxmul": args_uxmul, "uxdiv": args_uxdiv, "uxadd": args_uxadd,
+                    "uxatan2": args_uxatan2}[name](rng)
+    elif name in ("dist", "bond", "dih"):
+        sections = args_geom(rng, {"dist": 2, "bond": 3, "dih": 4}[name])
     else:
         sections = args_log(rng, lim, name == "log10")
     xs = [x for _, sec in sections for x in sec]
@@ -656,7 +892,7 @@ def gen_args(name, lim):
         spans.append((tag, i, i + len(sec)))
         i += len(sec)
     head = len(sections[0][1])
-    acc = xs[:head] + [xs[i] for i in random.Random(77).sample(range(len(xs)), N_ACC)]
+    acc = xs[:head] + [xs[i] for i in random.Random(77).sample(range(len(xs)), min(N_ACC, len(xs)))]
     return xs, acc, spans
 
 
@@ -664,9 +900,72 @@ PROBE = r'''# GENERATED by scripts/oracle/cr_verify.py. Reads job.bin (u64 words
 # two words each for pow and atan2) and writes res.bin. Mode 0: for each argument the function's result, the fast
 # path's result and one byte, 1 if the fast path's test passed. Mode 1: the accurate path's result alone.
 # Id 10 (sincos) gives sin and cos in the two slots, and the byte 1 or 0 as above, 2 if the fast pair differs
-# from the full pair, 3 if the pair differs from _km_cr_sin and _km_cr_cos; id 11 is x·2^y (M4d), two words.
+# from the full pair, 3 if the pair differs from _km_cr_sin and _km_cr_cos; id 11 is x·2^y (M4d), two words; id 12
+# is 1/(100·x) (M4e).
+include "src/error.cyr"
+include "src/constants.cyr"
 include "src/mathx_data.cyr"
 include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/potential.cyr"
+
+# The argument words of function fid.
+#must_use
+fn arity(fid): i64 {
+    if (fid == 5 || fid == 8 || fid == 11 || fid == 13) { return 2; }
+    if (fid >= 14 && fid <= 17) { return 4; }
+    if (fid == 18) { return 6; }
+    if (fid == 19) { return 9; }
+    if (fid == 20) { return 12; }
+    return 1;
+}
+
+# ADR 0002 #20 (M4e-2): ids 13 … 17 take (significand, exponent) words: _km_ux_sqrt_f64(s, e), _km_ux_mul_f64,
+# _km_ux_div_f64, _km_ux_add_f64 and _km_ux_atan2_f64 (mode 1: _km_ux_atan2_acc; mode 0's second slot: _km_ux_atan2_fast);
+# ids 18 … 20 the geometry's points (6, 9, 12 f64): mode 0 the public function, its second slot the slow path forced
+# (_km_distance_3d_ux, _km_bond_angle_ux, _km_dihedral_angle_ux), mode 1 the forced slow path alone. An Err is +inf.
+#must_use
+fn run_ux(fid, mode, a): (f64, f64, i64) {
+    var s1: f64 = load64(a);
+    var e1 = load64(a + 8);
+    var s2: f64 = load64(a + 16);
+    var e2 = load64(a + 24);
+    if (fid == 13) { var q: f64 = _km_ux_sqrt_f64(s1, e1); return (q, q, 1); }
+    if (fid == 14) { var m: f64 = _km_ux_mul_f64(s1, e1, s2, e2); return (m, m, 1); }
+    if (fid == 15) { var d: f64 = _km_ux_div_f64(s1, e1, s2, e2); return (d, d, 1); }
+    if (fid == 16) { var p: f64 = _km_ux_add_f64(s1, e1, s2, e2); return (p, p, 1); }
+    if (fid == 17) {
+        if (mode == 1) { var t1: f64 = _km_ux_atan2_acc(s1, e1, s2, e2); return (t1, t1, 0); }
+        var t0: f64 = _km_ux_atan2_f64(s1, e1, s2, e2);
+        var tf, tok = _km_ux_atan2_fast(s1, e1, s2, e2);
+        return (t0, tf, tok);
+    }
+    var inf: f64 = 0x7FF0000000000000;
+    if (fid == 18) {
+        var ds: f64 = _km_distance_3d_ux(a, a + 24);
+        if (mode == 1) { return (ds, ds, 0); }
+        var dp: f64 = distance_3d(a, a + 24);
+        return (dp, ds, 1);
+    }
+    if (fid == 19) {
+        var bs: f64 = inf;
+        var tb, vb = _km_bond_angle_ux(a, a + 24, a + 48);
+        if (is_ok(tb) == 1) { bs = vb; }
+        if (mode == 1) { return (bs, bs, 0); }
+        var bp: f64 = inf;
+        var tc, vc = bond_angle(a, a + 24, a + 48);
+        if (is_ok(tc) == 1) { bp = vc; }
+        return (bp, bs, 1);
+    }
+    var hs: f64 = inf;
+    var th, vh = _km_dihedral_angle_ux(a, a + 24, a + 48, a + 72);
+    if (is_ok(th) == 1) { hs = vh; }
+    if (mode == 1) { return (hs, hs, 0); }
+    var hp: f64 = inf;
+    var ti, vi = dihedral_angle(a, a + 24, a + 48, a + 72);
+    if (is_ok(ti) == 1) { hp = vi; }
+    return (hp, hs, 1);
+}
 
 #must_use
 fn run(fid, mode, x: f64, y: f64): (f64, f64, i64) {
@@ -682,6 +981,7 @@ fn run(fid, mode, x: f64, y: f64): (f64, f64, i64) {
         if (fid == 9) { var aa: f64 = _km_cr_acos_acc(x); return (aa, aa, 0); }
         if (fid == 10) { var ps, pc = _km_cr_sincos_acc(x); return (ps, pc, 0); }
         if (fid == 11) { var za: f64 = _km_cr_exp2_scaled_acc(x, y); return (za, za, 0); }
+        if (fid == 12) { var ha: f64 = _km_cr_hundredth_div_acc(x); return (ha, ha, 0); }
         var f: f64 = _km_cr_pow_acc(x, y);
         return (f, f, 0);
     }
@@ -698,6 +998,11 @@ fn run(fid, mode, x: f64, y: f64): (f64, f64, i64) {
         var c1: f64 = _km_cr_cos(x);
         if (load64(&s1) != load64(&s) || load64(&c1) != load64(&c)) { flag = 3; }
         return (s, c, flag);
+    }
+    if (fid == 12) {
+        var hh: f64 = _km_cr_hundredth_div(x);
+        var hf, ho = _km_cr_hundredth_div_fast(x);
+        return (hh, hf, ho);
     }
     if (fid == 11) {
         var z: f64 = _km_cr_exp2_scaled(x, y);
@@ -716,23 +1021,36 @@ fn run(fid, mode, x: f64, y: f64): (f64, f64, i64) {
 
 fn main(): i64 {
     alloc_init();
-    var cap = 8 * (3 + 2 * NMAX);
+    var cap = 8 * (3 + WMAX);
     var buf = alloc(cap);
     var got = file_read_all("job.bin", buf, cap);
     if (got < 24) { return 2; }
     var fid = load64(buf);
     var mode = load64(buf + 8);
     var n = load64(buf + 16);
-    var ar = 1;
-    if (fid == 5 || fid == 8 || fid == 11) { ar = 2; }
+    var ar = arity(fid);
     if (got != 8 * (3 + ar * n)) { return 3; }
     var out = alloc(17 * n + 8);
     var i = 0;
     while (i < n) {
-        var x: f64 = load64(buf + 24 + 8 * ar * i);
+        var at = buf + 24 + 8 * ar * i;
+        var x: f64 = load64(at);
         var y: f64 = 0.0;
-        if (ar == 2) { y = load64(buf + 32 + 16 * i); }
-        var r, rf, ok = run(fid, mode, x, y);
+        if (ar == 2) { y = load64(at + 8); }
+        var r: f64 = 0.0;
+        var rf: f64 = 0.0;
+        var ok = 0;
+        if (fid >= 13) {
+            var r1, rf1, ok1 = run_ux(fid, mode, at);
+            r = r1;
+            rf = rf1;
+            ok = ok1;
+        } else {
+            var r2, rf2, ok2 = run(fid, mode, x, y);
+            r = r2;
+            rf = rf2;
+            ok = ok2;
+        }
         store64(out + 8 * i, r);
         store64(out + 8 * n + 8 * i, rf);
         store8(out + 16 * n + i, ok);
@@ -754,9 +1072,9 @@ TARGETS = {
 }
 
 
-def build(root, work, nmax, targets):
+def build(root, work, wmax, targets):
     src = work / "probe.cyr"
-    src.write_text(PROBE.replace("NMAX", str(nmax)))
+    src.write_text(PROBE.replace("WMAX", str(wmax)))
     for t in targets:
         flags, out, _ = TARGETS[t]
         r = subprocess.run(["cyrius", "build", *flags, str(src), str(work / out)], cwd=root,
@@ -772,9 +1090,10 @@ def run_probe(work, target, fid, mode, args):
     """(results, fast results, fast flags) for the arguments (floats, or (x, y) pairs for pow)."""
     _, out, runner = TARGETS[target]
     n = len(args)
-    flat = [bits(v) for a in args for v in (a if isinstance(a, tuple) else (a,))]
-    if fid in PAIRS and args and not isinstance(args[0], tuple):
-        raise ValueError("pairs expected")
+    flat = [v & 0xFFFFFFFFFFFFFFFF if isinstance(v, int) else bits(v)
+            for a in args for v in (a if isinstance(a, tuple) else (a,))]
+    if ARITY.get(fid, 1) > 1 and args and not (isinstance(args[0], tuple) and len(args[0]) == ARITY[fid]):
+        raise ValueError(f"{ARITY[fid]}-word arguments expected")
     (work / "job.bin").write_bytes(struct.pack(f"<3Q{len(flat)}Q", fid, mode, n, *flat))
     res = work / "res.bin"
     for attempt in range(2):            # wine has been seen to exit 0 without writing the file, once
@@ -802,6 +1121,8 @@ def same(a, b):
 def ref_of(name, ref, a):
     if name == "exp2s":
         return ref_exp2s(*a)
+    if name in UX_NAMES:
+        return ref_ux(name, a)
     return ref(*a) if isinstance(a, tuple) else ref(a)
 
 
@@ -883,14 +1204,14 @@ def main():
 
     funcs = [f for f in FUNCS if only is None or f[1] in only]
     plan = {}
-    nmax = 0
+    wmax = 0
     for fid, name, _, _, ref in funcs:
         xs, acc, spans = gen_args(name, lim)
         plan[name] = (xs, acc, spans)
-        nmax = max(nmax, len(xs))
+        wmax = max(wmax, ARITY.get(fid, 1) * len(xs))
     if big:
-        nmax = max(nmax, 10_000_000)
-    build(root, work, nmax, targets)
+        wmax = max(wmax, 2 * 10_000_000)
+    build(root, work, wmax, targets)
     print(f"cr_verify: MPFR {mpfr_ref.VERSION}; targets {', '.join(targets)}; probe in {work}")
 
     failed = False
@@ -930,7 +1251,7 @@ def main():
             if t == targets[0]:
                 rates = [f"{tag} {(b - a) - sum(flags[a:b])}/{b - a}" for tag, a, b in spans]
                 print("         fallbacks by region: " + "; ".join(rates))
-        if big and "elf" in targets and name not in ("pow", "atan2", "exp2s"):
+        if big and "elf" in targets and name not in ("pow", "atan2", "exp2s") + UX_NAMES:
             rng = random.Random(9000 + fid)
             if name in ("ln", "log10"):
                 ys = binade_uniform(rng, 10_000_000, -1074, 1023, signs=(1,))
@@ -938,6 +1259,8 @@ def main():
                 ys = [rng.uniform(-8.0, 8.0) for _ in range(5_000_000)] + binade_uniform(rng, 5_000_000, -1074, 1023)
             elif name == "acos":
                 ys = [rng.uniform(-1.0, 1.0) for _ in range(10_000_000)]
+            elif name == "h100":
+                ys = binade_uniform(rng, 10_000_000, -1074, 1023)
             elif name == "exp10":
                 ys = [rng.uniform(lim["EXP10_UNF"] - 1, lim["EXP10_OVF"] + 1) for _ in range(5_000_000)] + \
                     binade_uniform(rng, 5_000_000, -1074, 8)

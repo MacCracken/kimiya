@@ -46,6 +46,7 @@ MODULES = {
     "inorganic": {"prefix": "", "structs": set()},
     "nuclear": {"prefix": "", "structs": set()},
     "potential": {"prefix": "", "structs": set()},
+    "spectroscopy": {"prefix": "", "structs": set()},
 }
 
 # Rust enums with `impl` methods (M4b): their const property methods are free functions of the enum value,
@@ -55,6 +56,7 @@ ENUM_METHODS = {
     "Geometry": "geometry_",
     "FunctionalGroup": "functional_group_",
     "Ligand": "ligand_",
+    "SpectralSeries": "spectral_series_",   # M4e: spectral_series_n_lower(s), spectral_series_wavelength(s, line)
 }
 
 # Rust structs that became handles (port plan §6.4: `Option<&'static T>` → a handle, 0 for None):
@@ -117,7 +119,7 @@ EXCEPTIONS = {
 
 # Later milestones (port plan §2.1): counted, not checked.
 PENDING_MODULES = {
-    "stoichiometry": "M4", "spectroscopy": "M4",
+    "stoichiometry": "M4",
     "reaction_dynamics": "M5", "network": "M5", "fitting": "M5", "sensitivity": "M5",
 }
 DEFERRED_MODULES = {

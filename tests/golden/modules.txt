@@ -13,5 +13,6 @@ phase
 potential
 reaction
 solution
+spectroscopy
 thermo
 thermochem

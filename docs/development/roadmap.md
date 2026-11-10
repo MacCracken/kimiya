@@ -10,8 +10,9 @@ Next: **Cyrius port** — plan of record: [`kimiya-port-plan.md`](kimiya-port-pl
 (tanmatra template: Rust 1.2.0 frozen in `rust-old/` as the parity oracle, Cyrius ships 2.0.0).
 M0–M3 and M3c are done (M3c, ADR 0006: every transcendental the port calls is correctly rounded, and every class-C row
 is gated at 0 ulp against the corrected oracle); M4 (structure, nuclear, spectroscopy) is in progress, its M4b (organic,
-inorganic), M4c (nuclear), M4a (correctly rounded sin, cos, atan2, acos) and M4d (potential, the trig switch) done —
-live status in [`state.md`](state.md).
+inorganic), M4c (nuclear), M4a (correctly rounded sin, cos, atan2, acos), M4d (potential, the trig switch), M4e
+(spectroscopy, hisab 1.4.0's FFT transcribed) and M4e-2 (potential's geometry with an unbounded exponent, ADR 0002 #20)
+done, M4f (stoichiometry) next — live status in [`state.md`](state.md).
 
 ---
 
@@ -73,6 +74,13 @@ type for average oxidation states, no separate extrapolating Antoine function. I
   rounded since M4d), λ_p < λ_d/100 and 4Δ/9 — done in the Cyrius API (M4c, ADR 0002 #13–#15)
 - [x] `potential::lj_equilibrium_distance` → the correctly rounded σ·2^(1/6); `lennard_jones` / `morse_width_parameter` → no
   spurious overflow of 4·ε / 2·D_e — done in the Cyrius API (M4d, ADR 0002 #16–#18)
+- [x] `spectroscopy::wavenumber_from_wavelength` / `wavelength_from_wavenumber` → the correctly rounded 1/(100·x) instead of
+  `0.01 / x` (one ulp off on about 14 % of inputs) — done in the Cyrius API (M4e, ADR 0002 #19)
+- [x] `potential::distance_3d` / `bond_angle` / `dihedral_angle` → no over- or underflow of the squared coordinates: Rust's
+  sequence evaluated with an unbounded exponent, the final √ / atan2 rounded once, Rust's bits wherever its chain stays
+  normal, the angles exactly scale-invariant — done in the Cyrius API (M4e-2, ADR 0002 #20, the user's decision)
+- [ ] after M4: the library-wide audit of intermediate over- and underflow of products and quotients of inputs, each edge
+  fixed as #20 (the user's decision; the `_km_ux_*` helpers exist; `state.md` lists the first candidates)
 - [ ] *additive* — `fitting::fit_beer_lambert` → also return the intercept
 - [ ] *additive* — `spectroscopy::rydberg_wavelength` → nuclear-mass parameter for the reduced-mass correction
 - [ ] `integration::soorat::MolecularStructure::from_molecule` → `Result`
@@ -93,6 +101,9 @@ type for average oxidation states, no separate extrapolating Antoine function. I
 - [ ] IUPAC 2011 hydrogen-bond definition — check the acceptor sentence quoted in `src/organic_data.cyr` against the
   published *Pure Appl. Chem.* 83, 1637 PDF (quoted from a secondary copy; the PDF was unreachable in M4b)
 - [ ] Na₂CO₃ ΔGf° is inconsistent with ΔHf°/S° by 2.55 kJ/mol in NBS/CRC (pinned as a known exception in tests)
+- [ ] `spectroscopy::isotope_abundances` — the masses are AME2020's to five decimals (¹H 1.00783 for 1.007825032, ¹³C
+  13.00335 for 13.003354835; within 5·10⁻⁶ u), and sulfur omits ³⁶S (0.0001; its abundances sum to 0.9999). Kept as the
+  oracle's in the port (functional parity, M4e); full AME2020 masses and ³⁶S would be a data change for a later release
 
 ---
 

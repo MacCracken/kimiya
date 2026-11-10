@@ -358,6 +358,104 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     `potential/bond_angle`, `lennard_jones`, `lj_equilibrium_distance`, `morse`, `mathx/cr_exp2_scaled`
   - generator: the exact integer arithmetic moved to `scripts/oracle/src/exact.rs` (with #16's sixth-power rounding);
     `cr_verify.py` gains `exp2s`; `mpfr_ref.py` gains `scaled_exp2`; `surface_parity.py` counts potential as ported
+- **M4e spectroscopy** (port plan §4, §6.4 "Decided in M4e"; M4 in progress, stoichiometry next):
+  - **spectroscopy** — the Beer–Lambert law (`absorbance`, `transmittance` on `_km_cr_exp10`,
+    `absorbance_from_transmittance` on `_km_cr_log10`, `concentration_from_absorbance`), the photon conversions and eV ↔ J,
+    `bohr_energy_level`, `bohr_transition_energy`, `rydberg_wavelength`, the spectral series (`enum KmSpectralSeries`,
+    `spectral_series_n_lower`, `spectral_series_wavelength` with the reduced-mass R_H), the wavenumber conversions
+    (ADR 0002 #19, Breaking, below), `reduced_mass`, `harmonic_oscillator_energy`, `vibrational_frequency`,
+    `rigid_rotor_energy`, `rotational_constant`, `diatomic_moment_of_inertia`, `isotope_abundances(z)` (a (pointer, count)
+    slice into the baked table), `isotope_pattern(atoms, n, out, cap)`, `fft_spectrum(signal, n, out, cap)` and
+    `find_peaks(data, n, t, out, cap)`, in Rust's check and operation order. Rust's u8 / u32 arguments are words, never
+    wrapped (Err, NaN or the empty slice outside the type; an isotope-pattern Z outside u8 is `InvalidElement`); Vec results
+    go to the caller's buffer of `cap` elements with `Ok(count)`, or `Err(KM_ERR_INVALID_INPUT)` when they don't fit (the
+    buffer untouched)
+  - **isotope_pattern** — Rust's pruned convolution operation for operation: a stable insertion sort on the masses'
+    total order (Rust's `sort_by(total_cmp)` is stable, and the binned means depend on the order of equal masses), the
+    binning, `fold(0.0, max)`, the renormalisation, `retain` in order, the `count` loop as Rust's; Rust's private
+    thresholds 10⁻¹², 0.001 and 0.5 u typed inline in the helpers that apply them and pinned to the ulp by
+    `tests/spectroscopy.tcyr`; the working tables start on the stack and move to the heap only for large molecules
+    (`Err(KM_ERR_COMPUTATION_ERROR)` if that allocation fails)
+  - **fft_spectrum** — hisab 1.4.0's `num::fft` transcribed as the private `_km_fft` (ADR 0003 amendment M4e): its
+    bit-reversal loop, butterflies and `w *= wn` recurrence with Complex's operations in their order, no FMA, the twiddles
+    from the correctly rounded `_km_cr_sincos` (hisab 3.4.1's `num_fft` takes them from the stdlib's `f64_cos` / `f64_sin`
+    and reseeds them every 64 steps), and Complex::abs's √(re·re + im·im); the transform runs in `out` when cap ≥ 2n
+    (nothing allocated; `signal` may be `out`), else in 16·n heap bytes
+  - generated `src/spectroscopy_data.cyr`: `enum KmSpectralSeries` (`KM_SPECTRAL_SERIES_*`, append-only) and its n_lower
+    column, the isotope abundance table from the oracle's `isotope_abundances(z)` for every u8 z (16 pairs over H, C, N,
+    O, S, Cl, Br, with the literal's comments), Rust's private R_H read through the API (the Lyman line u32::MAX − 1 is
+    RN(1/R_H), which fixes it uniquely) and its private mₑ/mₚ
+  - **mathx** — `_km_cr_hundredth_div(x)`, 1/(100·x) rounded once (a double-double residual and a rounding test, an exact
+    64-bit long division as its fallback; 1/100 generated as H + L by `mathx_tables.py`), for ADR 0002 #19, with
+    `_fast` / `_acc` entry points: `cr_verify.py`'s `h100` (1,049,032 arguments, 100,018 through the integer path, against
+    `mpfr_ref.hundredth_div`) and `tests/mathx.tcyr`'s two new groups
+  - golden module `spectroscopy` (52,985 rows: class A 1,255, B 46,415, C 5,315): every u8 Z for the Bohr levels and the
+    isotope table, transitions and the Rydberg formula over Z × (n₁, n₂) grids and close large n, every series to
+    u32::MAX's `checked_add` overflow, the wavenumbers over every decade, power of two and binade, the isotope patterns of
+    the Rust tests' molecules, every u8 Z alone, every element with data × counts to 5,000, elements without data to
+    u32::MAX, mixtures and the Err position, the FFT at every length 0 … 16 and every power of two to 2¹³ (impulses,
+    constants, ±0, Nyquist, sinusoids, random, huge, subnormal, NaN, ±∞), `find_peaks` over thresholds in and out of
+    [0, 1] (NaN, ±∞, −0), plateaus and non-finite data; 118 rows have ADR 0006 corrections
+    (`tests/golden/spectroscopy.cr.tsv`: glibc's pow(10, ·) on 3 transmittance rows, 10²³ among them, and its log10 on
+    115 absorbance rows); `validate.py` recomputes every row (with its own FFT transcription; the release oracle's
+    `sincos` gives glibc's sin and cos bits), proves #19 with `Fraction`, checks the generated data and pins the typed
+    constants (`--sensitivity` too); `probe_tables.py` compiles the 81 spectroscopy_data cells
+  - the harness: `_PAR_MAX` 1024 → 8448 tokens (the 2¹³-sample FFT rows); a row mapped to an ADR's exact value is counted
+    as accepted even within its class's tolerance (`_par_force_map`: #19's one-ulp class-B rows); `fft_spectrum` replays
+    through the heap work table up to n = 64 and in place above
+  - **result**, x86_64 ELF, x86_64 PE and aarch64: `296016 ok, 0 failed, 0 measured, 0 pending, 6416 accepted (ADR 6:
+    807), 0 glibc-matching (failed)` on 17 modules — under ADR 2, 1,654 #19 rows besides the earlier ones — every row 0
+    ulp from its reference, every class-C function at bound 0 ([`port-parity.md`](docs/development/port-parity.md) §15)
+  - 62 Rust tests ported one for one plus the 2 spectroscopy integration tests (`tests/spectroscopy.tcyr`) and 6
+    Cyrius-only groups (out-of-type integers, the caller buffers and slices, the isotope helpers' stable sort and
+    thresholds to the ulp, the FFT transcription, #19's exact values, R_H): 289 assertions;
+    `tests/potential.tcyr`'s `morse_width_parameter_matches_force_constant` now calls `vibrational_frequency`, as Rust's;
+    20 test files, 0 warnings; surface parity 394/394; benches `spectroscopy/absorbance`, `bohr_energy_level`,
+    `isotope_pattern_glucose` (against Rust) and the Cyrius-only `fft_spectrum_256` / `_1024` / `_4096`,
+    `find_peaks_1000`, `wavenumber_from_wavelength`
+  - generator: `m_spectroscopy.rs`, `t_spectroscopy.rs`, `exact::cr_hundredth_div` (128-bit integer division);
+    `mpfr_ref.py` gains `hundredth_div`; `surface_parity.py` counts spectroscopy as ported (the SpectralSeries methods as
+    `spectral_series_*`); `dist/kimiya.deps` lists `alloc` (spectroscopy calls it)
+- **M4e-2 potential's geometry with an unbounded exponent** (ADR 0002 #20, the user's decision of 2026-11-09, "Yes,
+  prescale"; port plan §6.4 "Decided in M4e-2"):
+  - **potential** — `distance_3d`, `bond_angle` and `dihedral_angle` are Rust's operation sequence evaluated in binary64
+    with an unbounded exponent range, the final √ or atan2 rounded once (Breaking, below). Each runs Rust's chain with a
+    cheap test that proves it stayed in the normal range (a sum-of-squares window for `distance_3d` and `bond_angle`, which
+    replaces `bond_angle`'s two `is_positive` calls; a per-component window on b₁, b₂, b₃ for the dihedral), and only
+    where the test fails, for finite coordinates, re-evaluates with the private `_km_distance_3d_ux`,
+    `_km_bond_angle_ux` and `_km_dihedral_angle_ux` (Rust's sub3 / cross / dot3 order on unbounded values)
+  - **mathx** — binary64 with an unbounded exponent: (significand, exponent) pairs with `_km_ux_from`, `_km_ux_neg`,
+    `_km_ux_add`, `_km_ux_sub`, `_km_ux_mul`, `_km_ux_div`, `_km_ux_sqrt` (each one IEEE operation on the significands,
+    hence the exact 53-bit rounding), `_km_ux_cmp`, `_km_ux_le`, `_km_ux_max` (Rust's max), `_km_ux_is_positive`, the
+    round-once `_km_ux_round` and the final `_km_ux_add_f64`, `_km_ux_sub_f64`, `_km_ux_mul_f64`, `_km_ux_div_f64`,
+    `_km_ux_sqrt_f64` and `_km_ux_atan2_f64` (`_fast`, `_acc`), each rounded once into binary64 with its exact error
+    breaking subnormal midpoints: the machinery of the library-wide audit of intermediate over- and underflow after M4
+  - golden module `potential`: 31,761 rows (4,823 new edge rows: coordinates near 2^±(500 … 1074), mixed magnitudes and
+    subnormal coordinates, differences that overflow, the coincidence and collinearity tolerances at extreme scales with
+    both crossings found by bisection, b₁ tiny against b₂ huge, tiny angles with subnormal results, trans and cis
+    dihedrals at scale for the −π → π mapping, seeded geometries at random scales); 3,605 rows noted with the port's
+    result (854 `distance_3d`, 1,205 `bond_angle`, 1,546 `dihedral_angle`, 91 of them the port's Err), 314 of them among
+    the 26,938 earlier rows; 2 more ADR 6 rows (glibc's atan2 rounds the subnormal midpoint quotient 1.5·2⁻¹⁰⁷⁴ up)
+  - generator: `exact::Ux` (53-bit rounding of u128 mantissas at any exponent) and `exact::ux_atan2_f64` (a 400-bit
+    fixed-point atan by Euler's series, Ziv's two-sided test), the f64 replica of Rust's chains checked on every row;
+    `mpfr_ref.py` gains `UX`, `unbounded`, the final `ux_sqrt_final`, `ux_atan2_final`, `ux_mul_final`, `ux_div_final`,
+    `ux_add_final` and `potential_*` (Rust's sequences on UX); `validate.py` proves every noted row, every unnoted row's
+    expected result and the in-range rows' Rust bits against MPFR, and the scale invariance; `cr_verify.py` gains
+    `uxsqrt`, `uxmul`, `uxdiv`, `uxadd`, `uxatan2` (1,040,039 arguments) and `dist`, `bond`, `dih` (114,000 edge
+    geometries, the slow path forced on all)
+  - the harness maps a #20 row's `(f:…)` or `(E:InvalidInput)` note (`_par_got_noted20`)
+  - **result**, x86_64 ELF, x86_64 PE and aarch64: `297232 ok, 0 failed, 0 measured, 0 pending, 10023 accepted (ADR 6:
+    809), 0 glibc-matching (failed)` on 17 modules — under ADR 2, 3,605 #20 rows besides the earlier ones
+    ([`port-parity.md`](docs/development/port-parity.md) §16)
+  - tests: `tests/mathx.tcyr` gains `ux_values` (48 MPFR values past binary64's range: subnormal ties, sticky terms,
+    overflow, exponent differences past 2^±2000; the signed zeros, IEEE's specials, order and max) and `ux_ieee` (20,000
+    seeded pairs: the final operations against IEEE's own, shifted past the range and back, atan2 against
+    `_km_cr_atan2`): 1,546 assertions;
+    `tests/potential.tcyr` gains `cyrius_unbounded_edges` (MPFR's values), `cyrius_scale_invariance` (600 random
+    geometries × 75 scales, bit for bit) and `cyrius_slow_path_agrees` (5,000 in-range geometries, the slow path forced):
+    159 assertions; 20 test files, 0 warnings; surface parity 394/394;
+    benches `potential/distance_3d` and the slow path's `potential/distance_3d_2p600`, `bond_angle_2p600`,
+    `dihedral_angle_2p600`
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -452,6 +550,28 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   1.2's, bit for bit.
   *Migration:* none for physical well depths.
 
+### Breaking (relative to Rust 1.2.0, ADR 0002 #19)
+- **spectroscopy** — `wavenumber_from_wavelength(λ)` and `wavelength_from_wavenumber(ν̃)` return the correctly rounded
+  1/(100·x), not 1.2's `0.01 / x`, whose 0.01 is 1/100 + 2.08 × 10⁻¹⁹ and whose quotient rounds again: they differ by one
+  ulp on about 14 % of inputs (`wavenumber_from_wavelength(17)` is 1/1700 = 0.000588235294117647, 1.2 the next double
+  up). The 1.2 tests' values (500 nm ↔ 20 000 cm⁻¹, 10 µm ↔ 1000 cm⁻¹) are unchanged, and so are the errors.
+  *Migration:* none for code that compares with a tolerance; code that tested 1.2's exact bits sees at most one ulp.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #20)
+- **potential** — `distance_3d`, `bond_angle` and `dihedral_angle` no longer over- or underflow in their squares, cross
+  products and dot products: each is Rust's own operation sequence evaluated with an unbounded exponent range (every
+  + − × ÷ √ rounded to 53 bits, the comparisons and Err checks on those values), the final √ or atan2 rounded once into
+  binary64. Where 1.2's chain stays in the normal range (every physical geometry: coordinates and bonds between about
+  10⁻¹⁵⁰ and 10¹⁵⁰, 10⁻⁷⁵ and 10⁷⁵ for dihedrals, or zero) the results are 1.2's, bit for bit; elsewhere 1.2 returned an
+  Err, 0, ±∞ or a degraded value.
+  Examples: `distance_3d([DBL_MAX, 0, 0], [0, 0, 0])` is DBL_MAX (1.2: +∞) and `distance_3d([5e-324, 0, 0], [0; 3])` is
+  5e-324 (1.2: 0); `bond_angle([1, 0, 0], [0; 3], [1, 2⁻¹⁰⁶⁰, 0])` is 2⁻¹⁰⁶⁰ (1.2: 0); the gauche dihedral scaled by 2⁷⁰⁰ is
+  π/2, as at 1 Å (1.2: Err). The angles are now exactly scale-invariant (2^k times every coordinate gives the same bits
+  whenever the scaled coordinates are exact), as Rust documents them, and the coincidence and collinearity tolerances
+  hold at every scale; non-finite coordinates still give 1.2's Err, NaN or ±∞.
+  *Migration:* none for physical geometries; code that relied on an Err or ±∞ for extreme coordinates gets the
+  geometry's value.
+
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
@@ -469,7 +589,10 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   Henderson–Hasselbalch row with base/acid = 0.8068…/2.6858… gives pH −2⁻⁵³ where 1.2.0 gave +0.0. Results no longer
   depend on the platform's libm: x86_64 and aarch64 give the same bits. Since M4d sin, cos, atan2 and acos are correctly
   rounded too (glibc misrounds 2 of the 710 `math` sin rows, 4 of the 2,910 cos rows, 1 of 2,620 acos rows and 1 of the
-  4,439 potential atan2 calls); a bond angle on such a call differs from 1.2's in the last bit
+  4,439 potential atan2 calls); a bond angle on such a call differs from 1.2's in the last bit. Since M4e the
+  Beer–Lambert `transmittance` (pow(10, ·): 3 golden rows, 10²³ among them) and `absorbance_from_transmittance` (log10:
+  115 rows) differ there too; the FFT's twiddles are correctly rounded (glibc's are at the 13 golden angles, so no
+  `fft_spectrum` row changes)
 
 ### Removed
 - **mathx** (private, M3c-3): `_km_log10` and `_km_expm1` (M1's Rust libm 0.2.16 / fdlibm transcriptions),
@@ -525,6 +648,21 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   atan2), `potential/lennard_jones` 35 ns, `potential/lj_equilibrium_distance` 109 ns (the correctly rounded σ·2^(1/6) of
   ADR 0002 #16), `potential/morse` 66 ns, `mathx/cr_exp2_scaled` 151 ns (ADR 0002 #13's N₀·2⁻ⁿ, 1000 after 1075.3
   half-lives). The Peng–Robinson trig roots' acos and cos now cost 142 + 3 × 81 ns instead of 5.8 µs + 3 × 1.68 µs
+
+- M4e spectroscopy, first measurement (Rust 1.2.0 → Cyrius): `spectroscopy/absorbance` 0.98 → 11 ns (11×),
+  `spectroscopy/bohr_energy_level` 1.21 → 16 ns (13×; Rust inlines both into a few instructions),
+  `spectroscopy/isotope_pattern_glucose` 2.80 → 16.8 µs (6.0×; 24 convolution steps on the stack tables, nothing
+  allocated); Cyrius-only `spectroscopy/fft_spectrum_256` 28.2 µs, `_1024` 134 µs, `_4096` 628 µs (in place),
+  `spectroscopy/find_peaks_1000` 22.5 µs, `spectroscopy/wavenumber_from_wavelength` 58 ns (ADR 0002 #19's correctly
+  rounded 1/(100·λ), the fast path)
+- M4e-2, ADR 0002 #20's fast-path test (Cyrius before → after, the same host, back to back): `potential/dihedral_angle`
+  131 → 133 ns (Rust 20.35; the per-component window on b₁, b₂, b₃, with the three |b|² computed inline),
+  `potential/bond_angle` 213 → 213 ns (the sum-of-squares window replaces Rust's two `is_positive` calls),
+  `potential/distance_3d` 14 → 16 ns (new; Cyrius-only); the slow path on the same geometries scaled by 2⁶⁰⁰, where Rust's
+  squares overflow: `potential/distance_3d_2p600` 314 ns, `bond_angle_2p600` 1.13 µs, `dihedral_angle_2p600` 1.31 µs
+  (1.2's chain gave +∞ or an Err there in 14, 52 and 80 ns); `potential/bond_angle_linear` (CO₂ on an axis, ba × bc
+  exactly 0) 1.06 µs → 135 ns, by a proven shortcut for an exactly linear or zero-angle geometry (it had taken the slow
+  path)
 
 ## [1.2.0] - 2026-11-08
 

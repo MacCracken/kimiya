@@ -20,7 +20,7 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
 | M2 Thermochemistry & gases | ✅ **done 2026-11-09.** M2a: `src/reaction.cyr`, `src/thermo.cyr`, generated `src/phase_data.cyr` + `src/phase.cyr` (Antoine → `Result`, ADR 0002 #4), generated `src/gas_data.cyr` + `src/gas.cyr` (`KmPengRobinsonParams`, the analytic PR cubic); correctly rounded acos/cos/ln/x^2.5 in `src/mathx.cyr` (ADR 0005). M2b: generated `src/thermochem_data.cyr` (`KmShomate`, 76 THERMOCHEM_DATA rows, 34 Shomate segments) + `src/thermochem.cyr` (reaction sums in J/mol, ADR 0002 #1; van 't Hoff; Shomate Cp and enthalpy; the flame temperature with hisab 1.4.0's Newton + bisection transcribed, ADR 0003 amendment). Golden `reaction` 1,188 + `thermo` 1,107 + `thermochem` 9,487 + `phase` 3,276 + `gas` 19,717 rows (math +7,500); **63,953 ok, 0 failed, 0 measured, 20 pending, 441 accepted** on x86_64 ELF, x86_64 PE and aarch64 (class B 0 ulp, the flame rows too; class C K = 2–10); 152 Rust tests ported; surface parity 140/140; 9 benches vs Rust |
 | M3 Solutions & electrochemistry | ✅ **done 2026-11-09.** M3a: `src/solution.cyr` (concentration units, pH, Henderson–Hasselbalch, the weak acid / base charge-balance Newton transcribed as `_km_charge_balance_root`, ionic strength over ion records, Debye–Hückel, Davies, Kohlrausch) with its ten constants generated into `src/constants.cyr`; generated `src/electrochemistry_data.cyr` (49 STANDARD_POTENTIALS rows, the first UTF-8 string blob) + `src/electrochemistry.cyr` (handles, Nernst, cell potentials, ΔG, Faraday's laws). M3b: `src/kinetics.cyr` (Arrhenius, the zero / first / second / nth-order laws and half-lives, steady state and pre-equilibrium, Michaelis–Menten, Lineweaver–Burk into the caller's two-f64 buffer, collision theory, Eyring). Golden `solution` 28,566 + `electrochemistry` 18,574 + `kinetics` 30,146 rows; at M3b 119,044 ok, 0 failed, 22,205 measured (the six kinetics class-C functions, gated since M3c), 10 pending, 441 accepted on all three targets; 131 Rust tests ported; surface parity 203/203; 7 benches vs Rust. Its primitives moved to the correctly rounded ones in M3c |
 | M3c Correct rounding (ADR 0006) | ✅ **done 2026-11-09.** M3c-1: the corrected oracle — `scripts/oracle/mpfr_ref.py` (MPFR 4.2 through ctypes), `validate.py --write-corrections` → `tests/golden/<module>.cr.tsv` (665 rows), the harness compares corrected rows against them. M3c-2: correctly rounded `_km_cr_exp`, `_km_cr_expm1`, `_km_cr_exp10`, `_km_cr_ln`, `_km_cr_log10`, `_km_cr_pow` in `src/mathx.cyr` (two-phase, Ziv), tables generated into `src/mathx_data.cyr` by `scripts/oracle/mathx_tables.py`, verified by `scripts/oracle/cr_verify.py` (≥ 1,000,000 arguments per primitive against MPFR, 0 mismatches, the same bits on every target) and `tests/mathx.tcyr`. M3c-3: every module on them in Rust's operation order (`_km_acos` / `_km_cos` kept; x^2.5 is `_km_cr_pow`); `_km_log10`, `_km_expm1`, `_km_log10_ln`, the `_km_ln` wrapper, `_km_pow_2_5` and `_km_dd_div` removed; every class-C function at bound 0; glibc-matching is a failure; 2,486 hard rows (subnormal exp × prefactor) added to `reaction`, `phase`, `thermochem`, `gas`. **143,071 ok, 0 failed, 0 measured, 10 pending, 1,105 accepted (ADR 6: 665; ADR 0002 #4: 440), 0 glibc-matching** on x86_64 ELF, x86_64 PE and aarch64, every class-C row 0 ulp (sin, atan2 and the 247 cos rows past \|x\| = 8 on the stdlib at 2 ulp); ADR 0004's row a plain ok; 15 test files, 0 warnings; surface parity 203/203 ([`port-parity.md`](port-parity.md) §9–§10) |
-| M4 Structure, nuclear & spectroscopy | ◐ **in progress.** **M4b ✅ done 2026-11-09** — generated `src/organic_data.cyr` (`KmBondType`, `KmGeometry`, `KmFunctionalGroup` with their property columns: bond energies, ideal angles, the UTF-8 pattern blob, the polar / donor flags and ADR 0002 #6's new acceptor column: IUPAC 2011's criterion, weak acceptors included, every group but the alkane, one source per family) + `src/organic.cyr` (`bond_type_energy_kj`, `enthalpy_from_bonds` over bond records, `predict_geometry` → `Option`, `geometry_ideal_bond_angle`, the `functional_group_*` properties; ADR 0002 #6: `KM_GEOMETRY_T_SHAPED`, `functional_group_is_hydrogen_bond_donor`, `…_acceptor`); generated `src/inorganic_data.cyr` (`KmLigand`, the private octahedral occupancy and unpaired-electron tables read through the API, the 10 Madelung / Born constants, the 30 Shannon IONIC_RADII rows) + `src/inorganic.cyr` (CFSE exact by ADR 0002 #12, (3·e_g − 2·t₂g)/5 in one correctly rounded division, Δ_tet, the spectrochemical series, spin-only moments, Born–Landé, Born–Haber, `lookup_ionic_radius` handles). Golden `organic` 9,104 + `inorganic` 15,107 rows and the last 10 `constants` rows: **167,279 ok, 0 failed, 0 measured, 0 pending, 1,118 accepted (ADR 6: 665; ADR 2: 440 Antoine + 13 exact-CFSE rows, by name), 0 glibc-matching** on x86_64 ELF, x86_64 PE and aarch64, every M4b row 0 ulp from its reference; 51 Rust tests ported (+ 2 integration); surface parity 323/323. **M4c ✅ done 2026-11-09** — generated `src/nuclear_data.cyr` (the 18 ISOTOPES rows: label blob, `u8` Z, `u16` A, half-life, a UTF-8 decay-mode blob) + `src/nuclear.cyr` (decay constants and laws, mass defect and binding energies, the SEMF → `Result` by ADR 0002 #3, Q-values over slices, the two-step decay chain into the caller's buffer with Rust's equal-rate limit, the secular-equilibrium test, `lookup_isotope` handles), every transcendental correctly rounded; by the user's decision on the review, ADR 0002 #13 (N₀/2ⁿ rounded once where Rust's 2⁻ⁿ is not a normal double: correctly rounded for an integer n or N₀ = ±2^j, faithful otherwise), #14 (the exact λ_p < λ_d/100) and, for M4b's inorganic, #15 (the correctly rounded 4Δ/9 past Δ·4's overflow). Golden `nuclear` 54,057 rows (the SEMF over every Z ≤ A ≤ 3Z with A ≤ 300) + 23 corrected rows, `inorganic` 15,162: **219,266 ok, 0 failed, 0 measured, 0 pending, 3,243 accepted (ADR 6: 688; ADR 2: 440 Antoine + 13 CFSE + 23 SEMF + 1,812 N₀/2ⁿ + 208 secular + 59 Δ_tet, all but the Antoine ones by name), 0 glibc-matching** on all three targets, every row 0 ulp from its reference; 36 Rust tests ported; surface parity 347/347. **M4a ✅ done 2026-11-09** — correctly rounded `_km_cr_sin`, `_km_cr_cos`, `_km_cr_sincos`, `_km_cr_atan2`, `_km_cr_acos` (two-phase; Cody–Waite and Payne–Hanek reduction, generated tables, `_km_td_norm` for the accurate division and square root), verified against MPFR by `cr_verify.py` on about 1.0–1.1 million arguments each (100,000 through the accurate path) on all three targets. **M4d ✅ done 2026-11-09** — `src/potential.cyr` (Lennard-Jones, Morse, Coulomb, distances, bond and dihedral angles through three-f64 point pointers, on `_km_cr_exp` and `_km_cr_atan2`); gas.cyr on M4a's `_km_cr_acos` / `_km_cr_cos` (every gas row keeps its bits) and ADR 0005's double-double `_km_cos` / `_km_acos` removed; the `math` trig rows at bound 0 (no golden transcendental row on the stdlib); ADR 0002 #13 correctly rounded (`_km_cr_exp2_scaled`), the new #16 (σ·2^(1/6) correctly rounded), #17 (Lennard-Jones past 4·ε's overflow), #18 (the Morse width past 2·D_e's overflow). Golden `potential` 26,938 rows + 1 corrected: **244,803 ok, 0 failed, 0 measured, 0 pending, 4,644 accepted (ADR 6: 689; ADR 2: 440 Antoine + 13 CFSE + 23 SEMF + 1,810 N₀/2ⁿ + 208 secular + 59 Δ_tet + 1,041 r_min + 180 Lennard-Jones + 181 Morse width), 0 glibc-matching** on all three targets, every row 0 ulp from its reference; 33 Rust tests ported; surface parity 357/357. **M4e** (spectroscopy) is next |
+| M4 Structure, nuclear & spectroscopy | ◐ **in progress.** **M4b ✅ done 2026-11-09** — generated `src/organic_data.cyr` (`KmBondType`, `KmGeometry`, `KmFunctionalGroup` with their property columns: bond energies, ideal angles, the UTF-8 pattern blob, the polar / donor flags and ADR 0002 #6's new acceptor column: IUPAC 2011's criterion, weak acceptors included, every group but the alkane, one source per family) + `src/organic.cyr` (`bond_type_energy_kj`, `enthalpy_from_bonds` over bond records, `predict_geometry` → `Option`, `geometry_ideal_bond_angle`, the `functional_group_*` properties; ADR 0002 #6: `KM_GEOMETRY_T_SHAPED`, `functional_group_is_hydrogen_bond_donor`, `…_acceptor`); generated `src/inorganic_data.cyr` (`KmLigand`, the private octahedral occupancy and unpaired-electron tables read through the API, the 10 Madelung / Born constants, the 30 Shannon IONIC_RADII rows) + `src/inorganic.cyr` (CFSE exact by ADR 0002 #12, (3·e_g − 2·t₂g)/5 in one correctly rounded division, Δ_tet, the spectrochemical series, spin-only moments, Born–Landé, Born–Haber, `lookup_ionic_radius` handles). Golden `organic` 9,104 + `inorganic` 15,107 rows and the last 10 `constants` rows: **167,279 ok, 0 failed, 0 measured, 0 pending, 1,118 accepted (ADR 6: 665; ADR 2: 440 Antoine + 13 exact-CFSE rows, by name), 0 glibc-matching** on x86_64 ELF, x86_64 PE and aarch64, every M4b row 0 ulp from its reference; 51 Rust tests ported (+ 2 integration); surface parity 323/323. **M4c ✅ done 2026-11-09** — generated `src/nuclear_data.cyr` (the 18 ISOTOPES rows: label blob, `u8` Z, `u16` A, half-life, a UTF-8 decay-mode blob) + `src/nuclear.cyr` (decay constants and laws, mass defect and binding energies, the SEMF → `Result` by ADR 0002 #3, Q-values over slices, the two-step decay chain into the caller's buffer with Rust's equal-rate limit, the secular-equilibrium test, `lookup_isotope` handles), every transcendental correctly rounded; by the user's decision on the review, ADR 0002 #13 (N₀/2ⁿ rounded once where Rust's 2⁻ⁿ is not a normal double: correctly rounded for an integer n or N₀ = ±2^j, faithful otherwise), #14 (the exact λ_p < λ_d/100) and, for M4b's inorganic, #15 (the correctly rounded 4Δ/9 past Δ·4's overflow). Golden `nuclear` 54,057 rows (the SEMF over every Z ≤ A ≤ 3Z with A ≤ 300) + 23 corrected rows, `inorganic` 15,162: **219,266 ok, 0 failed, 0 measured, 0 pending, 3,243 accepted (ADR 6: 688; ADR 2: 440 Antoine + 13 CFSE + 23 SEMF + 1,812 N₀/2ⁿ + 208 secular + 59 Δ_tet, all but the Antoine ones by name), 0 glibc-matching** on all three targets, every row 0 ulp from its reference; 36 Rust tests ported; surface parity 347/347. **M4a ✅ done 2026-11-09** — correctly rounded `_km_cr_sin`, `_km_cr_cos`, `_km_cr_sincos`, `_km_cr_atan2`, `_km_cr_acos` (two-phase; Cody–Waite and Payne–Hanek reduction, generated tables, `_km_td_norm` for the accurate division and square root), verified against MPFR by `cr_verify.py` on about 1.0–1.1 million arguments each (100,000 through the accurate path) on all three targets. **M4d ✅ done 2026-11-09** — `src/potential.cyr` (Lennard-Jones, Morse, Coulomb, distances, bond and dihedral angles through three-f64 point pointers, on `_km_cr_exp` and `_km_cr_atan2`); gas.cyr on M4a's `_km_cr_acos` / `_km_cr_cos` (every gas row keeps its bits) and ADR 0005's double-double `_km_cos` / `_km_acos` removed; the `math` trig rows at bound 0 (no golden transcendental row on the stdlib); ADR 0002 #13 correctly rounded (`_km_cr_exp2_scaled`), the new #16 (σ·2^(1/6) correctly rounded), #17 (Lennard-Jones past 4·ε's overflow), #18 (the Morse width past 2·D_e's overflow). Golden `potential` 26,938 rows + 1 corrected: **244,803 ok, 0 failed, 0 measured, 0 pending, 4,644 accepted (ADR 6: 689; ADR 2: 440 Antoine + 13 CFSE + 23 SEMF + 1,810 N₀/2ⁿ + 208 secular + 59 Δ_tet + 1,041 r_min + 180 Lennard-Jones + 181 Morse width), 0 glibc-matching** on all three targets, every row 0 ulp from its reference; 33 Rust tests ported; surface parity 357/357. **M4e ✅ done 2026-11-09** — generated `src/spectroscopy_data.cyr` (`KmSpectralSeries` and its n_lower column, the isotope abundance table from the oracle's `isotope_abundances(z)` at every u8 z, Rust's private R_H read through the API) + `src/spectroscopy.cyr` (Beer–Lambert on `_km_cr_exp10` / `_km_cr_log10`, the photon conversions, the Bohr levels and the Rydberg formula, the spectral series, the oscillator and rotor, `isotope_pattern`'s pruned convolution with Rust's stable sort, `fft_spectrum` on hisab 1.4.0's `num::fft` transcribed with correctly rounded twiddles (ADR 0003 amendment), `find_peaks`; Vec results into caller buffers); ADR 0002 #19 (the wavenumbers' correctly rounded 1/(100·x), `_km_cr_hundredth_div`). Golden `spectroscopy` 52,985 rows + 118 corrected: **296,016 ok, 0 failed, 0 measured, 0 pending, 6,416 accepted (ADR 6: 807; ADR 2: … + 1,654 1/(100x)), 0 glibc-matching** on all three targets, every row 0 ulp from its reference; 62 Rust tests ported (+ 2 integration); surface parity 394/394. **M4e-2 ✅ done 2026-11-10** — ADR 0002 #20 (the user's decision, "Yes, prescale"): `distance_3d`, `bond_angle` and `dihedral_angle` evaluate Rust's sequence with an unbounded exponent range (the final √ / atan2 rounded once), Rust's chain kept as a fast path behind a proven range test, `src/mathx.cyr`'s general `_km_ux_*` helpers as the slow path (and the machinery of the library-wide audit after M4). Golden `potential` 31,761 rows (4,823 new edge rows, 3,605 mapped under #20) + 3 corrected: **297,232 ok, 0 failed, 0 measured, 0 pending, 10,023 accepted (ADR 6: 809; ADR 2: … + 3,605 unbounded-exponent geometry rows), 0 glibc-matching** on all three targets; no row whose Rust chain stays in the normal range changes. **M4f** (stoichiometry) is next |
 | M5 Numerics | ☐ |
 | M7 Release 2.0.0 | ☐ |
 
@@ -43,8 +43,10 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
   correctly rounded primitives' tables and constants), `src/mathx.cyr` (the Rust-semantics helpers and the correctly
   rounded primitives, ADR 0006: the two-phase `_km_cr_exp`, `_km_cr_expm1`, `_km_cr_exp10`, `_km_cr_ln`, `_km_cr_log10`,
   `_km_cr_pow` (M3c-2), `_km_cr_sin`, `_km_cr_cos`, `_km_cr_sincos`, `_km_cr_atan2`, `_km_cr_acos` (M4a) and
-  `_km_cr_exp2_scaled` (M4d), each with `_acc` / `_fast` test entry points, and `_km_cr_sixth_root2_mul` (M4d, one
-  proven rounding); ADR 0005's double-double `_km_acos` / `_km_cos` were removed in M4d), `src/validate.cyr`, `src/element_data.cyr`
+  `_km_cr_exp2_scaled` (M4d) and `_km_cr_hundredth_div` (M4e, ADR 0002 #19), each with `_acc` / `_fast` test entry
+  points, and `_km_cr_sixth_root2_mul` (M4d, one proven rounding); since M4e-2 binary64 with an unbounded exponent
+  (`_km_ux_*`: (significand, exponent) pairs, + − × ÷ √, cmp / max, the round-once `_km_ux_round` and the final
+  `_km_ux_{add,sub,mul,div,sqrt,atan2}_f64`, ADR 0002 #20); ADR 0005's double-double `_km_acos` / `_km_cos` were removed in M4d), `src/validate.cyr`, `src/element_data.cyr`
   (generated: 118 elements, 32 property rows, `KmElementCategory`), `src/element.cyr`, `src/molecule.cyr`,
   `src/reaction.cyr`, `src/thermo.cyr`, `src/thermochem_data.cyr` (generated: `KmShomate`, 76 THERMOCHEM_DATA rows
   with formula / name blobs, 34 SHOMATE_DATA segments), `src/thermochem.cyr`, `src/phase_data.cyr` (generated:
@@ -56,37 +58,45 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
   `KmFunctionalGroup` and their property columns, ADR 0002 #6's acceptor column with its sources), `src/organic.cyr`,
   `src/inorganic_data.cyr` (generated, M4b: `KmLigand` and its field strengths, Rust's private octahedral d-electron
   tables, the 10 `KM_MADELUNG_*` / `KM_BORN_EXP_*`, the 30 IONIC_RADII rows), `src/inorganic.cyr`,
-  `src/potential.cyr` (M4d: Lennard-Jones, Morse, Coulomb and the 3D geometry; no data file), `src/nuclear_data.cyr`
+  `src/potential.cyr` (M4d: Lennard-Jones, Morse, Coulomb and the 3D geometry; no data file; M4e-2: the geometry's
+  unbounded-exponent slow paths, ADR 0002 #20), `src/nuclear_data.cyr`
   (generated, M4c: the 18 ISOTOPES rows, a UTF-8 decay-mode blob, `KM_ISOTOPES_COUNT`),
-  `src/nuclear.cyr` (its `q_value` sums with thermo's `_km_sum`); plus the
+  `src/nuclear.cyr` (its `q_value` sums with thermo's `_km_sum`), `src/spectroscopy_data.cyr` (generated, M4e:
+  `KmSpectralSeries` and its n_lower column, the isotope abundance pairs of H, C, N, O, S, Cl, Br with per-z start /
+  count columns, `_KM_RYDBERG_HYDROGEN` and the mass ratio), `src/spectroscopy.cyr` (M4e: calls element's lookups and
+  the earlier modules' `_km_is_enum_value`, `_km_is_u8`, `_km_is_u32`; includes `lib/alloc.cyr`); plus the
   `src/main.cyr` stub. Generated files are written by
   `scripts/oracle/` and never edited. Every transcendental the modules call is correctly rounded; `gas` and `nuclear`
-  include `lib/ganita.cyr` (cbrt), `gas` `lib/math.cyr` (`f64_clamp`; `mathx.cyr` no longer needs it since M4d). `dist/kimiya.deps`: math, string, vec, str, ganita, tagged; the bundle also
+  include `lib/ganita.cyr` (cbrt), `gas` `lib/math.cyr` (`f64_clamp`; `mathx.cyr` no longer needs it since M4d). `dist/kimiya.deps`: string, vec, str, math, ganita, alloc (M4e), tagged; the bundle also
   includes `lib/hisab.cyr` (thermo's and thermochem's `EPSILON_F64`), so a consumer needs kimiya's `[deps.hisab]`.
 
 ## Tests
 
-- `tests/parity.tcyr` (+ `tests/parity_core.cyr`, `tests/ulp.cyr`): the golden-corpus harness — 16 modules
+- `tests/parity.tcyr` (+ `tests/parity_core.cyr`, `tests/ulp.cyr`): the golden-corpus harness — 17 modules
   (constants, electrochemistry, element, gas, inorganic, kinetics, math, molecule, nuclear, organic, phase, potential,
-  reaction, solution, thermo, thermochem), 244,803 ok, 0 failed, 0 measured, 0 pending, 4,644 accepted (689 under ADR 6,
-  against the corrected oracle; under ADR 2 the 440 ADR 0002 #4 mapped Antoine rows, the 13 #12 exact-CFSE and 23 #3 SEMF
-  rows printed by name, and, counted, the 1,810 #13, 208 #14, 59 #15, 1,041 #16, 180 #17 and 181 #18 rows whose note names
-  the port's exact value), 0 glibc-matching, on x86_64 ELF, x86_64 PE and aarch64; ADR 0002 #6's renamed items compared
+  reaction, solution, spectroscopy, thermo, thermochem), 297,232 ok, 0 failed, 0 measured, 0 pending, 10,023 accepted (809
+  under ADR 6, against the corrected oracle; under ADR 2 the 440 ADR 0002 #4 mapped Antoine rows, the 13 #12 exact-CFSE and
+  23 #3 SEMF rows printed by name, and, counted, the 1,810 #13, 208 #14, 59 #15, 1,041 #16, 180 #17, 181 #18, 1,654 #19 and
+  3,605 #20 rows whose note names the port's value), 0 glibc-matching, on x86_64 ELF, x86_64 PE and aarch64 (`_PAR_MAX` 8448
+  tokens since M4e, for the 2¹³-sample FFT rows); ADR 0002 #6's renamed items compared
   under the Rust names (class A, summarised). Every class-C function and every `math` primitive at bound 0 (ADR 0006;
   sin, cos, atan2 and acos on M4a's primitives since M4d)
 - `tests/golden/`: `constants.tsv` (45, all compared since M4b), `electrochemistry.tsv` (18,574), `element.tsv` (975),
   `gas.tsv` (21,093), `inorganic.tsv` (15,162), `kinetics.tsv` (30,146), `math.tsv` (26,147), `molecule.tsv` (2,472),
-  `nuclear.tsv` (54,057), `organic.tsv` (9,104), `phase.tsv` (3,646), `potential.tsv` (26,938), `reaction.tsv` (1,558),
-  `solution.tsv` (28,566), `thermo.tsv` (1,107),
+  `nuclear.tsv` (54,057), `organic.tsv` (9,104), `phase.tsv` (3,646), `potential.tsv` (31,761), `reaction.tsv` (1,558),
+  `solution.tsv` (28,566), `spectroscopy.tsv` (52,985), `thermo.tsv` (1,107),
   `thermochem.tsv` (9,857), `modules.txt` — generated by
   `scripts/oracle/`; the corrected oracle (ADR 0006) `gas.cr.tsv` (11), `kinetics.cr.tsv` (323), `math.cr.tsv` (96),
-  `nuclear.cr.tsv` (23), `phase.cr.tsv` (4), `potential.cr.tsv` (1), `reaction.cr.tsv` (2), `solution.cr.tsv` (229) —
+  `nuclear.cr.tsv` (23), `phase.cr.tsv` (4), `potential.cr.tsv` (3), `reaction.cr.tsv` (2), `solution.cr.tsv` (229),
+  `spectroscopy.cr.tsv` (118) —
   written by `validate.py --write-corrections`
-- `tests/mathx.tcyr`: the correctly rounded primitives (M3c-2, M4a, M4d) — special values, exact and tie cases (10²³, the
-  subnormal ties), thresholds, subnormal results, the known hardest-to-round arguments, Payne–Hanek arguments, sincos,
-  atan2's sign and zero matrix, acos, x·2^y, the fast path's fallbacks, and seeded fast / accurate agreement, every
-  expected value MPFR's (20 groups, 1,384 assertions); `scripts/oracle/cr_verify.py` checks ≥ 1,000,000 arguments per
-  primitive (611,518 pairs for x·2^y) on every target
+- `tests/mathx.tcyr`: the correctly rounded primitives (M3c-2, M4a, M4d, M4e) — special values, exact and tie cases (10²³,
+  the subnormal ties), thresholds, subnormal results, the known hardest-to-round arguments, Payne–Hanek arguments, sincos,
+  atan2's sign and zero matrix, acos, x·2^y, 1/(100·x), the fast path's fallbacks, and seeded fast / accurate agreement,
+  every expected value MPFR's; since M4e-2 the unbounded-exponent arithmetic (ADR 0002 #20: 48 MPFR values past binary64's
+  range, 20,000 seeded pairs against IEEE's own operations) (24 groups, 1,546 assertions); `scripts/oracle/cr_verify.py`
+  checks ≥ 1,000,000 arguments per primitive (611,518 pairs for x·2^y, 1,049,032 for 1/(100·x); the five unbounded-exponent
+  final operations 1,040,039, the three geometry functions 114,000 edge geometries, the slow path forced) on every target
 - Reference tests, the Rust tests ported one for one: `tests/error.tcyr` (2 Rust + 1 Cyrius-only group,
   24 assertions), `tests/validate.tcyr` (3 + 1, 25), `tests/element.tcyr` (22 + 1, 96), `tests/molecule.tcyr`
   (11 + 1, 39; `serde_roundtrip` doesn't port), `tests/reaction.tcyr` (10 + 1, 29), `tests/thermo.tcyr`
@@ -96,8 +106,11 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
   `tests/organic.tcyr` (21 + the 2 organic integration tests + 4, 136; 5 tests use ADR 0002 #6's names; the acceptor
   property's reference tests), `tests/inorganic.tcyr` (30 + 7, 332; the exact CFSE of ADR 0002 #12, the exact Δ_tet of #15), `tests/nuclear.tcyr`
   (36 + 8, 243; `semi_empirical_invalid_is_nan` asserts ADR 0002 #3's Err; #13's correctly rounded and #14's exact values),
-  `tests/potential.tcyr` (33 + 5, 126; `morse_width_parameter_matches_force_constant` computes spectroscopy's √(k/μ)
-  inline until M4e; null pointers, the helpers, the tolerances to the ulp and the −π → π mapping, #16's r_min, #17 / #18)
+  `tests/potential.tcyr` (33 + 8, 159; `morse_width_parameter_matches_force_constant` calls `vibrational_frequency` since
+  M4e; null pointers, the helpers, the tolerances to the ulp and the −π → π mapping, #16's r_min, #17 / #18; M4e-2's
+  #20 edges against MPFR, the scale invariance bit for bit, the forced slow path against the fast one),
+  `tests/spectroscopy.tcyr` (62 + the 2 spectroscopy integration tests + 6, 289; out-of-type integers, the caller buffers,
+  the isotope helpers' stable sort and thresholds to the ulp, the FFT transcription, #19, R_H)
 - `tests/kimiya.tcyr`: smoke test of `dist/kimiya.cyr` as a consumer includes it (41 assertions)
 - `tests/kimiya.bcyr`: `element/lookup_by_symbol`, `element/lookup_by_number`, `molecule/molecular_weight_glucose`,
   `reaction/gibbs_free_energy`, `thermo/heat_transfer`, `gas/ideal_gas_pressure`, `gas/peng_robinson_z_n2_1mpa`,
@@ -110,7 +123,10 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
   `nuclear/binding_energy_per_nucleon_fe56`, `nuclear/semi_empirical_fe56` (M4c, against Rust) and the Cyrius-only
   `nuclear/decay_chain_two_step`, the M4a trig benches (`mathx/cr_sin`, `cr_cos`, `cr_sincos`, `cr_atan2`, `cr_acos`
   beside `f64_sin`, `f64_cos`, `ganita_f64_atan2`), `potential/dihedral_angle` (M4d, against Rust) and the Cyrius-only
-  `potential/bond_angle`, `lennard_jones`, `lj_equilibrium_distance`, `morse`, `mathx/cr_exp2_scaled`
+  `potential/bond_angle`, `lennard_jones`, `lj_equilibrium_distance`, `morse`, `mathx/cr_exp2_scaled`, `distance_3d` and
+  the #20 slow path's `distance_3d_2p600`, `bond_angle_2p600`, `dihedral_angle_2p600` (M4e-2),
+  `spectroscopy/absorbance`, `bohr_energy_level`, `isotope_pattern_glucose` (M4e, against Rust) and the Cyrius-only
+  `spectroscopy/fft_spectrum_256` / `_1024` / `_4096`, `find_peaks_1000`, `wavenumber_from_wavelength`
 - `tests/kimiya.fcyr`: scaffold fuzz harness
 
 ## Dependencies
@@ -131,11 +147,35 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
 
 ## Next
 
-**M4e**: `spectroscopy` (Rydberg / R_H, Beer–Lambert, `find_peaks`, the FFT via hisab's `num_fft`, isotope patterns with
-their pruned convolution; its trigonometry is M4a's), then `stoichiometry` (exact integer balancing, rational oxidation
-states, ADR 0002 #7) to complete M4.
+**M4f**: `stoichiometry` (exact integer balancing, rational oxidation states, ADR 0002 #7) to complete M4.
 
 Follow-ups:
+- **The library-wide audit of intermediate over- and underflow** (the user's decision, 2026-11-09, with ADR 0002 #20):
+  after M4, check every ported module for products and quotients of inputs that over- or underflow in Rust's chain where
+  the result is representable, and fix each edge as #20 does — Rust's sequence evaluated with an unbounded exponent, the
+  final operation rounded once, rows whose chain stays normal keeping Rust's bits, a cheap fast-path range test. The
+  machinery exists: `src/mathx.cyr`'s `_km_ux_*` (pairs, + − × ÷ √, cmp / max, `_km_ux_round` and the final
+  `_km_ux_{add,sub,mul,div,sqrt,atan2}_f64`), `mpfr_ref.UX` / `unbounded` / `ux_*_final` for `validate.py`'s proofs,
+  `exact::Ux` for the generator's notes, `cr_verify.py`'s `ux*` families. First candidates, from M4d's and M4e's kept
+  lists: `lennard_jones`' (σ/r)⁶ and (σ/r)¹², Coulomb's k·q₁·q₂ and r·r, `morse`'s subnormal D_e·x, Beer–Lambert's ε·l·c
+  and ε·l, `reduced_mass`' m₁·m₂ and m₁ + m₂, k/μ, h·B, 8π²·I, μ·r·r, the FFT's butterfly sums and re² + im². Each fix is an
+  ADR 0002 row, accepted before it lands.
+- **hisab's FFT twiddles are not correctly rounded** (M4e, ADR 0003 amendment): hisab 3.4.1's `num_fft` takes them from
+  the stdlib's `f64_cos` / `f64_sin` and reseeds them every 64 steps, so its transforms differ from 1.4.0's and from a
+  correctly rounded reference in the last bits from n = 256 on, and by platform. kimiya transcribes 1.4.0's `num::fft`
+  with `_km_cr_sincos` twiddles; a hisab FFT on correctly rounded twiddles (or with 1.4.0's recurrence as an option) would
+  let it call hisab. For the hisab feature request.
+- **M4e, reported to the user (kept as Rust's under the policy):** `reduced_mass(m, m)` one ulp from m/2 on 8.6 % of masses
+  (33 of 315 golden rows); `bohr_energy_level(Z, Z)` one ulp from −R on 3 of 12 (and Z/n = 1/k from −R/k² on 30 %); the
+  Rydberg factor 1/n₁² − 1/n₂² cancelling for close large n (an exact factor would move `rydberg_wavelength` up to 3.9·10⁷
+  ulp at n ≈ 2³¹, 39 ulp at n = 100, 939 at n = 10⁴) and `bohr_transition_energy`'s E₂ − E₁ likewise; the over- and underflow of
+  products and quotients of inputs (Beer–Lambert's ε·l·c and ε·l, `reduced_mass`'s m₁·m₂ and m₁ + m₂, k/μ, h·B, 8π²·I,
+  μ·r·r, the FFT's sums and re² + im², which hypot would avoid); `find_peaks`' interpolated threshold; the isotope
+  thresholds 0.001 (only an intensity of exactly RN(0.001) is judged differently from 1/1000) and 10⁻¹². ADR 0002's M4e
+  addition lists them. Fixed: #19.
+- **M4e data, kept as the oracle's** (functional parity; reported, not changed): the isotope masses are AME2020's to five
+  decimals (¹H 1.00783 for 1.007825032, ²H 2.01410 for 2.014101778, ¹³C 13.00335 for 13.003354835; every mass within
+  5·10⁻⁶ u of its AME value), and sulfur omits ³⁶S (0.0001, so its abundances sum to 0.9999).
 - **CI: a truncated parity run.** Concurrent `cyrius test --win` runs under wine can print a truncated parity run and
   still exit 0, so the CI gate must check that the parity summary line (`=== parity summary: … ===`) is present (and
   that `cyrius test` reports every test file). The harness cannot detect this itself: whether wine cuts the program's
@@ -147,9 +187,8 @@ Follow-ups:
   representable), of k·q₁·q₂ and of r·r (`coulomb`, `coulomb_force` for r past 1.3 × 10¹⁵⁴ or below 1.5 × 10⁻¹⁵⁴), of the
   squared coordinates in `distance_3d`, `bond_angle` and `dihedral_angle` (beyond about 10¹⁵⁴, or 10⁷⁷ for the dihedral's
   fourth powers, and below the reciprocals: an Err, 0, ±∞ or a degraded value where the distance or angle is
-  representable, though Rust documents the angles as scale-invariant: an exact power-of-two prescaling would fix it and
-  keep Rust's bits wherever it doesn't overflow, if the user wants it as an ADR 0002 row), `morse`'s r − r_e overflow and
-  its subnormal D_e·x. Fixed in M4d: #16, #17, #18. The two numerical tolerances (10⁻¹², 10⁻²⁰) are kept, as
+  representable, though Rust documents the angles as scale-invariant: fixed in M4e-2 as ADR 0002 #20, the user's
+  decision), `morse`'s r − r_e overflow and its subnormal D_e·x. Fixed in M4d: #16, #17, #18. The two numerical tolerances (10⁻¹², 10⁻²⁰) are kept, as
   `EQUAL_RATE_REL_TOL`.
 - **ADR 0002 #13 is correctly rounded since M4d** (`_km_cr_exp2_scaled`; M4c's faithful fractional-n path is gone).
   `decay_constant`'s LN_2/t½ (1 ulp from CR(ln 2/t½) on 476 of 2,175 rows) is kept under the policy.

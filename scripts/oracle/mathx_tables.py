@@ -1,5 +1,6 @@
 """Generate src/mathx_data.cyr: the tables and constants of the correctly rounded exp, expm1, exp10, ln
-and log10 (ADR 0006, M3c-2a), sin, cos, atan2 and acos (M4a) and x·2^(1/6) (M4d) in src/mathx.cyr.
+and log10 (ADR 0006, M3c-2a), sin, cos, atan2 and acos (M4a), x·2^(1/6) (M4d) and 1/(100·x) (M4e) in
+src/mathx.cyr.
 
 Every value is computed from MPFR (through scripts/oracle/mpfr_ref.py's ctypes binding, at 400 bits)
 or from exact rational arithmetic (Python's Fraction), then split into doubles, each the round-to-
@@ -26,6 +27,8 @@ Besides writing the values, the generator checks the properties the code's error
 - atan: atan(j/256) as triple-doubles to 2^-158.
 - 2^(1/6) (M4d, ADR 0002 #16): H + M + L to 2^-158 from an exact integer root, H Rust's RN(2^(1/6)), and the
   continued-fraction bound that makes the triple-double product x·(H + M + L) round correctly once.
+- 1/100 (M4e, ADR 0002 #19): H + L to 2^-116 from the exact rational, H Rust's 0.01 (the wavenumber conversions'
+  correctly rounded 1/(100·x), _km_cr_hundredth_div).
 """
 from fractions import Fraction
 import ctypes
@@ -589,6 +592,22 @@ def root6_2():
     return {"H": h, "M": m, "L": l_}, d, q
 
 
+# ── 1/100 (M4e): ADR 0002 #19's wavenumber conversions ──────────────────────────────────────────
+
+def hundredth():
+    """1/100 = H + L + t as a double-double (each the nearest double to what is left), with the properties
+    _km_cr_hundredth_div's fast path uses: H is Rust's 0.01 literal, |t| < 2^-116 (so the residual 1/100 − y0·x,
+    formed from H, L and an exact product, is within 2^-110.2 of the exact one), and 1/(100·x) is never a midpoint
+    (100·x = 2^2·25·m·2^e has the odd factor 25, so no dyadic value equals 1/(100·x)), which is why the integer
+    path's sticky bit is never 0."""
+    q = Fraction(1, 100)
+    h, l_ = _fsplit(q, 2)
+    assert h == 0.01 and bits(h) == 0x3F847AE147AE147B, hex(bits(h))
+    assert abs(q - _exact([h, l_])) < Fraction(1, 1 << 116)
+    assert 0 < abs(l_) < 2.0 ** -61
+    return {"H": h, "L": l_}
+
+
 # ── thresholds, from the correctly rounded MPFR functions ───────────────────────────────────────
 
 def _last_true(pred, lo_b, hi_b):
@@ -752,6 +771,10 @@ def render():
         "_km_cr_sixth_root2_mul), from the exact integer root ⌊(2^2701)^(1/6)⌋; H is Rust's 2.0.powf(1.0 / 6.0).",
         f"min over q ≤ 2^54 of |q·2^(1/6) − p| is 2^{math.log2(float(d6)):.2f} (q = {q6}, from the continued fraction),",
         "so no x·2^(1/6) is nearer a rounding boundary than half of it in ulps, far beyond the product's 2^-102.6.",
+    ])
+    L += _scalars("HUNDREDTH_", hundredth(), ["H", "L"], [
+        "1/100 = H + L to 2^-116 (M4e, ADR 0002 #19: spectroscopy.cyr's wavenumber conversions through",
+        "_km_cr_hundredth_div, the correctly rounded 1/(100·x)), from the exact rational; H is Rust's 0.01.",
     ])
     return "\n".join(L).rstrip("\n") + "\n"
 

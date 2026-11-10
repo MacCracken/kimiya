@@ -55,6 +55,8 @@ include "src/inorganic.cyr"
 include "src/potential.cyr"
 include "src/nuclear_data.cyr"
 include "src/nuclear.cyr"
+include "src/spectroscopy_data.cyr"
+include "src/spectroscopy.cyr"
 
 alloc_init();
 
@@ -1359,7 +1361,7 @@ fn _par_inorganic(fp, fl): i64 {
     return 0;
 }
 
-# ── ADR 0002 #13 … #18: an exact value named in the note ───────────────────────────────
+# ── ADR 0002 #13 … #20: an exact value named in the note ───────────────────────────────
 # Where the port's value is the exact one and the oracle's is not, and the exact value can't be derived from the
 # oracle's (unlike #12's q/5), the golden row keeps the oracle's value and its note names the port's, `[ADR 0002 #N: …
 # (f:<bits>)]` or `(i:<0|1>)]`; scripts/oracle writes it and validate.py proves it with exact rational arithmetic. A
@@ -1371,6 +1373,8 @@ var _par_adr15 = 0;
 var _par_adr16 = 0;
 var _par_adr17 = 0;
 var _par_adr18 = 0;
+var _par_adr19 = 0;
+var _par_adr20 = 0;
 
 # 1 if the current row's note contains the C string `tag`.
 #must_use
@@ -1427,6 +1431,7 @@ fn _par_map_exact(adr, v, kind) {
     }
     if (kind == 102) { _par_got_f(v); } else { _par_got_i(v); }
     _par_mapped = adr;
+    _par_force_map = 1;                     # accepted even within the class's tolerance (#19's one-ulp class-B rows)
     _par_hist_on = 0;
     if (adr == 13) { _par_adr13 = _par_adr13 + 1; }
     if (adr == 14) { _par_adr14 = _par_adr14 + 1; }
@@ -1434,6 +1439,8 @@ fn _par_map_exact(adr, v, kind) {
     if (adr == 16) { _par_adr16 = _par_adr16 + 1; }
     if (adr == 17) { _par_adr17 = _par_adr17 + 1; }
     if (adr == 18) { _par_adr18 = _par_adr18 + 1; }
+    if (adr == 19) { _par_adr19 = _par_adr19 + 1; }
+    if (adr == 20) { _par_adr20 = _par_adr20 + 1; }
     return 0;
 }
 
@@ -1599,27 +1606,58 @@ fn _par_got_noted(adr, tag, t, v) {
     return 0;
 }
 
+# ADR 0002 #20 (M4e-2): the got list for a geometry row (distance_3d's value when isres = 0, or bond_angle's /
+# dihedral_angle's Result) whose note may name the port's result, Rust's sequence evaluated with an unbounded exponent:
+# `= <x> (f:<bits>)]`, `= Ok(<x>) (f:<bits>)]` or `= Err(InvalidInput) (E:InvalidInput)]`. A noted row's port result
+# must be that one (then mapped, accepted under ADR 2, counted); a row without the note is compared with the oracle as
+# usual.
+fn _par_got_noted20(isres, t, v) {
+    if (_par_note_has("[ADR 0002 #20:") != 1) {
+        if (isres == 1) { _par_got_res(t, v); } else { _par_got_f(v); }
+        return 0;
+    }
+    if (_par_note_has("(E:InvalidInput)]") == 1) {
+        if (isres != 1 || is_ok(t) == 1 || v != KM_ERR_INVALID_INPUT) {
+            _par_got_err(0 - 1);    # the note's Err, and the port gave anything else: "Unknown" matches nothing
+            return 0;
+        }
+        _par_got_err(v);
+        _par_mapped = 20;
+        _par_force_map = 1;
+        _par_hist_on = 0;
+        _par_adr20 = _par_adr20 + 1;
+        return 0;
+    }
+    if (isres == 1 && is_ok(t) != 1) {
+        _par_got_err(0 - 1);
+        return 0;
+    }
+    _par_map_exact(20, v, 102);
+    return 0;
+}
+
 # `potential` rows: src/potential.cyr. Rust's [f64; 3] points are three f64 tokens each, which the port reads through
-# pointers to three contiguous f64 (port plan §6.4). ADR 0002 #16 (lj_equilibrium_distance), #17 (lennard_jones) and
-# #18 (morse_width_parameter): a noted row's port value must be the note's.
+# pointers to three contiguous f64 (port plan §6.4). ADR 0002 #16 (lj_equilibrium_distance), #17 (lennard_jones), #18
+# (morse_width_parameter) and #20 (distance_3d, bond_angle, dihedral_angle): a noted row's port result must be the
+# note's.
 fn _par_potential(fp, fl): i64 {
     var pts: f64[12];
     if (_par_eq(fp, fl, "potential::distance_3d") == 1) {
         _par_in_points(0, 2, &pts);
         var dd: f64 = distance_3d(&pts, &pts + 24);
-        _par_got_f(dd);
+        _par_got_noted20(0, 0, _km_bits(dd));
         return 1;
     }
     if (_par_eq(fp, fl, "potential::bond_angle") == 1) {
         _par_in_points(0, 3, &pts);
         var ta, va = bond_angle(&pts, &pts + 24, &pts + 48);
-        _par_got_res(ta, va);
+        _par_got_noted20(1, ta, va);
         return 1;
     }
     if (_par_eq(fp, fl, "potential::dihedral_angle") == 1) {
         _par_in_points(0, 4, &pts);
         var td, vd = dihedral_angle(&pts, &pts + 24, &pts + 48, &pts + 72);
-        _par_got_res(td, vd);
+        _par_got_noted20(1, td, vd);
         return 1;
     }
     var x: f64 = _par_in(0);
@@ -1663,6 +1701,239 @@ fn _par_potential(fp, fl): i64 {
     return 0;
 }
 
+# ── spectroscopy (M4e) ──────────────────────────────────────────────────────────────
+
+# The golden name of a KmSpectralSeries value ("SpectralSeries.Lyman"), "" for a word that is no value.
+#must_use
+fn _par_series_name(v): i64 {
+    if (v == KM_SPECTRAL_SERIES_LYMAN) { return "SpectralSeries.Lyman"; }
+    if (v == KM_SPECTRAL_SERIES_BALMER) { return "SpectralSeries.Balmer"; }
+    if (v == KM_SPECTRAL_SERIES_PASCHEN) { return "SpectralSeries.Paschen"; }
+    if (v == KM_SPECTRAL_SERIES_BRACKETT) { return "SpectralSeries.Brackett"; }
+    if (v == KM_SPECTRAL_SERIES_PFUND) { return "SpectralSeries.Pfund"; }
+    return "";
+}
+
+# The KmSpectralSeries value whose golden name is input token k, an `e:` token; -1 for none.
+#must_use
+fn _par_in_series(k): i64 {
+    var at = k * 8;
+    if (k >= _par_in_n || load64(_par_in_k + at) != 101) { return 0 - 1; }
+    var p = load64(_par_in_v + at);
+    var len = load64(_par_in_l + at);
+    var v = 0;
+    while (v < KM_SPECTRAL_SERIES_COUNT) {
+        if (_par_eq(p, len, _par_series_name(v)) == 1) { return v; }
+        v = v + 1;
+    }
+    return 0 - 1;
+}
+
+# The spectroscopy rows' work buffers, allocated once (_par_spec_alloc): the input slice (_PAR_MAX words, the
+# isotope_pattern atoms' records too) and the output (2·_PAR_MAX words: fft_spectrum's in-place transform).
+var _par_spec_in = 0;
+var _par_spec_out = 0;
+fn _par_spec_alloc(): i64 {
+    if (_par_spec_in == 0) { _par_spec_in = _par_words(_PAR_MAX); }
+    if (_par_spec_out == 0) { _par_spec_out = _par_words(2 * _PAR_MAX); }
+    if (_par_spec_in == 0 || _par_spec_out == 0) { return 0; }
+    return 1;
+}
+
+# Appends a Result whose Ok payload is a count of f64 values at buf (`v:n` and the n values), or its Err.
+fn _par_got_f64s(t, v, buf) {
+    if (is_err_result(t) == 1) { _par_got_err(v); return 0; }
+    _par_got_seq(v);
+    var j = 0;
+    while (j < v) {
+        _par_got_f(load64(buf + 8 * j));
+        j = j + 1;
+    }
+    return 0;
+}
+
+# `spectroscopy` rows: src/spectroscopy.cyr and the generated src/spectroscopy_data.cyr. Rust's u8 / u32 are `i:` words,
+# SpectralSeries an `e:` token; slices are `v:n` + n elements, read into the work buffer (isotope_pattern's atoms as
+# 16-byte (z, count) records), and a Vec result is the caller's buffer's count and contents (port plan §6.4).
+# fft_spectrum runs with a buffer of n/2 + 1 values up to n = 64 (the heap work table) and of 2n above (the in-place
+# transform), so both paths replay the corpus. ADR 0002 #19 (the wavenumber conversions): a noted row's port value must
+# be the note's.
+fn _par_spectroscopy(fp, fl): i64 {
+    if (_par_spec_alloc() != 1) { return 0 - 1; }
+    if (_par_eq(fp, fl, "SpectralSeries::n_lower") == 1) {
+        var s = _par_in_series(0);
+        if (s < 0) { return 0 - 1; }
+        _par_got_i(spectral_series_n_lower(s));
+        return 1;
+    }
+    if (_par_eq(fp, fl, "SpectralSeries::wavelength") == 1) {
+        var s2 = _par_in_series(0);
+        if (s2 < 0) { return 0 - 1; }
+        var ts, vs = spectral_series_wavelength(s2, _par_in(1));
+        _par_got_res(ts, vs);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::bohr_energy_level") == 1) {
+        var tb, vb = bohr_energy_level(_par_in(0), _par_in(1));
+        _par_got_res(tb, vb);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::bohr_transition_energy") == 1) {
+        var tt, vt = bohr_transition_energy(_par_in(0), _par_in(1), _par_in(2));
+        _par_got_res(tt, vt);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::rydberg_wavelength") == 1) {
+        var tr, vr = rydberg_wavelength(_par_in(0), _par_in(1), _par_in(2));
+        _par_got_res(tr, vr);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::isotope_abundances") == 1) {
+        var ap, an = isotope_abundances(_par_in(0));
+        _par_got_seq(an);
+        var j = 0;
+        while (j < 2 * an) {
+            _par_got_f(load64(ap + 8 * j));
+            j = j + 1;
+        }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::isotope_pattern") == 1) {
+        var na = _par_in(0);
+        var k = 0;
+        while (k < 2 * na) {
+            store64(_par_spec_in + 8 * k, _par_in(1 + k));
+            k = k + 1;
+        }
+        var tp, vp = isotope_pattern(_par_spec_in, na, _par_spec_out, _PAR_MAX);
+        if (is_err_result(tp) == 1) { _par_got_err(vp); return 1; }
+        _par_got_seq(vp);
+        k = 0;
+        while (k < 2 * vp) {
+            _par_got_f(load64(_par_spec_out + 8 * k));
+            k = k + 1;
+        }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::fft_spectrum") == 1) {
+        var n = _par_in_f64s(0, _par_spec_in);
+        var cap = 2 * n;
+        if (n <= 64) { cap = n / 2 + 1; }
+        var tf, vf = fft_spectrum(_par_spec_in, n, _par_spec_out, cap);
+        _par_got_f64s(tf, vf, _par_spec_out);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::find_peaks") == 1) {
+        var nd = _par_in_f64s(0, _par_spec_in);
+        var th: f64 = _par_in(1 + nd);
+        var tk, vk = find_peaks(_par_spec_in, nd, th, _par_spec_out, nd);
+        if (is_err_result(tk) == 1) { _par_got_err(vk); return 1; }
+        _par_got_seq(vk);
+        var q = 0;
+        while (q < vk) {
+            _par_got_i(load64(_par_spec_out + 8 * q));
+            q = q + 1;
+        }
+        return 1;
+    }
+    var x: f64 = _par_in(0);
+    if (_par_eq(fp, fl, "spectroscopy::transmittance") == 1) {
+        var r1: f64 = transmittance(x);
+        _par_got_f(r1);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::absorbance_from_transmittance") == 1) {
+        var t2, v2 = absorbance_from_transmittance(x);
+        _par_got_res(t2, v2);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::photon_energy_from_frequency") == 1) {
+        var r3: f64 = photon_energy_from_frequency(x);
+        _par_got_f(r3);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::photon_energy_from_wavelength") == 1) {
+        var t4, v4 = photon_energy_from_wavelength(x);
+        _par_got_res(t4, v4);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::wavelength_from_energy") == 1) {
+        var t5, v5 = wavelength_from_energy(x);
+        _par_got_res(t5, v5);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::frequency_from_wavelength") == 1) {
+        var t6, v6 = frequency_from_wavelength(x);
+        _par_got_res(t6, v6);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::joules_to_ev") == 1) {
+        var r7: f64 = joules_to_ev(x);
+        _par_got_f(r7);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::ev_to_joules") == 1) {
+        var r8: f64 = ev_to_joules(x);
+        _par_got_f(r8);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::wavenumber_from_wavelength") == 1) {
+        var t9, v9 = wavenumber_from_wavelength(x);
+        _par_got_noted(19, "[ADR 0002 #19:", t9, v9);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::wavelength_from_wavenumber") == 1) {
+        var t10, v10 = wavelength_from_wavenumber(x);
+        _par_got_noted(19, "[ADR 0002 #19:", t10, v10);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::rotational_constant") == 1) {
+        var t11, v11 = rotational_constant(x);
+        _par_got_res(t11, v11);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::harmonic_oscillator_energy") == 1) {
+        var w12: f64 = _par_in(1);
+        var r12: f64 = harmonic_oscillator_energy(_par_in(0), w12);
+        _par_got_f(r12);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::rigid_rotor_energy") == 1) {
+        var b13: f64 = _par_in(1);
+        var r13: f64 = rigid_rotor_energy(_par_in(0), b13);
+        _par_got_f(r13);
+        return 1;
+    }
+    var y: f64 = _par_in(1);
+    if (_par_eq(fp, fl, "spectroscopy::reduced_mass") == 1) {
+        var t14, v14 = reduced_mass(x, y);
+        _par_got_res(t14, v14);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::vibrational_frequency") == 1) {
+        var t15, v15 = vibrational_frequency(x, y);
+        _par_got_res(t15, v15);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::diatomic_moment_of_inertia") == 1) {
+        var r16: f64 = diatomic_moment_of_inertia(x, y);
+        _par_got_f(r16);
+        return 1;
+    }
+    var z: f64 = _par_in(2);
+    if (_par_eq(fp, fl, "spectroscopy::absorbance") == 1) {
+        var r17: f64 = absorbance(x, y, z);
+        _par_got_f(r17);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "spectroscopy::concentration_from_absorbance") == 1) {
+        var t18, v18 = concentration_from_absorbance(x, y, z);
+        _par_got_res(t18, v18);
+        return 1;
+    }
+    return 0;
+}
+
 # Routes a row to its module's dispatcher. 0 (pending) for a module with none yet.
 fn _par_dispatch(mp, ml, fp, fl): i64 {
     _par_got_n = 0;
@@ -1684,6 +1955,7 @@ fn _par_dispatch(mp, ml, fp, fl): i64 {
     if (_par_eq(mp, ml, "inorganic") == 1) { return _par_inorganic(fp, fl); }
     if (_par_eq(mp, ml, "nuclear") == 1) { return _par_nuclear(fp, fl); }
     if (_par_eq(mp, ml, "potential") == 1) { return _par_potential(fp, fl); }
+    if (_par_eq(mp, ml, "spectroscopy") == 1) { return _par_spectroscopy(fp, fl); }
     return 0;
 }
 
@@ -1857,6 +2129,9 @@ fn _par_c_bound(fp, fl): i64 {
     if (_par_eq(fp, fl, "potential::morse") == 1) { return 0; }                       # M4d: exp
     if (_par_eq(fp, fl, "potential::bond_angle") == 1) { return 0; }                  # M4d: atan2
     if (_par_eq(fp, fl, "potential::dihedral_angle") == 1) { return 0; }              # M4d: atan2
+    if (_par_eq(fp, fl, "spectroscopy::transmittance") == 1) { return 0; }            # M4e: exp10
+    if (_par_eq(fp, fl, "spectroscopy::absorbance_from_transmittance") == 1) { return 0; }   # M4e: log10
+    if (_par_eq(fp, fl, "spectroscopy::fft_spectrum") == 1) { return 0; }             # M4e: sincos (the twiddles)
     return 0 - 1;
 }
 
@@ -1874,8 +2149,8 @@ fn _par_accepted(fp, fl, ip, il): i64 {
     if (_par_mapped == 12) { return 2; }
     # ADR 0002 #3: a SEMF row where the oracle's NaN (z > a or a = 0) is the port's Err(InvalidInput).
     if (_par_mapped == 3) { return 2; }
-    # ADR 0002 #13 … #18: a row whose note names the port's exact value, which the port returned.
-    if (_par_mapped >= 13 && _par_mapped <= 18) { return 2; }
+    # ADR 0002 #13 … #20: a row whose note names the port's exact value, which the port returned.
+    if (_par_mapped >= 13 && _par_mapped <= 20) { return 2; }
     return 0;
 }
 
@@ -1885,7 +2160,7 @@ fn _par_accepted(fp, fl, ip, il): i64 {
 #must_use
 fn _par_accepted_quiet(adr): i64 {
     if (adr == 2 && _par_mapped == 2) { return 1; }
-    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 18) { return 1; }
+    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 20) { return 1; }
     return 0;
 }
 
@@ -1900,6 +2175,13 @@ fn _par_accepted_bits(adr): i64 {
 # After the phase module: the ADR 0002 #4 mapping summary; after thermochem, ADR 0002 #1's; after organic, #6's; after
 # inorganic, #12's and #15's; after nuclear, #3's, #13's and #14's; after potential, #16's, #17's and #18's.
 fn _par_module_done(mp, ml) {
+    if (_par_eq(mp, ml, "spectroscopy") == 1) {
+        print("  ADR 0002 #19 exact 1/(100x): ", 31);
+        fmt_int(_par_adr19);
+        print(" wavenumber_from_wavelength / wavelength_from_wavenumber rows where the port's correctly rounded", 96);
+        println(" 1/(100x) differs from Rust's 0.01/x (accepted, ADR 2, counted, not listed)");
+        return 0;
+    }
     if (_par_eq(mp, ml, "potential") == 1) {
         print("  ADR 0002 #16 exact sigma*2^(1/6): ", 36);
         fmt_int(_par_adr16);
@@ -1913,6 +2195,10 @@ fn _par_module_done(mp, ml) {
         fmt_int(_par_adr18);
         print(" morse_width_parameter rows where Rust's 2*D overflows and the port's (mu/2)/D is the noted value", 97);
         println(" (accepted, ADR 2, counted, not listed)");
+        print("  ADR 0002 #20 unbounded exponent: ", 35);
+        fmt_int(_par_adr20);
+        print(" distance_3d / bond_angle / dihedral_angle rows where an intermediate of Rust's chain leaves the", 96);
+        println(" normal range and the port's result is the noted one (accepted, ADR 2, counted, not listed)");
         return 0;
     }
     if (_par_eq(mp, ml, "nuclear") == 1) {

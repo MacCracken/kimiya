@@ -30,6 +30,11 @@ tanmatra's probe_tables.py; extend `checks` as the data modules arrive.
 - src/nuclear_data.cyr (M4c): KM_ISOTOPES_COUNT; for every ISOTOPES row the label (through the blob offsets), Z (u8),
   A (u16), the half-life and the decay mode (its UTF-8 bytes through the blob offsets), against the golden
   `nuclear::ISOTOPES[]` rows. The four nuclear constants are src/constants.cyr's.
+- src/spectroscopy_data.cyr (M4e): KM_SPECTRAL_SERIES_COUNT, each KmSpectralSeries member's value and its n_lower cell
+  against the golden `SpectralSeries::n_lower` rows; for every u8 z, the isotope count and each (mass, abundance) pair
+  through the start / count columns against the golden `spectroscopy::isotope_abundances` row (and none past
+  _KM_ISOTOPE_ABUNDANCE_ZS); _KM_RYDBERG_HYDROGEN and _KM_ELECTRON_PROTON_MASS_RATIO through what pins them, the golden
+  Lyman line u32::MAX − 1 (1/R_H, and 1/(RYDBERG / (1 + ratio))).
 - src/element_data.cyr (M1): for every row of ELEMENTS, the atomic number, symbol, name,
   atomic mass, electronegativity (presence flag and value) and category, against the golden
   `element::lookup_by_number` row of that Z; for every row of ELEMENT_PROPERTIES, the atomic
@@ -453,11 +458,64 @@ if consts_n != {"KM_ISOTOPES_COUNT"}:
     fail(f"src/nuclear_data.cyr constants not probed: {sorted(consts_n)}")
 nm4c = len(checks) - nm4c_before
 
+# ── src/spectroscopy_data.cyr (M4e) ─────────────────────────────────────────────────
+nm4e_before = len(checks)
+sdata = (root / "src/spectroscopy_data.cyr").read_text()
+series, abund, lyman_top = [], {}, None
+for fn, cls, ins, outs in rows("spectroscopy"):
+    if fn == "SpectralSeries::n_lower":
+        series.append((ins[0][2:].split(".", 1)[1], outs[0]))
+    elif fn == "spectroscopy::isotope_abundances":
+        abund[int(ins[0][2:])] = outs
+    elif fn == "SpectralSeries::wavelength" and ins == ["e:SpectralSeries.Lyman", "i:4294967294"]:
+        lyman_top = outs[0]
+checks.append(("fmt_int(KM_SPECTRAL_SERIES_COUNT);", "i", str(len(series)), "KM_SPECTRAL_SERIES_COUNT"))
+for k, (v, want) in enumerate(series):   # the golden rows are in declaration order: row k is value k
+    name = "KM_SPECTRAL_SERIES_" + snake(v)
+    checks.append((f"fmt_int({name});", "i", str(k), f"{name} = {k}"))
+    checks.append((f"fmt_int(KM_SPECTRAL_SERIES_N_LOWER[{name}]);", "i", want[2:], f"KM_SPECTRAL_SERIES_N_LOWER[{name}]"))
+zs_s = int(re.search(r"^const _KM_ISOTOPE_ABUNDANCE_ZS = (\d+);", sdata, re.M).group(1))
+if sorted(abund) != list(range(256)):
+    fail(f"golden isotope_abundances rows cover {len(abund)} of the 256 u8 z")
+for z in range(256):
+    outs = abund.get(z, ["v:0"])
+    n = int(outs[0][2:])
+    if z >= zs_s:
+        if n != 0:
+            fail(f"isotope_abundances({z}) has {n} isotopes past _KM_ISOTOPE_ABUNDANCE_ZS = {zs_s}")
+        continue
+    checks.append((f"fmt_int(_KM_ISOTOPE_ABUNDANCE_COUNT[{z}]);", "i", str(n), f"_KM_ISOTOPE_ABUNDANCE_COUNT[{z}]"))
+    for k in range(n):
+        for j, what in ((0, "mass"), (1, "abundance")):
+            checks.append((f"x = _KM_ISOTOPE_ABUNDANCES[2 * (_KM_ISOTOPE_ABUNDANCE_START[{z}] + {k}) + {j}]; fmt_hex(x);",
+                           "f", outs[1 + 2 * k + j][2:], f"isotope_abundances({z})[{k}].{what}"))
+if lyman_top is None:
+    fail("no golden SpectralSeries::wavelength row for Lyman, u32::MAX − 1 (it pins R_H)")
+else:
+    # R_H through what pins it: RN(1/R_H) is the golden Lyman line u32::MAX − 1 (validate.py: the one double with that
+    # reciprocal), and Rust's const expression on the generated ratio gives the same R_H.
+    checks.append(("x = 1.0 / _KM_RYDBERG_HYDROGEN; fmt_hex(x);", "f", lyman_top[2:], "1 / _KM_RYDBERG_HYDROGEN"))
+    checks.append(("ft = 1.0 + _KM_ELECTRON_PROTON_MASS_RATIO; fe = KM_RYDBERG / ft; x = 1.0 / fe; fmt_hex(x);", "f",
+                   lyman_top[2:], "1 / (KM_RYDBERG / (1 + _KM_ELECTRON_PROTON_MASS_RATIO))"))
+covered_s = {"KM_SPECTRAL_SERIES_N_LOWER", "_KM_ISOTOPE_ABUNDANCES", "_KM_ISOTOPE_ABUNDANCE_START",
+             "_KM_ISOTOPE_ABUNDANCE_COUNT"}
+tables_s = set(re.findall(r"^var (_?KM_[A-Z0-9_]+)", sdata, re.M))
+if tables_s != covered_s:
+    fail(f"src/spectroscopy_data.cyr tables not probed: {sorted(tables_s - covered_s)}; probed but gone: {sorted(covered_s - tables_s)}")
+consts_s = set(re.findall(r"^const (_?KM_[A-Z0-9_]+)", sdata, re.M))
+if consts_s != {"KM_SPECTRAL_SERIES_COUNT", "_KM_ISOTOPE_ABUNDANCE_ZS", "_KM_ELECTRON_PROTON_MASS_RATIO",
+                "_KM_RYDBERG_HYDROGEN"}:
+    fail(f"src/spectroscopy_data.cyr constants not probed: {sorted(consts_s)}")
+members_s = set(re.findall(r"^    (KM_[A-Z0-9_]+) = \d+;", sdata, re.M))
+if members_s != {"KM_SPECTRAL_SERIES_" + snake(v) for v, _ in series}:
+    fail(f"src/spectroscopy_data.cyr enum members not probed: {sorted(members_s)}")
+nm4e = len(checks) - nm4e_before
+
 # ── the probe program ───────────────────────────────────────────────────────────────
 src = ['include "src/constants.cyr"', 'include "src/element_data.cyr"', 'include "src/phase_data.cyr"',
        'include "src/gas_data.cyr"', 'include "src/thermochem_data.cyr"',
        'include "src/electrochemistry_data.cyr"', 'include "src/organic_data.cyr"',
-       'include "src/inorganic_data.cyr"', 'include "src/nuclear_data.cyr"', "",
+       'include "src/inorganic_data.cyr"', 'include "src/nuclear_data.cyr"', 'include "src/spectroscopy_data.cyr"', "",
        "fn main() {", "    var x: f64 = 0.0;", "    var m04: f64 = -0.4;", "    var ft: f64 = 0.0;",
        "    var fe: f64 = 0.0;", "    var p = 0;"]
 for k, (stmt, kind, want, label) in enumerate(checks):
@@ -489,7 +547,8 @@ for k, (stmt, kind, want, label) in enumerate(checks):
 pending = len(golden) - nconst
 print(f"checked {nconst} constants, {nelem} element_data cells, {nm2a} phase_data / gas_data cells, "
       f"{nm2b} thermochem_data cells, {nm3a} electrochemistry_data cells, {nm4b_o} organic_data cells, "
-      f"{nm4b_i} inorganic_data cells and {nm4c} nuclear_data cells through the Cyrius compiler ({pending} golden "
+      f"{nm4b_i} inorganic_data cells, {nm4c} nuclear_data cells and {nm4e} spectroscopy_data cells through the Cyrius "
+      f"compiler ({pending} golden "
       f"constants without a generated "
       f"home); failures: {fails}")
 if pending:

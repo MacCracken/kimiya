@@ -97,3 +97,33 @@ solver path included, and shows that each typed constant (10⁻³, 10⁻⁶, the
 golden row's bits when perturbed; `tests/thermochem.tcyr` pins 10⁻³ and 10⁻⁶ on the private helpers
 exactly, and the 10⁻¹² derivative threshold to within ±1 % (no golden row reaches it). The iteration limits
 (50, 200) are transcribed but not observable: no row converges near them, so no output depends on them. The status stays **Accepted**; port plan §6.2's row is updated.
+
+## Amendment (M4e, 2026-11-09)
+
+**hisab 1.4.0's FFT is transcribed too.** The decision above sent `num::fft` / `Complex` (spectroscopy's
+`fft_spectrum`) to hisab 3.4.1's `num_fft` / `HComplex`, class C for n ≥ 256. Porting `spectroscopy` showed that route
+can't reach the corrected oracle (ADR 0006), so M4e transcribes the routine before any row was compared:
+
+- **The twiddles.** hisab 1.4.0 forms wn = (cos θ, sin θ) once per stage, θ = (−2·π)/len (−2·π and the ÷ len are exact),
+  and advances w by `w *= wn` across the stage. The release oracle calls glibc's `sincos` there (LLVM joins
+  `angle.cos()` and `angle.sin()`; its bits are glibc's `sin` and `cos`, which the golden rows prove). hisab 3.4.1's
+  `num_fft` takes them from the stdlib's `f64_cos` / `f64_sin`, which are not correctly rounded (the `math` rows' shadow
+  lines: 82 cos and 20 sin rows one ulp off the corrected oracle), and **reseeds** w from `f64_cos(angle·k)` /
+  `f64_sin(angle·k)` every 64 steps (`_NUM_FFT_RESEED`), a different recurrence: its bits move from n = 256 on (port
+  plan §6.2). Neither is the oracle's operation sequence evaluated with correctly rounded primitives.
+- **So** `src/spectroscopy.cyr` has a private `_km_fft(data, n)`: hisab 1.4.0's `src/num/fft.rs` lines 12–58 operation for
+  operation — the bit-reversal loop, the butterflies with `Complex`'s `mul` (re = w.re·d.re − w.im·d.im, im = w.re·d.im
+  + w.im·d.re), `add`, `sub` and `mul_assign` from `src/num/complex.rs`, no FMA — with the twiddle from `src/mathx.cyr`'s
+  correctly rounded `_km_cr_sincos`; `fft_spectrum` then takes `Complex::abs` = √(re·re + im·im) of the first n/2 + 1
+  bins, as Rust (not hypot). hisab's own `n <= 1` exit is kept; its power-of-two check is `fft_spectrum`'s, made first
+  as in Rust.
+
+**Consequence.** `fft_spectrum` is class C at **bound 0** against the corrected oracle, as every other class-C function:
+213 golden rows (every length 0 … 16, every power of two to 2¹³, 2^k ± 1; impulses, constants, ±0, alternating and
+Nyquist signals, sinusoids, random, huge, subnormal, NaN and ±∞ samples), 27,512 floats, all 0 ulp on x86_64 ELF, x86_64
+PE and aarch64 (`docs/development/port-parity.md` §15). glibc's sin and cos are correctly rounded at the 13 FFT angles
+−2π/2^k (MPFR decides), so no row needs a correction; `validate.py` recomputes every row with its own transcription and
+glibc's (then MPFR's) twiddles, and perturbing the −2.0 by an ulp changes 41 rows. The status stays **Accepted**; port
+plan §6.2's row is updated. **Follow-up for hisab** (`docs/development/state.md`): hisab's FFT twiddles are not correctly
+rounded (`f64_cos` / `f64_sin`), so its transforms differ in the last bits by platform and from a correctly rounded
+reference; a hisab FFT on correctly rounded twiddles, or with 1.4.0's recurrence as an option, would let kimiya call it.

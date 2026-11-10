@@ -29,10 +29,22 @@
 #     correctly rounded μ/(2·D_e) (μ·½ is exact, or the quotient rounds to 0 either way), Rust's form elsewhere.
 #   The golden rows keep the oracle's values; where the port's differ, the note names them and the harness maps the
 #   two (accepted under ADR 2, counted).
-# - Kept as Rust's (reviewed in M4d, reported to the user): the over- and underflow of (σ/r)⁶ and (σ/r)¹², of
-#   k·q₁·q₂ and r·r, of the squared coordinates in distance_3d, bond_angle and dihedral_angle (an Err or a 0 / ±∞ /
-#   imprecise value where the true one is representable), and a subnormal D_e·x in morse: each is a chain of rounded
-#   operations with no single exact value to restore (ADR 0002's policy: Rust's sequence is the definition).
+# - ADR 0002 #20 (M4e-2; the user's decision of 2026-11-09, "Yes, prescale"): distance_3d, bond_angle and
+#   dihedral_angle are Rust's own operation sequence evaluated in binary64 with an unbounded exponent range: every
+#   + − × ÷ √ rounded to 53 bits, nothing over- or underflowing, the comparisons and Err checks on those values, and the
+#   final √ or atan2 rounded once into binary64 (its subnormal grid, or ±∞). Rust squares raw coordinates, so above
+#   about 10¹⁵⁴ (10⁷⁷ for the dihedral's fourth powers) or below their reciprocals its chain gave an Err, 0, ±∞ or a
+#   degraded value where the distance or angle is representable. Each function runs Rust's chain (the fast path) with a
+#   cheap test that proves it stayed in the normal range, and only otherwise, for finite coordinates, re-evaluates with
+#   src/mathx.cyr's unbounded-exponent helpers (_km_*_ux below); non-finite coordinates keep Rust's results. So every
+#   input whose chain stays normal gets Rust's bits, and the angles are exactly scale-invariant (every check is
+#   homogeneous, atan2's two arguments have the same degree): bond_angle and dihedral_angle of 2^k times the
+#   coordinates give the same bits for every k with the scaled coordinates exact, and distance_3d scales by exactly
+#   2^k wherever it is normal.
+# - Kept as Rust's (reviewed in M4d, reported to the user; the library-wide audit after M4 revisits each with
+#   src/mathx.cyr's unbounded-exponent helpers): the over- and underflow of (σ/r)⁶ and (σ/r)¹², of k·q₁·q₂ and r·r, and
+#   a subnormal D_e·x in morse: each a chain of rounded operations whose intermediates can leave the normal range where
+#   the result is representable (ADR 0002's policy until then: Rust's sequence is the definition).
 
 # ── private helpers ─────────────────────────────────────────────────────────────────────────────────
 
@@ -59,6 +71,196 @@ fn _km_cross(a0: f64, a1: f64, a2: f64, b0: f64, b1: f64, b2: f64): (f64, f64, f
 fn _km_dot3(a0: f64, a1: f64, a2: f64, b0: f64, b1: f64, b2: f64): f64 {
     var d: f64 = ((a0 * b0) + (a1 * b1)) + (a2 * b2);
     return d;
+}
+
+# ── the geometry with an unbounded exponent (ADR 0002 #20, M4e-2) ───────────────────────────────────────────────
+#
+# Rust's sub3 / cross / dot3 on src/mathx.cyr's unbounded-exponent values, in Rust's operation order. A vector is six
+# words, the three (s, e) pairs (48 bytes: `var v[48];`).
+
+# The vector of the three f64 at p, exactly (each _km_ux_from).
+fn _km_load3_ux(out, p) {
+    var k = 0;
+    while (k < 3) {
+        var x: f64 = load64(p + 8 * k);
+        var s, e = _km_ux_from(x);
+        store64(out + 16 * k, s);
+        store64(out + 16 * k + 8, e);
+        k = k + 1;
+    }
+}
+
+# out = a − b, componentwise (Rust's sub3).
+fn _km_sub3_ux(out, a, b) {
+    var k = 0;
+    while (k < 3) {
+        var xs: f64 = load64(a + 16 * k);
+        var ys: f64 = load64(b + 16 * k);
+        var s, e = _km_ux_sub(xs, load64(a + 16 * k + 8), ys, load64(b + 16 * k + 8));
+        store64(out + 16 * k, s);
+        store64(out + 16 * k + 8, e);
+        k = k + 1;
+    }
+}
+
+# a_i·b_j − a_j·b_i as an (s, e) pair (one component of Rust's cross).
+#must_use
+fn _km_cross1_ux(a, b, i, j): (f64, i64) {
+    var ais: f64 = load64(a + 16 * i);
+    var ajs: f64 = load64(a + 16 * j);
+    var bis: f64 = load64(b + 16 * i);
+    var bjs: f64 = load64(b + 16 * j);
+    var ps, pe = _km_ux_mul(ais, load64(a + 16 * i + 8), bjs, load64(b + 16 * j + 8));
+    var qs, qe = _km_ux_mul(ajs, load64(a + 16 * j + 8), bis, load64(b + 16 * i + 8));
+    var s, e = _km_ux_sub(ps, pe, qs, qe);
+    return (s, e);
+}
+
+# out = a × b (Rust's cross): [a1·b2 − a2·b1, a2·b0 − a0·b2, a0·b1 − a1·b0].
+fn _km_cross_ux(out, a, b) {
+    var s0, e0 = _km_cross1_ux(a, b, 1, 2);
+    var s1, e1 = _km_cross1_ux(a, b, 2, 0);
+    var s2, e2 = _km_cross1_ux(a, b, 0, 1);
+    store64(out, s0);
+    store64(out + 8, e0);
+    store64(out + 16, s1);
+    store64(out + 24, e1);
+    store64(out + 32, s2);
+    store64(out + 40, e2);
+}
+
+# a · b (Rust's dot3): (a0·b0 + a1·b1) + a2·b2.
+#must_use
+fn _km_dot3_ux(a, b): (f64, i64) {
+    var a0: f64 = load64(a);
+    var b0: f64 = load64(b);
+    var a1: f64 = load64(a + 16);
+    var b1: f64 = load64(b + 16);
+    var a2: f64 = load64(a + 32);
+    var b2: f64 = load64(b + 32);
+    var p0, f0 = _km_ux_mul(a0, load64(a + 8), b0, load64(b + 8));
+    var p1, f1 = _km_ux_mul(a1, load64(a + 24), b1, load64(b + 24));
+    var p2, f2 = _km_ux_mul(a2, load64(a + 40), b2, load64(b + 40));
+    var s01, e01 = _km_ux_add(p0, f0, p1, f1);
+    var s, e = _km_ux_add(s01, e01, p2, f2);
+    return (s, e);
+}
+
+# 1 if every coordinate of the three f64 at each of the n pointers (in order: p0, p1, p2, p3) is finite.
+#must_use
+fn _km_points_finite(p0, p1, p2, p3, n): i64 {
+    var k = 0;
+    while (k < 3 * n) {
+        var q = p0;
+        if (k >= 3) { q = p1; }
+        if (k >= 6) { q = p2; }
+        if (k >= 9) { q = p3; }
+        var x: f64 = load64(q + 8 * (k % 3));
+        if (_km_is_finite(x) != 1) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# distance_3d with an unbounded exponent (ADR 0002 #20), for finite coordinates: Rust's √((dx² + dy²) + dz²) with every
+# operation rounded to 53 bits and nothing over- or underflowing, the √ rounded once into binary64.
+#must_use
+fn _km_distance_3d_ux(p1, p2): f64 {
+    var u[48];
+    var v[48];
+    var d[48];
+    _km_load3_ux(&u, p1);
+    _km_load3_ux(&v, p2);
+    _km_sub3_ux(&d, &v, &u);
+    var ss, se = _km_dot3_ux(&d, &d);
+    var r: f64 = _km_ux_sqrt_f64(ss, se);
+    return r;
+}
+
+# bond_angle with an unbounded exponent (ADR 0002 #20), for finite coordinates: Rust's sequence, every check on the
+# exact values (|ba|², |bc|² > 0; the coincidence tests against (10⁻¹²)²·max(|a|², |b|²) and (10⁻¹²)²·max(|c|², |b|²)),
+# then atan2(√|ba × bc|², ba · bc) rounded once.
+#must_use
+fn _km_bond_angle_ux(a, b, c): Result {
+    var ua[48];
+    var ub[48];
+    var uc[48];
+    var ba[48];
+    var bc[48];
+    var cr[48];
+    _km_load3_ux(&ua, a);
+    _km_load3_ux(&ub, b);
+    _km_load3_ux(&uc, c);
+    _km_sub3_ux(&ba, &ua, &ub);
+    _km_sub3_ux(&bc, &uc, &ub);
+    var bas, bae = _km_dot3_ux(&ba, &ba);
+    var bcs, bce = _km_dot3_ux(&bc, &bc);
+    var tol: f64 = 0.000000000001;          # COINCIDENT_REL_TOL, 10⁻¹²
+    var tol_sq: f64 = tol * tol;
+    var ts, te = _km_ux_from(tol_sq);
+    var bs, be = _km_dot3_ux(&ub, &ub);
+    if (_km_ux_is_positive(bas, bae) != 1 || _km_ux_is_positive(bcs, bce) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var aqs, aqe = _km_dot3_ux(&ua, &ua);
+    var mas, mae = _km_ux_max(aqs, aqe, bs, be);
+    var tas, tae = _km_ux_mul(ts, te, mas, mae);
+    if (_km_ux_le(bas, bae, tas, tae) == 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var cs, ce = _km_dot3_ux(&uc, &uc);
+    var mcs, mce = _km_ux_max(cs, ce, bs, be);
+    var tcs, tce = _km_ux_mul(ts, te, mcs, mce);
+    if (_km_ux_le(bcs, bce, tcs, tce) == 1) { return Err(KM_ERR_INVALID_INPUT); }
+    _km_cross_ux(&cr, &ba, &bc);
+    var cns, cne = _km_dot3_ux(&cr, &cr);
+    var ys, ye = _km_ux_sqrt(cns, cne);
+    var xs, xe = _km_dot3_ux(&ba, &bc);
+    var ang: f64 = _km_ux_atan2_f64(ys, ye, xs, xe);
+    return Ok(ang);
+}
+
+# dihedral_angle with an unbounded exponent (ADR 0002 #20), for finite coordinates: Rust's sequence, every check on the
+# exact values (|n₁|², |n₂|² > 0; the collinearity tests against (10⁻²⁰·|b₁|²)·|b₂|² and (10⁻²⁰·|b₂|²)·|b₃|²), then
+# atan2(√|b₂|²·(b₁ · n₂), n₁ · n₂) rounded once, and Rust's −π → π.
+#must_use
+fn _km_dihedral_angle_ux(a, b, c, d): Result {
+    var ua[48];
+    var ub[48];
+    var uc[48];
+    var ud[48];
+    var u[48];
+    var v[48];
+    var w[48];
+    var n1[48];
+    var n2[48];
+    _km_load3_ux(&ua, a);
+    _km_load3_ux(&ub, b);
+    _km_load3_ux(&uc, c);
+    _km_load3_ux(&ud, d);
+    _km_sub3_ux(&u, &ub, &ua);              # b₁
+    _km_sub3_ux(&v, &uc, &ub);              # b₂
+    _km_sub3_ux(&w, &ud, &uc);              # b₃
+    _km_cross_ux(&n1, &u, &v);
+    _km_cross_ux(&n2, &v, &w);
+    var n1s, n1e = _km_dot3_ux(&n1, &n1);
+    var n2s, n2e = _km_dot3_ux(&n2, &n2);
+    var b2s, b2e = _km_dot3_ux(&v, &v);
+    if (_km_ux_is_positive(n1s, n1e) != 1 || _km_ux_is_positive(n2s, n2e) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var tol: f64 = 0.00000000000000000001;  # COLLINEAR_SIN_SQ_TOL, 10⁻²⁰
+    var ts, te = _km_ux_from(tol);
+    var b1s, b1e = _km_dot3_ux(&u, &u);
+    var p1s, p1e = _km_ux_mul(ts, te, b1s, b1e);
+    var t1s, t1e = _km_ux_mul(p1s, p1e, b2s, b2e);
+    if (_km_ux_le(n1s, n1e, t1s, t1e) == 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var b3s, b3e = _km_dot3_ux(&w, &w);
+    var p2s, p2e = _km_ux_mul(ts, te, b2s, b2e);
+    var t2s, t2e = _km_ux_mul(p2s, p2e, b3s, b3e);
+    if (_km_ux_le(n2s, n2e, t2s, t2e) == 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var sbs, sbe = _km_ux_sqrt(b2s, b2e);
+    var dns, dne = _km_dot3_ux(&u, &n2);
+    var yvs, yve = _km_ux_mul(sbs, sbe, dns, dne);
+    var xvs, xve = _km_dot3_ux(&n1, &n2);
+    var phi: f64 = _km_ux_atan2_f64(yvs, yve, xvs, xve);
+    var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
+    if (phi <= -pi) { return Ok(pi); }
+    return Ok(phi);
 }
 
 # ── intermolecular potentials ───────────────────────────────────────────────────────────────────────
@@ -162,8 +364,9 @@ fn coulomb_force(q1: f64, q2: f64, r: f64): Result {
 # ── molecular geometry from 3D coordinates ──────────────────────────────────────────────────────────
 
 # The distance between two points p1 and p2 (pointers to three f64), √((x₂ − x₁)² + (y₂ − y₁)² + (z₂ − z₁)²), in the
-# unit of the coordinates; NaN for a null pointer. Inputs are not validated (non-finite coordinates propagate).
-# Mirrors `potential::distance_3d`.
+# unit of the coordinates; NaN for a null pointer. Inputs are not validated (non-finite coordinates propagate as in
+# Rust). ADR 0002 #20: Rust's sequence with an unbounded exponent, the √ rounded once (|(DBL_MAX, 0, 0)| is DBL_MAX,
+# |(2⁻¹⁰⁷⁴, 0, 0)| is 2⁻¹⁰⁷⁴, where Rust's squares give +∞ and 0). Mirrors `potential::distance_3d`, with ADR 0002 #20.
 #must_use
 fn distance_3d(p1, p2): f64 {
     if (p1 == 0 || p2 == 0) {
@@ -181,15 +384,27 @@ fn distance_3d(p1, p2): f64 {
     var dz: f64 = z2 - z1;
     var s: f64 = ((dx * dx) + (dy * dy)) + (dz * dz);
     var d: f64 = f64_sqrt(s);
-    return d;
+    # Rust's chain while it provably is the unbounded-exponent one (ADR 0002 #20): s in [2^-900, DBL_MAX] (no square
+    # overflowed, and a sum of squares that large absorbs any underflowed one exactly where it is added: each is
+    # below 2^-1022, under a quarter ulp of the partial sum it meets, or the sum would be smaller), or all three
+    # differences 0. Otherwise, for finite coordinates, the unbounded evaluation; non-finite ones keep Rust's NaN or
+    # +∞.
+    var lo: f64 = 0x07B0000000000000;       # 2^-900
+    var hi: f64 = 0x7FEFFFFFFFFFFFFF;       # DBL_MAX
+    if (s >= lo && s <= hi) { return d; }
+    if (dx == 0.0 && dy == 0.0 && dz == 0.0) { return d; }
+    if (_km_points_finite(p1, p2, 0, 0, 2) != 1) { return d; }
+    var u: f64 = _km_distance_3d_ux(p1, p2);
+    return u;
 }
 
 # The bond angle A-B-C (B the central atom; a, b, c pointers to three f64), in radians in [0, π], as Rust's
-# atan2(|ba × bc|, ba · bc) (accurate near 0 and π, unlike acos) on the correctly rounded _km_cr_atan2; scale-invariant
-# in exact arithmetic. Ok(θ), or Err(KM_ERR_INVALID_INPUT) for a null pointer, a non-finite coordinate (|ba|² or |bc|²
-# is then NaN or ∞), or A or C coinciding with B: |ba|² ≤ (10⁻¹²)²·max(|a|², |b|²), or the same for C, so a bond below
-# the coordinates' resolution counts as zero (Rust's COINCIDENT_REL_TOL, squared at run time as Rust does). Mirrors
-# `potential::bond_angle`.
+# atan2(|ba × bc|, ba · bc) (accurate near 0 and π, unlike acos) on the correctly rounded _km_cr_atan2. Ok(θ), or
+# Err(KM_ERR_INVALID_INPUT) for a null pointer, a non-finite coordinate (|ba|² or |bc|² is then NaN or ∞), or A or C
+# coinciding with B: |ba|² ≤ (10⁻¹²)²·max(|a|², |b|²), or the same for C, so a bond below the coordinates' resolution
+# counts as zero (Rust's COINCIDENT_REL_TOL, squared at run time as Rust does). ADR 0002 #20: Rust's sequence with an
+# unbounded exponent (the checks on the exact values, atan2 rounded once), so θ is scale-invariant bit for bit, as Rust
+# documents it in exact arithmetic. Mirrors `potential::bond_angle`, with ADR 0002 #20.
 #must_use
 fn bond_angle(a, b, c): Result {
     if (a == 0 || b == 0 || c == 0) { return Err(KM_ERR_INVALID_INPUT); }
@@ -209,21 +424,58 @@ fn bond_angle(a, b, c): Result {
     var tol: f64 = 0.000000000001;          # COINCIDENT_REL_TOL, 10⁻¹²
     var tol_sq: f64 = tol * tol;
     var b_sq: f64 = _km_dot3(b0, b1, b2, b0, b1, b2);
-    if (_km_is_positive(ba_sq) != 1 || _km_is_positive(bc_sq) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var a_sq: f64 = _km_dot3(a0, a1, a2, a0, a1, a2);
-    var ma: f64 = _km_max(a_sq, b_sq);
-    var ta: f64 = tol_sq * ma;
-    if (ba_sq <= ta) { return Err(KM_ERR_INVALID_INPUT); }
-    var c_sq: f64 = _km_dot3(c0, c1, c2, c0, c1, c2);
-    var mc: f64 = _km_max(c_sq, b_sq);
-    var tc: f64 = tol_sq * mc;
-    if (bc_sq <= tc) { return Err(KM_ERR_INVALID_INPUT); }
-    var cr0, cr1, cr2 = _km_cross(ba0, ba1, ba2, bc0, bc1, bc2);
-    var cn: f64 = _km_dot3(cr0, cr1, cr2, cr0, cr1, cr2);
-    var y: f64 = f64_sqrt(cn);
-    var x: f64 = _km_dot3(ba0, ba1, ba2, bc0, bc1, bc2);
-    var ang: f64 = _km_cr_atan2(y, x);
-    return Ok(ang);
+    # Rust's chain while it provably stays the unbounded-exponent one (ADR 0002 #20): |ba|², |bc|², max(|a|², |b|²),
+    # max(|c|², |b|²) and |ba × bc|² in [2^-900, DBL_MAX], ba · bc finite. A sum of squares of at least 2^-900 is exact
+    # of any underflowed term (each below 2^-1022 absorbed where it is added), so these and the thresholds are the
+    # unbounded values; |ba · bc| below 2^-510 against |ba × bc| ≥ 2^-450 leaves atan2 at RN(π/2) either way.
+    var lo: f64 = 0x07B0000000000000;       # 2^-900
+    var hi: f64 = 0x7FEFFFFFFFFFFFFF;       # DBL_MAX
+    if (ba_sq >= lo && ba_sq <= hi && bc_sq >= lo && bc_sq <= hi) {
+        var a_sq: f64 = _km_dot3(a0, a1, a2, a0, a1, a2);
+        var ma: f64 = _km_max(a_sq, b_sq);
+        var c_sq: f64 = _km_dot3(c0, c1, c2, c0, c1, c2);
+        var mc: f64 = _km_max(c_sq, b_sq);
+        if (ma >= lo && ma <= hi && mc >= lo && mc <= hi) {
+            var ta: f64 = tol_sq * ma;
+            if (ba_sq <= ta) { return Err(KM_ERR_INVALID_INPUT); }
+            var tc: f64 = tol_sq * mc;
+            if (bc_sq <= tc) { return Err(KM_ERR_INVALID_INPUT); }
+            var cr0, cr1, cr2 = _km_cross(ba0, ba1, ba2, bc0, bc1, bc2);
+            var cn: f64 = _km_dot3(cr0, cr1, cr2, cr0, cr1, cr2);
+            var x: f64 = _km_dot3(ba0, ba1, ba2, bc0, bc1, bc2);
+            var dxx: f64 = x - x;
+            if (cn >= lo && cn <= hi && dxx == 0.0) {
+                var y: f64 = f64_sqrt(cn);
+                var ang: f64 = _km_cr_atan2(y, x);
+                return Ok(ang);
+            }
+            # An exactly linear or zero-angle geometry (CO₂ on an axis): ba × bc is exactly 0, so |ba × bc|² = 0 fails
+            # the test above. When every component of ba and bc is 0 or at least 2^-511 in magnitude, each product in
+            # the cross and dot products is 0 or normal (one that overflows leaves a cross component or x non-finite,
+            # which fails here), and a sum or difference of such is exact wherever it is subnormal: the cross
+            # components and x are the unbounded ones, y is +0 in both evaluations, and atan2(+0, x) is the result.
+            if (cr0 == 0.0 && cr1 == 0.0 && cr2 == 0.0 && dxx == 0.0) {
+                var m: f64 = 0x2000000000000000;    # 2^-511
+                var tiny = 0;
+                if (ba0 != 0.0 && ba0 < m && ba0 > -m) { tiny = 1; }
+                if (ba1 != 0.0 && ba1 < m && ba1 > -m) { tiny = 1; }
+                if (ba2 != 0.0 && ba2 < m && ba2 > -m) { tiny = 1; }
+                if (bc0 != 0.0 && bc0 < m && bc0 > -m) { tiny = 1; }
+                if (bc1 != 0.0 && bc1 < m && bc1 > -m) { tiny = 1; }
+                if (bc2 != 0.0 && bc2 < m && bc2 > -m) { tiny = 1; }
+                if (tiny == 0) {
+                    var z: f64 = 0.0;
+                    var ang0: f64 = _km_cr_atan2(z, x);
+                    return Ok(ang0);
+                }
+            }
+        }
+    }
+    # A non-finite coordinate makes |ba|² or |bc|² NaN or +∞: Rust's Err. Finite ones: the unbounded evaluation.
+    if (_km_points_finite(a, b, c, 0, 3) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var tx, vx = _km_bond_angle_ux(a, b, c);
+    if (is_ok(tx) == 1) { return Ok(vx); }
+    return Err(vx);
 }
 
 # The dihedral (torsion) angle A-B-C-D (a, b, c, d pointers to three f64), in radians in (−π, π]: the angle between the
@@ -232,7 +484,9 @@ fn bond_angle(a, b, c): Result {
 # n₁ · n₂) on the correctly rounded _km_cr_atan2, and atan2's −π (a trans geometry whose y-term is −0.0) reported as π.
 # Ok(φ), or Err(KM_ERR_INVALID_INPUT) for a null pointer, a non-finite coordinate, two consecutive atoms coinciding, or
 # A-B-C or B-C-D collinear: |n₁|² ≤ 10⁻²⁰·|b₁|²·|b₂|² (a bond angle within about 10⁻¹⁰ rad of 0 or π; Rust's
-# COLLINEAR_SIN_SQ_TOL), or the same for n₂. Mirrors `potential::dihedral_angle`.
+# COLLINEAR_SIN_SQ_TOL), or the same for n₂. ADR 0002 #20: Rust's sequence with an unbounded exponent (the checks on the
+# exact values, atan2 rounded once, then the −π → π mapping), so φ is scale-invariant bit for bit. Mirrors
+# `potential::dihedral_angle`, with ADR 0002 #20.
 #must_use
 fn dihedral_angle(a, b, c, d): Result {
     if (a == 0 || b == 0 || c == 0 || d == 0) { return Err(KM_ERR_INVALID_INPUT); }
@@ -251,17 +505,52 @@ fn dihedral_angle(a, b, c, d): Result {
     var u0, u1, u2 = _km_sub3(b0, b1, b2, a0, a1, a2);       # b₁
     var v0, v1, v2 = _km_sub3(c0, c1, c2, b0, b1, b2);       # b₂
     var w0, w1, w2 = _km_sub3(d0, d1, d2, c0, c1, c2);       # b₃
+    # |b₁|², |b₂|², |b₃|² as Rust's dot3 (inline: the squares are the fast path's test), b₁ = (u0, u1, u2) and so on.
+    var q0: f64 = u0 * u0;
+    var q1: f64 = u1 * u1;
+    var q2: f64 = u2 * u2;
+    var q3: f64 = v0 * v0;
+    var q4: f64 = v1 * v1;
+    var q5: f64 = v2 * v2;
+    var q6: f64 = w0 * w0;
+    var q7: f64 = w1 * w1;
+    var q8: f64 = w2 * w2;
+    var b1_sq: f64 = (q0 + q1) + q2;
+    var b2_sq: f64 = (q3 + q4) + q5;
+    var b3_sq: f64 = (q6 + q7) + q8;
+    # Rust's chain while it provably stays the unbounded-exponent one (ADR 0002 #20): every component of b₁, b₂, b₃
+    # zero or of magnitude in [2^-229, 2^254). From below: a component's square is below 2^-458 exactly when
+    # 0 ≤ |x| < 2^-229 (the double below 2^-229 squares to 2^-458·(1 − 2^-52)), and then the component must be 0; from
+    # above, |b|² ≤ 2^506. Then the cross components are 0 or in [2^-510, 2^509] (each nonzero product is at least
+    # 2^-458, a multiple of 2^-510), b₁ · n₂ is 0 or at least 2^-791, and every product is in [2^-1020, 2^1020]: no
+    # intermediate leaves the normal range.
+    var lo: f64 = 0x2350000000000000;       # 2^-458
+    var hi: f64 = 0x5F90000000000000;       # 2^506
+    var bad = 0;
+    if (q0 < lo) { if (u0 != 0.0) { bad = 1; } }
+    if (q1 < lo) { if (u1 != 0.0) { bad = 1; } }
+    if (q2 < lo) { if (u2 != 0.0) { bad = 1; } }
+    if (q3 < lo) { if (v0 != 0.0) { bad = 1; } }
+    if (q4 < lo) { if (v1 != 0.0) { bad = 1; } }
+    if (q5 < lo) { if (v2 != 0.0) { bad = 1; } }
+    if (q6 < lo) { if (w0 != 0.0) { bad = 1; } }
+    if (q7 < lo) { if (w1 != 0.0) { bad = 1; } }
+    if (q8 < lo) { if (w2 != 0.0) { bad = 1; } }
+    if (bad != 0 || !(b1_sq <= hi) || !(b2_sq <= hi) || !(b3_sq <= hi)) {
+        # A non-finite coordinate makes |n₁|² or |n₂|² NaN or +∞: Rust's Err. Finite ones: the unbounded evaluation.
+        if (_km_points_finite(a, b, c, d, 4) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        var tx, vx = _km_dihedral_angle_ux(a, b, c, d);
+        if (is_ok(tx) == 1) { return Ok(vx); }
+        return Err(vx);
+    }
     var n10, n11, n12 = _km_cross(u0, u1, u2, v0, v1, v2);
     var n20, n21, n22 = _km_cross(v0, v1, v2, w0, w1, w2);
     var n1_sq: f64 = _km_dot3(n10, n11, n12, n10, n11, n12);
     var n2_sq: f64 = _km_dot3(n20, n21, n22, n20, n21, n22);
-    var b2_sq: f64 = _km_dot3(v0, v1, v2, v0, v1, v2);
     if (_km_is_positive(n1_sq) != 1 || _km_is_positive(n2_sq) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var tol: f64 = 0.00000000000000000001;  # COLLINEAR_SIN_SQ_TOL, 10⁻²⁰
-    var b1_sq: f64 = _km_dot3(u0, u1, u2, u0, u1, u2);
     var t1: f64 = (tol * b1_sq) * b2_sq;
     if (n1_sq <= t1) { return Err(KM_ERR_INVALID_INPUT); }
-    var b3_sq: f64 = _km_dot3(w0, w1, w2, w0, w1, w2);
     var t2: f64 = (tol * b2_sq) * b3_sq;
     if (n2_sq <= t2) { return Err(KM_ERR_INVALID_INPUT); }
     var sb: f64 = f64_sqrt(b2_sq);

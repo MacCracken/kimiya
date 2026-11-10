@@ -34,6 +34,8 @@ include "src/inorganic.cyr"
 include "src/potential.cyr"
 include "src/nuclear_data.cyr"
 include "src/nuclear.cyr"
+include "src/spectroscopy_data.cyr"
+include "src/spectroscopy.cyr"
 
 # A sink the timed loops write to, so their results are used.
 var _bench_sink = 0;
@@ -64,6 +66,13 @@ var _bench_chain = 0;       # the decay chain's 24-byte out buffer
 var _bench_t = 0;           # M4a: 4 f64 input slots, filled by main()
 var _bench_pts = 0;         # M4d: the gauche dihedral's four points (12 f64), filled by main()
 var _bench_p = 0;           # M4d: 6 f64 input slots, filled by main()
+var _bench_s = 0;           # M4e: 5 f64 input slots, filled by main()
+var _bench_sz = 0;          # 1 (Rust's black_box(1) u8)
+var _bench_sn3 = 0;         # 3 (Rust's black_box(3) u32)
+var _bench_glucose = 0;     # [(6, 6), (1, 12), (8, 6)]: 3 (z, count) records
+var _bench_iso_out = 0;     # isotope_pattern's out buffer (64 records)
+var _bench_sig = 0;         # fft_spectrum's signal (4096 f64) and find_peaks' data (1000 of them)
+var _bench_spec = 0;        # fft_spectrum's out buffer (2 × 4096 f64: the in-place transform), find_peaks' indices
 
 # element/lookup_by_symbol: `lookup_by_symbol(black_box("Fe"))`, a linear scan to row 26.
 fn bench_lookup_by_symbol(per_batch, batches) {
@@ -660,7 +669,11 @@ fn bench_dihedral_angle(per_batch, batches) {
 
 # Cyrius-only (rust-old/benches has no other potential bench): potential/bond_angle (water at metre scale),
 # potential/lennard_jones (Ar at r_min), potential/lj_equilibrium_distance (ADR 0002 #16's correctly rounded σ·2^(1/6)),
-# potential/morse (HCl at 1.1·r_e), and mathx/cr_exp2_scaled (ADR 0002 #13's N₀·2⁻ⁿ, 1000 after 1075.3 half-lives).
+# potential/morse (HCl at 1.1·r_e), and mathx/cr_exp2_scaled (ADR 0002 #13's N₀·2⁻ⁿ, 1000 after 1075.3 half-lives);
+# potential/distance_3d (water's H–H distance in metres), and the slow path of ADR 0002 #20 (M4e-2):
+# potential/distance_3d_2p600, bond_angle_2p600 and dihedral_angle_2p600, the same geometries scaled by 2⁶⁰⁰ (exact),
+# whose squares overflow; potential/bond_angle_linear, CO₂ in metres on an axis (ba × bc exactly 0: #20's linear
+# shortcut, not the slow path).
 fn bench_potential(name, fid, per_batch, batches) {
     var e: f64 = load64(_bench_p);
     var s: f64 = load64(_bench_p + 8);
@@ -707,6 +720,157 @@ fn bench_potential(name, fid, per_batch, batches) {
                 _bench_sink = v4;
                 i = i + 1;
             }
+        }
+        if (fid == 5) {
+            while (i < per_batch) {
+                var v5: f64 = distance_3d(_bench_pts + 96, _bench_pts + 144);
+                _bench_sink = v5;
+                i = i + 1;
+            }
+        }
+        if (fid == 6) {
+            while (i < per_batch) {
+                var v6: f64 = distance_3d(_bench_pts + 264, _bench_pts + 312);
+                _bench_sink = v6;
+                i = i + 1;
+            }
+        }
+        if (fid == 7) {
+            while (i < per_batch) {
+                var t7, v7 = bond_angle(_bench_pts + 264, _bench_pts + 288, _bench_pts + 312);
+                _bench_sink = v7;
+                i = i + 1;
+            }
+        }
+        if (fid == 8) {
+            while (i < per_batch) {
+                var t8, v8 = dihedral_angle(_bench_pts + 168, _bench_pts + 192, _bench_pts + 216, _bench_pts + 240);
+                _bench_sink = v8;
+                i = i + 1;
+            }
+        }
+        if (fid == 9) {
+            while (i < per_batch) {
+                var t9, v9 = bond_angle(_bench_pts + 336, _bench_pts + 360, _bench_pts + 384);
+                _bench_sink = v9;
+                i = i + 1;
+            }
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# spectroscopy/absorbance: Rust's bench_absorbance, `absorbance(black_box(100.0), black_box(1.0), black_box(0.01))`.
+fn bench_absorbance(per_batch, batches) {
+    var e: f64 = load64(_bench_s);
+    var l: f64 = load64(_bench_s + 8);
+    var c: f64 = load64(_bench_s + 16);
+    var b = bench_new("spectroscopy/absorbance");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var a: f64 = absorbance(e, l, c);
+            _bench_sink = a;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# spectroscopy/bohr_energy_level: Rust's bench_bohr_energy, `bohr_energy_level(black_box(1), black_box(3)).unwrap()`.
+fn bench_bohr_energy_level(per_batch, batches) {
+    var b = bench_new("spectroscopy/bohr_energy_level");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = bohr_energy_level(_bench_sz, _bench_sn3);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# spectroscopy/isotope_pattern_glucose: Rust's bench_isotope_pattern, C₆H₁₂O₆ (24 convolution steps; the working tables
+# stay in the stack tables, nothing is allocated).
+fn bench_isotope_pattern_glucose(per_batch, batches) {
+    var b = bench_new("spectroscopy/isotope_pattern_glucose");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = isotope_pattern(_bench_glucose, 3, _bench_iso_out, 64);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# Cyrius-only (rust-old/benches has no FFT, peak or wavenumber bench): spectroscopy/fft_spectrum_<n> (a seeded signal,
+# the in-place transform: cap = 2n, nothing allocated), spectroscopy/find_peaks_1000 (1000 values, threshold 0.1),
+# spectroscopy/wavenumber_from_wavelength (ADR 0002 #19's correctly rounded 1/(100·λ), λ = 656.47 nm).
+fn bench_fft_spectrum(name, n, per_batch, batches) {
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = fft_spectrum(_bench_sig, n, _bench_spec, 2 * n);
+            _bench_sink = load64(_bench_spec + 8);
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# spectroscopy/find_peaks_1000: the first 1,000 values of the seeded signal, threshold 0.1, into a 1,000-word buffer.
+fn bench_find_peaks(per_batch, batches) {
+    var th: f64 = load64(_bench_s + 24);
+    var b = bench_new("spectroscopy/find_peaks_1000");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = find_peaks(_bench_sig, 1000, th, _bench_spec, 1000);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# spectroscopy/wavenumber_from_wavelength: Hα's 656.47 nm, through ADR 0002 #19's correctly rounded 1/(100·λ).
+fn bench_wavenumber(per_batch, batches) {
+    var x: f64 = load64(_bench_s + 32);
+    var b = bench_new("spectroscopy/wavenumber_from_wavelength");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = wavenumber_from_wavelength(x);
+            _bench_sink = v;
+            i = i + 1;
         }
         bench_batch_stop(b, per_batch);
         k = k + 1;
@@ -850,7 +1014,7 @@ fn main(): i64 {
     bench_trig("mathx/cr_atan2", 6, 1000000, 20);
     bench_trig("mathx/ganita_f64_atan2", 7, 1000000, 20);
     bench_trig("mathx/cr_acos", 8, 1000000, 20);
-    _bench_pts = alloc(21 * 8);
+    _bench_pts = alloc(51 * 8);
     var ins7: f64[21];
     ins7[0] = 1.0;                              # the gauche dihedral: A, B, C, D
     ins7[1] = 1.0;
@@ -874,6 +1038,24 @@ fn main(): i64 {
     ins7[19] = 0.00000000009267109213698450;
     ins7[20] = 0.0;
     memcpy(_bench_pts, &ins7, 21 * 8);
+    var p600: f64 = 0x6570000000000000;          # 2⁶⁰⁰: the scaled copies, for ADR 0002 #20's slow path
+    var jp = 0;
+    while (jp < 21) {
+        var vp: f64 = ins7[jp] * p600;
+        store64(_bench_pts + 168 + 8 * jp, vp);
+        jp = jp + 1;
+    }
+    var co2: f64[9];                            # CO₂ in metres: O, C, O on the x axis (C=O 1.16 Å)
+    co2[0] = -0.000000000116;
+    co2[1] = 0.0;
+    co2[2] = 0.0;
+    co2[3] = 0.0;
+    co2[4] = 0.0;
+    co2[5] = 0.0;
+    co2[6] = 0.000000000116;
+    co2[7] = 0.0;
+    co2[8] = 0.0;
+    memcpy(_bench_pts + 336, &co2, 9 * 8);
     bench_dihedral_angle(1000000, 20);
     _bench_p = alloc(6 * 8);
     var ins8: f64[6];
@@ -890,6 +1072,50 @@ fn main(): i64 {
     bench_potential("potential/morse", 3, 1000000, 20);
     store64(_bench_p, 0x408F400000000000);      # 1000.0
     bench_potential("mathx/cr_exp2_scaled", 4, 1000000, 20);
+    bench_potential("potential/distance_3d", 5, 1000000, 20);
+    bench_potential("potential/distance_3d_2p600", 6, 100000, 20);
+    bench_potential("potential/bond_angle_2p600", 7, 100000, 20);
+    bench_potential("potential/dihedral_angle_2p600", 8, 100000, 20);
+    bench_potential("potential/bond_angle_linear", 9, 1000000, 20);
+    _bench_s = alloc(5 * 8);
+    var ins9: f64[5];
+    ins9[0] = 100.0;                            # ε, l, c (A = 1)
+    ins9[1] = 1.0;
+    ins9[2] = 0.01;
+    ins9[3] = 0.1;                              # find_peaks' threshold
+    ins9[4] = 0.00000065647;                    # Hα in metres
+    memcpy(_bench_s, &ins9, 5 * 8);
+    _bench_sz = 1;
+    _bench_sn3 = 3;
+    bench_absorbance(1000000, 20);
+    bench_bohr_energy_level(1000000, 20);
+    _bench_glucose = alloc(6 * 8);
+    store64(_bench_glucose, 6);
+    store64(_bench_glucose + 8, 6);
+    store64(_bench_glucose + 16, 1);
+    store64(_bench_glucose + 24, 12);
+    store64(_bench_glucose + 32, 8);
+    store64(_bench_glucose + 40, 6);
+    _bench_iso_out = alloc(64 * 16);
+    bench_isotope_pattern_glucose(10000, 20);
+    _bench_sig = alloc(4096 * 8);
+    _bench_spec = alloc(2 * 4096 * 8);
+    var seed = 0x2545F4914F6CDD1D;
+    var j = 0;
+    while (j < 4096) {
+        seed = seed ^ (seed << 13);
+        seed = seed ^ (seed >> 7);
+        seed = seed ^ (seed << 17);
+        var u: f64 = f64_from((seed >> 11) & 0xFFFFFFFFFF);
+        var x: f64 = u / 1099511627776.0;
+        store64(_bench_sig + 8 * j, x);
+        j = j + 1;
+    }
+    bench_fft_spectrum("spectroscopy/fft_spectrum_256", 256, 1000, 20);
+    bench_fft_spectrum("spectroscopy/fft_spectrum_1024", 1024, 200, 20);
+    bench_fft_spectrum("spectroscopy/fft_spectrum_4096", 4096, 50, 20);
+    bench_find_peaks(10000, 20);
+    bench_wavenumber(1000000, 20);
     return 0;
 }
 
