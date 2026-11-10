@@ -1,0 +1,825 @@
+# nuclear.tcyr — the tests of rust-old/src/nuclear.rs, ported one for one (each test_group is the Rust test's name;
+# all 36), plus Cyrius-only tests of ADR 0002 #3's Result, Rust's u32 as a word (counts outside 0 ..= u32::MAX, the
+# checked add's boundary), the decay chain's caller buffer and its equal-rate threshold, q_value's slices, the isotope
+# handles and their UTF-8 decay modes, and the typed constants. The golden corpus separately checks every function
+# over its grid (tests/parity.tcyr).
+#
+# Adapted beyond the port's form (port plan §6.4: `Result::unwrap` is `is_ok` + the payload, `lookup_isotope(..)
+# .unwrap()` a non-zero handle read with the isotope_* accessors, a tuple the caller's buffer, a slice a pointer and a
+# count, `x.exp()` the correctly rounded _km_cr_exp the module calls), one test only: ADR 0002 #3 makes
+# semi_empirical_binding_energy a Result, so `semi_empirical_invalid_is_nan` asserts Err(InvalidInput) where Rust
+# asserted NaN, and the three SEMF value tests unwrap the Ok. ADR 0002 #13 and #14 (the exact N₀/2ⁿ where 2⁻ⁿ is not a
+# normal double, the exact λ_p < λ_d/100) change none of the Rust tests' cases: (1000, 2 half-lives), (5e-18, 3.3e-7)
+# and (0.1, 0.2) give Rust's values; the two Cyrius-only groups below pin the cases they change.
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/thermo.cyr"
+include "src/nuclear_data.cyr"
+include "src/nuclear.cyr"
+
+alloc_init();
+
+# |x|.
+#must_use
+fn absf(x: f64): f64 {
+    var a: f64 = f64_abs(x);
+    return a;
+}
+
+# 1 if x is NaN.
+#must_use
+fn is_nan(x: f64): i64 {
+    if (x != x) { return 1; }
+    return 0;
+}
+
+# f64::EPSILON.
+#must_use
+fn eps64(): f64 {
+    var e: f64 = 0.0000000000000002220446049250313;
+    return e;
+}
+
+# decay_constant(t).unwrap().
+#must_use
+fn lambda_of(t: f64): f64 {
+    var tt, v = decay_constant(t);
+    assert(is_ok(tt) == 1, "decay_constant: Ok");
+    var l: f64 = v;
+    return l;
+}
+
+# time_for_fraction(f, l).unwrap().
+#must_use
+fn tff(fr: f64, l: f64): f64 {
+    var tt, v = time_for_fraction(fr, l);
+    assert(is_ok(tt) == 1, "time_for_fraction: Ok");
+    var t: f64 = v;
+    return t;
+}
+
+# semi_empirical_binding_energy(z, a).unwrap() (ADR 0002 #3: a Result).
+#must_use
+fn semf(z, a): f64 {
+    var tt, v = semi_empirical_binding_energy(z, a);
+    assert(is_ok(tt) == 1, "semi_empirical_binding_energy: Ok");
+    var be: f64 = v;
+    return be;
+}
+
+# 1 if semi_empirical_binding_energy(z, a) is Err(InvalidInput).
+#must_use
+fn semf_err(z, a): i64 {
+    var tt, v = semi_empirical_binding_energy(z, a);
+    if (is_err_result(tt) == 1 && v == KM_ERR_INVALID_INPUT) { return 1; }
+    return 0;
+}
+
+# 1 if binding_energy_per_nucleon(z, n, m) is Err(InvalidInput).
+#must_use
+fn bea_err(z, n, m: f64): i64 {
+    var tt, v = binding_energy_per_nucleon(z, n, m);
+    if (is_err_result(tt) == 1 && v == KM_ERR_INVALID_INPUT) { return 1; }
+    return 0;
+}
+
+# The three outputs of decay_chain_two_step(..).unwrap(), at buf, buf + 8, buf + 16.
+fn chain(n0: f64, l1: f64, l2: f64, t: f64, buf) {
+    var tt, v = decay_chain_two_step(n0, l1, l2, t, buf);
+    assert(is_ok(tt) == 1 && v == 3, "decay_chain_two_step: Ok(3)");
+}
+
+# 1 if decay_chain_two_step(..) is Err(InvalidInput).
+#must_use
+fn chain_err(n0: f64, l1: f64, l2: f64, t: f64): i64 {
+    var buf[24];
+    var tt, v = decay_chain_two_step(n0, l1, l2, t, &buf);
+    if (is_err_result(tt) == 1 && v == KM_ERR_INVALID_INPUT) { return 1; }
+    return 0;
+}
+
+# The handle of an isotope that must be in the table.
+#must_use
+fn iso(sym): i64 {
+    var h = lookup_isotope(sym);
+    assert(h != 0, "lookup_isotope");
+    return h;
+}
+
+# A slice of two f64 at buf.
+fn pair(buf, a: f64, b: f64) {
+    store64(buf, a);
+    store64(buf + 8, b);
+}
+
+# ── radioactive decay ───────────────────────────────────────────────────────────────
+
+fn _t_decay_constant_c14() {
+    test_group("decay_constant_c14");
+    # C-14: t½ = 5700 a (NUBASE2020) = 1.7988e11 s → λ = 3.8534e-12 s⁻¹
+    var l: f64 = lambda_of(isotope_half_life_s(iso("C-14")));
+    var d: f64 = absf(l - 0.0000000000038534);
+    assert(d < 0.0000000000000001, "C-14 λ should be 3.8534e-12");
+}
+
+fn _t_decay_constant_zero_is_error() {
+    test_group("decay_constant_zero_is_error");
+    var t, v = decay_constant(0.0);
+    assert(is_err_result(t) == 1, "t½ = 0");
+}
+
+fn _t_decay_constant_nan_is_error() {
+    test_group("decay_constant_nan_is_error");
+    var t1, v1 = decay_constant(_km_nan());
+    assert(is_err_result(t1) == 1, "NaN");
+    var ninf: f64 = -_KM_INF;
+    var t2, v2 = decay_constant(ninf);
+    assert(is_err_result(t2) == 1, "−∞");
+}
+
+fn _t_decay_constant_stable_is_zero() {
+    test_group("decay_constant_stable_is_zero");
+    # f64::INFINITY is the documented stable-isotope half-life.
+    var l: f64 = lambda_of(_KM_INF);
+    assert(l == 0.0, "λ = 0");
+}
+
+fn _t_atoms_remaining_one_half_life() {
+    test_group("atoms_remaining_one_half_life");
+    var l: f64 = lambda_of(100.0);
+    var n: f64 = atoms_remaining(1000.0, l, 100.0);
+    var d: f64 = absf(n - 500.0);
+    assert(d < 0.1, "should have half after one half-life");
+}
+
+fn _t_atoms_remaining_two_half_lives() {
+    test_group("atoms_remaining_two_half_lives");
+    var n: f64 = atoms_after_half_lives(1000.0, 2.0);
+    var d: f64 = absf(n - 250.0);
+    assert(d < eps64(), "1000 / 2²");
+}
+
+fn _t_activity_basic() {
+    test_group("activity_basic");
+    var a: f64 = activity(0.01, 1000000.0);
+    var d: f64 = absf(a - 10000.0);
+    assert(d < eps64(), "0.01 × 1e6");
+}
+
+fn _t_time_for_half() {
+    test_group("time_for_half");
+    var l: f64 = lambda_of(100.0);
+    var t: f64 = tff(0.5, l);
+    var d: f64 = absf(t - 100.0);
+    assert(d < 0.01, "t½");
+}
+
+fn _t_time_for_fraction_invalid() {
+    test_group("time_for_fraction_invalid");
+    var t1, v1 = time_for_fraction(0.0, 0.01);
+    assert(is_err_result(t1) == 1, "fraction 0");
+    var t2, v2 = time_for_fraction(1.5, 0.01);
+    assert(is_err_result(t2) == 1, "fraction 1.5");
+    var t3, v3 = time_for_fraction(0.5, 0.0);
+    assert(is_err_result(t3) == 1, "λ = 0");
+}
+
+fn _t_time_for_fraction_nan_is_error() {
+    test_group("time_for_fraction_nan_is_error");
+    var t1, v1 = time_for_fraction(_km_nan(), 0.01);
+    assert(is_err_result(t1) == 1, "fraction NaN");
+    var t2, v2 = time_for_fraction(0.5, _km_nan());
+    assert(is_err_result(t2) == 1, "λ NaN");
+    var t3, v3 = time_for_fraction(0.5, _KM_INF);
+    assert(is_err_result(t3) == 1, "λ ∞");
+}
+
+# ── constants ───────────────────────────────────────────────────────────────────────
+
+fn _t_constants_codata_2018() {
+    test_group("constants_codata_2018");
+    var amu: f64 = KM_AMU_MEV;
+    var mp: f64 = KM_PROTON_MASS_U;
+    var mn: f64 = KM_NEUTRON_MASS_U;
+    var mh: f64 = KM_HYDROGEN_ATOM_MASS_U;
+    assert(amu == 931.49410242, "AMU_MEV");
+    assert(mp == 1.007276466621, "PROTON_MASS_U");
+    assert(mn == 1.00866491595, "NEUTRON_MASS_U");
+    assert(mh == 1.007825031898, "HYDROGEN_ATOM_MASS_U (AME2020)");
+    # Cross-check: CODATA 2018 m_p·c² = 938.272 088 16 MeV, m_n·c² = 939.565 420 52 MeV.
+    var ep: f64 = mp * amu;
+    var en: f64 = mn * amu;
+    var dp: f64 = absf(ep - 938.27208816);
+    var dn: f64 = absf(en - 939.56542052);
+    assert(dp < 0.00000001, "m_p·c²");
+    assert(dn < 0.00000001, "m_n·c²");
+}
+
+fn _t_hydrogen_atom_mass_is_proton_plus_electron() {
+    test_group("hydrogen_atom_mass_is_proton_plus_electron");
+    # m(¹H) = m_p + m_e − 13.6 eV/c²; CODATA 2018 m_e = 5.485 799 090 65e-4 u.
+    # AME2020 and CODATA 2018 agree to ~3e-11 u (within their uncertainties).
+    var m_e: f64 = 0.000548579909065;
+    var amu: f64 = KM_AMU_MEV;
+    var binding_u: f64 = 0.000013598434 / amu;
+    var mp: f64 = KM_PROTON_MASS_U;
+    var mh: f64 = KM_HYDROGEN_ATOM_MASS_U;
+    var d: f64 = absf(mh - ((mp + m_e) - binding_u));
+    assert(d < 0.0000000001, "m(¹H) = m_p + m_e − 13.6 eV");
+}
+
+# ── binding energy ──────────────────────────────────────────────────────────────────
+
+fn _t_mass_defect_he4() {
+    test_group("mass_defect_he4");
+    # He-4: Z=2, N=2, neutral-atom M = 4.002 603 254 u (AME2020)
+    # Δm = 2×1.007 825 032 + 2×1.008 664 916 − 4.002 603 254 = 0.030 377 u
+    var md: f64 = mass_defect(2, 2, 4.002603254);
+    var d: f64 = absf(md - 0.030377);
+    assert(d < 0.00001, "He-4 mass defect should be 0.030377 u");
+}
+
+fn _t_binding_energy_he4() {
+    test_group("binding_energy_he4");
+    # He-4 BE = 28.296 MeV (AME2020)
+    var md: f64 = mass_defect(2, 2, 4.002603254);
+    var be: f64 = binding_energy_mev(md);
+    var d: f64 = absf(be - 28.296);
+    assert(d < 0.01, "He-4 BE should be 28.296 MeV");
+}
+
+fn _t_be_per_nucleon_fe56() {
+    test_group("be_per_nucleon_fe56");
+    # Fe-56: Z=26, N=30, M = 55.934 936 33 u (AME2020), BE/A = 8.790 MeV
+    var t, v = binding_energy_per_nucleon(26, 30, 55.93493633);
+    assert(is_ok(t) == 1, "Ok");
+    var bea: f64 = v;
+    var d: f64 = absf(bea - 8.79);
+    assert(d < 0.01, "Fe-56 BE/A should be 8.790 MeV");
+}
+
+fn _t_be_per_nucleon_overflow_is_error() {
+    test_group("be_per_nucleon_overflow_is_error");
+    assert(bea_err(4294967295, 1, 1.0) == 1, "u32::MAX + 1 overflows");
+}
+
+fn _t_be_per_nucleon_nan_mass_is_error() {
+    test_group("be_per_nucleon_nan_mass_is_error");
+    assert(bea_err(26, 30, _km_nan()) == 1, "NaN mass");
+    assert(bea_err(26, 30, _KM_INF) == 1, "∞ mass");
+}
+
+fn _t_semi_empirical_fe56() {
+    test_group("semi_empirical_fe56");
+    # Experimental BE(Fe-56) = 492.26 MeV (AME2020); Povh SEMF gives 494.0.
+    var be: f64 = semf(26, 56);
+    var d: f64 = absf(be - 492.26);
+    assert(d < 2.0, "SEMF Fe-56 should be ~492.3 MeV");
+}
+
+fn _t_semi_empirical_u238() {
+    test_group("semi_empirical_u238");
+    # Experimental BE(U-238) = 1801.69 MeV (AME2020); Povh SEMF gives 1808.0.
+    var be: f64 = semf(92, 238);
+    var d: f64 = absf(be - 1801.69);
+    assert(d < 7.0, "SEMF U-238 should be ~1801.7 MeV");
+}
+
+# ADR 0002 #3: Rust 1.2 returns NaN here; the port returns Err(InvalidInput).
+fn _t_semi_empirical_invalid_is_nan() {
+    test_group("semi_empirical_invalid_is_nan (ADR 0002 #3: Err)");
+    # z > a used to panic (debug) / wrap (release); a = 0 gave NaN by accident.
+    assert(semf_err(3, 2) == 1, "z > a: Err (Rust NaN)");
+    assert(semf_err(0, 0) == 1, "a = 0: Err (Rust NaN)");
+}
+
+fn _t_semi_empirical_he4() {
+    test_group("semi_empirical_he4");
+    var be: f64 = semf(2, 4);
+    # SEMF is less accurate for light nuclei, but should be > 0
+    assert(be > 0.0, "He-4 BE should be positive");
+}
+
+# ── isotope data ────────────────────────────────────────────────────────────────────
+
+fn _t_lookup_c14() {
+    test_group("lookup_c14");
+    var h = iso("C-14");
+    assert_eq(isotope_z(h), 6, "Z");
+    assert_eq(isotope_a(h), 14, "A");
+    var t: f64 = isotope_half_life_s(h);
+    assert(t > 100000000000.0, "t½ > 1e11 s");
+}
+
+fn _t_lookup_u235() {
+    test_group("lookup_u235");
+    assert_eq(isotope_z(iso("U-235")), 92, "Z");
+}
+
+fn _t_half_lives_nubase2020() {
+    test_group("half_lives_nubase2020");
+    var julian_year: f64 = 31557600.0;
+    var i131: f64 = isotope_half_life_s(iso("I-131"));
+    var d1: f64 = absf(i131 - (8.0252 * 86400.0));
+    assert(d1 < 1.0, "I-131");
+    var pu239: f64 = isotope_half_life_s(iso("Pu-239"));
+    var r2: f64 = pu239 / (24110.0 * julian_year);
+    var d2: f64 = absf(r2 - 1.0);
+    assert(d2 < 0.0001, "Pu-239");
+    var c14: f64 = isotope_half_life_s(iso("C-14"));
+    var r3: f64 = c14 / (5700.0 * julian_year);
+    var d3: f64 = absf(r3 - 1.0);
+    assert(d3 < 0.0001, "C-14");
+}
+
+fn _t_lookup_nonexistent() {
+    test_group("lookup_nonexistent");
+    assert_eq(lookup_isotope("Xx-999"), 0, "None");
+}
+
+fn _t_isotope_count() {
+    test_group("isotope_count");
+    assert(KM_ISOTOPES_COUNT >= 18, "at least 18 isotopes");
+}
+
+# ── Q-value ─────────────────────────────────────────────────────────────────────────
+
+fn _t_q_value_deuterium_tritium_fusion() {
+    test_group("q_value_deuterium_tritium_fusion");
+    # D + T → He-4 + n
+    # m_D=2.01410, m_T=3.01605, m_He4=4.00260, m_n=1.00866
+    var r[16];
+    var p[16];
+    pair(&r, 2.0141, 3.01605);
+    pair(&p, 4.0026, 1.00866);
+    var q: f64 = q_value(&r, 2, &p, 2);
+    # Q ≈ 17.6 MeV
+    var d: f64 = absf(q - 17.6);
+    assert(d < 0.5, "D-T fusion Q should be ~17.6 MeV");
+}
+
+fn _t_q_value_endothermic_is_negative() {
+    test_group("q_value_endothermic_is_negative");
+    var r[16];
+    var p[16];
+    pair(&r, 4.0026, 1.00866);
+    pair(&p, 2.0141, 3.01605);
+    var q: f64 = q_value(&r, 2, &p, 2);
+    assert(q < 0.0, "reverse fusion should be endothermic");
+}
+
+# ── decay chains ────────────────────────────────────────────────────────────────────
+
+fn _t_decay_chain_mass_conservation() {
+    test_group("decay_chain_mass_conservation");
+    var b[24];
+    chain(1000.0, 0.1, 0.05, 10.0, &b);
+    var na: f64 = load64(&b);
+    var nb: f64 = load64(&b + 8);
+    var nc: f64 = load64(&b + 16);
+    var total: f64 = (na + nb) + nc;
+    var d: f64 = absf(total - 1000.0);
+    assert(d < 0.1, "mass should be conserved");
+}
+
+fn _t_decay_chain_at_t0() {
+    test_group("decay_chain_at_t0");
+    var b[24];
+    chain(1000.0, 0.1, 0.05, 0.0, &b);
+    var na: f64 = load64(&b);
+    var nb: f64 = load64(&b + 8);
+    var nc: f64 = load64(&b + 16);
+    var d: f64 = absf(na - 1000.0);
+    assert(d < eps64(), "N_A = N₀");
+    var ab: f64 = absf(nb);
+    var ac: f64 = absf(nc);
+    assert(ab < eps64(), "N_B = 0");
+    assert(ac < eps64(), "N_C = 0");
+}
+
+fn _t_decay_chain_long_time() {
+    test_group("decay_chain_long_time");
+    # After very long time, almost all should be C
+    var b[24];
+    chain(1000.0, 0.1, 0.05, 200.0, &b);
+    var na: f64 = load64(&b);
+    var nb: f64 = load64(&b + 8);
+    var nc: f64 = load64(&b + 16);
+    assert(nc > 990.0, "most should be C after long time");
+    assert(na < 1.0, "N_A < 1");
+    assert(nb < 10.0, "N_B < 10");
+}
+
+fn _t_decay_chain_equal_rates_uses_limit() {
+    test_group("decay_chain_equal_rates_uses_limit");
+    # λ₁ = λ₂ = λ: N_B = N₀·λ·t·e^(−λt) = 1000 × 0.1 × 10 × e⁻¹
+    var b[24];
+    chain(1000.0, 0.1, 0.1, 10.0, &b);
+    var na: f64 = load64(&b);
+    var nb: f64 = load64(&b + 8);
+    var nc: f64 = load64(&b + 16);
+    var em1: f64 = _km_cr_exp(-1.0);
+    var expected: f64 = 1000.0 * em1;
+    var d1: f64 = absf(nb - expected);
+    assert(d1 < 0.000000001, "N_B = N₀·e⁻¹");
+    var d2: f64 = absf(na - expected);
+    assert(d2 < 0.000000001, "N_A = N₀·e⁻¹");
+    var d3: f64 = absf(((na + nb) + nc) - 1000.0);
+    assert(d3 < 0.000000001, "conserved");
+}
+
+fn _t_decay_chain_nearly_equal_rates_is_accurate() {
+    test_group("decay_chain_nearly_equal_rates_is_accurate");
+    # Δλ/λ = 1e-10 is outside the equal-rate tolerance; the naive Bateman
+    # form loses ~6 digits here to cancellation.
+    var b[24];
+    var l2: f64 = 0.1 * (1.0 + 0.0000000001);
+    chain(1000.0, 0.1, l2, 10.0, &b);
+    var nb: f64 = load64(&b + 8);
+    var em1: f64 = _km_cr_exp(-1.0);
+    var limit: f64 = 1000.0 * em1;
+    var rel: f64 = absf((nb - limit) / limit);
+    assert(rel < 0.000000001, "N_B near the limit");
+    # λ₂ < λ₁ branch, far from equal: compare with the textbook formula.
+    var l1: f64 = 2.0;
+    var l2b: f64 = 0.5;
+    var t: f64 = 3.0;
+    chain(1.0, l1, l2b, t, &b);
+    var nb2: f64 = load64(&b + 8);
+    var x1: f64 = -l1;
+    x1 = x1 * t;
+    var x2: f64 = -l2b;
+    x2 = x2 * t;
+    var e1: f64 = _km_cr_exp(x1);
+    var e2: f64 = _km_cr_exp(x2);
+    var textbook: f64 = (l1 / (l2b - l1)) * (e1 - e2);
+    var d: f64 = absf(nb2 - textbook);
+    assert(d < 0.00000000000001, "the textbook Bateman N_B");
+}
+
+fn _t_decay_chain_no_overflow_for_fast_parent() {
+    test_group("decay_chain_no_overflow_for_fast_parent");
+    # λ₁ ≫ λ₂ at long times must not produce inf·0 = NaN.
+    var b[24];
+    chain(1.0, 10.0, 0.1, 100.0, &b);
+    var na: f64 = load64(&b);
+    var nb: f64 = load64(&b + 8);
+    var nc: f64 = load64(&b + 16);
+    assert(na == 0.0 && _km_is_finite(nb) == 1 && _km_is_finite(nc) == 1, "N_A = 0, N_B and N_C finite");
+    var e10: f64 = _km_cr_exp(-10.0);
+    var textbook: f64 = (10.0 / (0.1 - 10.0)) * (0.0 - e10);
+    var d: f64 = absf(nb - textbook);
+    assert(d < 0.000000000000001, "the textbook N_B");
+}
+
+fn _t_decay_chain_invalid_inputs_are_errors() {
+    test_group("decay_chain_invalid_inputs_are_errors");
+    assert(chain_err(1000.0, 0.1, 0.05, -1.0) == 1, "t < 0");
+    assert(chain_err(-1.0, 0.1, 0.05, 1.0) == 1, "N₀ < 0");
+    assert(chain_err(_km_nan(), 0.1, 0.05, 1.0) == 1, "N₀ NaN");
+    assert(chain_err(1000.0, _km_nan(), 0.05, 1.0) == 1, "λ₁ NaN");
+    assert(chain_err(1000.0, 0.1, _KM_INF, 1.0) == 1, "λ₂ ∞");
+    assert(chain_err(1000.0, 0.1, 0.05, _km_nan()) == 1, "t NaN");
+}
+
+fn _t_secular_equilibrium_check() {
+    test_group("secular_equilibrium_check");
+    # U-238 (λ ~ 5e-18) → Th-234 (λ ~ 3.3e-7) → very secular
+    assert_eq(is_secular_equilibrium(0.000000000000000005, 0.00000033), 1, "U-238 → Th-234");
+    # Two similar rates → not secular
+    assert_eq(is_secular_equilibrium(0.1, 0.2), 0, "similar rates");
+}
+
+# ── Cyrius-only ─────────────────────────────────────────────────────────────────────
+
+# ADR 0002 #3: semi_empirical_binding_energy is a Result. Err(InvalidInput) wherever Rust 1.2 returns NaN (z > a, a = 0)
+# and for a word outside Rust's u32; Ok for every real nucleus up to u32::MAX.
+fn _t_cyrius_semf_result() {
+    test_group("cyrius_semf_result (ADR 0002 #3)");
+    assert(semf_err(1, 0) == 1 && semf_err(300, 299) == 1 && semf_err(4294967295, 4294967294) == 1, "z > a: Err");
+    assert(semf_err(0, 0) == 1 && semf_err(4294967295, 0) == 1, "a = 0: Err");
+    assert(semf_err(0 - 1, 4) == 1 && semf_err(2, 4294967296) == 1 && semf_err(4294967296, 4294967296) == 1,
+        "a word outside u32: Err, never wrapped (2^32 is not 0)");
+    var n1: f64 = semf(0, 1);
+    var u: f64 = semf(4294967295, 4294967295);
+    assert(_km_is_finite(n1) == 1 && _km_is_finite(u) == 1, "a free neutron and Z = A = u32::MAX: Ok, finite");
+    # The pairing term's three cases: odd A (0), even-even (+δ/√A), odd-odd (−δ/√A).
+    var ee: f64 = semf(26, 56);
+    var oo: f64 = semf(27, 56);
+    var oa: f64 = semf(26, 57);
+    assert(ee > oo, "even-even binds more than odd-odd at A = 56");
+    assert(_km_is_finite(oa) == 1, "odd A");
+    # N = Z: the asymmetry term is exactly 0, so 16O is volume − surface − Coulomb + pairing, in Rust's order.
+    var o16: f64 = semf(8, 16);
+    var af: f64 = 16.0;
+    var c: f64 = ganita_f64_cbrt(af);
+    var sq: f64 = f64_sqrt(af);
+    var want: f64 = 15.67 * af - (17.23 * c) * c;
+    want = want - ((0.714 * 8.0) * 8.0) / c;
+    want = want - 0.0;
+    want = want + 11.2 / sq;
+    assert(_km_bits(o16) == _km_bits(want), "16O: Rust's order, bit for bit");
+}
+
+# Rust's u32 is a word: outside 0 ..= u32::MAX, NaN for mass_defect (no error channel) and Err for
+# binding_energy_per_nucleon, never wrapped; Z + N must fit in u32 (Rust's checked_add).
+fn _t_cyrius_out_of_u32() {
+    test_group("cyrius_out_of_u32");
+    var md1: f64 = mass_defect(0 - 1, 2, 4.0);
+    var md2: f64 = mass_defect(2, 4294967296, 4.0);
+    assert(is_nan(md1) == 1 && is_nan(md2) == 1, "mass_defect: NaN outside u32");
+    var md3: f64 = mass_defect(4294967295, 4294967295, 0.0);
+    assert(_km_is_finite(md3) == 1 && md3 > 0.0, "mass_defect: u32::MAX counts are fine");
+    assert(bea_err(0 - 1, 2, 4.0) == 1 && bea_err(2, 4294967296, 4.0) == 1, "BE/A: Err outside u32");
+    assert(bea_err(2147483648, 2147483648, 1.0) == 1, "2^31 + 2^31 overflows u32");
+    var t, v = binding_energy_per_nucleon(2147483647, 2147483648, 1.0);
+    assert(is_ok(t) == 1, "2^31 − 1 + 2^31 = u32::MAX: Ok");
+    assert(bea_err(0, 0, 4.0) == 1, "A = 0");
+    assert(bea_err(0, 0, _km_nan()) == 1, "A = 0 before the mass");
+}
+
+# The chain's tuple is the caller's buffer: Ok(3) and the three values; on Err the buffer is untouched. The equal-rate
+# branch is taken exactly when |λ₂ − λ₁| ≤ 1e-12·max(λ₁, λ₂) (Rust's `<=`).
+fn _t_cyrius_chain_buffer() {
+    test_group("cyrius_chain_buffer");
+    var b[24];
+    var sentinel: f64 = 12345.0;
+    store64(&b, sentinel);
+    store64(&b + 8, sentinel);
+    store64(&b + 16, sentinel);
+    var t, v = decay_chain_two_step(1000.0, 0.1, 0.0, 1.0, &b);
+    assert(is_err_result(t) == 1 && v == KM_ERR_INVALID_INPUT, "λ₂ = 0: Err");
+    var s0: f64 = load64(&b);
+    var s1: f64 = load64(&b + 8);
+    var s2: f64 = load64(&b + 16);
+    assert(s0 == sentinel && s1 == sentinel && s2 == sentinel, "on Err the buffer is untouched");
+    # The check order: λ₁ and λ₂, then N₀, then t (all InvalidInput).
+    assert(chain_err(_km_nan(), _km_nan(), 0.05, _km_nan()) == 1, "λ₁ first");
+    # δ = 2^-40 with λ₂ = 2^-40 / 1e-12 rounded: on the threshold or just past it; the two branches give different bits.
+    var l: f64 = 0.1;
+    var tol: f64 = 0.000000000001;
+    var thr: f64 = tol * l;
+    var l2: f64 = l - thr;            # δ = l − l2, at most 1e-12·0.1 after rounding
+    chain(1000.0, l, l2, 10.0, &b);
+    var d: f64 = l - l2;
+    var nb: f64 = load64(&b + 8);
+    if (d <= thr) {
+        var xl: f64 = -l2;
+        xl = xl * 10.0;
+        var e: f64 = _km_cr_exp(xl);
+        var want: f64 = ((1000.0 * l) * e) * 10.0;
+        assert(_km_bits(nb) == _km_bits(want), "on the threshold: the limit N₀·λ₁·e^(−λ_min·t)·t");
+    } else {
+        assert(nb > 0.0, "past the threshold: the Bateman form");
+    }
+    # e^(−λ₁t) subnormal, N₀ = DBL_MAX: N_A is scaled back into the normal range.
+    var big: f64 = 0x7FEFFFFFFFFFFFFF;
+    chain(big, 1.0, 2.0, 740.0, &b);
+    var na: f64 = load64(&b);
+    var tiny: f64 = 0x0010000000000000;
+    var e740: f64 = _km_cr_exp(-740.0);
+    assert(e740 < tiny && na > tiny, "e^−740 is subnormal; DBL_MAX·e^−740 is normal");
+    var want_na: f64 = big * e740;
+    assert(_km_bits(na) == _km_bits(want_na), "N_A = N₀·e^(−λ₁t), one multiply");
+}
+
+# q_value's slices: a pointer and a count each, summed from −0.0 (Rust's `.sum()`); NaN for no slice.
+fn _t_cyrius_slices() {
+    test_group("cyrius_slices");
+    var q0: f64 = q_value(0, 0, 0, 0);
+    assert(_km_bits(q0) == 0, "two empty slices: (−0.0 − −0.0)·m_u·c² = +0.0");
+    var r[16];
+    pair(&r, -0.0, -0.0);
+    var q1: f64 = q_value(&r, 2, 0, 0);
+    assert(_km_bits(q1) == 0, "[−0, −0] − []: −0.0 − −0.0 = +0.0");
+    var qn1: f64 = q_value(0, 1, 0, 0);
+    var qn2: f64 = q_value(&r, 0 - 1, 0, 0);
+    var qn3: f64 = q_value(&r, 1, 0, 2);
+    assert(is_nan(qn1) == 1 && is_nan(qn2) == 1 && is_nan(qn3) == 1, "a null pointer with values, or n < 0: NaN");
+    pair(&r, 235.043928, 1.008665);
+    var q2: f64 = q_value(&r, 1, &r, 1);
+    assert(_km_bits(q2) == 0, "a reaction to itself: +0.0");
+}
+
+# Handles and accessors: every row is reached by its own label; an invalid handle reads nothing; the decay modes are
+# the UTF-8 bytes of Rust's &str.
+fn _t_cyrius_handles() {
+    test_group("cyrius_handles");
+    var h = 1;
+    while (h <= KM_ISOTOPES_COUNT) {
+        assert_eq(lookup_isotope(isotope_symbol(h)), h, "one row per label");
+        var t: f64 = isotope_half_life_s(h);
+        assert(_km_is_positive(t) == 1 && isotope_z(h) > 0 && isotope_a(h) >= isotope_z(h), "a radioisotope row");
+        h = h + 1;
+    }
+    var bad: i64[3];
+    bad[0] = 0;
+    bad[1] = KM_ISOTOPES_COUNT + 1;
+    bad[2] = 0 - 1;
+    var k = 0;
+    while (k < 3) {
+        assert(streq(isotope_symbol(bad[k]), "") == 1, "symbol: \"\"");
+        assert_eq(isotope_z(bad[k]), 0, "z: 0");
+        assert_eq(isotope_a(bad[k]), 0, "a: 0");
+        var t2: f64 = isotope_half_life_s(bad[k]);
+        assert(is_nan(t2) == 1, "half-life: NaN");
+        assert(streq(isotope_decay_mode(bad[k]), "") == 1, "decay mode: \"\"");
+        k = k + 1;
+    }
+    assert_eq(lookup_isotope(0), 0, "null symbol");
+    assert_eq(lookup_isotope(""), 0, "\"\"");
+    assert_eq(lookup_isotope("c-14"), 0, "case-sensitive");
+    assert_eq(lookup_isotope("C-14 "), 0, "exact");
+    assert_eq(lookup_isotope("Tc-99"), 0, "a prefix of Tc-99m");
+    assert(streq(isotope_symbol(iso("Tc-99m")), "Tc-99m") == 1, "the metastable label");
+    assert_eq(isotope_a(iso("Np-237")), 237, "u16 A");
+    var k40 = isotope_decay_mode(iso("K-40"));
+    assert(streq(k40, "β⁻/β⁺/EC") == 1 && strlen(k40) == 14, "K-40: β⁻/β⁺/EC, 14 UTF-8 bytes");
+    assert(streq(isotope_decay_mode(iso("U-238")), "α") == 1, "U-238: α");
+    assert(streq(isotope_decay_mode(iso("Tc-99m")), "IT") == 1, "Tc-99m: IT");
+}
+
+# The typed constants (Rust's LN_2, EQUAL_RATE_REL_TOL, the SEMF coefficients), and the edges Rust's formulas keep: a
+# subnormal half-life, −ln 1 = −0.0, negative n.
+fn _t_cyrius_typed_constants() {
+    test_group("cyrius_typed_constants");
+    var l1: f64 = lambda_of(1.0);
+    assert(_km_bits(l1) == 0x3FE62E42FEFA39EF, "decay_constant(1) = LN_2 exactly");
+    var sub: f64 = 0.0;
+    store64(&sub, 1);                       # the smallest subnormal (a small hex literal reads as an integer)
+    var lsub: f64 = lambda_of(sub);
+    assert(lsub == _KM_INF, "a subnormal half-life: λ overflows to +∞, Ok (Rust)");
+    var t1: f64 = tff(1.0, 0.01);
+    assert(_km_bits(t1) == 0x8000000000000000, "fraction 1: −ln 1 / λ = −0.0 (Rust)");
+    var neg: f64 = atoms_after_half_lives(1000.0, -2.0);
+    assert(neg == 4000.0, "n = −2: 1000 · 4");
+    var three: f64 = atoms_after_half_lives(3.0, 1074.0);
+    assert(_km_bits(three) == 3, "3 · 2⁻¹⁰⁷⁴: Rust's form, exact (2⁻¹⁰⁷⁴ is representable)");
+}
+
+# The bits of x.
+#must_use
+fn bits_of(x: f64): i64 {
+    return _km_bits(x);
+}
+
+# N₀/2ⁿ after ADR 0002 #13, as its bits.
+#must_use
+fn aah_bits(n0: f64, n: f64): i64 {
+    var r: f64 = atoms_after_half_lives(n0, n);
+    return _km_bits(r);
+}
+
+# ADR 0002 #13 (the user's decision, 2026-11-09): where Rust's 2⁻ⁿ overflows, underflows or is subnormal, N₀/2ⁿ
+# correctly rounded (rounded once). M4c's port was faithful for a fractional n with N₀ not a power of two (N₀·CR(2⁻ᶠ),
+# then one rounding); since M4d every case is correctly rounded (src/mathx.cyr's _km_cr_exp2_scaled). Every expected
+# value is exact rational arithmetic's (validate.py's, Python Fraction) or, for a fractional n, MPFR's
+# (mpfr_ref.scaled_exp2).
+fn _t_cyrius_exact_half_lives() {
+    test_group("cyrius_exact_half_lives (ADR 0002 #13)");
+    assert_eq(aah_bits(1000.0, 1075.0), 500, "1000 after 1075 half-lives: 500·2⁻¹⁰⁷⁴ ≈ 2.47e-321 (Rust 0)");
+    var p100: f64 = 0x4630000000000000;     # 2¹⁰⁰
+    assert_eq(aah_bits(p100, 1100.0), 0x0170000000000000, "2¹⁰⁰ after 1100: 2⁻¹⁰⁰⁰ (Rust 0)");
+    assert_eq(aah_bits(1.0, 1075.0), 0, "2⁻¹⁰⁷⁵ is a tie: to even, 0");
+    assert_eq(aah_bits(3.0, 1075.0), 2, "1.5·2⁻¹⁰⁷⁴: a tie, to even, 2·2⁻¹⁰⁷⁴ (Rust 0)");
+    assert_eq(aah_bits(5.0, 1075.0), 2, "2.5·2⁻¹⁰⁷⁴: to even, 2");
+    assert_eq(aah_bits(7.0, 1075.0), 4, "3.5·2⁻¹⁰⁷⁴: to even, 4");
+    assert_eq(aah_bits(-1000.0, 1075.0), 0x80000000000001F4, "the sign is N₀'s");
+    var big: f64 = 0x7FEFFFFFFFFFFFFF;
+    assert_eq(aah_bits(big, 1075.0), 0x3CBFFFFFFFFFFFFF, "DBL_MAX after 1075: (2 − 2⁻⁵²)·2⁻⁵² exactly (Rust 0)");
+    assert_eq(aah_bits(big, 2098.0), 1, "DBL_MAX after 2098: rounds to 2⁻¹⁰⁷⁴, once");
+    var sub: f64 = 0.0;
+    store64(&sub, 1);
+    assert_eq(aah_bits(sub, -1080.0), 0x4050000000000000, "2⁻¹⁰⁷⁴ after −1080 half-lives: 64 (Rust +∞)");
+    assert_eq(aah_bits(sub, -2097.0), 0x7FE0000000000000, "2⁻¹⁰⁷⁴ after −2097: 2¹⁰²³");
+    var zero: f64 = 0.0;
+    assert_eq(aah_bits(zero, -1100.0), 0, "0 after −1100 half-lives: 0 (scaleB; Rust 0·∞ = NaN)");
+    var nzero: f64 = -0.0;
+    assert_eq(aah_bits(nzero, -1100.0), 0x8000000000000000, "−0 stays −0");
+    var inf: f64 = atoms_after_half_lives(_KM_INF, 1100.0);
+    assert(inf == _KM_INF, "∞ after 1100 half-lives: ∞ (Rust ∞·0 = NaN)");
+    var nan: f64 = atoms_after_half_lives(_km_nan(), 1100.0);
+    assert(is_nan(nan) == 1, "NaN stays NaN");
+    var pw: f64 = _km_cr_pow(2.0, -1000.5);
+    assert_eq(aah_bits(p100, 1100.5), bits_of(pw), "N₀ = 2¹⁰⁰, n = 1100.5: CR(2^−1000.5)");
+    assert_eq(aah_bits(p100, 1100.5), 0x0166A09E667F3BCD, "… = 0x0166A09E667F3BCD (MPFR)");
+    assert_eq(aah_bits(3.0, 1074.5), 2, "3·2^−1074.5 ≈ 2.12·2⁻¹⁰⁷⁴: 2 (correctly rounded; Rust 3·CR(2^−1074.5) = 3)");
+    var e300: f64 = 0x7E37E43C8800759C;     # 1e300
+    assert_eq(aah_bits(e300, 1100.75), 0x396C6978CEAD5D0D, "1e300 after 1100.75: normal, CR here (Rust 0)");
+    # A fractional n (M4d: correctly rounded; M4c's faithful N₀·CR(2⁻ᶠ)·2⁻ᵏ gave …AC, …04, …C2 on the first three, one
+    # ulp off, where Rust's N₀·CR(2⁻ⁿ), with a 51–52-bit subnormal 2⁻ⁿ, lands on the correctly rounded value by luck).
+    assert_eq(aah_bits(big, 1022.25), 0x400AE89F995AD3AD, "DBL_MAX after 1022.25: CR(N₀/2ⁿ) = 3.363585661014858");
+    assert_eq(aah_bits(e300, 1022.25), 0x3E54171F0DE63805, "1e300 after 1022.25: CR, 1.8710566312934567e-8");
+    var e250: f64 = 0x73D658E3AB795204;     # 1e250
+    assert_eq(aah_bits(e250, 1022.5), 0x33EF9A8F2D6A2BC1, "1e250 after 1022.5: CR, 1.5733648139913584e-58");
+    assert_eq(aah_bits(1000.0, 1075.3), 0x196, "1000 after 1075.3: a subnormal, 406·2⁻¹⁰⁷⁴ (Rust 0)");
+    var m75: f64 = 0xC23176592E000000;     # −7.5e10
+    var n107: f64 = 0x4090E2CCCCCCCCCD;    # 1080.7
+    assert_eq(aah_bits(m75, n107), 0x800000002AFF49F0, "−7.5e10 after 1080.7: −3.56405953e-315, rounded once");
+    var t10: f64 = 0x3DE12E0BE826D695;     # 1.25e-10
+    var nm1030: f64 = 0xC09019999999999A;  # −1030.4
+    assert_eq(aah_bits(t10, nm1030), 0x7E46AB41D5750EA3, "1.25e-10 after −1030.4: 1.897656250074479e300 (Rust +∞)");
+    assert_eq(aah_bits(big, 2097.75), 1, "DBL_MAX after 2097.75: 2⁻¹⁰⁷⁴");
+    assert_eq(aah_bits(sub, -2097.5), 0x7FE6A09E667F3BCD, "2⁻¹⁰⁷⁴ after −2097.5: 2^1023.5 (Rust +∞)");
+    assert_eq(aah_bits(3.0, 1100.25), 0, "below 2⁻¹⁰⁷⁵: 0");
+    assert_eq(aah_bits(1.5, 2300.0), 0, "|n| > 2200: ±0 or ±∞ without arithmetic");
+    var ovf: f64 = atoms_after_half_lives(1.5, -2300.0);
+    assert(ovf == _KM_INF, "… and +∞");
+    var lim: f64 = atoms_after_half_lives(1.0, _KM_INF);
+    assert(_km_bits(lim) == 0, "n = +∞ keeps Rust's limit, 0");
+}
+
+# ADR 0002 #14 (the user's decision, 2026-11-09): λ_p < λ_d/100 exactly; Rust's NaN, ±∞ and ±0 semantics kept. Each
+# expected value is Python Fraction's.
+fn _t_cyrius_exact_secular() {
+    test_group("cyrius_exact_secular (ADR 0002 #14)");
+    assert_eq(is_secular_equilibrium(0.03, 3.0), 1, "(0.03, 3): 0.029999… < 3/100 (Rust 0)");
+    var sub: f64 = 0.0;
+    store64(&sub, 1);
+    assert_eq(is_secular_equilibrium(0.0, sub), 1, "(0, 5e-324): 0 < 5e-326 (Rust's 0.01·λ_d underflows: 0)");
+    var nzero: f64 = -0.0;
+    assert_eq(is_secular_equilibrium(nzero, sub), 1, "(−0, 5e-324): 1");
+    assert_eq(is_secular_equilibrium(-0.02, -2.0), 1, "(−0.02, −2): −0.0200000000000000004 < −0.02 (Rust 0)");
+    assert_eq(is_secular_equilibrium(-0.03, -3.0), 0, "(−0.03, −3): −0.029999… is above −0.03");
+    var u100: f64 = 0.0;
+    store64(&u100, 100);
+    var u101: f64 = 0.0;
+    store64(&u101, 101);
+    assert_eq(is_secular_equilibrium(sub, u100), 0, "100·2⁻¹⁰⁷⁴ against itself: not <");
+    assert_eq(is_secular_equilibrium(sub, u101), 1, "100·2⁻¹⁰⁷⁴ < 101·2⁻¹⁰⁷⁴ (Rust 0: 0.01·λ_d rounds to 2⁻¹⁰⁷⁴)");
+    var big: f64 = 0x7FEFFFFFFFFFFFFF;
+    var c: f64 = big / 100.0;
+    assert_eq(is_secular_equilibrium(c, big), 1, "RN(DBL_MAX/100) · 100 < DBL_MAX: no overflow in 100·λ_p");
+    var c1: f64 = 0.0;
+    store64(&c1, _km_bits(c) + 1);
+    assert_eq(is_secular_equilibrium(c1, big), 0, "one ulp above: 100·λ_p > DBL_MAX, compared exactly");
+    assert_eq(is_secular_equilibrium(0.01, 1.0), 0, "the double 0.01 is above 1/100");
+    var below: f64 = 0x3F847AE147AE147A;
+    assert_eq(is_secular_equilibrium(below, 1.0), 1, "one ulp below 0.01: <");
+    assert_eq(is_secular_equilibrium(_km_nan(), 1.0), 0, "NaN: 0");
+    assert_eq(is_secular_equilibrium(1.0, _km_nan()), 0, "NaN: 0");
+    assert_eq(is_secular_equilibrium(1000000.0, _KM_INF), 1, "λ_d = ∞: ∞/100 = ∞");
+    var ninf: f64 = -_KM_INF;
+    assert_eq(is_secular_equilibrium(ninf, -1.0), 1, "λ_p = −∞");
+    assert_eq(is_secular_equilibrium(_KM_INF, _KM_INF), 0, "∞ < ∞: 0");
+    assert_eq(is_secular_equilibrium(nzero, nzero), 0, "0 < 0: 0");
+    assert_eq(is_secular_equilibrium(-0.000001, 0.0), 1, "λ_p < 0 = λ_d/100");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_decay_constant_c14();
+    _t_decay_constant_zero_is_error();
+    _t_decay_constant_nan_is_error();
+    _t_decay_constant_stable_is_zero();
+    _t_atoms_remaining_one_half_life();
+    _t_atoms_remaining_two_half_lives();
+    _t_activity_basic();
+    _t_time_for_half();
+    _t_time_for_fraction_invalid();
+    _t_time_for_fraction_nan_is_error();
+    _t_constants_codata_2018();
+    _t_hydrogen_atom_mass_is_proton_plus_electron();
+    _t_mass_defect_he4();
+    _t_binding_energy_he4();
+    _t_be_per_nucleon_fe56();
+    _t_be_per_nucleon_overflow_is_error();
+    _t_be_per_nucleon_nan_mass_is_error();
+    _t_semi_empirical_fe56();
+    _t_semi_empirical_u238();
+    _t_semi_empirical_invalid_is_nan();
+    _t_semi_empirical_he4();
+    _t_lookup_c14();
+    _t_lookup_u235();
+    _t_half_lives_nubase2020();
+    _t_lookup_nonexistent();
+    _t_isotope_count();
+    _t_q_value_deuterium_tritium_fusion();
+    _t_q_value_endothermic_is_negative();
+    _t_decay_chain_mass_conservation();
+    _t_decay_chain_at_t0();
+    _t_decay_chain_long_time();
+    _t_decay_chain_equal_rates_uses_limit();
+    _t_decay_chain_nearly_equal_rates_is_accurate();
+    _t_decay_chain_no_overflow_for_fast_parent();
+    _t_decay_chain_invalid_inputs_are_errors();
+    _t_secular_equilibrium_check();
+    _t_cyrius_semf_result();
+    _t_cyrius_out_of_u32();
+    _t_cyrius_chain_buffer();
+    _t_cyrius_slices();
+    _t_cyrius_handles();
+    _t_cyrius_typed_constants();
+    _t_cyrius_exact_half_lives();
+    _t_cyrius_exact_secular();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

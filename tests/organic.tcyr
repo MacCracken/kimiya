@@ -1,0 +1,490 @@
+# organic.tcyr — the tests of rust-old/src/organic.rs, ported one for one (each test_group is the Rust test's name;
+# all 21), the two organic tests of rust-old/tests/integration.rs, and Cyrius-only tests of ADR 0002 #6's new
+# hydrogen-bond acceptor property (reference tests only, as the ADR says: the oracle has no such data), invalid
+# enum values, out-of-u8 VSEPR arguments and the bond-list records. The golden corpus separately checks every
+# function over its grid (tests/parity.tcyr).
+#
+# Adaptations, each forced by ADR 0002 #6 and commented where it is made: `Geometry::TShapedThreeLonePairs` is
+# KM_GEOMETRY_T_SHAPED (vsepr_clf3_t_shaped), and `FunctionalGroup::hydrogen_bonding` is
+# functional_group_is_hydrogen_bond_donor (alcohol_polar_and_hbonds, ether_polar_not_hbond_donor,
+# acceptor_only_groups_are_not_donors, carboxylic_acid_hbonds). The rest is the port's form (port plan §6.4): an
+# enum method is <enum>_<method>(value), `Some(g)` is the value-form Option, a `&[(BondType, u32)]` is a pointer to
+# 16-byte (value, count) records and their count.
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/organic_data.cyr"
+include "src/organic.cyr"
+
+alloc_init();
+
+# f64::EPSILON.
+#must_use
+fn eps64(): f64 {
+    var e: f64 = 0.0000000000000002220446049250313;
+    return e;
+}
+
+# 1 if predict_geometry(b, lp) is Some(want).
+#must_use
+fn geometry_is(b, lp, want): i64 {
+    var t, g = predict_geometry(b, lp);
+    if (is_some(t) == 1 && g == want) { return 1; }
+    return 0;
+}
+
+# 1 if predict_geometry(b, lp) is None.
+#must_use
+fn geometry_none(b, lp): i64 {
+    var t, g = predict_geometry(b, lp);
+    if (is_none(t) == 1) { return 1; }
+    return 0;
+}
+
+# 1 if x is NaN.
+#must_use
+fn is_nan(x: f64): i64 {
+    if (x != x) { return 1; }
+    return 0;
+}
+
+# ── bond energies ───────────────────────────────────────────────────────────────────
+
+fn _t_bond_energy_ordering() {
+    test_group("bond_energy_ordering");
+    # Triple > double > single for carbon-carbon
+    var e3: f64 = bond_type_energy_kj(KM_BOND_TYPE_CC_TRIPLE);
+    var e2: f64 = bond_type_energy_kj(KM_BOND_TYPE_CC_DOUBLE);
+    var e1: f64 = bond_type_energy_kj(KM_BOND_TYPE_CC);
+    assert(e3 > e2, "C≡C > C=C");
+    assert(e2 > e1, "C=C > C–C");
+}
+
+fn _t_bond_energy_halogens_decrease_down_group() {
+    test_group("bond_energy_halogens_decrease_down_group");
+    # F-F is anomalously weak, but H-X decreases: HF > HCl > HBr > HI
+    var hf: f64 = bond_type_energy_kj(KM_BOND_TYPE_HF);
+    var hcl: f64 = bond_type_energy_kj(KM_BOND_TYPE_H_CL);
+    var hbr: f64 = bond_type_energy_kj(KM_BOND_TYPE_H_BR);
+    var hi: f64 = bond_type_energy_kj(KM_BOND_TYPE_HI);
+    assert(hf > hcl, "HF > HCl");
+    assert(hcl > hbr, "HCl > HBr");
+    assert(hbr > hi, "HBr > HI");
+}
+
+fn _t_bond_energy_all_positive() {
+    test_group("bond_energy_all_positive");
+    var bonds: i64[20];
+    bonds[0] = KM_BOND_TYPE_CH;
+    bonds[1] = KM_BOND_TYPE_CC;
+    bonds[2] = KM_BOND_TYPE_CC_DOUBLE;
+    bonds[3] = KM_BOND_TYPE_CC_TRIPLE;
+    bonds[4] = KM_BOND_TYPE_CO;
+    bonds[5] = KM_BOND_TYPE_CO_DOUBLE;
+    bonds[6] = KM_BOND_TYPE_CN;
+    bonds[7] = KM_BOND_TYPE_CN_DOUBLE;
+    bonds[8] = KM_BOND_TYPE_CN_TRIPLE;
+    bonds[9] = KM_BOND_TYPE_HH;
+    bonds[10] = KM_BOND_TYPE_OH;
+    bonds[11] = KM_BOND_TYPE_NH;
+    bonds[12] = KM_BOND_TYPE_OO;
+    bonds[13] = KM_BOND_TYPE_OO_DOUBLE;
+    bonds[14] = KM_BOND_TYPE_NN;
+    bonds[15] = KM_BOND_TYPE_NN_TRIPLE;
+    bonds[16] = KM_BOND_TYPE_FF;
+    bonds[17] = KM_BOND_TYPE_CL_CL;
+    bonds[18] = KM_BOND_TYPE_BR_BR;
+    bonds[19] = KM_BOND_TYPE_II;
+    var k = 0;
+    while (k < 20) {
+        var e: f64 = bond_type_energy_kj(bonds[k]);
+        assert(e > 0.0, "should have positive energy");
+        k = k + 1;
+    }
+}
+
+fn _t_enthalpy_from_bonds_h2_combustion() {
+    test_group("enthalpy_from_bonds_h2_combustion");
+    # 2H₂ + O₂ → 2H₂O
+    # Broken: 2×H–H + 1×O=O = 2×436 + 498 = 1370 kJ
+    # Formed: 4×O–H = 4×463 = 1852 kJ
+    # ΔH = 1370 − 1852 = −482 kJ (≈ 2 × −241.8 kJ/mol experimental, gas)
+    var broken: i64[4];
+    broken[0] = KM_BOND_TYPE_HH;
+    broken[1] = 2;
+    broken[2] = KM_BOND_TYPE_OO_DOUBLE;
+    broken[3] = 1;
+    var formed: i64[2];
+    formed[0] = KM_BOND_TYPE_OH;
+    formed[1] = 4;
+    var dh: f64 = enthalpy_from_bonds(&broken, 2, &formed, 1);
+    var want: f64 = -482.0;
+    var d: f64 = f64_abs(dh - want);
+    assert(d < 0.000000001, "2H₂ + O₂ → 2H₂O should be -482 kJ from the table");
+}
+
+fn _t_enthalpy_from_bonds_empty_is_zero() {
+    test_group("enthalpy_from_bonds_empty_is_zero");
+    var dh: f64 = enthalpy_from_bonds(0, 0, 0, 0);
+    var a: f64 = f64_abs(dh);
+    assert(a < eps64(), "no bonds: 0");
+}
+
+# ── VSEPR ───────────────────────────────────────────────────────────────────────────
+
+fn _t_vsepr_water() {
+    test_group("vsepr_water");
+    # H₂O: 2 bonding, 2 lone pairs → bent
+    assert(geometry_is(2, 2, KM_GEOMETRY_BENT_TWO_LONE_PAIRS) == 1, "H₂O: bent");
+}
+
+fn _t_vsepr_methane() {
+    test_group("vsepr_methane");
+    # CH₄: 4 bonding, 0 lone pairs → tetrahedral
+    assert(geometry_is(4, 0, KM_GEOMETRY_TETRAHEDRAL) == 1, "CH₄: tetrahedral");
+}
+
+fn _t_vsepr_ammonia() {
+    test_group("vsepr_ammonia");
+    # NH₃: 3 bonding, 1 lone pair → trigonal pyramidal
+    assert(geometry_is(3, 1, KM_GEOMETRY_TRIGONAL_PYRAMIDAL) == 1, "NH₃: trigonal pyramidal");
+}
+
+fn _t_vsepr_co2() {
+    test_group("vsepr_co2");
+    # CO₂: 2 bonding, 0 lone pairs → linear
+    assert(geometry_is(2, 0, KM_GEOMETRY_LINEAR) == 1, "CO₂: linear");
+}
+
+fn _t_vsepr_bf3() {
+    test_group("vsepr_bf3");
+    # BF₃: 3 bonding, 0 lone pairs → trigonal planar
+    assert(geometry_is(3, 0, KM_GEOMETRY_TRIGONAL_PLANAR) == 1, "BF₃: trigonal planar");
+}
+
+fn _t_vsepr_sf6() {
+    test_group("vsepr_sf6");
+    # SF₆: 6 bonding, 0 lone pairs → octahedral
+    assert(geometry_is(6, 0, KM_GEOMETRY_OCTAHEDRAL) == 1, "SF₆: octahedral");
+}
+
+fn _t_vsepr_xef2() {
+    test_group("vsepr_xef2");
+    # XeF₂: 2 bonding, 3 lone pairs → linear
+    assert(geometry_is(2, 3, KM_GEOMETRY_LINEAR) == 1, "XeF₂: linear");
+}
+
+fn _t_vsepr_diatomic_linear() {
+    test_group("vsepr_diatomic_linear");
+    # HCl, N₂, F₂: one bonding group → linear regardless of lone pairs
+    var lp = 0;
+    while (lp <= 3) {
+        assert(geometry_is(1, lp, KM_GEOMETRY_LINEAR) == 1, "one bonding group: linear");
+        lp = lp + 1;
+    }
+}
+
+fn _t_vsepr_clf3_t_shaped() {
+    test_group("vsepr_clf3_t_shaped");
+    # ClF₃: 3 bonding groups + 2 lone pairs → T-shaped
+    # ADR 0002 #6: Rust's Geometry::TShapedThreeLonePairs is KM_GEOMETRY_T_SHAPED.
+    assert(geometry_is(3, 2, KM_GEOMETRY_T_SHAPED) == 1, "ClF₃: T-shaped");
+}
+
+fn _t_vsepr_unsupported() {
+    test_group("vsepr_unsupported");
+    assert(geometry_none(7, 0) == 1, "7 bonding groups: None");
+}
+
+fn _t_tetrahedral_bond_angle() {
+    test_group("tetrahedral_bond_angle");
+    var a: f64 = geometry_ideal_bond_angle(KM_GEOMETRY_TETRAHEDRAL);
+    var d: f64 = f64_abs(a - 109.5);
+    assert(d < eps64(), "109.5°");
+}
+
+# ── functional groups ───────────────────────────────────────────────────────────────
+
+fn _t_alkane_nonpolar() {
+    test_group("alkane_nonpolar");
+    assert_eq(functional_group_is_polar(KM_FUNCTIONAL_GROUP_ALKANE), 0, "alkane: nonpolar");
+}
+
+fn _t_alcohol_polar_and_hbonds() {
+    test_group("alcohol_polar_and_hbonds");
+    assert_eq(functional_group_is_polar(KM_FUNCTIONAL_GROUP_ALCOHOL), 1, "alcohol: polar");
+    # ADR 0002 #6: Rust's hydrogen_bonding is functional_group_is_hydrogen_bond_donor.
+    assert_eq(functional_group_is_hydrogen_bond_donor(KM_FUNCTIONAL_GROUP_ALCOHOL), 1, "alcohol: donor");
+}
+
+fn _t_ether_polar_not_hbond_donor() {
+    test_group("ether_polar_not_hbond_donor");
+    # Ethers accept hydrogen bonds but have no O–H to donate.
+    assert_eq(functional_group_is_polar(KM_FUNCTIONAL_GROUP_ETHER), 1, "ether: polar");
+    # ADR 0002 #6: hydrogen_bonding is functional_group_is_hydrogen_bond_donor.
+    assert_eq(functional_group_is_hydrogen_bond_donor(KM_FUNCTIONAL_GROUP_ETHER), 0, "ether: no donor");
+}
+
+fn _t_acceptor_only_groups_are_not_donors() {
+    test_group("acceptor_only_groups_are_not_donors");
+    var g: i64[5];
+    g[0] = KM_FUNCTIONAL_GROUP_ETHER;
+    g[1] = KM_FUNCTIONAL_GROUP_KETONE;
+    g[2] = KM_FUNCTIONAL_GROUP_ALDEHYDE;
+    g[3] = KM_FUNCTIONAL_GROUP_ESTER;
+    g[4] = KM_FUNCTIONAL_GROUP_NITRILE;
+    var k = 0;
+    while (k < 5) {
+        # ADR 0002 #6: hydrogen_bonding is functional_group_is_hydrogen_bond_donor.
+        assert_eq(functional_group_is_hydrogen_bond_donor(g[k]), 0, "an acceptor, not a donor");
+        k = k + 1;
+    }
+}
+
+fn _t_carboxylic_acid_hbonds() {
+    test_group("carboxylic_acid_hbonds");
+    # ADR 0002 #6: hydrogen_bonding is functional_group_is_hydrogen_bond_donor.
+    assert_eq(functional_group_is_hydrogen_bond_donor(KM_FUNCTIONAL_GROUP_CARBOXYLIC_ACID), 1, "COOH: donor");
+}
+
+# ── rust-old/tests/integration.rs (the organic ones) ────────────────────────────────
+
+fn _t_bond_energy_methane_combustion() {
+    test_group("bond_energy_methane_combustion (integration)");
+    # CH₄ + 2O₂ → CO₂ + 2H₂O
+    # Broken: 4×C-H + 2×O=O
+    # Formed: 2×C=O + 4×O-H
+    var broken: i64[4];
+    broken[0] = KM_BOND_TYPE_CH;
+    broken[1] = 4;
+    broken[2] = KM_BOND_TYPE_OO_DOUBLE;
+    broken[3] = 2;
+    var formed: i64[4];
+    formed[0] = KM_BOND_TYPE_CO_DOUBLE;
+    formed[1] = 2;
+    formed[2] = KM_BOND_TYPE_OH;
+    formed[3] = 4;
+    var dh: f64 = enthalpy_from_bonds(&broken, 2, &formed, 2);
+    # Should be exothermic (bond energy estimates give ~-694 kJ/mol)
+    assert(dh < -600.0, "methane combustion should be exothermic");
+}
+
+fn _t_vsepr_predicts_water_bent() {
+    test_group("vsepr_predicts_water_bent (integration)");
+    assert(geometry_is(2, 2, KM_GEOMETRY_BENT_TWO_LONE_PAIRS) == 1, "H₂O: bent");
+}
+
+# ── Cyrius-only ─────────────────────────────────────────────────────────────────────
+
+# ADR 0002 #6's new acceptor property: reference tests only (no oracle). The criterion is IUPAC 2011's (Arunan et
+# al., Pure Appl. Chem. 83, 1637): an electron-rich region, a lone pair or a π-bonded pair, the weak acceptors
+# included (the user's decision); the sources, one per weak family, are in src/organic_data.cyr.
+fn _t_cyrius_hydrogen_bond_acceptor() {
+    test_group("cyrius_hydrogen_bond_acceptor");
+    # The acceptor-only groups the oracle's own hydrogen_bonding doc names: acceptors, not donors.
+    var only: i64[5];
+    only[0] = KM_FUNCTIONAL_GROUP_ETHER;
+    only[1] = KM_FUNCTIONAL_GROUP_ALDEHYDE;
+    only[2] = KM_FUNCTIONAL_GROUP_KETONE;
+    only[3] = KM_FUNCTIONAL_GROUP_ESTER;
+    only[4] = KM_FUNCTIONAL_GROUP_NITRILE;
+    var k = 0;
+    while (k < 5) {
+        assert_eq(functional_group_is_hydrogen_bond_acceptor(only[k]), 1, "acceptor-only group: an acceptor");
+        assert_eq(functional_group_is_hydrogen_bond_donor(only[k]), 0, "acceptor-only group: no donor");
+        k = k + 1;
+    }
+    # Every donor's O, N or S carries lone pairs, so every donor accepts too (amines tertiary included; the thiol's
+    # divalent S is a weak acceptor, Allen et al. 1997).
+    var both: i64[6];
+    both[0] = KM_FUNCTIONAL_GROUP_ALCOHOL;
+    both[1] = KM_FUNCTIONAL_GROUP_CARBOXYLIC_ACID;
+    both[2] = KM_FUNCTIONAL_GROUP_AMINE;
+    both[3] = KM_FUNCTIONAL_GROUP_AMIDE;
+    both[4] = KM_FUNCTIONAL_GROUP_PHENOL;
+    both[5] = KM_FUNCTIONAL_GROUP_THIOL;
+    k = 0;
+    while (k < 6) {
+        assert_eq(functional_group_is_hydrogen_bond_acceptor(both[k]), 1, "donor group: an acceptor too");
+        assert_eq(functional_group_is_hydrogen_bond_donor(both[k]), 1, "donor group: a donor");
+        k = k + 1;
+    }
+    # The weak acceptors with no donor: π-bonded pairs (X–H···π, Steiner 2002) and C–X halogens (Brammer et al.
+    # 2001; organic fluorine the weakest, Dunitz & Taylor 1997).
+    var weak: i64[4];
+    weak[0] = KM_FUNCTIONAL_GROUP_ALKENE;
+    weak[1] = KM_FUNCTIONAL_GROUP_ALKYNE;
+    weak[2] = KM_FUNCTIONAL_GROUP_AROMATIC_RING;
+    weak[3] = KM_FUNCTIONAL_GROUP_HALIDE;
+    k = 0;
+    while (k < 4) {
+        assert_eq(functional_group_is_hydrogen_bond_acceptor(weak[k]), 1, "weak acceptor: π pair or halogen");
+        assert_eq(functional_group_is_hydrogen_bond_donor(weak[k]), 0, "weak acceptor: no donor");
+        k = k + 1;
+    }
+    # The alkane, C–C and C–H σ bonds only: no lone pair, no π bond, so the one group that neither accepts nor donates.
+    assert_eq(functional_group_is_hydrogen_bond_acceptor(KM_FUNCTIONAL_GROUP_ALKANE), 0, "alkane: no acceptor");
+    assert_eq(functional_group_is_hydrogen_bond_donor(KM_FUNCTIONAL_GROUP_ALKANE), 0, "alkane: no donor");
+    # Acceptance is not polarity: the nonpolar alkene, alkyne and aromatic ring accept (their π faces).
+    var n = 0;
+    var np = 0;
+    var g = 0;
+    while (g < KM_FUNCTIONAL_GROUP_COUNT) {
+        if (functional_group_is_hydrogen_bond_acceptor(g) == 1) {
+            n = n + 1;
+            if (functional_group_is_polar(g) == 0) { np = np + 1; }
+        }
+        if (functional_group_is_hydrogen_bond_donor(g) == 1) {
+            assert_eq(functional_group_is_hydrogen_bond_acceptor(g), 1, "every donor accepts");
+        }
+        g = g + 1;
+    }
+    assert_eq(n, 15, "15 of the 16 groups are acceptors");
+    assert_eq(np, 3, "3 nonpolar acceptors: alkene, alkyne, aromatic ring");
+}
+
+# A word that is no value of the enum gets the property's "none": NaN, "" or 0, never an out-of-bounds read.
+fn _t_cyrius_invalid_enum_values() {
+    test_group("cyrius_invalid_enum_values");
+    var bad: i64[4];
+    bad[0] = 0 - 1;
+    bad[1] = 45;
+    bad[2] = 4294967296;
+    bad[3] = 0 - 9223372036854775807;
+    var k = 0;
+    while (k < 4) {
+        var e: f64 = bond_type_energy_kj(bad[k]);
+        assert(is_nan(e) == 1, "bond_type_energy_kj: NaN");
+        k = k + 1;
+    }
+    var a: f64 = geometry_ideal_bond_angle(KM_GEOMETRY_COUNT);
+    assert(is_nan(a) == 1, "geometry_ideal_bond_angle(12): NaN");
+    var a2: f64 = geometry_ideal_bond_angle(0 - 1);
+    assert(is_nan(a2) == 1, "geometry_ideal_bond_angle(-1): NaN");
+    var g = 0 - 1;
+    while (g <= KM_FUNCTIONAL_GROUP_COUNT) {
+        if (g == 0) { g = KM_FUNCTIONAL_GROUP_COUNT; }
+        assert(streq(functional_group_pattern(g), "") == 1, "pattern: \"\"");
+        assert_eq(functional_group_is_polar(g), 0, "is_polar: 0");
+        assert_eq(functional_group_is_hydrogen_bond_donor(g), 0, "donor: 0");
+        assert_eq(functional_group_is_hydrogen_bond_acceptor(g), 0, "acceptor: 0");
+        g = g + 1;
+    }
+    # The values are Rust's declaration order, append-only.
+    assert(KM_BOND_TYPE_CH == 0 && KM_BOND_TYPE_II == 44 && KM_BOND_TYPE_COUNT == 45, "KmBondType 0 … 44");
+    assert(KM_GEOMETRY_T_SHAPED == 7 && KM_GEOMETRY_OCTAHEDRAL == 11 && KM_GEOMETRY_COUNT == 12, "KmGeometry 0 … 11");
+    assert(KM_FUNCTIONAL_GROUP_AROMATIC_RING == 15 && KM_FUNCTIONAL_GROUP_COUNT == 16, "KmFunctionalGroup 0 … 15");
+    # UTF-8 patterns: strlen counts bytes, as Rust's &str length does.
+    assert_eq(strlen(functional_group_pattern(KM_FUNCTIONAL_GROUP_ALKYNE)), 10, "\"C≡C (sp)\" is 10 bytes");
+    assert(streq(functional_group_pattern(KM_FUNCTIONAL_GROUP_AMINE), "-NH₂ / -NHR / -NR₂") == 1, "amine pattern");
+}
+
+# Rust's u8 arguments as words: outside 0 ..= 255 is None, never wrapped mod 256.
+fn _t_cyrius_vsepr_out_of_u8() {
+    test_group("cyrius_vsepr_out_of_u8");
+    assert(geometry_none(257, 0) == 1, "257 is not 1 mod 256");
+    assert(geometry_none(258, 2) == 1, "258 is not 2");
+    assert(geometry_none(4, 256) == 1, "lone pairs 256 is not 0");
+    assert(geometry_none(1, 0 - 1) == 1, "negative lone pairs");
+    assert(geometry_none(0 - 255, 0) == 1, "negative bonding groups");
+    assert(geometry_none(1, 4) == 1, "a diatomic with 4 lone pairs: None");
+    assert(geometry_none(0, 0) == 1, "no bonding groups: None");
+    assert(geometry_none(6, 1) == 1, "AX6E: None");
+    assert(geometry_none(255, 255) == 1, "u8::MAX");
+    var count = 0;
+    var b = 0;
+    while (b <= 255) {
+        var lp = 0;
+        while (lp <= 255) {
+            if (geometry_none(b, lp) == 0) { count = count + 1; }
+            lp = lp + 1;
+        }
+        b = b + 1;
+    }
+    assert_eq(count, 17, "17 (bonding, lone) pairs have a geometry (1 × 4, then 13)");
+}
+
+# enthalpy_from_bonds's records: (value, count) words. A bad list, an invalid value or a count outside u32 is NaN;
+# the sums fold from −0.0 as Rust's .sum().
+fn _t_cyrius_bond_records() {
+    test_group("cyrius_bond_records");
+    var one: i64[2];
+    one[0] = KM_BOND_TYPE_CH;
+    one[1] = 1;
+    var r: f64 = enthalpy_from_bonds(&one, 1, 0, 0);
+    assert(r == 413.0, "one C–H broken: 413 kJ");
+    var z: f64 = enthalpy_from_bonds(0, 0, 0, 0);
+    assert(_km_bits(z) == 0, "two empty lists: −0.0 − −0.0 = +0.0");
+    var f: f64 = enthalpy_from_bonds(0, 0, &one, 1);
+    assert(f == -413.0, "one C–H formed: −413 kJ");
+    var nb: f64 = enthalpy_from_bonds(&one, 0 - 1, 0, 0);
+    assert(is_nan(nb) == 1, "a negative count of records: NaN");
+    var np: f64 = enthalpy_from_bonds(0, 1, 0, 0);
+    assert(is_nan(np) == 1, "a null pointer with records: NaN");
+    var nf: f64 = enthalpy_from_bonds(&one, 1, 0, 2);
+    assert(is_nan(nf) == 1, "a null formed list with records: NaN");
+    var rec: i64[2];
+    rec[0] = 45;
+    rec[1] = 1;
+    var ne: f64 = enthalpy_from_bonds(&rec, 1, 0, 0);
+    assert(is_nan(ne) == 1, "no KmBondType value 45: NaN");
+    rec[0] = 0 - 1;
+    var ne2: f64 = enthalpy_from_bonds(0, 0, &rec, 1);
+    assert(is_nan(ne2) == 1, "no KmBondType value -1: NaN");
+    rec[0] = KM_BOND_TYPE_NN_TRIPLE;
+    rec[1] = 4294967296;
+    var nc: f64 = enthalpy_from_bonds(&rec, 1, 0, 0);
+    assert(is_nan(nc) == 1, "count 2^32 is no u32 (not 0 mod 2^32): NaN");
+    rec[1] = 0 - 1;
+    var nc2: f64 = enthalpy_from_bonds(&rec, 1, 0, 0);
+    assert(is_nan(nc2) == 1, "a negative count: NaN");
+    rec[1] = 4294967295;
+    var big: f64 = enthalpy_from_bonds(&rec, 1, 0, 0);
+    assert(big == 4058744093775.0, "945 × u32::MAX kJ, exact");
+    rec[1] = 0;
+    var zero: f64 = enthalpy_from_bonds(&rec, 1, 0, 0);
+    assert(_km_bits(zero) == 0, "a zero count: −0.0 + 0.0 = +0.0, minus −0.0");
+    # Cancellation: a list against itself is +0.0.
+    var same: f64 = enthalpy_from_bonds(&one, 1, &one, 1);
+    assert(_km_bits(same) == 0, "broken = formed: +0.0");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_bond_energy_ordering();
+    _t_bond_energy_halogens_decrease_down_group();
+    _t_bond_energy_all_positive();
+    _t_enthalpy_from_bonds_h2_combustion();
+    _t_enthalpy_from_bonds_empty_is_zero();
+    _t_vsepr_water();
+    _t_vsepr_methane();
+    _t_vsepr_ammonia();
+    _t_vsepr_co2();
+    _t_vsepr_bf3();
+    _t_vsepr_sf6();
+    _t_vsepr_xef2();
+    _t_vsepr_diatomic_linear();
+    _t_vsepr_clf3_t_shaped();
+    _t_vsepr_unsupported();
+    _t_tetrahedral_bond_angle();
+    _t_alkane_nonpolar();
+    _t_alcohol_polar_and_hbonds();
+    _t_ether_polar_not_hbond_donor();
+    _t_acceptor_only_groups_are_not_donors();
+    _t_carboxylic_acid_hbonds();
+    _t_bond_energy_methane_combustion();
+    _t_vsepr_predicts_water_bent();
+    _t_cyrius_hydrogen_bond_acceptor();
+    _t_cyrius_invalid_enum_values();
+    _t_cyrius_vsepr_out_of_u8();
+    _t_cyrius_bond_records();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

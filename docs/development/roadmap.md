@@ -9,8 +9,9 @@ Public API unchanged from 1.1 apart from additions.
 Next: **Cyrius port** — plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md)
 (tanmatra template: Rust 1.2.0 frozen in `rust-old/` as the parity oracle, Cyrius ships 2.0.0).
 M0–M3 and M3c are done (M3c, ADR 0006: every transcendental the port calls is correctly rounded, and every class-C row
-is gated at 0 ulp against the corrected oracle); M4 (structure, nuclear, spectroscopy, with correctly rounded sin and
-atan2) is next — live status in [`state.md`](state.md).
+is gated at 0 ulp against the corrected oracle); M4 (structure, nuclear, spectroscopy) is in progress, its M4b (organic,
+inorganic), M4c (nuclear), M4a (correctly rounded sin, cos, atan2, acos) and M4d (potential, the trig switch) done —
+live status in [`state.md`](state.md).
 
 ---
 
@@ -61,11 +62,17 @@ type for average oxidation states, no separate extrapolating Antoine function. I
 
 - [ ] `thermochem::reaction_enthalpy` / `reaction_gibbs_energy` return **kJ/mol** while every other energy API uses J/mol
 - [ ] `sensitivity::*_gradient` → `Result` (today invalid T, n = 0 or Q ≤ 0 yield non-finite values); `compute_gradient`'s `Result` is never `Err`
-- [ ] `nuclear::semi_empirical_binding_energy` → `Result` (today `NaN` for z > a or a = 0)
+- [x] `nuclear::semi_empirical_binding_energy` → `Result` (`NaN` for z > a or a = 0 in Rust 1.2) — done in the Cyrius API (M4c, ADR 0002 #3): `Err(KM_ERR_INVALID_INPUT)`
 - [ ] `phase::antoine_pressure_mmhg` / `_pa` → `Result` with range checking (today `NaN` at the pole, silent extrapolation outside the fitted range)
 - [ ] `bridge::*` → `Result` instead of `NaN` sentinels; remove `ionization_to_bond_energy_estimate` (physically unfounded heuristic)
-- [ ] `organic::FunctionalGroup::hydrogen_bonding` → `hydrogen_bond_donor` (+ `hydrogen_bond_acceptor`); `Geometry::TShapedThreeLonePairs` → `TShaped`
+- [x] `organic::FunctionalGroup::hydrogen_bonding` → `hydrogen_bond_donor` (+ `hydrogen_bond_acceptor`); `Geometry::TShapedThreeLonePairs` → `TShaped` — done in the Cyrius API (M4b, ADR 0002 #6): `functional_group_is_hydrogen_bond_donor`, the new cited `functional_group_is_hydrogen_bond_acceptor`, `KM_GEOMETRY_T_SHAPED`
 - [ ] `stoichiometry::assign_oxidation_states` → rational result so average states (Fe₃O₄ +8/3) are representable (today `Err`); `balance_equation` → integer matrix input
+- [x] `inorganic::cfse_octahedral` → the exact (3·e_g − 2·t₂g)/5 instead of `t2g·(−0.4) + eg·0.6` (which misses it on 13 of
+  22 cases, d⁵ high-spin and d¹⁰ ≠ 0) — done in the Cyrius API (M4b, ADR 0002 #12, the user's decision)
+- [x] `nuclear::atoms_after_half_lives`, `is_secular_equilibrium`, `inorganic::delta_tet_from_oct` → the exact N₀/2ⁿ (correctly
+  rounded since M4d), λ_p < λ_d/100 and 4Δ/9 — done in the Cyrius API (M4c, ADR 0002 #13–#15)
+- [x] `potential::lj_equilibrium_distance` → the correctly rounded σ·2^(1/6); `lennard_jones` / `morse_width_parameter` → no
+  spurious overflow of 4·ε / 2·D_e — done in the Cyrius API (M4d, ADR 0002 #16–#18)
 - [ ] *additive* — `fitting::fit_beer_lambert` → also return the intercept
 - [ ] *additive* — `spectroscopy::rydberg_wavelength` → nuclear-mass parameter for the reduced-mass correction
 - [ ] `integration::soorat::MolecularStructure::from_molecule` → `Result`
@@ -78,6 +85,13 @@ type for average oxidation states, no separate extrapolating Antoine function. I
 - [ ] Shomate C₂H₆ (+3.4 % at 298 K) and C₃H₈ (+8.4 %) — no NIST Shomate set exists; replace with a sourced fit (NASA-7 / Burcat)
 - [ ] Shomate high-T segments for NH₃ (> 1400 K), H₂S, SO₂, etc. — today out-of-range use returns `Err`
 - [ ] Antoine acetone range (−20–77 °C) unconfirmed
+- [ ] `organic::BondType::energy_kj` — the 45 average bond energies (kJ/mol) carry no source citation in 1.2.0; tie them to a
+  primary compilation (e.g. the CRC Handbook's or Luo's bond dissociation energies) and record the source (M4b review)
+- [x] `organic` hydrogen-bond acceptor classification (Cyrius 2.0, ADR 0002 #6) — decided by the user (2026-11-09): IUPAC
+  2011's criterion with the weak acceptors (π systems, thiol S, C–X halogens), every group but the alkane, each family
+  cited
+- [ ] IUPAC 2011 hydrogen-bond definition — check the acceptor sentence quoted in `src/organic_data.cyr` against the
+  published *Pure Appl. Chem.* 83, 1637 PDF (quoted from a secondary copy; the PDF was unreachable in M4b)
 - [ ] Na₂CO₃ ΔGf° is inconsistent with ΔHf°/S° by 2.55 kJ/mol in NBS/CRC (pinned as a known exception in tests)
 
 ---

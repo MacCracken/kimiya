@@ -194,6 +194,170 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   - `validate.py --sensitivity` is a diagnostic of conditioning: every primitive result is nudged (S for
     `peng_robinson_z_roots` 2²⁶, the Nernst functions and `henderson_hasselbalch` ~10¹⁸, the subnormal-prefactor rows
     4.4 × 10¹⁸), the retired rule's K is printed for comparison, and no bound is derived from it
+- **M4b organic and inorganic** (port plan §4, §6.4 "Decided in M4b"; M4 in progress):
+  - **organic** — generated `src/organic_data.cyr`: `enum KmBondType` (45), `enum KmGeometry` (12), `enum
+    KmFunctionalGroup` (16), explicit append-only values in Rust variant order under the Rust docs and section headings
+    (the generator proves its variant lists against the source declarations, `validate.py` parses them again), and their
+    property columns through the oracle's API — bond energies (with the `// Carbon bonds` headings of Rust's match),
+    ideal angles (with the arms' notes), the UTF-8 pattern blob, the polar and donor flags, and ADR 0002 #6's acceptor
+    column. `src/organic.cyr`: `bond_type_energy_kj(b)`, `geometry_ideal_bond_angle(g)`, `functional_group_pattern(g)`,
+    `functional_group_is_polar(g)`, `functional_group_is_hydrogen_bond_donor(g)`, the new
+    `functional_group_is_hydrogen_bond_acceptor(g)` (NaN, `""` or 0 for a word that is no value of the enum);
+    `predict_geometry(bonding, lone)` → the value-form `Option` of a `KmGeometry` (None outside u8, never wrapped);
+    `enthalpy_from_bonds(broken, nb, formed, nf)` over 16-byte (value, count) records, Rust's two `.sum()`s from −0.0
+    (NaN for a bad list, an invalid value or a count outside u32)
+  - **the hydrogen-bond acceptor classification** (ADR 0002 #6; no oracle data, so reference tests only): IUPAC 2011's
+    criterion (E. Arunan et al., *Pure Appl. Chem.* 83, 1637–1641), an electron-rich region such as a lone pair or a
+    π-bonded pair, the weak acceptors included (the user's decision): every group but the alkane accepts — the O and N
+    lone pairs (McMurry, *Organic Chemistry*, OpenStax 2023, §2.12), X–H···π to alkenes, alkynes and aromatic rings
+    (T. Steiner, *Angew. Chem. Int. Ed.* 41, 48 (2002)), the thiol's divalent sulfur (F. H. Allen et al., *Acta Cryst.*
+    B53, 696 (1997)) and C–X halogens (L. Brammer et al., *Cryst. Growth Des.* 1, 277 (2001); organic fluorine the
+    weakest, J. D. Dunitz & R. Taylor, *Chem. Eur. J.* 3, 89 (1997)). No strength is implied. The sources and each row's
+    reason are in the generated comment; `validate.py` and `probe_tables.py` recompute the column from the rule (a
+    lone-pair atom or a π bond in the group's pattern)
+  - **inorganic** — generated `src/inorganic_data.cyr`: `enum KmLigand` (11) and `KM_LIGAND_FIELD_STRENGTH`; Rust's
+    private octahedral occupancy and unpaired-electron tables, read through `cfse_octahedral` / `unpaired_electrons_oct`
+    (as M2a's `PA_PER_MMHG`) and cross-checked against their literals; the ten `KM_MADELUNG_*` / `KM_BORN_EXP_*` with their
+    section comments (**the last 10 pending `constants` golden rows: 0 pending now**); the 30 Shannon (1976) `IONIC_RADII`
+    rows (symbol blob, `i8` charge, coordination, radius) and `KM_IONIC_RADII_COUNT`. `src/inorganic.cyr`:
+    `cfse_octahedral` (exact, ADR 0002 #12), `delta_tet_from_oct`, `ligand_field_strength`, `ligand_is_strong_field`, `spin_only_moment`,
+    `unpaired_electrons_oct`, `born_lande_lattice_energy`, `born_haber_lattice_energy`, `lookup_ionic_radius` (handle =
+    row + 1) and the `ionic_radius_*` accessors. Rust's u8 / u32 / i8 are words never wrapped (Err, NaN or None outside
+    the type), and a Rust `bool` is 0 / 1, any other word `Err(KM_ERR_INVALID_INPUT)` (port plan §6.4)
+  - golden modules `organic` (9,104 rows: class A 7,596, B 1,508) and `inorganic` (15,107: A 9,397, B 5,710), every enum
+    value × property, `predict_geometry` over 7,491 (bonding, lone) pairs, every d count × spin, every u8 moment, every
+    table symbol × i8 charge, Born–Landé / Born–Haber over wide grids and every Err path; `validate.py` recomputes every
+    row from the Rust source (and perturbs each typed formula constant: each changes some row, the strong-field 8 from
+    above only); `probe_tables.py` compiles all 197 organic_data and 220 inorganic_data cells
+  - **result**, x86_64 ELF, x86_64 PE and aarch64: `167279 ok, 0 failed, 0 measured, 0 pending, 1118 accepted (ADR 6:
+    665), 0 glibc-matching (failed)` — the 13 new accepted rows are ADR 0002 #12's, printed by name — every M4b row 0 ulp
+    from its reference ([`port-parity.md`](docs/development/port-parity.md) §11)
+  - 51 Rust tests ported one for one (`tests/organic.tcyr` 21, `tests/inorganic.tcyr` 30; 5 organic tests use ADR 0002
+    #6's names) plus the two organic integration tests, and 10 Cyrius-only groups (the acceptor reference tests, invalid
+    enum values and handles, out-of-range u8 / u32 / i8 / bool words, the bond records, the exact CFSE): 464
+    assertions; 17 test files, 0 warnings; surface parity 323/323 (`surface_parity.py` maps enum methods to
+    `<enum>_<method>` and now uses the generator's snake rule)
+- **M4c nuclear** (port plan §4, §6.4 "Decided in M4c"; M4 in progress):
+  - generated `src/nuclear_data.cyr`: the 18 `ISOTOPES` rows (NUBASE2020 / ENSDF half-lives in s) as columns — the label
+    blob, `u8` Z, `u16` A, the half-life, a UTF-8 decay-mode blob ("β⁻/β⁺/EC") — and `KM_ISOTOPES_COUNT`, with `Isotope`'s
+    docs and the literal's three NUBASE2020 notes; the four nuclear constants stay `src/constants.cyr`'s
+  - **nuclear** — `decay_constant`, `atoms_remaining`, `activity`, `atoms_after_half_lives`, `time_for_fraction`,
+    `mass_defect`, `binding_energy_mev`, `binding_energy_per_nucleon`, `semi_empirical_binding_energy` (a `Result`, below),
+    `q_value(r, nr, p, np)` (two slices, Rust's `.sum()` from −0.0 through thermo's `_km_sum`), `decay_chain_two_step(n0,
+    λ₁, λ₂, t, out)` (the (N_A, N_B, N_C) tuple in the caller's 24-byte buffer, `Ok(3)`; Rust's cancellation-free Bateman
+    form and its equal-rate limit at |Δλ| ≤ 10⁻¹²·max λ kept exactly), `is_secular_equilibrium`, `lookup_isotope` (a handle,
+    0 for none) with `isotope_symbol` / `_z` / `_a` / `_half_life_s` / `_decay_mode`. Rust's check and operation order;
+    exp, exp_m1, ln and `2.0.powf(−n)` are the correctly rounded `_km_cr_exp`, `_km_cr_expm1`, `_km_cr_ln` and
+    `_km_cr_pow(2, −n)`, cbrt ganita's (correctly rounded); Rust's u32 counts are words, never wrapped (`Err`, or NaN for
+    `mass_defect`, outside u32); `LN_2`, the private 10⁻¹² tolerance and SEMF coefficients and the asymmetry's 4 are typed
+    inline and pinned by the corpus. `atoms_after_half_lives` and `is_secular_equilibrium` follow ADR 0002 #13 / #14
+    (below, Breaking)
+  - golden module `nuclear` (54,057 rows: class A 1,898, B 35,370, C 16,789): the SEMF over every Z ≤ A ≤ 3Z with A ≤ 300
+    (port plan §4), Z = 0 and the u32 extremes; decay laws and chains over wide λ, t and N₀ grids with every Err path,
+    ±0, NaN, ±∞, DBL_MAX and subnormals, λ₁ = λ₂ exactly, λ₁ ≈ λ₂ either side of the threshold and **pairs on it to the ulp
+    of 10⁻¹²**, and the subnormal-exp-and-pow-times-prefactor rows (ADR 0006 item 6); every isotope and isotope pair.
+    23 rows have an ADR 0006 correction (`tests/golden/nuclear.cr.tsv`, glibc's expm1). `validate.py` recomputes every
+    row (glibc's exp2 for the release oracle's `2.0.powf`, a new `_prim` kind), checks the coverage and ADR 0002 #3's
+    notes, perturbs each typed constant, checks `src/nuclear_data.cyr` against the literal, and proves every ADR 0002
+    #13 / #14 / #15 note with exact rational arithmetic (`Fraction`, MPFR), with seeded exact sweeps beyond the corpus;
+    `probe_tables.py` compiles the 91 new cells
+  - **result**, x86_64 ELF, x86_64 PE and aarch64: `219266 ok, 0 failed, 0 measured, 0 pending, 3243 accepted (ADR 6:
+    688), 0 glibc-matching (failed)` — the new accepted rows are 23 under ADR 6 and, under ADR 2 and printed by name,
+    #3's 23, #13's 1,812, #14's 208 and #15's 59 — every row 0 ulp from its reference (the oracle's, the corrected
+    oracle's or the note's exact value), every class-C function at bound 0
+    ([`port-parity.md`](docs/development/port-parity.md) §12)
+  - **ADR 0002's inexact-formula policy, reviewed and decided** (the user, 2026-11-09: "fix exactly"):
+    `atoms_after_half_lives` (#13), `is_secular_equilibrium` (#14) and M4b's `delta_tet_from_oct` overflow (#15) now return
+    the exact values (Breaking, below); `decay_constant`'s LN_2/t½ is kept (ln 2/t½ is irrational). The harness reads a
+    mapped row's exact value from its note (`parity_core.cyr`'s `_par_note_*`)
+  - 36 Rust tests ported one for one (`tests/nuclear.tcyr`; `semi_empirical_invalid_is_nan` asserts ADR 0002 #3's `Err`;
+    #13 / #14 change none) plus 8 Cyrius-only groups (the SEMF `Result`, out-of-u32 words and the checked add, the chain
+    buffer and threshold, the `q_value` slices, the isotope handles and UTF-8 modes, the typed constants and Rust's edges,
+    #13's exact N₀/2ⁿ, #14's exact comparison): 236 assertions; `tests/inorganic.tcyr` gains #15's group; the bundle smoke
+    test gains 6; 18 test files, 0 warnings; surface parity 347/347; benches
+    `nuclear/binding_energy_per_nucleon_fe56`, `nuclear/semi_empirical_fe56` (against Rust) and
+    `nuclear/decay_chain_two_step`
+  - harness: a mapped `Err` ↔ NaN row's `accepted` line prints no bit pair (`parity_core.cyr`)
+- **M4a correctly rounded trigonometry** ([ADR 0006](docs/adr/0006-correct-rounding-is-the-accuracy-target.md) item 1;
+  M4 in progress):
+  - **mathx** — `_km_cr_sin`, `_km_cr_cos`, `_km_cr_sincos`, `_km_cr_atan2` and `_km_cr_acos` in `src/mathx.cyr`, each
+    two-phase like M3c-2's primitives (a fast path with a proven error bound and a rounding test, a triple-double
+    accurate path, `_fast` / `_acc` entry points), + − × ÷, √ and integer bit operations only, the same bits on every
+    target. sin and cos over the whole double range: Cody–Waite reduction by a five-part π/2 below 2²⁰, Payne–Hanek past it
+    (1,344 bits of 2/π in exact 32-bit limbs, the fraction centred and summed into a triple-double), then sin/cos(i/256)
+    from a four-word table and a short polynomial in the remainder (fast path within 2⁻⁷⁰ relative), or a triple-double
+    Taylor series (below 2⁻¹⁴⁸ by the operation count; 2⁻¹³⁸ at worst, the reduction); `_km_cr_sincos` gives both. atan2
+    reduces with atan(j/256) (triple-double table) and δ = (n − c·d)/(d + c·n) built from exact partial products, never
+    rounding y/x first; a degree-9 polynomial in δ on the fast path (2⁻⁶⁹·⁴⁴), a triple-double long division and series on
+    the accurate one (2⁻¹⁴⁹); a quotient below 2⁻⁵⁹ is rounded directly (its exact subnormal midpoints too); C99 Annex F's
+    special values. acos is atan2(√(1 − x²), x) with 1 − x² nearly exact (double-double, then an exact four-term sum) and
+    √ by Newton steps. The tables and constants (sin/cos(i/256), atan(j/256), the bits of 2/π checked against Machin's
+    formula in integers, π/2's Cody–Waite parts, the polynomials) are generated into `src/mathx_data.cyr` by
+    `scripts/oracle/mathx_tables.py` from MPFR, which also proves the reduction bound (no double within 4.687 × 10⁻¹⁹ of a
+    nonzero multiple of π/2, by continued fractions, attained at Lefèvre and Muller's worst case 6381956970095103·2⁷⁹⁷)
+  - **`_km_td_norm`** — the accurate atan and acos paths divide, and take the square root of, triple-doubles formed after a
+    cancellation (n − c·d; the residual w − s²). `_km_td_add`'s last renormalisation does not see its rounded
+    third-order term, so after a cancellation its leading word can be far from the sum, while the long division's and
+    Newton step's corrections (each q = r₀/b₀) assume the leading word is the sum to 2⁻⁵². `_km_td_norm` renormalises
+    (two bottom-up TwoSum passes, exact) before each division and correction, which is what makes `_km_td_div`'s 2⁻¹⁵¹
+    and `_km_td_sqrt`'s 2⁻¹⁵⁰ hold: without it the accurate path's quotient could be wrong far above its bound, and with
+    it MPFR agrees on every argument tried
+  - **verification** — `scripts/oracle/cr_verify.py` gains sin, cos, sincos, atan2 and acos: about 1.0–1.1 million seeded
+    arguments each (every binade up to 2¹⁰²³, the Peng–Robinson range, the doubles nearest multiples of π/2 in every
+    binade, the Cody–Waite / Payne–Hanek edge, the FFT angles −2π/n, tiny |x|; atan2 over every quadrant, exponent
+    difference and the bond / dihedral geometries at Å and metre scale, subnormal and midpoint quotients; acos dense near
+    ±1, 0 and the branch points; Lefèvre–Muller's and Hanrot et al.'s hard cases, every C99 special pair, glibc's atan2
+    on the specials), plus 100,000 each forced through the accurate path: **0 mismatches against MPFR on x86_64 ELF,
+    x86_64 PE and aarch64**, the same bits and flags on all three; the fast path falls back on 7.0 × 10⁻⁵ (sin),
+    8.7 × 10⁻⁵ (cos), 1.9 × 10⁻⁵ (atan2) and 1.4 × 10⁻⁵ (acos) of the arguments. `tests/mathx.tcyr` gains the special
+    values, hard cases, Payne–Hanek arguments, sincos, atan2's sign and zero matrix and acos (every expected value
+    MPFR's) ([`port-parity.md`](docs/development/port-parity.md) §13)
+- **M4d potential, the trig switch, ADR 0002 #13 completed** (port plan §4, §6.4 "Decided in M4d"; M4 in progress):
+  - **potential** — `lennard_jones`, `lj_equilibrium_distance`, `morse`, `morse_width_parameter`, `coulomb`,
+    `coulomb_force`, `distance_3d(p1, p2)`, `bond_angle(a, b, c)`, `dihedral_angle(a, b, c, d)` in Rust's check and operation
+    order; a Rust `[f64; 3]` is a pointer to three contiguous f64 (NaN or `Err(KM_ERR_INVALID_INPUT)` for a null
+    pointer); Rust's private `sub3` / `cross` / `dot3` are `_km_sub3` / `_km_cross` (multi-value returns) and `_km_dot3`;
+    the private 10⁻¹² and 10⁻²⁰ tolerances are typed inline and pinned to the ulp by the corpus; exp and atan2 are the
+    correctly rounded `_km_cr_exp` and `_km_cr_atan2`; `KM_COULOMB_CONSTANT` is the generated constant (no data file).
+    `lj_equilibrium_distance`, `lennard_jones` and `morse_width_parameter` follow ADR 0002 #16 / #17 / #18 (Breaking,
+    below)
+  - **the trig switch** — `gas.cyr`'s Peng–Robinson cubic calls M4a's `_km_cr_acos` and `_km_cr_cos`: all 21,093 gas
+    rows keep their bits. The `math` corpus's sin, cos (all 2,910 rows, the 247 past |x| = 8 included), atan2 and acos
+    rows are gated at bound 0 on `_km_cr_sin` / `_km_cr_cos` / `_km_cr_atan2` / `_km_cr_acos`: no golden transcendental row
+    is on the stdlib any more (`f64_sin`, `f64_cos` and `ganita_f64_atan2` are never-gated shadow lines)
+  - **mathx** — `_km_cr_exp2_scaled(x, y)`, x·2^y rounded once (exp's fast core and rounding test at the final scale,
+    exp's accurate core in triple-double as the fallback; subnormal results at the 2⁻¹⁰⁷⁴ grid), for ADR 0002 #13; and
+    `_km_cr_sixth_root2_mul(x)`, x·2^(1/6) rounded once (a triple-double product and one `_km_cr_finish`), for #16, with
+    2^(1/6) generated as a triple-double by `mathx_tables.py` from an exact integer root and its continued fraction
+    proving that no rounding test is needed (every x·2^(1/6) is at least 2⁻⁵⁵·¹ ulp from a rounding boundary)
+  - **ADR 0002 #13 completed** — `atoms_after_half_lives` past the normal range is the correctly rounded N₀/2ⁿ for every
+    N₀ and n (M4c's was faithful for a fractional n with N₀ not a power of two): `_km_cr_exp2_scaled(N₀, −n)`, checked
+    against MPFR (`mpfr_ref.scaled_exp2`, 2^f to 400 bits bounded from both sides) on 611,518 seeded pairs and 100,228
+    through the accurate path alone on x86_64 ELF, x86_64 PE and aarch64 (`cr_verify.py`'s `exp2s`), on every golden row
+    (`validate.py`: MPFR and a 60-digit 2⁻ᶠ), and on 4,057 pairs in `tests/mathx.tcyr`; the generator's notes are the
+    correctly rounded values (`scripts/oracle/src/exact.rs`: 2⁻ᶠ to 320 bits in integer arithmetic, Ziv's two-sided test)
+  - golden module `potential` (26,938 rows: class B 11,320, C 15,618): Lennard-Jones over r/σ 0.5–100 at Å and metre
+    scale and the over- and underflow of (σ/r)⁶ and (σ/r)¹², r_min over every binade, subnormals and the overflow end,
+    Morse across exp's range with **near-cancellation rows** (1 − e^(−a(r − r_e)) for |a(r − r_e)| from 10⁻¹⁷ to 1, S up to
+    8.4 × 10¹⁸), the Morse width and Coulomb's law over every decade and their intermediates' over- and underflow,
+    distances, bond and dihedral angles at Å, metre and femtometre scale, right / linear / tiny angles, trans / cis /
+    gauche / perpendicular dihedrals with every sign of their zero coordinates (12 rows where atan2's −π becomes π),
+    **atoms on the coincidence and collinearity tolerances to the ulp**, every Err path, ±0, NaN, ±∞, DBL_MAX and
+    subnormal coordinates; 1 row has an ADR 0006 correction (`tests/golden/potential.cr.tsv`, glibc's atan2). `validate.py`
+    recomputes every row, proves #16 (2·σ⁶ against each midpoint's sixth power), #17 and #18 exactly, and pins both
+    tolerances (± 1 ulp, × ½, × 2), Rust's 4.0 and 2.0 and the π of the −π mapping
+  - **result**, x86_64 ELF, x86_64 PE and aarch64: `244803 ok, 0 failed, 0 measured, 0 pending, 4644 accepted (ADR 6:
+    689), 0 glibc-matching (failed)` on 16 modules — under ADR 2, 1,041 #16, 180 #17 and 181 #18 rows besides the earlier
+    ones (#13 now 1,810) — every row 0 ulp from its reference, every class-C function at bound 0
+    ([`port-parity.md`](docs/development/port-parity.md) §14)
+  - 33 Rust tests ported one for one (`tests/potential.tcyr`; `morse_width_parameter_matches_force_constant` computes
+    spectroscopy's √(k/μ) inline until M4e) plus 5 Cyrius-only groups (null pointers and the point layout, the helpers'
+    operation order, the tolerances to the ulp and the −π → π mapping, #16's exact r_min, #17 / #18's overflow edges):
+    126 assertions; `tests/mathx.tcyr` gains `_km_cr_exp2_scaled`'s groups; the bundle smoke test gains potential; 19 test
+    files, 0 warnings; surface parity 357/357; benches `potential/dihedral_angle` (against Rust) and the Cyrius-only
+    `potential/bond_angle`, `lennard_jones`, `lj_equilibrium_distance`, `morse`, `mathx/cr_exp2_scaled`
+  - generator: the exact integer arithmetic moved to `scripts/oracle/src/exact.rs` (with #16's sixth-power rounding);
+    `cr_verify.py` gains `exp2s`; `mpfr_ref.py` gains `scaled_exp2`; `surface_parity.py` counts potential as ported
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -214,6 +378,80 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   extrapolation must use a coefficient set fitted over its temperatures (or `clausius_clapeyron`); code that
   tested `p.is_nan()` tests `is_err_result(tag)`. In range, the value is 1.2's to within the class-C bound.
 
+### Breaking (relative to Rust 1.2.0, ADR 0002 #6)
+- **organic** — `Geometry::TShapedThreeLonePairs` (three bonding groups and **two** lone pairs, ClF₃: the Rust name is a
+  misnomer) is `KM_GEOMETRY_T_SHAPED`, at its Rust position (value 7); `FunctionalGroup::hydrogen_bonding` is
+  `functional_group_is_hydrogen_bond_donor`, with the same result for every group (thiols are donors, ethers, aldehydes,
+  ketones, esters and nitriles are not). New beside it: `functional_group_is_hydrogen_bond_acceptor`, which 1.2 had no
+  counterpart of: by IUPAC 2011's criterion every group but the alkane accepts, weak π, sulfur and halogen acceptors
+  included.
+  *Migration:* `Geometry::TShapedThreeLonePairs` → `KM_GEOMETRY_T_SHAPED` (`predict_geometry(3, 2)` returns it);
+  `g.hydrogen_bonding()` → `functional_group_is_hydrogen_bond_donor(g)`; code that treated "not `hydrogen_bonding`" as
+  "doesn't hydrogen-bond" asks `functional_group_is_hydrogen_bond_acceptor(g)` too (an ether accepts, an alkane
+  neither donates nor accepts). Code that wants only the strong O / N acceptors can't use the acceptor flag alone: the
+  π systems, the thiol and the halide answer 1 as weak acceptors.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #12)
+- **inorganic** — `cfse_octahedral` returns the exact CFSE, (3·n(e_g) − 2·n(t₂g))/5 correctly rounded (the integer
+  numerator, one division), not 1.2's `t2g * (-0.4) + eg * 0.6`. They differ on 13 of the 22 Ok cases: high-spin d⁵
+  and d¹⁰ (both spins) are now exactly 0 (1.2: −2.2 × 10⁻¹⁶ and −4.4 × 10⁻¹⁶), and the 10 others by 1–4 ulp (d³: −1.2
+  where 1.2 gave −1.2000000000000002; low-spin d⁶: −2.4, not −2.4000000000000004). Errors are unchanged.
+  *Migration:* nothing for code that compares with a tolerance, as the 1.2 tests do; code that tested 1.2's exact bits
+  (or worked around them, e.g. `if cfse.abs() < 1e-15 { 0.0 }`) can compare with the exact values directly
+  (`cfse == 0.0` for d⁵ high-spin and d¹⁰, `cfse == -1.2` for d³).
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #3)
+- **nuclear** — `semi_empirical_binding_energy` returns a `Result` instead of a bare value: `Err(KM_ERR_INVALID_INPUT)`
+  where 1.2 returned NaN — Z > A or A = 0, no such nucleus — and for a Z or A outside Rust's u32. Every finite value is
+  1.2's, bit for bit.
+  *Migration:* `let be = semi_empirical_binding_energy(z, a);` becomes
+  `var t, v = semi_empirical_binding_energy(z, a); if (is_ok(t) == 1) { var be: f64 = v; … }`; code that tested
+  `be.is_nan()` tests `is_err_result(t)` (the payload is `KM_ERR_INVALID_INPUT`).
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #13)
+- **nuclear** — `atoms_after_half_lives(n0, n)` returns the correctly rounded N₀/2ⁿ (rounded once) where Rust's
+  intermediate 2⁻ⁿ is not a normal double (n > 1022 or n ≤ −1024), instead of 1.2's `n0 * 2.0.powf(-n)`, which there
+  overflows to ±∞, underflows to 0 or loses bits as a subnormal: 1000 after 1075 half-lives is 500·2⁻¹⁰⁷⁴ ≈ 2.47 × 10⁻³²¹
+  (1.2: 0), 2¹⁰⁰ after 1,100 is 2⁻¹⁰⁰⁰ (1.2: 0), the smallest subnormal after −1080 is 64 (1.2: +∞), ties go to even
+  (2⁻¹⁰⁷⁵ → 0, 1.5·2⁻¹⁰⁷⁴ → 2⁻¹⁰⁷³), and a fractional n too (DBL_MAX after 1022.25 is 3.363585661014858; M4c's port was
+  faithful there, one ulp off on a third of the corpus's fractional rows, where 1.2 could be ±∞, 0 or up to 2⁵² ulp off).
+  ±0, ±∞ and NaN N₀ give N₀ there (0 after −1100 half-lives is 0; 1.2: NaN). Everywhere else — every n with 2⁻ⁿ normal,
+  an infinite n — the value is 1.2's.
+  *Migration:* nothing for code within the normal range (|n| ≲ 1022 half-lives); code that relied on 1.2's 0, ±∞ or NaN
+  past it gets the representable N₀/2ⁿ (`r == 0.0` still holds wherever |N₀/2ⁿ| is at most 2⁻¹⁰⁷⁵).
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #14)
+- **nuclear** — `is_secular_equilibrium(λ_p, λ_d)` tests λ_p < λ_d/100 exactly, not 1.2's `λ_p < 0.01 * λ_d`, whose 0.01
+  is 0.0100000000000000002 and whose product rounds or underflows. They differ only within an ulp or so of the boundary,
+  and where 0.01·λ_d underflows: (0.03, 3) is now true (0.03 is 0.0299999…), (−0.02, −2) true, (0, 5 × 10⁻³²⁴) true
+  (1.2: false for all three). NaN still gives false; ±∞ and ±0 compare as in 1.2.
+  *Migration:* none in practice — the threshold is a heuristic for "≪"; code that tested the exact 1.2 boundary uses the
+  exact one.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #15)
+- **inorganic** — `delta_tet_from_oct(Δ)` is the correctly rounded 4Δ/9 for every finite Δ: where 1.2's Δ·4 overflows
+  (|Δ| ≥ 2¹⁰²², above DBL_MAX/4) it returned ±∞; the port returns (Δ/9)·4 there (`delta_tet_from_oct(DBL_MAX)` ≈
+  7.99 × 10³⁰⁷). Every other value is 1.2's, bit for bit.
+  *Migration:* none for physical Δ_oct values; code that relied on ±∞ above 4.5 × 10³⁰⁷ gets the finite value.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #16)
+- **potential** — `lj_equilibrium_distance(σ)` returns the correctly rounded σ·2^(1/6), not 1.2's `sigma * 2.0.powf(1.0 /
+  6.0)`, which rounds twice (2^RN(1/6) is RN(2^(1/6)) = 1.122462048309373, then the product) and is one ulp off on about a
+  fifth of all σ (4,117 of 20,000 seeded; Ar's 3.4 × 10⁻¹⁰ m is not among them). NaN, ±0 and ±∞ are unchanged.
+  *Migration:* none for code that compares with a tolerance; code that tested 1.2's exact bits sees at most one ulp.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #17)
+- **potential** — `lennard_jones(ε, σ, r)` for ε ≥ 2¹⁰²² J returns (ε·d)·4, the correctly rounded 4·ε·d for the same
+  d = (σ/r)¹² − (σ/r)⁶, where 1.2's (4·ε)·d overflowed: ±∞, or NaN at r = σ (`lennard_jones(DBL_MAX, 1, 1)` is 0, 1.2
+  NaN). Every other value is 1.2's, bit for bit.
+  *Migration:* none for physical well depths.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #18)
+- **potential** — `morse_width_parameter(ω, μ, D_e)` for D_e ≥ 2¹⁰²³ J computes μ/(2·D_e) as (μ·½)/D_e, the correctly rounded
+  value, where 1.2's 2·D_e overflowed and gave a = 0 (`morse_width_parameter(4, 1, 2¹⁰²³)` is 2⁻⁵¹⁰). Every other value is
+  1.2's, bit for bit.
+  *Migration:* none for physical well depths.
+
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
@@ -229,7 +467,9 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   which 2.0 rounds to 122·2⁻¹⁰⁷⁴ where glibc gives 121·2⁻¹⁰⁷⁴, so `nth_order_half_life` on those inputs differs by
   4.9 × 10¹³ ulp (2.0 is the correct one). On ill-conditioned rows a 1-ulp primitive difference is amplified: the
   Henderson–Hasselbalch row with base/acid = 0.8068…/2.6858… gives pH −2⁻⁵³ where 1.2.0 gave +0.0. Results no longer
-  depend on the platform's libm: x86_64 and aarch64 give the same bits
+  depend on the platform's libm: x86_64 and aarch64 give the same bits. Since M4d sin, cos, atan2 and acos are correctly
+  rounded too (glibc misrounds 2 of the 710 `math` sin rows, 4 of the 2,910 cos rows, 1 of 2,620 acos rows and 1 of the
+  4,439 potential atan2 calls); a bond angle on such a call differs from 1.2's in the last bit
 
 ### Removed
 - **mathx** (private, M3c-3): `_km_log10` and `_km_expm1` (M1's Rust libm 0.2.16 / fdlibm transcriptions),
@@ -238,6 +478,10 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   Cyrius-only tests now pin the correctly rounded bits (`tests/solution.tcyr`'s Henderson–Hasselbalch group: log10
   `…69DB`, glibc's `…69DA`)
 - `validate.py`'s `_km_log10_ln` sensitivity model, its "S before" mode and the e_log10.c composition check
+- **mathx** (private, M4d): ADR 0005's double-double `_km_cos` and `_km_acos` (M2a) and their helpers `_km_dd_cos_sin`,
+  `_km_dd_asin`, `_km_dd_add`, `_km_dd_mul`, `_km_dd_div_d` and `_km_dd_sqrt`, once `gas.cyr` moved to M4a's
+  `_km_cr_cos` / `_km_cr_acos` (the same bits on every golden row); `src/mathx.cyr` no longer includes `lib/math.cyr`.
+  Their tests moved to the replacements (`tests/gas.tcyr`), their benches and `cr_verify.py`'s comparison went with them
 
 ### Performance
 - `molecule/molecular_weight_glucose`: 121 ns → 26.7 ns (−78%; Rust 3.63 ns) by walking the atom buffer and
@@ -265,6 +509,22 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   11 ns for `f64_exp`; `solution/ph_from_h` 69.9 → 87.3 ns (Rust 9.73), `solution/weak_acid_ph` 196 → 219 ns (Rust
   34.85) — `_km_cr_log10` 78.7 ns against 59 ns for fdlibm's; pow faster: `_km_cr_pow` 138 / 181 ns against
   `ganita_f64_pow` 198 / 218 ns on the two benched pairs. Every other bench unchanged within noise
+- M4b organic / inorganic, first measurement (Cyrius only: rust-old/benches has no organic or inorganic bench):
+  `organic/enthalpy_from_bonds` 49.5 ns (CH₄ + 2O₂, two lists of two records), `inorganic/lookup_ionic_radius` 107 ns
+  (Sn²⁺, a scan to the last of the 30 rows)
+- M4c nuclear, first measurement (Rust 1.2.0 → Cyrius): `nuclear/binding_energy_per_nucleon_fe56` 2.02 → 27 ns (13×;
+  41 → 29 ns from calling a private, unchecked `_km_mass_defect` and multiplying by m_u·c² inline, same host back to
+  back), `nuclear/semi_empirical_fe56` 18.50 → 131 ns (7.1×; ganita's correctly rounded cbrt); Cyrius-only
+  `nuclear/decay_chain_two_step` 256 ns (two correctly rounded exps and two expm1s)
+- M4a correctly rounded trigonometry (Cyrius-only; [`docs/benchmarks-rust-v-cyrius.md`](docs/benchmarks-rust-v-cyrius.md)):
+  `mathx/cr_sin` 74 ns against `f64_sin` 37 ns (the stdlib's, not correctly rounded), `mathx/cr_cos` 82 against `f64_cos`
+  40, `mathx/cr_atan2` 113 against `ganita_f64_atan2` 53, `mathx/cr_acos` 140 ns against ADR 0005's double-double
+  `_km_acos` 5.8 µs (41× faster), and `_km_cos` was 1.68 µs (`cr_cos` 20× faster); `mathx/cr_sincos` 115 ns for both
+- M4d potential, first measurement (Rust 1.2.0 → Cyrius): `potential/dihedral_angle` 20.35 → 130 ns (6.4×; Rust's gauche
+  geometry, whose atan2 is the x = 0 special case); Cyrius-only `potential/bond_angle` 215 ns (a full correctly rounded
+  atan2), `potential/lennard_jones` 35 ns, `potential/lj_equilibrium_distance` 109 ns (the correctly rounded σ·2^(1/6) of
+  ADR 0002 #16), `potential/morse` 66 ns, `mathx/cr_exp2_scaled` 151 ns (ADR 0002 #13's N₀·2⁻ⁿ, 1000 after 1075.3
+  half-lives). The Peng–Robinson trig roots' acos and cos now cost 142 + 3 × 81 ns instead of 5.8 µs + 3 × 1.68 µs
 
 ## [1.2.0] - 2026-11-08
 

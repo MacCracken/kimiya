@@ -1,0 +1,255 @@
+# inorganic.cyr — inorganic chemistry: crystal field theory, the spectrochemical series, spin-only magnetic moments,
+# lattice energies and ionic radii (port of rust-old/src/inorganic.rs).
+#
+# CFSE is in units of Δ_oct, moments in Bohr magnetons, the Born–Landé energy in J/mol and the Born–Haber one in
+# kJ/mol, radii in pm. The data — KmLigand and its field strengths, Rust's private octahedral occupancy and
+# unpaired-electron tables, the Madelung constants and Born exponents, the 30 Shannon IONIC_RADII rows — is
+# src/inorganic_data.cyr (generated); AVOGADRO, ELEMENTARY_CHARGE and COULOMB_CONSTANT are src/constants.cyr's.
+# Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs.
+# Every expression keeps Rust's operation order, so every result is bit-identical (classes A and B), but one: the CFSE
+# is computed exactly, (3·e_g − 2·t₂g) / 5 in one correctly rounded division (ADR 0002 #12; the golden rows where Rust's
+# −0.4·t₂g + 0.6·e_g misses it are mapped by the harness and reported as accepted under ADR 2), and Δ_tet is the
+# correctly rounded 4Δ/9 also where Rust's Δ·4 overflows (ADR 0002 #15, mapped the same way).
+#
+# - Rust's integers are words here, never wrapped (port plan §6.4). A d-electron or unpaired-electron count (`u8`)
+#   outside 0 ..= 255, an ion charge (`u32`) outside 0 ..= u32::MAX, an ionic-radius charge (`i8`) outside
+#   −128 ..= 127: Err(KM_ERR_INVALID_INPUT) for a Result function (cfse_octahedral, unpaired_electrons_oct,
+#   born_lande_lattice_energy), NaN for a bare f64 (spin_only_moment), None (0) for a lookup (lookup_ionic_radius).
+# - Rust's `bool` is a word: 0 is false and 1 is true. Any other word is Err(KM_ERR_INVALID_INPUT) in a Result
+#   function (`high_spin` of cfse_octahedral and unpaired_electrons_oct), checked where Rust picks its table, before
+#   the count. (A non-Result function with a bool argument would return its "none", as for an out-of-type integer:
+#   port plan §6.4; inorganic has none.)
+# - KmLigand has explicit, append-only values in Rust variant order; Ligand's const methods are
+#   ligand_field_strength(l) and ligand_is_strong_field(l), 0 for a word that is no KmLigand value.
+#   is_strong_field is Rust's formula, field_strength ≥ 8 (the 8 typed inline, as in Rust).
+# - lookup_ionic_radius(symbol, charge) returns a handle, IONIC_RADII row + 1, or 0 for None; IonicRadius's fields
+#   are ionic_radius_symbol(h) ("" for an invalid handle), ionic_radius_charge(h) and ionic_radius_coordination(h) (0:
+#   no row has a zero charge or coordination) and ionic_radius_radius_pm(h) (NaN).
+
+include "lib/string.cyr"
+
+# 1 if the word x is a Rust u8 (0 ..= 255).
+#must_use
+fn _km_is_u8(x): i64 {
+    if (x < 0 || x > 255) { return 0; }
+    return 1;
+}
+
+# 1 if the word x is a Rust bool: 0 (false) or 1 (true).
+#must_use
+fn _km_is_bool(x): i64 {
+    if (x == 0 || x == 1) { return 1; }
+    return 0;
+}
+
+# ── crystal field theory ────────────────────────────────────────────────────────────
+
+# Crystal field stabilization energy (CFSE) of an octahedral dⁿ complex, in units of Δ_oct (a dimensionless
+# multiplier; negative = stabilizing): CFSE = −0.4·n(t₂g) + 0.6·n(e_g) = (3·n(e_g) − 2·n(t₂g)) / 5, from the generated
+# (t₂g, e_g) occupancy of dⁿ, high-spin (weak field, high_spin = 1: Hund's rule) or low-spin (strong field,
+# high_spin = 0: t₂g filled first). Electron-pairing energy is not included, so for d⁴–d⁷ the low-spin value is more
+# negative than the high-spin one even when the high-spin state is the ground state. Ok(CFSE) for n = 0 ..= 10;
+# Err(KM_ERR_INVALID_INPUT) if high_spin is no bool (0 or 1) or d_electrons is outside 0 ..= 10 (a word outside Rust's
+# u8 included). ADR 0002 #12: the value is exact — the integer numerator 3·e_g − 2·t₂g converted to f64, then one
+# correctly rounded division by 5 — where Rust's `t2g * (−0.4) + eg * 0.6` misses it on 13 of the 22 cases (high-spin
+# d⁵ gives −2⁻⁵² and d¹⁰ −2⁻⁵¹ rather than 0, d³ −1.2000000000000002). Mirrors `inorganic::cfse_octahedral`.
+#must_use
+fn cfse_octahedral(d_electrons, high_spin): Result {
+    if (_km_is_bool(high_spin) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (d_electrons < 0 || d_electrons > 10) { return Err(KM_ERR_INVALID_INPUT); }
+    var t2g = _KM_OCT_OCCUPANCY_LOW_SPIN_T2G[d_electrons];
+    var eg = _KM_OCT_OCCUPANCY_LOW_SPIN_EG[d_electrons];
+    if (high_spin == 1) {
+        t2g = _KM_OCT_OCCUPANCY_HIGH_SPIN_T2G[d_electrons];
+        eg = _KM_OCT_OCCUPANCY_HIGH_SPIN_EG[d_electrons];
+    }
+    var num = 3 * eg - 2 * t2g;
+    var n: f64 = f64_from(num);
+    var cfse: f64 = n / 5.0;
+    return Ok(cfse);
+}
+
+# The tetrahedral crystal field splitting Δ_tet ≈ (4/9)·Δ_oct (same metal, ligands and metal–ligand distance), in the
+# unit of delta_oct: the correctly rounded 4Δ/9. Computed as Rust's `delta_oct * 4.0 / 9.0` (Δ·4 is exact, so one
+# rounding) except where Δ·4 overflows, |Δ| ≥ 2¹⁰²² (above DBL_MAX/4): there Rust gives ±∞, and ADR 0002 #15 (the user's
+# decision, 2026-11-09) takes (Δ/9)·4 — one rounded division, then an exact ×4 that cannot overflow — which is again the
+# correctly rounded 4Δ/9 (4·DBL_MAX/9 ≈ 7.99 × 10³⁰⁷, not +∞). ±∞ and NaN propagate as in Rust.
+# Mirrors `inorganic::delta_tet_from_oct`, with ADR 0002 #15.
+#must_use
+fn delta_tet_from_oct(delta_oct: f64): f64 {
+    var four: f64 = delta_oct * 4.0;
+    if (_km_is_finite(four) != 1 && _km_is_finite(delta_oct) == 1) {
+        var ninth: f64 = delta_oct / 9.0;          # ADR 0002 #15: Δ·4 overflowed
+        var tet4: f64 = ninth * 4.0;
+        return tet4;
+    }
+    var tet: f64 = four / 9.0;
+    return tet;
+}
+
+# ── spectrochemical series ──────────────────────────────────────────────────────────
+
+# The relative field strength of ligand l (a KmLigand value) as an ordinal rank 1–12 (dimensionless; higher =
+# stronger field; gaps between ranks carry no meaning); 0 for a word that is no KmLigand value. Mirrors
+# `Ligand::field_strength`.
+#must_use
+fn ligand_field_strength(l): i64 {
+    if (l < 0 || l >= KM_LIGAND_COUNT) { return 0; }
+    return KM_LIGAND_FIELD_STRENGTH[l];
+}
+
+# 1 if ligand l is a strong-field ligand (typically causes low spin), i.e. its rank is ≥ 8 (KM_LIGAND_AMMONIA and
+# stronger); 0 otherwise and for a word that is no KmLigand value. NH₃ is borderline: whether its complexes are
+# low-spin depends on the metal ion and its oxidation state ([Co(NH₃)₆]³⁺ is low-spin, [Co(NH₃)₆]²⁺ high-spin).
+# Mirrors `Ligand::is_strong_field`.
+#must_use
+fn ligand_is_strong_field(l): i64 {
+    if (l < 0 || l >= KM_LIGAND_COUNT) { return 0; }
+    if (KM_LIGAND_FIELD_STRENGTH[l] >= 8) { return 1; }
+    return 0;
+}
+
+# ── spin-only magnetic moment ───────────────────────────────────────────────────────
+
+# The spin-only magnetic moment μ = √(n(n + 2)) in Bohr magnetons for n unpaired electrons (a Rust u8, as a word);
+# NaN for a word outside 0 ..= 255 (there is no error channel). Mirrors `inorganic::spin_only_moment`.
+#must_use
+fn spin_only_moment(unpaired_electrons): f64 {
+    if (_km_is_u8(unpaired_electrons) != 1) { return _km_nan(); }
+    var n: f64 = f64_from(unpaired_electrons);
+    var n2: f64 = n + 2.0;
+    var p: f64 = n * n2;
+    var mu: f64 = f64_sqrt(p);
+    return mu;
+}
+
+# The number of unpaired electrons of an octahedral dⁿ complex, high-spin (high_spin = 1) or low-spin (0), from the
+# generated tables. Ok(n unpaired) for d_electrons = 0 ..= 10; Err(KM_ERR_INVALID_INPUT) if high_spin is no bool or
+# d_electrons is outside 0 ..= 10 (a word outside Rust's u8 included). Mirrors `inorganic::unpaired_electrons_oct`.
+#must_use
+fn unpaired_electrons_oct(d_electrons, high_spin): Result {
+    if (_km_is_bool(high_spin) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (d_electrons < 0 || d_electrons > 10) { return Err(KM_ERR_INVALID_INPUT); }
+    if (high_spin == 1) { return Ok(_KM_OCT_UNPAIRED_HIGH_SPIN[d_electrons]); }
+    return Ok(_KM_OCT_UNPAIRED_LOW_SPIN[d_electrons]);
+}
+
+# ── lattice energy ──────────────────────────────────────────────────────────────────
+
+# The Born–Landé lattice energy U = −(k_e·N_A·M·z⁺·z⁻·e²) / r₀ · (1 − 1/n) in J/mol (negative = stable), from the
+# Madelung constant M (dimensionless, positive), the cation and anion charge magnitudes z⁺ and z⁻ (Rust u32s, as
+# words; the anion's sign is handled by the formula), the nearest-neighbour distance r₀ in m and the Born exponent n
+# (typically 5–12). Computed in Rust's order, `−k_e · N_A · M · z⁺ · z⁻ · e · e / r₀ · (1 − 1/n)` left to right.
+# Ok(U); Err(KM_ERR_INVALID_INPUT) if r₀ is not positive and finite, n is not finite or ≤ 1, M is not positive and
+# finite, or either charge is 0 or outside 0 ..= u32::MAX (in that order). Mirrors
+# `inorganic::born_lande_lattice_energy`.
+#must_use
+fn born_lande_lattice_energy(madelung: f64, z_cation, z_anion, r0_m: f64, born_exponent: f64): Result {
+    if (_km_is_positive(r0_m) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(born_exponent) != 1 || born_exponent <= 1.0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(madelung) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (z_cation < 1 || z_cation > 0xFFFFFFFF || z_anion < 1 || z_anion > 0xFFFFFFFF) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    var ke: f64 = KM_COULOMB_CONSTANT;
+    var na: f64 = KM_AVOGADRO;
+    var e: f64 = KM_ELEMENTARY_CHARGE;
+    var zc: f64 = f64_from(z_cation);
+    var za: f64 = f64_from(z_anion);
+    var u: f64 = -ke;
+    u = u * na;
+    u = u * madelung;
+    u = u * zc;
+    u = u * za;
+    u = u * e;
+    u = u * e;
+    u = u / r0_m;
+    var inv: f64 = 1.0 / born_exponent;
+    var factor: f64 = 1.0 - inv;
+    u = u * factor;
+    return Ok(u);
+}
+
+# The Born–Haber lattice energy U = ΔH_f° − ΔH_sub − IE − ΔH_diss/2 − EA in kJ/mol (negative = stable), from the
+# compound's formation enthalpy, the metal's sublimation enthalpy and ionization energy, the full X₂ → 2X
+# dissociation enthalpy (halved here, for MX) and the nonmetal's electron affinity (negative = energy released), all
+# in kJ/mol. Computed in Rust's order, left to right; inputs are not validated (NaN and ±∞ propagate). Mirrors
+# `inorganic::born_haber_lattice_energy`.
+#must_use
+fn born_haber_lattice_energy(formation_enthalpy_kj: f64, sublimation_enthalpy_kj: f64, ionization_energy_kj: f64,
+    dissociation_enthalpy_kj: f64, electron_affinity_kj: f64): f64 {
+    var u: f64 = formation_enthalpy_kj - sublimation_enthalpy_kj;
+    u = u - ionization_energy_kj;
+    var half: f64 = dissociation_enthalpy_kj / 2.0;
+    u = u - half;
+    u = u - electron_affinity_kj;
+    return u;
+}
+
+# ── ionic radii ─────────────────────────────────────────────────────────────────────
+
+# The IONIC_RADII row of handle h (h − 1), or -1 if h is no handle.
+#must_use
+fn _km_ionic_radius_row(h): i64 {
+    if (h >= 1 && h <= KM_IONIC_RADII_COUNT) { return h - 1; }
+    return 0 - 1;
+}
+
+# The Shannon (1976) ionic radius of the ion with element symbol `symbol` (a C string, exact and case-sensitive:
+# "Fe") and charge `charge` (in e, negative for anions; a Rust i8, as a word), as a handle (its IONIC_RADII row + 1),
+# whatever its coordination number; 0 when no row matches, `symbol` is 0, or charge is outside −128 ..= 127. The first
+# match in table order, as Rust's linear `find` (each ion has one row). Mirrors `inorganic::lookup_ionic_radius`.
+#must_use
+fn lookup_ionic_radius(symbol, charge): i64 {
+    if (symbol == 0 || charge < (0 - 128) || charge > 127) { return 0; }
+    var c0 = load8(symbol);
+    if (c0 == 0) { return 0; }
+    var n = strlen(symbol);
+    var row = 0;
+    while (row < KM_IONIC_RADII_COUNT) {
+        var p = &_KM_IONIC_RADII_SYMBOL_BYTES + _KM_IONIC_RADII_SYMBOL_OFF[row];
+        # The charge and the first byte decide most rows; memeq stops at p's NUL, which differs from symbol's byte.
+        if (KM_IONIC_RADII_CHARGE[row] == charge && load8(p) == c0) {
+            if (memeq(p, symbol, n) == 1 && load8(p + n) == 0) { return row + 1; }
+        }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The element symbol of IONIC_RADII handle h ("Fe") as a C string in the baked table; "" for an invalid handle.
+# Mirrors `IonicRadius::symbol`.
+#must_use
+fn ionic_radius_symbol(h): i64 {
+    var row = _km_ionic_radius_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_IONIC_RADII_SYMBOL_BYTES + _KM_IONIC_RADII_SYMBOL_OFF[row];
+}
+
+# The ion charge of IONIC_RADII handle h in units of e (negative for anions); 0 for an invalid handle, which no row
+# has. Mirrors `IonicRadius::charge`.
+#must_use
+fn ionic_radius_charge(h): i64 {
+    var row = _km_ionic_radius_row(h);
+    if (row < 0) { return 0; }
+    return KM_IONIC_RADII_CHARGE[row];
+}
+
+# The coordination number the radius of IONIC_RADII handle h applies to (6 for every row but Sn²⁺, 8); 0 for an
+# invalid handle. Mirrors `IonicRadius::coordination`.
+#must_use
+fn ionic_radius_coordination(h): i64 {
+    var row = _km_ionic_radius_row(h);
+    if (row < 0) { return 0; }
+    return KM_IONIC_RADII_COORDINATION[row];
+}
+
+# The effective ionic radius of IONIC_RADII handle h in pm (Shannon 1976); NaN for an invalid handle. Mirrors
+# `IonicRadius::radius_pm`.
+#must_use
+fn ionic_radius_radius_pm(h): f64 {
+    var row = _km_ionic_radius_row(h);
+    if (row < 0) { return _km_nan(); }
+    var r: f64 = KM_IONIC_RADII_RADIUS_PM[row];
+    return r;
+}

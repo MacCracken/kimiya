@@ -589,17 +589,18 @@ fn _t_cyrius_presets_and_roots() {
     assert(is_err_code(t5, v5, KM_ERR_COMPUTATION_ERROR), "P = DBL_MAX overflows: ComputationError");
 }
 
-# Cyrius-only, ADR 0005 and ADR 0006: the gas functions' acos, cos, ln and x^2.5 (_km_acos, _km_cos, _km_cr_ln
-# and, since M3c-3, _km_cr_pow(x, 2.5) for Redlich–Kwong's Tc^2.5) are correctly rounded. At these arguments glibc
+# Cyrius-only, ADR 0005 and ADR 0006: the gas functions' acos, cos, ln and x^2.5 (since M4d _km_cr_acos and
+# _km_cr_cos, which replaced ADR 0005's double-double _km_acos and _km_cos with the same bits, _km_cr_ln and, since
+# M3c-3, _km_cr_pow(x, 2.5) for Redlich–Kwong's Tc^2.5) are correctly rounded. At these arguments glibc
 # 2.44 (the oracle) is 1 ulp off the correctly rounded value (MPFR, scripts/oracle/mpfr_ref.py); the port returns
 # the correctly rounded bits. Plus the special values each mirrors from Rust.
 fn _t_cyrius_correctly_rounded_primitives() {
     test_group("cyrius_correctly_rounded_primitives");
     var a: f64 = 0.9063776739144427;
-    var ra: f64 = _km_acos(a);
+    var ra: f64 = _km_cr_acos(a);
     assert_bits_eq(ra, 0x3FDBEA28A544ED43, "acos(0.9063776739144427)");
     var c: f64 = 2.3734367101827383;
-    var rc: f64 = _km_cos(c);
+    var rc: f64 = _km_cr_cos(c);
     assert_bits_eq(rc, 0xBFE703A1604251B1, "cos(2.3734367101827383)");
     var l: f64 = 1.7602758701689474;
     var rl: f64 = _km_cr_ln(l);
@@ -609,18 +610,18 @@ fn _t_cyrius_correctly_rounded_primitives() {
     assert_bits_eq(rp, 0x414F94DCA9F5C8F0, "443.38094864525084^2.5");
     var one: f64 = 1.0;
     var m1: f64 = -1.0;
-    var r1: f64 = _km_acos(one);
+    var r1: f64 = _km_cr_acos(one);
     assert_bits_eq(r1, 0, "acos(1) = +0");
-    var r2: f64 = _km_acos(m1);
+    var r2: f64 = _km_cr_acos(m1);
     assert_bits_eq(r2, 0x400921FB54442D18, "acos(-1) = pi");
     var two: f64 = 2.0;
-    var r3: f64 = _km_acos(two);
+    var r3: f64 = _km_cr_acos(two);
     assert_eq(ulp_is_nan(r3), 1, "acos(2) = NaN");
     var zero: f64 = 0.0;
-    var r4: f64 = _km_cos(zero);
+    var r4: f64 = _km_cr_cos(zero);
     assert_bits_eq(r4, 0x3FF0000000000000, "cos(0) = 1");
     var inf: f64 = 1.0 / 0.0;
-    var r5: f64 = _km_cos(inf);
+    var r5: f64 = _km_cr_cos(inf);
     assert_eq(ulp_is_nan(r5), 1, "cos(inf) = NaN");
     var r6: f64 = _km_cr_ln(one);
     assert_bits_eq(r6, 0, "ln(1) = +0");

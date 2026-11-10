@@ -8,6 +8,8 @@
 # - `_par_accepted(fp, fl, ip, il)`: the ADR accepting a divergent row, or 0;
 # - `_par_accepted_quiet(adr)`: 1 when that ADR's accepted rows are counted (on their function's
 #   line, as "accepted") but not printed one by one — a mapped divergence with many rows;
+# - `_par_accepted_bits(adr)`: 1 when a printed accepted row also gets its got / want bit pair (a mapped row whose note
+#   already names both values doesn't need it);
 # - `_par_module_done(mp, ml)`: called after a module's report, for module-specific summary lines;
 # - `_par_skip(mp, ml)`: 1 for a module another harness replays;
 # - `_par_shadows(mp, ml, fp, fl, cls)`: optional extra, ungated comparisons of the same row
@@ -46,6 +48,10 @@ var _par_alt_k = 0;
 var _par_alt_v = 0;
 var _par_alt_l = 0;
 var _par_alt_n = 0;
+# The current row's note (its text and length; the harness ignores notes, but an ADR 0002 mapping whose exact value is
+# not derivable from the oracle's reads it from the note: #13, #14, #15).
+var _par_note_p = 0;
+var _par_note_l = 0;
 
 # 1 if text [p, p + len) equals the C string `s`.
 #must_use
@@ -696,6 +702,9 @@ fn _par_module(mp, ml): i64 {
             var t4 = _par_find(buf, t3 + 1, eol, 9);
             var fp = buf + line;
             var fl = t1 - line;
+            _par_note_p = buf + t4 + 1;
+            _par_note_l = eol - t4 - 1;
+            if (_par_note_l < 0) { _par_note_l = 0; }
             var cls = load8(buf + t1 + 1);
             var bad = 0;
             if (t4 >= eol || t2 != t1 + 2) { bad = 1; }
@@ -809,7 +818,12 @@ fn _par_module(mp, ml): i64 {
                 print("): ", 3);
                 print(buf + t4 + 1, eol - t4 - 1);
                 println("");
-                ulp_print_pair(load64(_par_got_v), load64(_par_want_v));
+                # The bit pair only where both first outputs are floats and the ADR asks for it (ADR 0002 #12's CFSE
+                # rows); a mapped Err ↔ NaN row (#3) has no float on the port's side, and #13 / #15's notes name both
+                # values already.
+                if (load64(_par_got_k) == 102 && load64(_par_want_k) == 102 && _par_accepted_bits(adr) == 1) {
+                    ulp_print_pair(load64(_par_got_v), load64(_par_want_v));
+                }
             }
             else {
                 if (cr >= 0) { cr_fail = cr_fail + 1; }

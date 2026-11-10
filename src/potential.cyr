@@ -1,0 +1,275 @@
+# potential.cyr — intermolecular potentials (Lennard-Jones, Morse, Coulomb) and molecular geometry from 3D coordinates
+# (distances, bond and dihedral angles) (port of rust-old/src/potential.rs).
+#
+# SI as Rust documents it: energies in the unit of the well depth (J), lengths in any consistent unit (m for
+# Coulomb's law), charges in C. Fallible functions return a value-form Result whose Err payload is
+# KM_ERR_INVALID_INPUT (Rust's only error here), and reject NaN and ±∞ inputs where Rust does. Every expression keeps
+# Rust's operation order, constant by constant, including the private helpers sub3 / cross / dot3 (_km_sub3,
+# _km_cross, _km_dot3, on scalars: Rust's [f64; 3] by value is three f64 here, and each helper returns its three
+# results as a multi-value return). The arithmetic functions are bit-identical (class B: + − × ÷ and √); morse (exp),
+# bond_angle and dihedral_angle (atan2) are class C on src/mathx.cyr's correctly rounded _km_cr_exp and _km_cr_atan2
+# (ADR 0006), compared exactly against the corrected oracle (docs/development/port-parity.md §14).
+#
+# - Rust's `[f64; 3]` arguments are pointers to three contiguous f64 (24 bytes, `var p: f64[3];`): distance_3d(p1, p2),
+#   bond_angle(a, b, c), dihedral_angle(a, b, c, d). A null pointer (0) gives NaN from distance_3d and
+#   Err(KM_ERR_INVALID_INPUT) from the Result functions, checked before anything else (port plan §6.4).
+# - COULOMB_CONSTANT is src/constants.cyr's KM_COULOMB_CONSTANT (generated, CODATA 2018). Rust's private
+#   COINCIDENT_REL_TOL (10⁻¹²; bond_angle squares it, as Rust does, at run time) and COLLINEAR_SIN_SQ_TOL (10⁻²⁰) are
+#   typed formula constants inline, as nuclear.cyr's EQUAL_RATE_REL_TOL: numerical tolerances, kept as Rust's, and each
+#   pinned to the ulp by golden rows on the threshold (validate.py perturbs it one ulp, halves and doubles it, and
+#   requires some row to change). π (dihedral_angle's −π → π mapping) is std::f64::consts::PI by its bits.
+# - ADR 0002 #16, #17, #18 (M4d; the user's policy of 2026-11-09, "fix exactly" where Rust's rounding misses an exact
+#   value):
+#   - #16, lj_equilibrium_distance: Rust's `sigma * 2.0.powf(1.0 / 6.0)` rounds the exponent 1/6 and then the product,
+#     two roundings; the port returns the correctly rounded σ·2^(1/6) (src/mathx.cyr's _km_cr_sixth_root2_mul, one
+#     rounding of a triple-double product, proven sufficient by 2^(1/6)'s continued fraction);
+#   - #17, lennard_jones: Rust's (4·ε)·d overflows to ±∞ (or ∞·0 = NaN) for ε ≥ 2¹⁰²² where 4·ε·d is representable;
+#     there the port takes (ε·d)·4, the correctly rounded 4·ε·d (scaling by 4 is exact), Rust's form elsewhere;
+#   - #18, morse_width_parameter: Rust's μ/(2·D_e) is μ/∞ = 0 for D_e ≥ 2¹⁰²³; there the port takes (μ·½)/D_e, the
+#     correctly rounded μ/(2·D_e) (μ·½ is exact, or the quotient rounds to 0 either way), Rust's form elsewhere.
+#   The golden rows keep the oracle's values; where the port's differ, the note names them and the harness maps the
+#   two (accepted under ADR 2, counted).
+# - Kept as Rust's (reviewed in M4d, reported to the user): the over- and underflow of (σ/r)⁶ and (σ/r)¹², of
+#   k·q₁·q₂ and r·r, of the squared coordinates in distance_3d, bond_angle and dihedral_angle (an Err or a 0 / ±∞ /
+#   imprecise value where the true one is representable), and a subnormal D_e·x in morse: each is a chain of rounded
+#   operations with no single exact value to restore (ADR 0002's policy: Rust's sequence is the definition).
+
+# ── private helpers ─────────────────────────────────────────────────────────────────────────────────
+
+# a − b, componentwise (Rust's sub3).
+#must_use
+fn _km_sub3(a0: f64, a1: f64, a2: f64, b0: f64, b1: f64, b2: f64): (f64, f64, f64) {
+    var d0: f64 = a0 - b0;
+    var d1: f64 = a1 - b1;
+    var d2: f64 = a2 - b2;
+    return (d0, d1, d2);
+}
+
+# a × b (Rust's cross): [a1·b2 − a2·b1, a2·b0 − a0·b2, a0·b1 − a1·b0].
+#must_use
+fn _km_cross(a0: f64, a1: f64, a2: f64, b0: f64, b1: f64, b2: f64): (f64, f64, f64) {
+    var c0: f64 = (a1 * b2) - (a2 * b1);
+    var c1: f64 = (a2 * b0) - (a0 * b2);
+    var c2: f64 = (a0 * b1) - (a1 * b0);
+    return (c0, c1, c2);
+}
+
+# a · b (Rust's dot3): (a0·b0 + a1·b1) + a2·b2.
+#must_use
+fn _km_dot3(a0: f64, a1: f64, a2: f64, b0: f64, b1: f64, b2: f64): f64 {
+    var d: f64 = ((a0 * b0) + (a1 * b1)) + (a2 * b2);
+    return d;
+}
+
+# ── intermolecular potentials ───────────────────────────────────────────────────────────────────────
+
+# The Lennard-Jones 6-12 potential V(r) = 4ε[(σ/r)¹² − (σ/r)⁶], in the unit of ε (J), from the well depth ε, the
+# collision diameter σ and the separation r (any consistent length unit). Ok(V), or Err(KM_ERR_INVALID_INPUT) if ε, σ
+# or r is not positive and finite (checked in that order). (σ/r)⁶ is Rust's five multiplications, (σ/r)¹² its square,
+# then (4·ε)·d; ADR 0002 #17: for ε ≥ 2¹⁰²², where Rust's 4·ε overflows, (ε·d)·4, the correctly rounded 4·ε·d (Rust:
+# ±∞, or NaN at r = σ). Mirrors `potential::lennard_jones`, with ADR 0002 #17.
+#must_use
+fn lennard_jones(epsilon: f64, sigma: f64, r: f64): Result {
+    if (_km_is_positive(epsilon) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(sigma) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(r) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var sr: f64 = sigma / r;
+    var sr6: f64 = ((((sr * sr) * sr) * sr) * sr) * sr;
+    var sr12: f64 = sr6 * sr6;
+    var d: f64 = sr12 - sr6;
+    var edge: f64 = 0x7FD0000000000000;    # 2¹⁰²²: from here 4·ε overflows (ADR 0002 #17)
+    if (epsilon >= edge) {
+        var w: f64 = (epsilon * d) * 4.0;
+        return Ok(w);
+    }
+    var v: f64 = (4.0 * epsilon) * d;
+    return Ok(v);
+}
+
+# The Lennard-Jones equilibrium distance r_min = 2^(1/6)·σ ≈ 1.122σ, in the unit of σ. ADR 0002 #16: the correctly
+# rounded σ·2^(1/6) (one rounding; Rust's σ·2.0.powf(1.0 / 6.0) rounds twice and is one ulp off on about a fifth of all
+# σ); NaN, ±0 and ±∞ give σ. Inputs are not validated. Mirrors `potential::lj_equilibrium_distance`, with ADR 0002 #16.
+#must_use
+fn lj_equilibrium_distance(sigma: f64): f64 {
+    var r: f64 = _km_cr_sixth_root2_mul(sigma);
+    return r;
+}
+
+# The Morse potential V(r) = D_e·(1 − exp(−a(r − r_e)))², in the unit of D_e (J), zero at r = r_e, from the well depth
+# D_e, the width parameter a (m⁻¹), the equilibrium distance r_e and the separation r. Ok(V), or
+# Err(KM_ERR_INVALID_INPUT) if D_e or a is not positive and finite (in that order); r_e and r are not validated
+# (non-finite ones propagate). Computed as Rust's x = 1 − exp(−a·(r − r_e)), then (D_e·x)·x, on the correctly rounded
+# _km_cr_exp. Mirrors `potential::morse`.
+#must_use
+fn morse(d_e: f64, a: f64, r_e: f64, r: f64): Result {
+    if (_km_is_positive(d_e) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(a) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var na: f64 = -a;
+    var dr: f64 = r - r_e;
+    var y: f64 = na * dr;
+    var ey: f64 = _km_cr_exp(y);
+    var x: f64 = 1.0 - ey;
+    var v: f64 = (d_e * x) * x;
+    return Ok(v);
+}
+
+# The Morse width parameter a = ω_e·√(μ/(2·D_e)), in m⁻¹, from the harmonic angular frequency ω_e (rad/s), the reduced
+# mass μ (kg) and the well depth D_e (J). Ok(a), or Err(KM_ERR_INVALID_INPUT) if any parameter is not positive and
+# finite. ADR 0002 #18: for D_e ≥ 2¹⁰²³, where Rust's 2·D_e overflows (μ/∞ = 0), (μ·½)/D_e, the correctly rounded
+# μ/(2·D_e); Rust's form elsewhere. Mirrors `potential::morse_width_parameter`, with ADR 0002 #18.
+#must_use
+fn morse_width_parameter(omega_e: f64, reduced_mass: f64, d_e: f64): Result {
+    if (_km_is_positive(d_e) != 1 || _km_is_positive(reduced_mass) != 1 || _km_is_positive(omega_e) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    var q: f64 = 0.0;
+    var edge: f64 = 0x7FE0000000000000;    # 2¹⁰²³: from here 2·D_e overflows (ADR 0002 #18)
+    if (d_e >= edge) {
+        var hm: f64 = reduced_mass * 0.5;
+        q = hm / d_e;
+    } else {
+        var td: f64 = 2.0 * d_e;
+        q = reduced_mass / td;
+    }
+    var sq: f64 = f64_sqrt(q);
+    var w: f64 = omega_e * sq;
+    return Ok(w);
+}
+
+# The Coulomb potential energy V(r) = k_e·q₁·q₂/r, in J, of two point charges (C) at a separation r (m). Ok(V), or
+# Err(KM_ERR_INVALID_INPUT) if r is not positive and finite; the charges are not validated. Computed as Rust's
+# ((k_e·q₁)·q₂)/r. Mirrors `potential::coulomb`.
+#must_use
+fn coulomb(q1: f64, q2: f64, r: f64): Result {
+    if (_km_is_positive(r) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var k: f64 = KM_COULOMB_CONSTANT;
+    var v: f64 = ((k * q1) * q2) / r;
+    return Ok(v);
+}
+
+# The Coulomb force F = k_e·q₁·q₂/r², in N (positive: repulsion), of two point charges (C) at a separation r (m).
+# Ok(F), or Err(KM_ERR_INVALID_INPUT) if r is not positive and finite. Computed as Rust's ((k_e·q₁)·q₂)/(r·r).
+# Mirrors `potential::coulomb_force`.
+#must_use
+fn coulomb_force(q1: f64, q2: f64, r: f64): Result {
+    if (_km_is_positive(r) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var k: f64 = KM_COULOMB_CONSTANT;
+    var rr: f64 = r * r;
+    var v: f64 = ((k * q1) * q2) / rr;
+    return Ok(v);
+}
+
+# ── molecular geometry from 3D coordinates ──────────────────────────────────────────────────────────
+
+# The distance between two points p1 and p2 (pointers to three f64), √((x₂ − x₁)² + (y₂ − y₁)² + (z₂ − z₁)²), in the
+# unit of the coordinates; NaN for a null pointer. Inputs are not validated (non-finite coordinates propagate).
+# Mirrors `potential::distance_3d`.
+#must_use
+fn distance_3d(p1, p2): f64 {
+    if (p1 == 0 || p2 == 0) {
+        var nan: f64 = _km_nan();
+        return nan;
+    }
+    var x1: f64 = load64(p1);
+    var y1: f64 = load64(p1 + 8);
+    var z1: f64 = load64(p1 + 16);
+    var x2: f64 = load64(p2);
+    var y2: f64 = load64(p2 + 8);
+    var z2: f64 = load64(p2 + 16);
+    var dx: f64 = x2 - x1;
+    var dy: f64 = y2 - y1;
+    var dz: f64 = z2 - z1;
+    var s: f64 = ((dx * dx) + (dy * dy)) + (dz * dz);
+    var d: f64 = f64_sqrt(s);
+    return d;
+}
+
+# The bond angle A-B-C (B the central atom; a, b, c pointers to three f64), in radians in [0, π], as Rust's
+# atan2(|ba × bc|, ba · bc) (accurate near 0 and π, unlike acos) on the correctly rounded _km_cr_atan2; scale-invariant
+# in exact arithmetic. Ok(θ), or Err(KM_ERR_INVALID_INPUT) for a null pointer, a non-finite coordinate (|ba|² or |bc|²
+# is then NaN or ∞), or A or C coinciding with B: |ba|² ≤ (10⁻¹²)²·max(|a|², |b|²), or the same for C, so a bond below
+# the coordinates' resolution counts as zero (Rust's COINCIDENT_REL_TOL, squared at run time as Rust does). Mirrors
+# `potential::bond_angle`.
+#must_use
+fn bond_angle(a, b, c): Result {
+    if (a == 0 || b == 0 || c == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    var a0: f64 = load64(a);
+    var a1: f64 = load64(a + 8);
+    var a2: f64 = load64(a + 16);
+    var b0: f64 = load64(b);
+    var b1: f64 = load64(b + 8);
+    var b2: f64 = load64(b + 16);
+    var c0: f64 = load64(c);
+    var c1: f64 = load64(c + 8);
+    var c2: f64 = load64(c + 16);
+    var ba0, ba1, ba2 = _km_sub3(a0, a1, a2, b0, b1, b2);
+    var bc0, bc1, bc2 = _km_sub3(c0, c1, c2, b0, b1, b2);
+    var ba_sq: f64 = _km_dot3(ba0, ba1, ba2, ba0, ba1, ba2);
+    var bc_sq: f64 = _km_dot3(bc0, bc1, bc2, bc0, bc1, bc2);
+    var tol: f64 = 0.000000000001;          # COINCIDENT_REL_TOL, 10⁻¹²
+    var tol_sq: f64 = tol * tol;
+    var b_sq: f64 = _km_dot3(b0, b1, b2, b0, b1, b2);
+    if (_km_is_positive(ba_sq) != 1 || _km_is_positive(bc_sq) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var a_sq: f64 = _km_dot3(a0, a1, a2, a0, a1, a2);
+    var ma: f64 = _km_max(a_sq, b_sq);
+    var ta: f64 = tol_sq * ma;
+    if (ba_sq <= ta) { return Err(KM_ERR_INVALID_INPUT); }
+    var c_sq: f64 = _km_dot3(c0, c1, c2, c0, c1, c2);
+    var mc: f64 = _km_max(c_sq, b_sq);
+    var tc: f64 = tol_sq * mc;
+    if (bc_sq <= tc) { return Err(KM_ERR_INVALID_INPUT); }
+    var cr0, cr1, cr2 = _km_cross(ba0, ba1, ba2, bc0, bc1, bc2);
+    var cn: f64 = _km_dot3(cr0, cr1, cr2, cr0, cr1, cr2);
+    var y: f64 = f64_sqrt(cn);
+    var x: f64 = _km_dot3(ba0, ba1, ba2, bc0, bc1, bc2);
+    var ang: f64 = _km_cr_atan2(y, x);
+    return Ok(ang);
+}
+
+# The dihedral (torsion) angle A-B-C-D (a, b, c, d pointers to three f64), in radians in (−π, π]: the angle between the
+# ABC and BCD planes with the IUPAC sign (positive when, viewed along B→C, B–A turns clockwise to eclipse C–D); planar
+# trans is π, cis 0. With b₁ = B − A, b₂ = C − B, b₃ = D − C, n₁ = b₁ × b₂ and n₂ = b₂ × b₃: φ = atan2(|b₂|·(b₁ · n₂),
+# n₁ · n₂) on the correctly rounded _km_cr_atan2, and atan2's −π (a trans geometry whose y-term is −0.0) reported as π.
+# Ok(φ), or Err(KM_ERR_INVALID_INPUT) for a null pointer, a non-finite coordinate, two consecutive atoms coinciding, or
+# A-B-C or B-C-D collinear: |n₁|² ≤ 10⁻²⁰·|b₁|²·|b₂|² (a bond angle within about 10⁻¹⁰ rad of 0 or π; Rust's
+# COLLINEAR_SIN_SQ_TOL), or the same for n₂. Mirrors `potential::dihedral_angle`.
+#must_use
+fn dihedral_angle(a, b, c, d): Result {
+    if (a == 0 || b == 0 || c == 0 || d == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    var a0: f64 = load64(a);
+    var a1: f64 = load64(a + 8);
+    var a2: f64 = load64(a + 16);
+    var b0: f64 = load64(b);
+    var b1: f64 = load64(b + 8);
+    var b2: f64 = load64(b + 16);
+    var c0: f64 = load64(c);
+    var c1: f64 = load64(c + 8);
+    var c2: f64 = load64(c + 16);
+    var d0: f64 = load64(d);
+    var d1: f64 = load64(d + 8);
+    var d2: f64 = load64(d + 16);
+    var u0, u1, u2 = _km_sub3(b0, b1, b2, a0, a1, a2);       # b₁
+    var v0, v1, v2 = _km_sub3(c0, c1, c2, b0, b1, b2);       # b₂
+    var w0, w1, w2 = _km_sub3(d0, d1, d2, c0, c1, c2);       # b₃
+    var n10, n11, n12 = _km_cross(u0, u1, u2, v0, v1, v2);
+    var n20, n21, n22 = _km_cross(v0, v1, v2, w0, w1, w2);
+    var n1_sq: f64 = _km_dot3(n10, n11, n12, n10, n11, n12);
+    var n2_sq: f64 = _km_dot3(n20, n21, n22, n20, n21, n22);
+    var b2_sq: f64 = _km_dot3(v0, v1, v2, v0, v1, v2);
+    if (_km_is_positive(n1_sq) != 1 || _km_is_positive(n2_sq) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var tol: f64 = 0.00000000000000000001;  # COLLINEAR_SIN_SQ_TOL, 10⁻²⁰
+    var b1_sq: f64 = _km_dot3(u0, u1, u2, u0, u1, u2);
+    var t1: f64 = (tol * b1_sq) * b2_sq;
+    if (n1_sq <= t1) { return Err(KM_ERR_INVALID_INPUT); }
+    var b3_sq: f64 = _km_dot3(w0, w1, w2, w0, w1, w2);
+    var t2: f64 = (tol * b2_sq) * b3_sq;
+    if (n2_sq <= t2) { return Err(KM_ERR_INVALID_INPUT); }
+    var sb: f64 = f64_sqrt(b2_sq);
+    var dn: f64 = _km_dot3(u0, u1, u2, n20, n21, n22);
+    var yv: f64 = sb * dn;
+    var xv: f64 = _km_dot3(n10, n11, n12, n20, n21, n22);
+    var phi: f64 = _km_cr_atan2(yv, xv);
+    var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
+    if (phi <= -pi) { return Ok(pi); }
+    return Ok(phi);
+}

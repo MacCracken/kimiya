@@ -1,4 +1,5 @@
-"""Verify the correctly rounded exp, exp10, expm1, ln, log10 and pow of src/mathx.cyr against MPFR (ADR 0006).
+"""Verify the correctly rounded exp, exp10, expm1, ln, log10, pow, sin, cos, atan2, acos and x·2^y of src/mathx.cyr
+against MPFR (ADR 0006).
 
 For each primitive it generates seeded arguments (deterministic: random.Random with fixed seeds), builds
 a probe program that calls the Cyrius function on every argument, runs it on each target, and compares
@@ -17,6 +18,22 @@ powers with dyadic y, powers of two around the tie 2^-1075); the published hard 
 pair. It also checks pow(10, x) against exp10(x), _km_cr_pow(x, 2.5) (Redlich–Kwong's Tc^2.5; ADR 0005's
 double-double _km_pow_2_5 until M3c-3) against MPFR over every binade, and the special values against glibc's pow
 (ctypes, libm.so.6) as well as MPFR.
+sin and cos (M4a) get >= 1,000,000 arguments each: every binade up to 2^1023, the Peng–Robinson range [-2.2, 3.2],
+doubles near multiples of pi/2 (RN(k pi/2) +- ulps for k < 2^40, and in every binade the doubles closest to a
+multiple of pi/2, found from the continued fraction of 2^(e-52)*2/pi, with Lefevre and Muller's worst case for
+the reduction), the FFT angles -2pi/n, the Cody–Waite / Payne–Hanek edge, the table edges, tiny |x|, and
+Lefevre–Muller's and Hanrot et al.'s hard cases; _km_cr_sincos is checked against both on the sin arguments.
+atan2 gets >= 1,000,000 (y, x) pairs: every quadrant over every binade, every exponent difference, results near
++-pi and +-pi/2, subnormal and exactly-midpoint quotients, |y/x| near the table points and 1, bond and dihedral
+angles at Angstrom and metre scales (near-collinear and perpendicular included), arctan's hard cases, and every
+C99 special pair (also against glibc's atan2). acos gets >= 1,000,000: [-1, 1], dense near +-1 and 0, every
+binade, the branch points 1/2 and 1/sqrt(2), and arccos's and arcsin's hard cases. (Until M4d it also compared M2a's
+double-double _km_acos and _km_cos with them: bit-identical on every argument; M4d removed the two.)
+exp2s, _km_cr_exp2_scaled(x, y) = x*2^y rounded once (M4d, ADR 0002 #13: nuclear's N0/2^n past the normal range), gets
+>= 600,000 (x, y) pairs: nuclear's edge (N0 = m*2^e, y = -n with n beyond 1022 or -1024), results across the subnormal
+range and at the overflow end, exact scalings and their ties (integer y), tiny and subnormal |y|, |y| near 2200, every
+binade of x with y over [-2300, 2300], and the special pairs; the reference is mpfr_ref.scaled_exp2 (2^f to 400 bits,
+bounded from both sides).
 Through each function's _km_cr_<f>_fast entry it reports the fast path's fallback rate per region, and
 checks the fast path's result equals the function's wherever its test passes. It checks that the three
 targets give identical bits and flags.
@@ -25,7 +42,8 @@ Usage, from the repo root:
     python3 -I scripts/oracle/cr_verify.py                 # x86_64 ELF, x86_64 PE (wine), aarch64 (qemu)
     python3 -I scripts/oracle/cr_verify.py --targets elf   # one target
     python3 -I scripts/oracle/cr_verify.py --big           # also 10,000,000 more per primitive on ELF
-    python3 -I scripts/oracle/cr_verify.py --only pow,exp  # some functions
+    python3 -I scripts/oracle/cr_verify.py --only pow,exp  # some functions (exp exp10 expm1 ln log10 pow sin cos
+                                                           # atan2 acos exp2s)
     python3 -I scripts/oracle/cr_verify.py --work DIR      # probe sources and binaries in DIR
                                                            # (default build/cr-verify, gitignored)
 Exit status 1 on any mismatch or cross-target difference, 2 on a build or run failure.
@@ -49,7 +67,14 @@ FUNCS = [  # (id, name, fast entry, accurate entry, MPFR reference)
     (3, "ln", "_km_cr_ln", "_km_cr_ln_acc", mpfr_ref.log),
     (4, "log10", "_km_cr_log10", "_km_cr_log10_acc", mpfr_ref.log10),
     (5, "pow", "_km_cr_pow", "_km_cr_pow_acc", mpfr_ref.pow),
+    (6, "sin", "_km_cr_sin", "_km_cr_sin_acc", mpfr_ref.sin),
+    (7, "cos", "_km_cr_cos", "_km_cr_cos_acc", mpfr_ref.cos),
+    (8, "atan2", "_km_cr_atan2", "_km_cr_atan2_acc", mpfr_ref.atan2),
+    (9, "acos", "_km_cr_acos", "_km_cr_acos_acc", mpfr_ref.acos),
+    (11, "exp2s", "_km_cr_exp2_scaled", "_km_cr_exp2_scaled_acc", None),   # the reference is ref_exp2s, below
 ]
+PAIRS = (5, 8, 11)   # the functions of two arguments
+FID_SINCOS = 10      # probe-only id: _km_cr_sincos
 N_UNIFORM = 700_000
 N_ACC = 100_000
 
@@ -304,8 +329,308 @@ def args_pow(rng, lim):
     ]
 
 
+# Lefevre–Muller 2003 worst cases (Tables 8–11 and 13; the run after the round bit in the comment), checked with
+# 400-bit MPFR: sin on [2^-24, 2 + 4675/8192], arcsin, cos on [2^-25, 12867/8192], arccos, arctan.
+HARD_SIN = [float.fromhex(h) for h in (
+    "0x1.e0000000001c2p-20",   # 0 0^72
+    "0x1.598bae9e632f6p-7",    # 0 1^59
+    "0x1.fe767739d0f6dp-2",    # 1 1^65
+    "0x1.921fb54442d18p+0",    # 1 1^54 (RN(pi/2))
+    "0x1.6756745770a51p+1")]   # 0 0^54
+HARD_ASIN = [float.fromhex(h) for h in ("0x1.dfffffffff02ep-20", "0x1.dffffffffc0b8p-19", "0x1.e9950730c4696p-2")]
+HARD_COS = [float.fromhex(h) for h in (
+    "0x1.8000000000009p-23",   # 0 0^88
+    "0x1.8000000000024p-22",   # 0 0^82
+    "0x1.2000000000f30p-18",   # 0 0^60
+    "0x1.06b505550e6b2p-9",    # 0 0^58
+    "0x1.97ccd3d2c438fp-6",    # 1 1^55
+    "0x1.6b8a6273d7c21p+0")]   # 1 0^54
+HARD_ACOS = [float.fromhex("0x1.fd737be914578p-11")]   # 1 1^62
+HARD_ATAN = [float.fromhex(h) for h in (
+    "0x1.e000000000546p-21", "0x1.22e8d75e2bc7fp-11", "0x1.a933fe176b375p-3", "0x1.7ba49f739829fp-1",
+    "0x1.06b8e2c3cc000p+52")]  # the last: 4621447055448553/2^11, arctan's worst case above 2.25e12 (1 0^45)
+# Hanrot, Lefevre, Stehle and Zimmermann (ARITH 18, 2007): sin in [2^1023, 2^1024) (1^43 and 0^45 after the 53
+# bits), and Lefevre and Muller's (2003, sect. 2.3) double closest to a nonzero multiple of pi/2 (4.687e-19 away).
+HARD_SC_BIG = [4621478864517314 * 2.0 ** 971, 5501214608935005 * 2.0 ** 971, 6381956970095103 * 2.0 ** 797]
+PI = math.pi
+
+
+def _twopi_int():
+    """2/pi to 1,344 bits as an integer T (2/pi ~ T/2^1344), from the generator's table."""
+    import mathx_tables
+    t = 0
+    for w in mathx_tables.twopi_words()[2:]:
+        t = (t << 32) | w
+    return t, 32 * (mathx_tables.N_TWOPI - 2)
+
+
+def closest_to_pio2_multiples():
+    """In every binade [2^e, 2^(e+1)), e = 0 ... 1023, the doubles m*2^(e-52) closest to a multiple of pi/2: m among
+    the small multiples of the continued-fraction convergent denominators q_n of alpha = 2^(e-52)*2/pi with
+    2^52 <= m < 2^53 (|m alpha - round(m alpha)| is then within a few times its minimum over the binade)."""
+    t, nb = _twopi_int()
+    out = []
+    for e in range(0, 1024):
+        num, den = t, 1 << (nb - (e - 52))          # alpha = num/den (den may be fractional for big e: rescale)
+        if nb - (e - 52) < 0:
+            break
+        # continued fraction of num/den
+        p0, q0, p1, q1 = 0, 1, 1, 0
+        a, b = num, den
+        conv = []
+        while b and q1 < (1 << 53):
+            c = a // b
+            a, b = b, a - c * b
+            p0, q0, p1, q1 = p1, q1, c * p1 + p0, c * q1 + q0
+            conv.append(q1)
+        for q in conv:
+            if q < (1 << 40) or q >= (1 << 53):
+                continue
+            tlo = -(-(1 << 52) // q)
+            for tt in range(tlo, tlo + 4):
+                m = tt * q
+                if (1 << 52) <= m < (1 << 53):
+                    out.append(math.ldexp(float(m), e - 52))
+    return out
+
+
+def args_sc(rng, lim):
+    tiny_edges = [2.0 ** -26, 2.0 ** -27, 2.0 ** -25]
+    sp = list(SPECIALS) + [ulps(v, d) for v in tiny_edges for d in range(-3, 4)] + \
+        [k * PI / 2 for k in range(-40, 41)] + [ulps(k * PI / 2, d) for k in range(1, 9) for d in (-2, -1, 1, 2)] + \
+        [2 * PI, -2 * PI, PI, -PI, 2.0 ** 20, ulps(2.0 ** 20, -1), 2.0 ** 1023, fb(0x7FEFFFFFFFFFFFFF)]
+    hard = HARD_SIN + HARD_COS + HARD_SC_BIG + [ulps(h, d) for h in HARD_SC_BIG for d in (-2, -1, 1, 2)]
+    hard += [-h for h in hard]
+    near = []
+    import mathx_tables
+    pio2 = mathx_tables._pio2()
+    for _ in range(25_000):                        # RN(k pi/2) +- ulps, k < 2^40
+        k = rng.choice([rng.randint(1, 64), rng.randint(1, 1 << 12), rng.randint(1, 1 << 20), rng.randint(1, 1 << 40)])
+        v = mathx_tables._V()
+        mathx_tables._m.mpfr_mul_ui(v.p, pio2.p, k, 0)
+        x = mathx_tables._get(v)
+        for d in (rng.randint(-40, 40), rng.randint(-3, 3), 0, rng.randint(-2000, 2000)):
+            near.append(math.copysign(ulps(x, d), rng.random() - 0.5))
+    closest = closest_to_pio2_multiples()
+    closest = [ulps(x, d) for x in closest for d in (-1, 0, 1)]
+    closest += [-x for x in closest]
+    fft = [-(2.0 * PI) / (1 << k) for k in range(1, 21)] + [-(2.0 * PI) / n for n in range(2, 4097)] + \
+        [-(2.0 * PI) / rng.randint(2, 1 << 20) for _ in range(40_000)]
+    edges = []
+    for _ in range(15_000):                        # r near (i + 1/2)/256: the table index's rounding
+        i = rng.randint(-201, 201)
+        k = rng.choice([0, 0, 1, 2, 3, rng.randint(1, 1 << 19)])
+        x0 = k * PI / 2 + (i + 0.5) / 256
+        edges += [ulps(x0, rng.randint(-3, 3)), ulps(k * PI / 2 + i / 256, rng.randint(-3, 3))]
+    return [
+        ("special+hard", sp + hard),
+        ("binade-uniform", binade_uniform(rng, 470_000, -1074, 1023)),
+        ("PR range [-2.2, 3.2]", [rng.uniform(-2.2, 3.2) for _ in range(100_000)]),
+        ("[-8, 8]", [rng.uniform(-8.0, 8.0) for _ in range(40_000)]),
+        ("near k*pi/2 (k < 2^40)", near),
+        ("closest to k*pi/2 per binade", closest),
+        ("FFT angles -2pi/n", fft),
+        ("huge [2^20, 2^1024)", binade_uniform(rng, 90_000, 20, 1023)),
+        ("[0, 2^20] and the 2^20 edge", [rng.uniform(-2.0 ** 20, 2.0 ** 20) for _ in range(40_000)]
+         + around(2.0 ** 20, 2000) + around(-2.0 ** 20, 2000)),
+        ("tiny |x|", [math.copysign(2.0 ** rng.uniform(-60, -18), rng.random() - 0.5) for _ in range(40_000)]
+         + [ulps(v, d) for v in tiny_edges for d in range(-500, 501)]),
+        ("table edges (i + 1/2)/256", edges),
+    ]
+
+
+def atan2_specials():
+    vals = [0.0, -0.0, fb(1), -fb(1), 1.0, -1.0, 2.0, -0.5, fb(0x7FEFFFFFFFFFFFFF), -fb(0x7FEFFFFFFFFFFFFF),
+            INF, -INF, NAN, 3.0, -3.0, 2.0 ** -1022, -(2.0 ** -1022), 1e300, -1e-300]
+    return [(y, x) for y in vals for x in vals]
+
+
+def _vec(rng, scale):
+    return [rng.uniform(-1.0, 1.0) * scale for _ in range(3)]
+
+
+def _cross(a, b):
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def bond_and_dihedral(rng, n):
+    """atan2(|ba x bc|, ba.bc) (potential::bond_angle) and atan2(|b2| b1.n2, n1.n2) (dihedral_angle), as the
+    oracle computes them in doubles, at Angstrom (1) and metre (1e-10) scales, with near-collinear and
+    perpendicular geometries."""
+    bond, dih = [], []
+    for _ in range(n):
+        sc = rng.choice([1.0, 1e-10, 1.5, 1e-9, 3.7e-11])
+        ba = _vec(rng, sc)
+        bc = _vec(rng, sc)
+        shape = rng.random()
+        if shape < 0.25:                         # near-collinear (angle near 0 or pi)
+            eps = 2.0 ** rng.uniform(-50, -5)
+            sgn = rng.choice([1.0, -1.0])
+            bc = [sgn * v * rng.uniform(0.5, 2.0) + eps * sc * rng.uniform(-1, 1) for v in ba]
+        elif shape < 0.4:                        # near-perpendicular
+            c = _cross(ba, _vec(rng, sc))
+            nn = math.sqrt(_dot(c, c)) or 1.0
+            bc = [v / nn * sc + 2.0 ** rng.uniform(-50, -5) * sc * rng.uniform(-1, 1) for v in c]
+        cr = _cross(ba, bc)
+        bond.append((math.sqrt(_dot(cr, cr)), _dot(ba, bc)))
+        b1, b2, b3 = _vec(rng, sc), _vec(rng, sc), _vec(rng, sc)
+        if shape < 0.2:
+            b3 = [v + 2.0 ** rng.uniform(-40, -5) * sc * rng.uniform(-1, 1) for v in b1]
+        n1 = _cross(b1, b2)
+        n2 = _cross(b2, b3)
+        dih.append((math.sqrt(_dot(b2, b2)) * _dot(b1, n2), _dot(n1, n2)))
+    return bond, dih
+
+
+def args_atan2(rng, lim):
+    sgn = lambda: rng.choice((1.0, -1.0))
+    quad = [(sgn() * binade_uniform(rng, 1, -1074, 1023, signs=(1,))[0],
+             sgn() * binade_uniform(rng, 1, -1074, 1023, signs=(1,))[0]) for _ in range(300_000)]
+    diffs = []
+    for _ in range(200_000):                     # every exponent difference, -2097 ... 2097
+        d = rng.randint(-2097, 2097)
+        lo, hi = max(-1074, -1074 - d), min(1023, 1023 - d)
+        e = rng.randint(lo, hi)
+        y = binade_uniform(rng, 1, e + d, e + d, signs=(1,))[0]
+        x = binade_uniform(rng, 1, e, e, signs=(1,))[0]
+        diffs.append((sgn() * y, sgn() * x))
+    near_pi = [(sgn() * x * 2.0 ** -rng.uniform(0, 80), -x) for x in
+               (binade_uniform(rng, 1, -900, 900, signs=(1,))[0] for _ in range(60_000))]
+    near_pio2 = [(sgn() * y, sgn() * y * 2.0 ** -rng.uniform(0, 80)) for y in
+                 (binade_uniform(rng, 1, -900, 900, signs=(1,))[0] for _ in range(60_000))]
+    sub = []
+    for _ in range(60_000):                      # quotients from 2^-1100 to 2^-1015 (x > 0): subnormal, and below
+        eq = rng.randint(-1100, -1015)
+        ex = rng.randint(-1074 - eq, 1023)
+        x = binade_uniform(rng, 1, ex, ex, signs=(1,))[0]
+        y = binade_uniform(rng, 1, eq + ex, eq + ex, signs=(1,))[0]
+        sub.append((sgn() * y, x))
+    for _ in range(20_000):                      # exact quotients, midpoints (2K+1)*2^-1075 among them
+        k = rng.randint(1, 1 << rng.randint(1, 52)) | 1
+        b = rng.randint(1, 1021)
+        a = rng.choice([-1075, -1075, -1076, -1074, -1060, rng.randint(-1100, -1000)])
+        y = math.ldexp(float(k), a + b)
+        if y != 0.0 and math.isfinite(y):
+            sub.append((sgn() * y, math.ldexp(1.0, b)))
+            sub.append((sgn() * y * 3.0, math.ldexp(3.0, b)))
+    sub += [(3 * 2.0 ** -60, 2.0 ** 1015), (-3 * 2.0 ** -60, 2.0 ** 1015), (5 * 2.0 ** -61, 2.0 ** 1015),
+            (2.0 ** -1074, 1.5), (2.0 ** -1074, 2.0 ** 1023), (fb(3), 2.0)]
+    jpts = []
+    for _ in range(30_000):                      # |y/x| near (j + 1/2)/256, near j/256, near 1
+        j = rng.randint(0, 255)
+        x = sgn() * binade_uniform(rng, 1, -500, 500, signs=(1,))[0]
+        for z in ((j + 0.5) / 256, j / 256 + 2.0 ** -rng.uniform(20, 52), 1.0 - 2.0 ** -rng.uniform(1, 53)):
+            jpts.append((sgn() * abs(x) * z, x))
+    jpts += [(v, v) for v in binade_uniform(rng, 2000, -1074, 1023)] + \
+        [(v, -v) for v in binade_uniform(rng, 2000, -1074, 1023)]
+    bond, dih = bond_and_dihedral(rng, 100_000)
+    hard = [(h, 1.0) for h in HARD_ATAN] + [(-h, 1.0) for h in HARD_ATAN] + \
+        [(h * 2.0 ** k, 2.0 ** k) for h in HARD_ATAN for k in (-1000, -60, -1, 1, 60, 900)] + \
+        [(1.0, h) for h in HARD_ATAN] + [(-1.0, -h) for h in HARD_ATAN]
+    return [
+        ("special", atan2_specials() + hard),
+        ("quadrants, binade-uniform", quad),
+        ("every exponent difference", diffs),
+        ("near +-pi (|y| << |x|, x < 0)", near_pi),
+        ("near +-pi/2 (|x| << |y|)", near_pio2),
+        ("subnormal and exact quotients", sub),
+        ("|y/x| near j/256 and 1, |y| = |x|", jpts),
+        ("bond angles", bond),
+        ("dihedral angles", dih),
+    ]
+
+
+def args_acos(rng, lim):
+    sp = list(SPECIALS) + [ulps(2.0 ** -56, d) for d in range(-3, 4)] + [-ulps(2.0 ** -56, d) for d in range(-3, 4)] + \
+        [1.0000000000000002, -1.0000000000000002, 2.0, -2.0] + HARD_ACOS + [-h for h in HARD_ACOS] + \
+        [math.sin(h) for h in HARD_ASIN] + [ulps(h, d) for h in HARD_ACOS for d in range(-5, 6)]
+    near1 = [1.0 - 2.0 ** -rng.uniform(1, 53) for _ in range(100_000)] + \
+        [-1.0 + 2.0 ** -rng.uniform(1, 53) for _ in range(80_000)] + around(1.0, 3000) + around(-1.0, 3000)
+    near1 = [v for v in near1 if abs(v) <= 1.0]
+    branch = []
+    for v in (0.5, 0.7071067811865476, 0.7071067811865475, 0.25, 0.1):
+        branch += around(v, 2000) + around(-v, 2000)
+    return [
+        ("special+hard", sp),
+        ("[-1, 1]", [rng.uniform(-1.0, 1.0) for _ in range(330_000)]),
+        ("near +-1", near1),
+        ("near 0", [math.copysign(2.0 ** -rng.uniform(1, 60), rng.random() - 0.5) for _ in range(150_000)]),
+        ("binade-uniform |x| < 1", [v for v in binade_uniform(rng, 220_000, -1074, -1)]),
+        ("branch points +-1/2, +-1/sqrt2, ...", branch),
+        ("PR-like (-q/2)/sqrt(-p^3/27)", [math.copysign(min(1.0, rng.uniform(0, 1) ** 0.25), rng.random() - 0.5)
+                                         for _ in range(100_000)]),
+    ]
+
+
+def ref_exp2s(x, y):
+    """x*2^y rounded once, with _km_cr_exp2_scaled's special values (src/mathx.cyr): x NaN, +-0 or +-inf gives x for
+    a finite y; y NaN gives NaN; y = +inf gives +-inf (NaN for x = 0), y = -inf gives +-0 (NaN for x = +-inf)."""
+    if math.isnan(x):
+        return x
+    if math.isnan(y):
+        return y
+    if math.isinf(y):
+        if y > 0:
+            return NAN if x == 0 else math.copysign(INF, x)
+        return NAN if math.isinf(x) else math.copysign(0.0, x)
+    if x == 0 or math.isinf(x):
+        return x
+    return mpfr_ref.scaled_exp2(x, y)
+
+
+def args_exp2s(rng):
+    """(x, y) pairs for x*2^y (M4d)."""
+    def sig(neg_ok=True):
+        x = fb((0x3FF << 52) | rng.randrange(0, 1 << 52))
+        return -x if neg_ok and rng.random() < 0.5 else x
+
+    def target(lo, hi, n):
+        out = []
+        for _ in range(n):   # x over every binade, y placing x*2^y near 2^t (t uniform in [lo, hi])
+            x = binade_uniform(rng, 1, -1074, 1023)[0]
+            t = rng.uniform(lo, hi)
+            out.append((x, t - math.log2(abs(x))))
+        return out
+    edge = []
+    for _ in range(150_000):    # nuclear's ADR 0002 #13 rows: N0 = m*2^e, n past 1022 or -1024, y = -n
+        n = rng.uniform(1022.0, 1200.0) if rng.random() < 0.5 else rng.uniform(-1200.0, -1024.0)
+        e = rng.randint(-1074, 1023) if n > 0 else rng.randint(-1074, 0)
+        edge.append((math.ldexp(sig(), e) if e >= -1022 else sig() * 2.0 ** e, -n))
+    quarters = [(m, -(1022.0 + q / 4)) for m in (fb(0x7FEFFFFFFFFFFFFF), 1e300, 2.0 ** 1000, 1e250, 1.0, 1000.0)
+                for q in range(0, 215)]
+    ties = []
+    for _ in range(30_000):     # exact scalings: an odd integer times 2^y near and in the subnormal range (ties)
+        o = 2 * rng.randint(0, 1 << 20) + 1
+        ties.append((float(o) * rng.choice((1.0, -1.0)), float(rng.randint(-1100, -1040))))
+        x = binade_uniform(rng, 1, -1074, 1023)[0]
+        ties.append((x, float(rng.randint(-2150, 2150))))
+    small = []
+    for _ in range(40_000):     # |y| < 1, tiny and subnormal |y| included, and |y| near the 2200 cut
+        x = binade_uniform(rng, 1, -1074, 1023)[0]
+        small.append((x, math.copysign(2.0 ** rng.uniform(-1074, 0), rng.random() - 0.5)))
+        small.append((sig(), rng.choice((1.0, -1.0)) * ulps(2200.0, rng.randint(-1000, 1000))))
+    sp = [0.0, -0.0, INF, -INF, NAN, fb(1), -fb(1), fb(0x7FEFFFFFFFFFFFFF), 1.0, -1.0, 2.0 ** -1022, 1.5]
+    spy = [0.0, -0.0, INF, -INF, NAN, 0.5, -0.5, 2200.0, -2200.0, 2200.5, -2200.5, 1074.0, -1074.0, -1075.0, 1024.0,
+           -1022.25, 1e-300, -fb(1), 1023.0]
+    return [
+        ("special", [(x, y) for x in sp for y in spy]),
+        ("nuclear edge", edge + quarters),
+        ("subnormal results", target(-1080.0, -1018.0, 120_000)),
+        ("overflow end", target(1020.0, 1025.0, 50_000)),
+        ("exact and ties", ties),
+        ("small |y|, |y| ~ 2200", small),
+        ("every binade, y in [-2300, 2300]", [(binade_uniform(rng, 1, -1074, 1023)[0], rng.uniform(-2300.0, 2300.0))
+                                              for _ in range(150_000)]),
+    ]
+
+
 def gen_args(name, lim):
-    rng = random.Random({"exp": 1001, "exp10": 1002, "expm1": 1003, "ln": 1004, "log10": 1005, "pow": 1006}[name])
+    rng = random.Random({"exp": 1001, "exp10": 1002, "expm1": 1003, "ln": 1004, "log10": 1005, "pow": 1006,
+                         "sin": 1007, "cos": 1008, "atan2": 1009, "acos": 1010, "exp2s": 1011}[name])
     if name == "exp":
         sections = args_exp(rng, lim)
     elif name == "exp10":
@@ -314,6 +639,14 @@ def gen_args(name, lim):
         sections = args_expm1(rng, lim)
     elif name == "pow":
         sections = args_pow(rng, lim)
+    elif name in ("sin", "cos"):
+        sections = args_sc(rng, lim)
+    elif name == "atan2":
+        sections = args_atan2(rng, lim)
+    elif name == "acos":
+        sections = args_acos(rng, lim)
+    elif name == "exp2s":
+        sections = args_exp2s(rng)
     else:
         sections = args_log(rng, lim, name == "log10")
     xs = [x for _, sec in sections for x in sec]
@@ -328,8 +661,10 @@ def gen_args(name, lim):
 
 
 PROBE = r'''# GENERATED by scripts/oracle/cr_verify.py. Reads job.bin (u64 words: function id, mode, n, then n arguments,
-# two words each for pow) and writes res.bin. Mode 0: for each argument the function's result, the fast path's
-# result and one byte, 1 if the fast path's test passed. Mode 1: the accurate path's result alone.
+# two words each for pow and atan2) and writes res.bin. Mode 0: for each argument the function's result, the fast
+# path's result and one byte, 1 if the fast path's test passed. Mode 1: the accurate path's result alone.
+# Id 10 (sincos) gives sin and cos in the two slots, and the byte 1 or 0 as above, 2 if the fast pair differs
+# from the full pair, 3 if the pair differs from _km_cr_sin and _km_cr_cos; id 11 is x·2^y (M4d), two words.
 include "src/mathx_data.cyr"
 include "src/mathx.cyr"
 
@@ -341,8 +676,33 @@ fn run(fid, mode, x: f64, y: f64): (f64, f64, i64) {
         if (fid == 2) { var c: f64 = _km_cr_expm1_acc(x); return (c, c, 0); }
         if (fid == 3) { var d: f64 = _km_cr_ln_acc(x); return (d, d, 0); }
         if (fid == 4) { var e: f64 = _km_cr_log10_acc(x); return (e, e, 0); }
+        if (fid == 6) { var sa: f64 = _km_cr_sin_acc(x); return (sa, sa, 0); }
+        if (fid == 7) { var ca: f64 = _km_cr_cos_acc(x); return (ca, ca, 0); }
+        if (fid == 8) { var ta: f64 = _km_cr_atan2_acc(x, y); return (ta, ta, 0); }
+        if (fid == 9) { var aa: f64 = _km_cr_acos_acc(x); return (aa, aa, 0); }
+        if (fid == 10) { var ps, pc = _km_cr_sincos_acc(x); return (ps, pc, 0); }
+        if (fid == 11) { var za: f64 = _km_cr_exp2_scaled_acc(x, y); return (za, za, 0); }
         var f: f64 = _km_cr_pow_acc(x, y);
         return (f, f, 0);
+    }
+    if (fid == 6) { var m: f64 = _km_cr_sin(x); var mf, mo = _km_cr_sin_fast(x); return (m, mf, mo); }
+    if (fid == 7) { var n: f64 = _km_cr_cos(x); var nf, no = _km_cr_cos_fast(x); return (n, nf, no); }
+    if (fid == 8) { var o: f64 = _km_cr_atan2(x, y); var of, oo = _km_cr_atan2_fast(x, y); return (o, of, oo); }
+    if (fid == 9) { var q: f64 = _km_cr_acos(x); var qf, qo = _km_cr_acos_fast(x); return (q, qf, qo); }
+    if (fid == 10) {
+        var s, c = _km_cr_sincos(x);
+        var fs, fc, fo = _km_cr_sincos_fast(x);
+        var flag = fo;
+        if (fo == 1 && (load64(&fs) != load64(&s) || load64(&fc) != load64(&c))) { flag = 2; }
+        var s1: f64 = _km_cr_sin(x);
+        var c1: f64 = _km_cr_cos(x);
+        if (load64(&s1) != load64(&s) || load64(&c1) != load64(&c)) { flag = 3; }
+        return (s, c, flag);
+    }
+    if (fid == 11) {
+        var z: f64 = _km_cr_exp2_scaled(x, y);
+        var zf, zo = _km_cr_exp2_scaled_fast(x, y);
+        return (z, zf, zo);
     }
     if (fid == 0) { var g: f64 = _km_cr_exp(x); var gf, go = _km_cr_exp_fast(x); return (g, gf, go); }
     if (fid == 1) { var h: f64 = _km_cr_exp10(x); var hf, ho = _km_cr_exp10_fast(x); return (h, hf, ho); }
@@ -364,7 +724,7 @@ fn main(): i64 {
     var mode = load64(buf + 8);
     var n = load64(buf + 16);
     var ar = 1;
-    if (fid == 5) { ar = 2; }
+    if (fid == 5 || fid == 8 || fid == 11) { ar = 2; }
     if (got != 8 * (3 + ar * n)) { return 3; }
     var out = alloc(17 * n + 8);
     var i = 0;
@@ -413,6 +773,8 @@ def run_probe(work, target, fid, mode, args):
     _, out, runner = TARGETS[target]
     n = len(args)
     flat = [bits(v) for a in args for v in (a if isinstance(a, tuple) else (a,))]
+    if fid in PAIRS and args and not isinstance(args[0], tuple):
+        raise ValueError("pairs expected")
     (work / "job.bin").write_bytes(struct.pack(f"<3Q{len(flat)}Q", fid, mode, n, *flat))
     res = work / "res.bin"
     for attempt in range(2):            # wine has been seen to exit 0 without writing the file, once
@@ -438,7 +800,59 @@ def same(a, b):
 
 
 def ref_of(name, ref, a):
+    if name == "exp2s":
+        return ref_exp2s(*a)
     return ref(*a) if isinstance(a, tuple) else ref(a)
+
+
+def glibc_atan2():
+    import ctypes
+    lm = ctypes.CDLL("libm.so.6")
+    lm.atan2.argtypes = [ctypes.c_double, ctypes.c_double]
+    lm.atan2.restype = ctypes.c_double
+    return lm.atan2
+
+
+def m4a_checks(work, targets, plan):
+    """sincos against MPFR's sin and cos on every target; atan2's special values against glibc. True if anything
+    failed."""
+    failed = False
+    if "sin" in plan:
+        xs = plan["sin"][0]
+        ws = [bits(mpfr_ref.sin(x)) for x in xs]
+        wc = [bits(mpfr_ref.cos(x)) for x in xs]
+        first = None
+        for t in targets:
+            gs, gc, fl = run_probe(work, t, FID_SINCOS, 0, xs)
+            gas, gac, _ = run_probe(work, t, FID_SINCOS, 1, xs[:N_ACC])
+            bad = sum(1 for i in range(len(xs)) if not (same(gs[i], ws[i]) and same(gc[i], wc[i])))
+            bad_acc = sum(1 for i in range(len(gas)) if not (same(gas[i], ws[i]) and same(gac[i], wc[i])))
+            f2 = sum(1 for f in fl if f >= 2)
+            slow = sum(1 for f in fl if f == 0)
+            xd = 0 if first is None else sum(1 for a, b in zip(gs + gc + list(fl), first) if a != b)
+            if first is None:
+                first = gs + gc + list(fl)
+            print(f"sincos {t:8} {len(xs):9,} args: {bad} mismatches (sin or cos); accurate pair on {len(gas):,}: "
+                  f"{bad_acc}; fast/full or sin/cos pair differences {f2}; fell back {slow:,} "
+                  f"({slow / len(xs):.2e}); bits or flags differing from {targets[0]}: {xd}")
+            failed |= bool(bad or bad_acc or f2 or xd)
+    if "atan2" in plan:
+        ga = glibc_atan2()
+        sp = atan2_specials()
+        gs, _, _ = run_probe(work, targets[0], 8, 0, sp)
+        n_om = n_og = n_mg = 0
+        for i, (y, x) in enumerate(sp):
+            m = bits(mpfr_ref.atan2(y, x))
+            g = bits(ga(y, x))
+            if not same(m, g):
+                n_mg += 1
+                print(f"  special: MPFR and glibc differ at atan2({y!r}, {x!r}): MPFR {m:016x}, glibc {g:016x}")
+            n_om += not same(gs[i], m)
+            n_og += not same(gs[i], g)
+        print(f"atan2 special values: {len(sp)} pairs; ours vs MPFR {n_om} differ, ours vs glibc {n_og}, "
+              f"MPFR vs glibc {n_mg}")
+        failed |= bool(n_om or n_og)
+    return failed
 
 
 def glibc_pow():
@@ -516,10 +930,14 @@ def main():
             if t == targets[0]:
                 rates = [f"{tag} {(b - a) - sum(flags[a:b])}/{b - a}" for tag, a, b in spans]
                 print("         fallbacks by region: " + "; ".join(rates))
-        if big and "elf" in targets and name != "pow":
+        if big and "elf" in targets and name not in ("pow", "atan2", "exp2s"):
             rng = random.Random(9000 + fid)
             if name in ("ln", "log10"):
                 ys = binade_uniform(rng, 10_000_000, -1074, 1023, signs=(1,))
+            elif name in ("sin", "cos"):
+                ys = [rng.uniform(-8.0, 8.0) for _ in range(5_000_000)] + binade_uniform(rng, 5_000_000, -1074, 1023)
+            elif name == "acos":
+                ys = [rng.uniform(-1.0, 1.0) for _ in range(10_000_000)]
             elif name == "exp10":
                 ys = [rng.uniform(lim["EXP10_UNF"] - 1, lim["EXP10_OVF"] + 1) for _ in range(5_000_000)] + \
                     binade_uniform(rng, 5_000_000, -1074, 8)
@@ -588,6 +1006,7 @@ def main():
         print(f"pow special values: {len(sp)} pairs; ours vs MPFR {n_om} differ, ours vs glibc {n_og}, "
               f"MPFR vs glibc {n_mg}")
         failed |= bool(n_om)
+    failed |= m4a_checks(work, targets, plan)
     print("cr_verify: " + ("FAILED" if failed else "all results correctly rounded, identical on every target"))
     sys.exit(1 if failed else 0)
 

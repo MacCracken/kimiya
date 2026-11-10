@@ -4,7 +4,8 @@
 # It includes dist/kimiya.cyr (written by `cyrius distlib --all`; `cyrius distlib --check` proves it
 # current), not src/, so the bundle compiles warning-free as one unit and its modules work
 # together. The reference tests are tests/{error,validate,element,molecule,reaction,thermo,thermochem,
-# phase,gas,solution,electrochemistry,kinetics}.tcyr; the golden corpus is tests/parity.tcyr.
+# phase,gas,solution,electrochemistry,kinetics,organic,inorganic,potential,nuclear}.tcyr; the golden corpus is
+# tests/parity.tcyr.
 
 include "dist/kimiya.cyr"
 
@@ -87,6 +88,81 @@ fn main() {
     var tl, vl = lineweaver_burk(100.0, 5.0, &lb);
     var slope: f64 = load64(&lb);
     assert(is_ok(tl) == 1 && vl == 2 && slope == 0.05, "kinetics (Lineweaver–Burk buffer)");
+    var eo: f64 = bond_type_energy_kj(KM_BOND_TYPE_NN_TRIPLE);
+    assert(eo == 945.0 && KM_GEOMETRY_T_SHAPED == 7, "organic_data (ADR 0002 #6: KM_GEOMETRY_T_SHAPED)");
+    var bonds: i64[4];
+    bonds[0] = KM_BOND_TYPE_HH;
+    bonds[1] = 2;
+    bonds[2] = KM_BOND_TYPE_OO_DOUBLE;
+    bonds[3] = 1;
+    var oh: i64[2];
+    oh[0] = KM_BOND_TYPE_OH;
+    oh[1] = 4;
+    var dho: f64 = enthalpy_from_bonds(&bonds, 2, &oh, 1);
+    var tg, vg2 = predict_geometry(3, 2);
+    assert(dho == -482.0 && is_some(tg) == 1 && vg2 == KM_GEOMETRY_T_SHAPED, "organic (bond records, VSEPR)");
+    var acc = functional_group_is_hydrogen_bond_acceptor(KM_FUNCTIONAL_GROUP_ETHER);
+    var don = functional_group_is_hydrogen_bond_donor(KM_FUNCTIONAL_GROUP_ETHER);
+    assert(acc == 1 && don == 0, "organic (ADR 0002 #6 donor / acceptor)");
+    var md: f64 = KM_MADELUNG_NACL;
+    assert(md == 1.747565 && KM_IONIC_RADII_COUNT == 30, "inorganic_data (the last pending constants)");
+    var tb, vb = born_lande_lattice_energy(KM_MADELUNG_NACL, 1, 1, 0.000000000282, 8.0);
+    var ub: f64 = vb;
+    var tc5, vc5 = cfse_octahedral(6, 0);
+    var c6: f64 = vc5;
+    assert(is_ok(tb) == 1 && ub > -753900.0 && ub < -752900.0, "inorganic (Born–Landé)");
+    assert(is_ok(tc5) == 1 && c6 == -2.4, "inorganic (CFSE, low-spin d⁶: exactly −2.4, ADR 0002 #12)");
+    var rna: f64 = ionic_radius_radius_pm(lookup_ionic_radius("Na", 1));
+    assert(rna == 102.0, "inorganic (ionic radii handle)");
+    var hc14 = lookup_isotope("C-14");
+    var tc14: f64 = isotope_half_life_s(hc14);
+    assert(KM_ISOTOPES_COUNT == 18 && isotope_z(hc14) == 6 && tc14 == 179880000000.0, "nuclear_data (ISOTOPES handle)");
+    assert(streq(isotope_decay_mode(lookup_isotope("K-40")), "β⁻/β⁺/EC") == 1, "nuclear_data (UTF-8 decay mode)");
+    var tse, vse = semi_empirical_binding_energy(26, 56);
+    var bse: f64 = vse;
+    var tsx, vsx = semi_empirical_binding_energy(3, 2);
+    assert(is_ok(tse) == 1 && bse > 493.0 && bse < 495.0, "nuclear (SEMF: cbrt, sqrt)");
+    assert(is_err_result(tsx) == 1 && vsx == KM_ERR_INVALID_INPUT, "nuclear (SEMF z > a: Err, ADR 0002 #3)");
+    var nabc[24];
+    var tdc, vdc = decay_chain_two_step(1000.0, 0.1, 0.05, 10.0, &nabc);
+    var nc: f64 = load64(&nabc + 16);
+    assert(is_ok(tdc) == 1 && vdc == 3 && nc > 154.0 && nc < 156.0, "nuclear (decay chain buffer: exp, expm1)");
+    var qr[16];
+    var qp[16];
+    var mdeu: f64 = 2.0141;
+    var mt: f64 = 3.01605;
+    var mhe: f64 = 4.0026;
+    var mn: f64 = 1.00866;
+    store64(&qr, mdeu);
+    store64(&qr + 8, mt);
+    store64(&qp, mhe);
+    store64(&qp + 8, mn);
+    var qv: f64 = q_value(&qr, 2, &qp, 2);
+    assert(qv > 17.1 && qv < 18.1, "nuclear (q_value slices, thermo's _km_sum)");
+    var tlj, vlj = lennard_jones(1.0, 1.0, 1.0);
+    var vlv: f64 = vlj;
+    assert(is_ok(tlj) == 1 && vlv == 0.0, "potential (Lennard-Jones at r = σ)");
+    var rm: f64 = lj_equilibrium_distance(1.0);
+    assert(_km_bits(rm) == 0x3FF1F59AC3C7D6C0, "potential (r_min = RN(2^(1/6)), ADR 0002 #16)");
+    var gpts: f64[12];
+    gpts[0] = 1.0;
+    gpts[1] = 1.0;
+    gpts[2] = 0.0;
+    gpts[3] = 0.0;
+    gpts[4] = 0.0;
+    gpts[5] = 0.0;
+    gpts[6] = 1.5;
+    gpts[7] = 0.0;
+    gpts[8] = 0.0;
+    gpts[9] = 2.5;
+    gpts[10] = 0.0;
+    gpts[11] = 1.0;
+    var tdh, vdh = dihedral_angle(&gpts, &gpts + 24, &gpts + 48, &gpts + 72);
+    var dhv: f64 = vdh;
+    assert(is_ok(tdh) == 1 && dhv > 1.5707963 && dhv < 1.5707964, "potential (gauche dihedral: atan2, +90°)");
+    var tma, vma = morse(5.0, 1.0, 1.5, 3.0);
+    var ma: f64 = vma;
+    assert(is_ok(tma) == 1 && ma > 3.0 && ma < 3.05, "potential (Morse: exp, 5·(1 − e^−1.5)²)");
     return assert_summary();
 }
 

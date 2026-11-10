@@ -27,6 +27,9 @@ tanmatra's probe_tables.py; extend `checks` as the data modules arrive.
 - src/electrochemistry_data.cyr (M3a): KM_STANDARD_POTENTIALS_COUNT; for every STANDARD_POTENTIALS row the
   equation (its UTF-8 bytes through the blob offsets) and couple, the electron count and E°, against the golden
   `electrochemistry::STANDARD_POTENTIALS[]` rows. src/constants.cyr's checks cover the ten solution constants.
+- src/nuclear_data.cyr (M4c): KM_ISOTOPES_COUNT; for every ISOTOPES row the label (through the blob offsets), Z (u8),
+  A (u16), the half-life and the decay mode (its UTF-8 bytes through the blob offsets), against the golden
+  `nuclear::ISOTOPES[]` rows. The four nuclear constants are src/constants.cyr's.
 - src/element_data.cyr (M1): for every row of ELEMENTS, the atomic number, symbol, name,
   atomic mass, electronegativity (presence flag and value) and category, against the golden
   `element::lookup_by_number` row of that Z; for every row of ELEMENT_PROPERTIES, the atomic
@@ -55,7 +58,16 @@ def unpct_utf8(t):
     return re.sub(rb"%([0-9A-F]{2})", lambda m: bytes([int(m.group(1), 16)]), t.encode()).decode("utf-8")
 
 def snake(camel):
-    return re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", camel).upper()
+    """scripts/oracle/src/cyr.rs's snake (tanmatra's rule): `_` before a capital after a lowercase letter or digit, or
+    before a capital that starts a capitalised word after a run of capitals (`CCDouble` → `CC_DOUBLE`, M4b)."""
+    out = []
+    for k, ch in enumerate(camel):
+        if ch.isupper() and k > 0:
+            prev, nxt = camel[k - 1], camel[k + 1] if k + 1 < len(camel) else ""
+            if prev.islower() or prev.isdigit() or (prev.isupper() and nxt.islower()):
+                out.append("_")
+        out.append(ch.upper())
+    return "".join(out)
 
 checks = []  # (cyrius statement printing one value, kind 'f' | 'i' | 's', expected text, label)
 fails = 0
@@ -288,11 +300,166 @@ if consts_e != {"KM_STANDARD_POTENTIALS_COUNT"}:
     fail(f"src/electrochemistry_data.cyr constants not probed: {sorted(consts_e)}")
 nm3a = len(checks) - nm3a_before
 
+# ── src/organic_data.cyr (M4b) ──────────────────────────────────────────────────────
+nm4b_before = len(checks)
+odata = (root / "src/organic_data.cyr").read_text()
+orows = {}
+for fn, cls, ins, outs in rows("organic"):
+    if fn in ("BondType::energy_kj", "Geometry::ideal_bond_angle", "FunctionalGroup::pattern",
+              "FunctionalGroup::is_polar", "FunctionalGroup::hydrogen_bonding"):
+        orows.setdefault(fn, []).append((ins[0][2:].split(".", 1)[1], outs[0]))
+def member(prefix, variant):
+    # ADR 0002 #6: Geometry::TShapedThreeLonePairs is KM_GEOMETRY_T_SHAPED.
+    return "KM_GEOMETRY_T_SHAPED" if variant == "TShapedThreeLonePairs" else prefix + snake(variant)
+for fn, prefix, count, col in (("BondType::energy_kj", "KM_BOND_TYPE_", "KM_BOND_TYPE_COUNT", "KM_BOND_TYPE_ENERGY_KJ"),
+                               ("Geometry::ideal_bond_angle", "KM_GEOMETRY_", "KM_GEOMETRY_COUNT",
+                                "KM_GEOMETRY_IDEAL_BOND_ANGLE")):
+    rs = orows.get(fn, [])
+    checks.append((f"fmt_int({count});", "i", str(len(rs)), count))
+    for k, (v, want) in enumerate(rs):   # the golden rows are in declaration order: row k is value k
+        name = member(prefix, v)
+        checks.append((f"fmt_int({name});", "i", str(k), f"{name} = {k}"))
+        checks.append((f"x = {col}[{name}]; fmt_hex(x);", "f", want[2:], f"{col}[{name}]"))
+pats = orows.get("FunctionalGroup::pattern", [])
+checks.append(("fmt_int(KM_FUNCTIONAL_GROUP_COUNT);", "i", str(len(pats)), "KM_FUNCTIONAL_GROUP_COUNT"))
+for k, (v, want) in enumerate(pats):
+    name = member("KM_FUNCTIONAL_GROUP_", v)
+    checks.append((f"fmt_int({name});", "i", str(k), f"{name} = {k}"))
+    checks.append((f"p = &_KM_FUNCTIONAL_GROUP_PATTERN_BYTES + _KM_FUNCTIONAL_GROUP_PATTERN_OFF[{name}]; print(p, strlen(p));",
+                   "s", unpct_utf8(want[2:]), f"pattern[{name}] (UTF-8)"))
+    # ADR 0002 #6's acceptor column has no golden row: its rule on the golden pattern, IUPAC 2011's electron-rich
+    # region — a lone-pair atom (O, N, S, a halogen or the placeholder X) or a π bond (=, ≡, an aryl ring).
+    pat = unpct_utf8(want[2:])
+    atoms = set(re.findall(r"[A-Z][a-z]?", pat))
+    site = atoms & {"O", "N", "S", "F", "Cl", "Br", "I", "X", "Ar"} or "=" in pat or "≡" in pat or "C₆H₅" in pat
+    acc = "1" if site else "0"
+    checks.append((f"if (KM_FUNCTIONAL_GROUP_IS_HYDROGEN_BOND_ACCEPTOR[{name}]) {{ fmt_int(1); }} else {{ fmt_int(0); }}",
+                   "i", acc, f"acceptor[{name}] (by its rule)"))
+for fn, col in (("FunctionalGroup::is_polar", "KM_FUNCTIONAL_GROUP_IS_POLAR"),
+                ("FunctionalGroup::hydrogen_bonding", "KM_FUNCTIONAL_GROUP_IS_HYDROGEN_BOND_DONOR")):
+    for v, want in orows.get(fn, []):
+        name = member("KM_FUNCTIONAL_GROUP_", v)
+        checks.append((f"if ({col}[{name}]) {{ fmt_int(1); }} else {{ fmt_int(0); }}", "i", want[2:], f"{col}[{name}]"))
+covered_o = {"KM_BOND_TYPE_ENERGY_KJ", "KM_GEOMETRY_IDEAL_BOND_ANGLE", "_KM_FUNCTIONAL_GROUP_PATTERN_OFF",
+             "_KM_FUNCTIONAL_GROUP_PATTERN_BYTES", "KM_FUNCTIONAL_GROUP_IS_POLAR",
+             "KM_FUNCTIONAL_GROUP_IS_HYDROGEN_BOND_DONOR", "KM_FUNCTIONAL_GROUP_IS_HYDROGEN_BOND_ACCEPTOR"}
+tables_o = set(re.findall(r"^var (_?KM_[A-Z0-9_]+)", odata, re.M))
+if tables_o != covered_o:
+    fail(f"src/organic_data.cyr tables not probed: {sorted(tables_o - covered_o)}; probed but gone: {sorted(covered_o - tables_o)}")
+consts_o = set(re.findall(r"^const (_?KM_[A-Z0-9_]+)", odata, re.M))
+if consts_o != {"KM_BOND_TYPE_COUNT", "KM_GEOMETRY_COUNT", "KM_FUNCTIONAL_GROUP_COUNT"}:
+    fail(f"src/organic_data.cyr constants not probed: {sorted(consts_o)}")
+members_o = set(re.findall(r"^    (KM_[A-Z0-9_]+) = \d+;", odata, re.M))
+probed_o = {member(p, v) for fn, p in (("BondType::energy_kj", "KM_BOND_TYPE_"), ("Geometry::ideal_bond_angle", "KM_GEOMETRY_"),
+                                        ("FunctionalGroup::pattern", "KM_FUNCTIONAL_GROUP_")) for v, _ in orows.get(fn, [])}
+if members_o != probed_o:
+    fail(f"src/organic_data.cyr enum members not probed: {sorted(members_o - probed_o)}; probed but gone: {sorted(probed_o - members_o)}")
+nm4b_o = len(checks) - nm4b_before
+
+# ── src/inorganic_data.cyr (M4b) ────────────────────────────────────────────────────
+nm4b_before = len(checks)
+idata = (root / "src/inorganic_data.cyr").read_text()
+for m in re.finditer(r"^# Rust: kimiya::(\S+)\nconst (KM_[A-Z0-9_]+) = ", idata, re.M):
+    path, name = m.groups()
+    if path not in golden:
+        fail(f"src/inorganic_data.cyr: {name}: kimiya::{path} has no golden row")
+        continue
+    checks.append((f"x = {name}; fmt_hex(x);", "f", golden[path][2:], f"const {path}"))
+    nconst += 1
+lig, cfse, unp, radii, radii_len = [], {}, {}, {}, None
+for fn, cls, ins, outs in rows("inorganic"):
+    if fn == "Ligand::field_strength":
+        lig.append((ins[0][2:].split(".", 1)[1], outs[0]))
+    elif fn == "inorganic::cfse_octahedral" and outs[0].startswith("f:"):
+        cfse[(int(ins[0][2:]), int(ins[1][2:]))] = outs[0]
+    elif fn == "inorganic::unpaired_electrons_oct" and outs[0].startswith("i:"):
+        unp[(int(ins[0][2:]), int(ins[1][2:]))] = outs[0]
+    elif fn == "inorganic::IONIC_RADII[]":
+        radii[int(ins[0][2:])] = outs
+    elif fn == "inorganic::IONIC_RADII":
+        radii_len = int(outs[0][2:])
+checks.append(("fmt_int(KM_LIGAND_COUNT);", "i", str(len(lig)), "KM_LIGAND_COUNT"))
+for k, (v, want) in enumerate(lig):
+    name = "KM_LIGAND_" + snake(v)
+    checks.append((f"fmt_int({name});", "i", str(k), f"{name} = {k}"))
+    checks.append((f"fmt_int(KM_LIGAND_FIELD_STRENGTH[{name}]);", "i", want[2:], f"KM_LIGAND_FIELD_STRENGTH[{name}]"))
+if sorted(cfse) != sorted(unp) or sorted(cfse) != [(d, h) for d in range(11) for h in (0, 1)]:
+    fail(f"golden cfse / unpaired Ok rows are not d = 0 ..= 10 × both spins: {sorted(cfse)[:4]}..")
+for (d, h), want in sorted(cfse.items()):
+    spin = "HIGH_SPIN" if h == 1 else "LOW_SPIN"
+    t2g, eg = f"_KM_OCT_OCCUPANCY_{spin}_T2G[{d}]", f"_KM_OCT_OCCUPANCY_{spin}_EG[{d}]"
+    # Each occupancy cell is probed through what pins it: t2g + eg = d, and Rust's cfse formula on the pair.
+    checks.append((f"fmt_int({t2g} + {eg});", "i", str(d), f"{spin} occupancy d{d}: t2g + eg"))
+    checks.append((f"ft = f64_from({t2g}); fe = f64_from({eg}); x = ft * m04 + fe * 0.6; fmt_hex(x);", "f", want[2:],
+                   f"{spin} occupancy d{d}: t2g·(−0.4) + eg·0.6 = cfse_octahedral({d}, {h})"))
+    checks.append((f"fmt_int(_KM_OCT_UNPAIRED_{spin}[{d}]);", "i", unp[(d, h)][2:], f"_KM_OCT_UNPAIRED_{spin}[{d}]"))
+rcount = int(re.search(r"^const KM_IONIC_RADII_COUNT = (\d+);", idata, re.M).group(1))
+if radii_len != rcount or sorted(radii) != list(range(rcount)):
+    fail(f"golden IONIC_RADII has {radii_len} rows ({len(radii)} listed); KM_IONIC_RADII_COUNT is {rcount}")
+checks.append(("fmt_int(KM_IONIC_RADII_COUNT);", "i", str(radii_len), "KM_IONIC_RADII_COUNT"))
+for k in range(rcount):
+    sym, q, cn, r = radii[k]
+    lab = f"IONIC_RADII[{k}]"
+    checks.append((f"p = &_KM_IONIC_RADII_SYMBOL_BYTES + _KM_IONIC_RADII_SYMBOL_OFF[{k}]; print(p, strlen(p));",
+                   "s", unpct(sym[2:]), f"{lab}.symbol"))
+    checks.append((f"fmt_int(KM_IONIC_RADII_CHARGE[{k}]);", "i", q[2:], f"{lab}.charge (i8)"))
+    checks.append((f"fmt_int(KM_IONIC_RADII_COORDINATION[{k}]);", "i", cn[2:], f"{lab}.coordination"))
+    checks.append((f"x = KM_IONIC_RADII_RADIUS_PM[{k}]; fmt_hex(x);", "f", r[2:], f"{lab}.radius_pm"))
+covered_i = {"KM_LIGAND_FIELD_STRENGTH", "_KM_OCT_OCCUPANCY_HIGH_SPIN_T2G", "_KM_OCT_OCCUPANCY_HIGH_SPIN_EG",
+             "_KM_OCT_OCCUPANCY_LOW_SPIN_T2G", "_KM_OCT_OCCUPANCY_LOW_SPIN_EG", "_KM_OCT_UNPAIRED_HIGH_SPIN",
+             "_KM_OCT_UNPAIRED_LOW_SPIN", "_KM_IONIC_RADII_SYMBOL_OFF", "_KM_IONIC_RADII_SYMBOL_BYTES",
+             "KM_IONIC_RADII_CHARGE", "KM_IONIC_RADII_COORDINATION", "KM_IONIC_RADII_RADIUS_PM"}
+tables_i = set(re.findall(r"^var (_?KM_[A-Z0-9_]+)", idata, re.M))
+if tables_i != covered_i:
+    fail(f"src/inorganic_data.cyr tables not probed: {sorted(tables_i - covered_i)}; probed but gone: {sorted(covered_i - tables_i)}")
+consts_i = set(re.findall(r"^const (_?KM_[A-Z0-9_]+) = \d+;", idata, re.M))
+if consts_i != {"KM_LIGAND_COUNT", "KM_IONIC_RADII_COUNT"}:
+    fail(f"src/inorganic_data.cyr integer constants not probed: {sorted(consts_i)}")
+members_i = set(re.findall(r"^    (KM_[A-Z0-9_]+) = \d+;", idata, re.M))
+if members_i != {"KM_LIGAND_" + snake(v) for v, _ in lig}:
+    fail(f"src/inorganic_data.cyr enum members not probed: {sorted(members_i)}")
+nm4b_i = len(checks) - nm4b_before
+
+# ── src/nuclear_data.cyr (M4c) ──────────────────────────────────────────────────────
+nm4c_before = len(checks)
+ndata = (root / "src/nuclear_data.cyr").read_text()
+iso_rows, iso_len = {}, None
+for fn, cls, ins, outs in rows("nuclear"):
+    if fn == "nuclear::ISOTOPES[]":
+        iso_rows[int(ins[0][2:])] = outs
+    elif fn == "nuclear::ISOTOPES":
+        iso_len = int(outs[0][2:])
+icount_n = int(re.search(r"^const KM_ISOTOPES_COUNT = (\d+);", ndata, re.M).group(1))
+if iso_len != icount_n or sorted(iso_rows) != list(range(icount_n)):
+    fail(f"golden ISOTOPES has {iso_len} rows ({len(iso_rows)} listed); KM_ISOTOPES_COUNT is {icount_n}")
+checks.append(("fmt_int(KM_ISOTOPES_COUNT);", "i", str(iso_len), "KM_ISOTOPES_COUNT"))
+for k in range(icount_n):
+    sym, z, a, hl, mode = iso_rows[k]
+    lab = f"ISOTOPES[{k}]"
+    checks.append((f"p = &_KM_ISOTOPES_SYMBOL_BYTES + _KM_ISOTOPES_SYMBOL_OFF[{k}]; print(p, strlen(p));",
+                   "s", unpct(sym[2:]), f"{lab}.symbol"))
+    checks.append((f"fmt_int(KM_ISOTOPES_Z[{k}]);", "i", z[2:], f"{lab}.z (u8)"))
+    checks.append((f"fmt_int(KM_ISOTOPES_A[{k}]);", "i", a[2:], f"{lab}.a (u16)"))
+    checks.append((f"x = KM_ISOTOPES_HALF_LIFE_S[{k}]; fmt_hex(x);", "f", hl[2:], f"{lab}.half_life_s"))
+    checks.append((f"p = &_KM_ISOTOPES_DECAY_MODE_BYTES + _KM_ISOTOPES_DECAY_MODE_OFF[{k}]; print(p, strlen(p));",
+                   "s", unpct_utf8(mode[2:]), f"{lab}.decay_mode (UTF-8)"))
+covered_n = {"_KM_ISOTOPES_SYMBOL_OFF", "_KM_ISOTOPES_SYMBOL_BYTES", "KM_ISOTOPES_Z", "KM_ISOTOPES_A",
+             "KM_ISOTOPES_HALF_LIFE_S", "_KM_ISOTOPES_DECAY_MODE_OFF", "_KM_ISOTOPES_DECAY_MODE_BYTES"}
+tables_n = set(re.findall(r"^var (_?KM_[A-Z0-9_]+)", ndata, re.M))
+if tables_n != covered_n:
+    fail(f"src/nuclear_data.cyr tables not probed: {sorted(tables_n - covered_n)}; probed but gone: {sorted(covered_n - tables_n)}")
+consts_n = set(re.findall(r"^const (_?KM_[A-Z0-9_]+)", ndata, re.M))
+if consts_n != {"KM_ISOTOPES_COUNT"}:
+    fail(f"src/nuclear_data.cyr constants not probed: {sorted(consts_n)}")
+nm4c = len(checks) - nm4c_before
+
 # ── the probe program ───────────────────────────────────────────────────────────────
 src = ['include "src/constants.cyr"', 'include "src/element_data.cyr"', 'include "src/phase_data.cyr"',
        'include "src/gas_data.cyr"', 'include "src/thermochem_data.cyr"',
-       'include "src/electrochemistry_data.cyr"', "",
-       "fn main() {", "    var x: f64 = 0.0;", "    var p = 0;"]
+       'include "src/electrochemistry_data.cyr"', 'include "src/organic_data.cyr"',
+       'include "src/inorganic_data.cyr"', 'include "src/nuclear_data.cyr"', "",
+       "fn main() {", "    var x: f64 = 0.0;", "    var m04: f64 = -0.4;", "    var ft: f64 = 0.0;",
+       "    var fe: f64 = 0.0;", "    var p = 0;"]
 for k, (stmt, kind, want, label) in enumerate(checks):
     src.append(f"    {stmt} println(\" {k}\");")
 src += ["    return 0;", "}", "", "var r = main();", "sys_exit_group(r);", ""]
@@ -321,6 +488,10 @@ for k, (stmt, kind, want, label) in enumerate(checks):
         fail(f"{label}: {stmt} -> {g!r}, want {want!r}")
 pending = len(golden) - nconst
 print(f"checked {nconst} constants, {nelem} element_data cells, {nm2a} phase_data / gas_data cells, "
-      f"{nm2b} thermochem_data cells and {nm3a} electrochemistry_data cells through the Cyrius compiler ({pending} "
-      f"golden constants are module data of later milestones); failures: {fails}")
+      f"{nm2b} thermochem_data cells, {nm3a} electrochemistry_data cells, {nm4b_o} organic_data cells, "
+      f"{nm4b_i} inorganic_data cells and {nm4c} nuclear_data cells through the Cyrius compiler ({pending} golden "
+      f"constants without a generated "
+      f"home); failures: {fails}")
+if pending:
+    fail(f"{pending} golden constants have no generated constant (none is pending since M4b)")
 sys.exit(1 if fails else 0)

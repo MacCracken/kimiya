@@ -27,6 +27,13 @@ include "src/solution.cyr"
 include "src/electrochemistry_data.cyr"
 include "src/electrochemistry.cyr"
 include "src/kinetics.cyr"
+include "src/organic_data.cyr"
+include "src/organic.cyr"
+include "src/inorganic_data.cyr"
+include "src/inorganic.cyr"
+include "src/potential.cyr"
+include "src/nuclear_data.cyr"
+include "src/nuclear.cyr"
 
 # A sink the timed loops write to, so their results are used.
 var _bench_sink = 0;
@@ -45,6 +52,18 @@ var _bench_cu = 0;          # "Cu2+/Cu"
 var _bench_n = 0;           # 2 electrons (Rust's black_box(2) u8)
 var _bench_k = 0;           # M3b: 8 f64 input slots, filled by main()
 var _bench_m = 0;           # M3c-2a / M3c-2b: 9 f64 input slots, filled by main()
+var _bench_bonds_b = 0;     # M4b: [(CH, 4), (OODouble, 2)], 2 bond records (CH₄ + 2O₂ → CO₂ + 2H₂O)
+var _bench_bonds_f = 0;     # [(CODouble, 2), (OH, 4)]
+var _bench_sn = 0;          # "Sn"
+var _bench_q = 0;           # 2 (Sn²⁺, the table's last row)
+var _bench_nz = 0;          # M4c: 26 (Rust's black_box(26) u32)
+var _bench_nn = 0;          # 30
+var _bench_na = 0;          # 56
+var _bench_nu = 0;          # 6 f64 input slots, filled by main()
+var _bench_chain = 0;       # the decay chain's 24-byte out buffer
+var _bench_t = 0;           # M4a: 4 f64 input slots, filled by main()
+var _bench_pts = 0;         # M4d: the gauche dihedral's four points (12 f64), filled by main()
+var _bench_p = 0;           # M4d: 6 f64 input slots, filled by main()
 
 # element/lookup_by_symbol: `lookup_by_symbol(black_box("Fe"))`, a linear scan to row 26.
 fn bench_lookup_by_symbol(per_batch, batches) {
@@ -473,6 +492,42 @@ fn bench_pow(name, sx, sy, fid, per_batch, batches) {
     bench_report(b);
 }
 
+# mathx/cr_sin, cr_cos, cr_sincos, cr_atan2, cr_acos (M4a, Cyrius-only; ADR 0006) beside the stdlib's f64_sin /
+# f64_cos (x87 on x86_64, the fdlibm polyfills on aarch64; not correctly rounded) and ganita_f64_atan2. sin and cos at
+# 2π/3 + 0.1 (a Peng–Robinson angle), atan2 at (0.866, −0.5) (a 120° bond angle: |ba × bc|, ba·bc), acos at −0.35.
+# (M4a also benched M2a's double-double _km_cos, 1.68 µs, and _km_acos, 5.8 µs, which gas.cyr called until M4d moved it
+# to _km_cr_cos and _km_cr_acos and removed them.)
+fn bench_trig(name, fid, per_batch, batches) {
+    var x: f64 = load64(_bench_t);
+    var ty: f64 = load64(_bench_t + 8);
+    var tx: f64 = load64(_bench_t + 16);
+    var c: f64 = load64(_bench_t + 24);
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        if (fid == 0) { while (i < per_batch) { var r0: f64 = _km_cr_sin(x); _bench_sink = r0; i = i + 1; } }
+        if (fid == 1) { while (i < per_batch) { var r1: f64 = f64_sin(x); _bench_sink = r1; i = i + 1; } }
+        if (fid == 2) { while (i < per_batch) { var r2: f64 = _km_cr_cos(x); _bench_sink = r2; i = i + 1; } }
+        if (fid == 3) { while (i < per_batch) { var r3: f64 = f64_cos(x); _bench_sink = r3; i = i + 1; } }
+        if (fid == 5) {
+            while (i < per_batch) {
+                var s5, c5 = _km_cr_sincos(x);
+                _bench_sink = s5;
+                _bench_sink = c5;
+                i = i + 1;
+            }
+        }
+        if (fid == 6) { while (i < per_batch) { var r6: f64 = _km_cr_atan2(ty, tx); _bench_sink = r6; i = i + 1; } }
+        if (fid == 7) { while (i < per_batch) { var r7: f64 = ganita_f64_atan2(ty, tx); _bench_sink = r7; i = i + 1; } }
+        if (fid == 8) { while (i < per_batch) { var r8: f64 = _km_cr_acos(c); _bench_sink = r8; i = i + 1; } }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
 # A species list of up to three records (formula, coefficient), on the heap.
 #must_use
 fn _bench_species(f1, c1: f64, f2, c2: f64, f3, c3: f64): i64 {
@@ -484,6 +539,179 @@ fn _bench_species(f1, c1: f64, f2, c2: f64, f3, c3: f64): i64 {
     store64(buf + 32, f3);
     store64(buf + 40, c3);
     return buf;
+}
+
+# organic/enthalpy_from_bonds (Cyrius-only: rust-old/benches has no organic bench): the integration test's methane
+# combustion, `enthalpy_from_bonds(&[(CH, 4), (OODouble, 2)], &[(CODouble, 2), (OH, 4)])` — two lists of two
+# records, each checked and summed from −0.0, one subtraction.
+fn bench_enthalpy_from_bonds(per_batch, batches) {
+    var b = bench_new("organic/enthalpy_from_bonds");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var dh: f64 = enthalpy_from_bonds(_bench_bonds_b, 2, _bench_bonds_f, 2);
+            _bench_sink = dh;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# inorganic/lookup_ionic_radius (Cyrius-only: rust-old/benches has no inorganic bench): `lookup_ionic_radius("Sn", 2)`,
+# a linear scan to the last of the 30 rows (the charge and the first byte decide most rows).
+fn bench_lookup_ionic_radius(per_batch, batches) {
+    var b = bench_new("inorganic/lookup_ionic_radius");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) { _bench_sink = lookup_ionic_radius(_bench_sn, _bench_q); i = i + 1; }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# nuclear/binding_energy_per_nucleon_fe56: `binding_energy_per_nucleon(black_box(26), black_box(30),
+# black_box(55.934_936_33)).unwrap()` — the u32 checks and checked add, A = 0, the mass guard, Δm and one division.
+fn bench_binding_energy_per_nucleon(per_batch, batches) {
+    var m: f64 = load64(_bench_nu);
+    var b = bench_new("nuclear/binding_energy_per_nucleon_fe56");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = binding_energy_per_nucleon(_bench_nz, _bench_nn, m);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# nuclear/semi_empirical_fe56: `semi_empirical_binding_energy(black_box(26), black_box(56))` — one cbrt (ganita's,
+# correctly rounded), one sqrt, the five terms; a Result in the port (ADR 0002 #3).
+fn bench_semi_empirical(per_batch, batches) {
+    var b = bench_new("nuclear/semi_empirical_fe56");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = semi_empirical_binding_energy(_bench_nz, _bench_na);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# nuclear/decay_chain_two_step (Cyrius-only: rust-old/benches has no decay-chain bench): the Rust test's
+# `decay_chain_two_step(1000.0, 0.1, 0.05, 10.0)` — three guards, two correctly rounded exps and two expm1s (the
+# Bateman branch), into the caller's buffer.
+fn bench_decay_chain_two_step(per_batch, batches) {
+    var n0: f64 = load64(_bench_nu + 8);
+    var l1: f64 = load64(_bench_nu + 16);
+    var l2: f64 = load64(_bench_nu + 24);
+    var tt: f64 = load64(_bench_nu + 32);
+    var b = bench_new("nuclear/decay_chain_two_step");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = decay_chain_two_step(n0, l1, l2, tt, _bench_chain);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# potential/dihedral_angle: Rust's bench_dihedral, the butane-like gauche geometry in ångströms — A (1, 1, 0), B the
+# origin, C (1.5, 0, 0), D (2.5, 0, 1) — through four pointers (Rust passes [f64; 3] by value).
+fn bench_dihedral_angle(per_batch, batches) {
+    var b = bench_new("potential/dihedral_angle");
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = dihedral_angle(_bench_pts, _bench_pts + 24, _bench_pts + 48, _bench_pts + 72);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# Cyrius-only (rust-old/benches has no other potential bench): potential/bond_angle (water at metre scale),
+# potential/lennard_jones (Ar at r_min), potential/lj_equilibrium_distance (ADR 0002 #16's correctly rounded σ·2^(1/6)),
+# potential/morse (HCl at 1.1·r_e), and mathx/cr_exp2_scaled (ADR 0002 #13's N₀·2⁻ⁿ, 1000 after 1075.3 half-lives).
+fn bench_potential(name, fid, per_batch, batches) {
+    var e: f64 = load64(_bench_p);
+    var s: f64 = load64(_bench_p + 8);
+    var r: f64 = load64(_bench_p + 16);
+    var a: f64 = load64(_bench_p + 24);
+    var re: f64 = load64(_bench_p + 32);
+    var nn: f64 = load64(_bench_p + 40);
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        if (fid == 0) {
+            while (i < per_batch) {
+                var t0, v0 = bond_angle(_bench_pts + 96, _bench_pts + 120, _bench_pts + 144);
+                _bench_sink = v0;
+                i = i + 1;
+            }
+        }
+        if (fid == 1) {
+            while (i < per_batch) {
+                var t1, v1 = lennard_jones(e, s, r);
+                _bench_sink = v1;
+                i = i + 1;
+            }
+        }
+        if (fid == 2) {
+            while (i < per_batch) {
+                var v2: f64 = lj_equilibrium_distance(s);
+                _bench_sink = v2;
+                i = i + 1;
+            }
+        }
+        if (fid == 3) {
+            while (i < per_batch) {
+                var t3, v3 = morse(e, a, re, r);
+                _bench_sink = v3;
+                i = i + 1;
+            }
+        }
+        if (fid == 4) {
+            while (i < per_batch) {
+                var v4: f64 = _km_cr_exp2_scaled(e, nn);
+                _bench_sink = v4;
+                i = i + 1;
+            }
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
 }
 
 # Runs every bench.
@@ -577,6 +805,91 @@ fn main(): i64 {
     bench_pow("mathx/ganita_f64_pow", 5, 6, 1, 1000000, 20);
     bench_pow("mathx/cr_pow_1.409e-132", 7, 8, 0, 1000000, 20);
     bench_pow("mathx/ganita_f64_pow_1.409e-132", 7, 8, 1, 1000000, 20);
+    _bench_bonds_b = alloc(4 * 8);
+    store64(_bench_bonds_b, KM_BOND_TYPE_CH);
+    store64(_bench_bonds_b + 8, 4);
+    store64(_bench_bonds_b + 16, KM_BOND_TYPE_OO_DOUBLE);
+    store64(_bench_bonds_b + 24, 2);
+    _bench_bonds_f = alloc(4 * 8);
+    store64(_bench_bonds_f, KM_BOND_TYPE_CO_DOUBLE);
+    store64(_bench_bonds_f + 8, 2);
+    store64(_bench_bonds_f + 16, KM_BOND_TYPE_OH);
+    store64(_bench_bonds_f + 24, 4);
+    bench_enthalpy_from_bonds(1000000, 20);
+    _bench_sn = "Sn";
+    _bench_q = 2;
+    bench_lookup_ionic_radius(1000000, 20);
+    _bench_nz = 26;
+    _bench_nn = 30;
+    _bench_na = 56;
+    _bench_nu = alloc(6 * 8);
+    var ins5: f64[6];
+    ins5[0] = 55.93493633;
+    ins5[1] = 1000.0;
+    ins5[2] = 0.1;
+    ins5[3] = 0.05;
+    ins5[4] = 10.0;
+    ins5[5] = 0.0;
+    memcpy(_bench_nu, &ins5, 6 * 8);
+    _bench_chain = alloc(24);
+    bench_binding_energy_per_nucleon(1000000, 20);
+    bench_semi_empirical(1000000, 20);
+    bench_decay_chain_two_step(1000000, 20);
+    _bench_t = alloc(4 * 8);
+    var ins6: f64[4];
+    ins6[0] = 2.1943951023931953;
+    ins6[1] = 0.8660254037844386;
+    ins6[2] = -0.5;
+    ins6[3] = -0.35;
+    memcpy(_bench_t, &ins6, 4 * 8);
+    bench_trig("mathx/cr_sin", 0, 1000000, 20);
+    bench_trig("mathx/f64_sin", 1, 1000000, 20);
+    bench_trig("mathx/cr_cos", 2, 1000000, 20);
+    bench_trig("mathx/f64_cos", 3, 1000000, 20);
+    bench_trig("mathx/cr_sincos", 5, 1000000, 20);
+    bench_trig("mathx/cr_atan2", 6, 1000000, 20);
+    bench_trig("mathx/ganita_f64_atan2", 7, 1000000, 20);
+    bench_trig("mathx/cr_acos", 8, 1000000, 20);
+    _bench_pts = alloc(21 * 8);
+    var ins7: f64[21];
+    ins7[0] = 1.0;                              # the gauche dihedral: A, B, C, D
+    ins7[1] = 1.0;
+    ins7[2] = 0.0;
+    ins7[3] = 0.0;
+    ins7[4] = 0.0;
+    ins7[5] = 0.0;
+    ins7[6] = 1.5;
+    ins7[7] = 0.0;
+    ins7[8] = 0.0;
+    ins7[9] = 2.5;
+    ins7[10] = 0.0;
+    ins7[11] = 1.0;
+    ins7[12] = 0.00000000009572;                # water in metres: H₁, O, H₂ at 104.52°
+    ins7[13] = 0.0;
+    ins7[14] = 0.0;
+    ins7[15] = 0.0;
+    ins7[16] = 0.0;
+    ins7[17] = 0.0;
+    ins7[18] = -0.000000000023966374020599026;
+    ins7[19] = 0.00000000009267109213698450;
+    ins7[20] = 0.0;
+    memcpy(_bench_pts, &ins7, 21 * 8);
+    bench_dihedral_angle(1000000, 20);
+    _bench_p = alloc(6 * 8);
+    var ins8: f64[6];
+    ins8[0] = 0.00000000000000000000165;        # ε (Ar); D_e for Morse below; N₀ = 1000 for exp2_scaled
+    ins8[1] = 0.00000000034;                    # σ (Ar)
+    ins8[2] = 0.00000000038163735642518;        # r ≈ r_min (Ar)
+    ins8[3] = 18680000000.0;                    # a (HCl)
+    ins8[4] = 0.00000000034694305129561;        # r_e = r/1.1
+    ins8[5] = -1075.3;                          # −n
+    memcpy(_bench_p, &ins8, 6 * 8);
+    bench_potential("potential/bond_angle", 0, 1000000, 20);
+    bench_potential("potential/lennard_jones", 1, 1000000, 20);
+    bench_potential("potential/lj_equilibrium_distance", 2, 1000000, 20);
+    bench_potential("potential/morse", 3, 1000000, 20);
+    store64(_bench_p, 0x408F400000000000);      # 1000.0
+    bench_potential("mathx/cr_exp2_scaled", 4, 1000000, 20);
     return 0;
 }
 

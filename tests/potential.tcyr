@@ -1,0 +1,637 @@
+# potential.tcyr — the tests of rust-old/src/potential.rs, ported one for one (each test_group is the Rust test's name;
+# all 33), plus Cyrius-only tests of the pointer arguments (null pointers, the 24-byte point layout), the private
+# helpers' operation order, the typed tolerances on their thresholds, the −π → π mapping, and ADR 0002 #16, #17 and
+# #18's exact values. The golden corpus separately checks every function over its grid (tests/parity.tcyr).
+#
+# Adapted beyond the port's form (port plan §6.4: `Result::unwrap` is `is_ok` + the payload, a Rust `[f64; 3]` the
+# address of a three-f64 buffer, `x.cos()` / `x.sin()` the correctly rounded _km_cr_cos / _km_cr_sin, `x.to_radians()`
+# Rust's x·(π/180)), one test only: `morse_width_parameter_matches_force_constant` calls
+# `spectroscopy::vibrational_frequency`, which ports in M4e; its value, √(k/μ) after the positivity checks, is
+# computed inline. ADR 0002 #16, #17 and #18 change none of the Rust tests' cases beyond their tolerances (#16 moves
+# Ar's r_min by at most an ulp; #17 and #18 need ε ≥ 2¹⁰²² J or D_e ≥ 2¹⁰²³ J).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/potential.cyr"
+
+alloc_init();
+
+# 1 if |a − b| < eps.
+#must_use
+fn near(a: f64, b: f64, eps: f64): i64 {
+    var d: f64 = f64_abs(a - b);
+    if (d < eps) { return 1; }
+    return 0;
+}
+
+# f64::EPSILON.
+#must_use
+fn eps64(): f64 {
+    var e: f64 = 0.0000000000000002220446049250313;
+    return e;
+}
+
+# 1 if x is NaN.
+#must_use
+fn is_nan(x: f64): i64 {
+    if (x != x) { return 1; }
+    return 0;
+}
+
+# The f64 with bit pattern b.
+#must_use
+fn from_bits(b): f64 {
+    var x: f64 = 0.0;
+    store64(&x, b);
+    return x;
+}
+
+# std::f64::consts::PI.
+#must_use
+fn pi(): f64 {
+    var p: f64 = 0x400921FB54442D18;
+    return p;
+}
+
+# std::f64::consts::FRAC_PI_2.
+#must_use
+fn frac_pi_2(): f64 {
+    var p: f64 = 0x3FF921FB54442D18;
+    return p;
+}
+
+# A Result's Ok payload as an f64 (the test fails on Err).
+#must_use
+fn ok_f(t, v, name): f64 {
+    assert(is_ok(t) == 1, name);
+    var x: f64 = v;
+    return x;
+}
+
+# 1 if the Result (t, v) is Err(InvalidInput).
+#must_use
+fn is_invalid(t, v): i64 {
+    if (is_err_result(t) == 1 && v == KM_ERR_INVALID_INPUT) { return 1; }
+    return 0;
+}
+
+# The points of a test: up to four, three f64 each, in one buffer (point k at &_pts + 24k).
+var _pts: f64[12];
+
+# Point k := (x, y, z); returns its address.
+fn pt(k, x: f64, y: f64, z: f64): i64 {
+    _pts[3 * k] = x;
+    _pts[3 * k + 1] = y;
+    _pts[3 * k + 2] = z;
+    return &_pts + 24 * k;
+}
+
+# lennard_jones(ε, σ, r).unwrap().
+#must_use
+fn lj(e: f64, s: f64, r: f64): f64 {
+    var t, v = lennard_jones(e, s, r);
+    var x: f64 = ok_f(t, v, "lennard_jones: Ok");
+    return x;
+}
+
+# morse(D_e, a, r_e, r).unwrap().
+#must_use
+fn mo(d: f64, a: f64, re: f64, r: f64): f64 {
+    var t, v = morse(d, a, re, r);
+    var x: f64 = ok_f(t, v, "morse: Ok");
+    return x;
+}
+
+# ── Lennard-Jones ──
+
+fn _t_lj_at_equilibrium_is_negative() {
+    test_group("lj_at_equilibrium_is_negative");
+    var sigma: f64 = 0.00000000034;           # Ar
+    var r: f64 = lj_equilibrium_distance(sigma);
+    var v: f64 = lj(0.00000000000000000000165, sigma, r);
+    assert(v < 0.0, "V at r_min should be negative (bound)");
+}
+
+fn _t_lj_at_sigma_is_zero() {
+    test_group("lj_at_sigma_is_zero");
+    var v: f64 = lj(1.0, 1.0, 1.0);
+    var av: f64 = f64_abs(v);
+    assert(av < eps64(), "V(σ) should be 0");
+}
+
+fn _t_lj_repulsive_at_short_range() {
+    test_group("lj_repulsive_at_short_range");
+    var v: f64 = lj(1.0, 1.0, 0.5);
+    assert(v > 0.0, "V at r<σ should be repulsive");
+}
+
+fn _t_lj_approaches_zero_at_long_range() {
+    test_group("lj_approaches_zero_at_long_range");
+    var v: f64 = lj(1.0, 1.0, 100.0);
+    var av: f64 = f64_abs(v);
+    assert(av < 0.0000000001, "V at large r should approach 0");
+}
+
+fn _t_lj_zero_distance_is_error() {
+    test_group("lj_zero_distance_is_error");
+    var t, v = lennard_jones(1.0, 1.0, 0.0);
+    assert(is_err_result(t) == 1, "r = 0 is an error");
+}
+
+fn _t_lj_invalid_epsilon_is_error() {
+    test_group("lj_invalid_epsilon_is_error");
+    var t1, v1 = lennard_jones(0.0, 1.0, 1.0);
+    assert(is_err_result(t1) == 1, "ε = 0");
+    var t2, v2 = lennard_jones(-1.0, 1.0, 1.0);
+    assert(is_err_result(t2) == 1, "ε = −1");
+    var t3, v3 = lennard_jones(_km_nan(), 1.0, 1.0);
+    assert(is_err_result(t3) == 1, "ε = NaN");
+    var t4, v4 = lennard_jones(_KM_INF, 1.0, 1.0);
+    assert(is_err_result(t4) == 1, "ε = ∞");
+}
+
+fn _t_lj_nan_inputs_are_errors() {
+    test_group("lj_nan_inputs_are_errors");
+    var t1, v1 = lennard_jones(1.0, _km_nan(), 1.0);
+    assert(is_err_result(t1) == 1, "σ = NaN");
+    var t2, v2 = lennard_jones(1.0, 1.0, _km_nan());
+    assert(is_err_result(t2) == 1, "r = NaN");
+    var t3, v3 = lennard_jones(1.0, 1.0, _KM_INF);
+    assert(is_err_result(t3) == 1, "r = ∞");
+}
+
+# ── Morse ──
+
+fn _t_morse_at_equilibrium_is_zero() {
+    test_group("morse_at_equilibrium_is_zero");
+    var v: f64 = mo(5.0, 1.0, 1.5, 1.5);
+    var av: f64 = f64_abs(v);
+    assert(av < eps64(), "V(r_e) should be 0");
+}
+
+fn _t_morse_at_infinity_is_de() {
+    test_group("morse_at_infinity_is_de");
+    var v: f64 = mo(5.0, 1.0, 1.5, 100.0);
+    assert(near(v, 5.0, 0.01) == 1, "V(∞) should approach D_e");
+}
+
+fn _t_morse_symmetric_near_equilibrium() {
+    test_group("morse_symmetric_near_equilibrium");
+    var vp: f64 = mo(5.0, 2.0, 1.5, 1.6);
+    var vm: f64 = mo(5.0, 2.0, 1.5, 1.4);
+    var d: f64 = f64_abs(vp - vm);
+    var mx: f64 = _km_max(vp, vm);
+    assert(d < (0.5 * mx), "should be roughly symmetric near r_e");
+}
+
+fn _t_morse_nan_inputs_are_errors() {
+    test_group("morse_nan_inputs_are_errors");
+    var t1, v1 = morse(_km_nan(), 1.0, 1.5, 1.5);
+    assert(is_err_result(t1) == 1, "D_e = NaN");
+    var t2, v2 = morse(5.0, _km_nan(), 1.5, 1.5);
+    assert(is_err_result(t2) == 1, "a = NaN");
+    var t3, v3 = morse(_KM_INF, 1.0, 1.5, 1.5);
+    assert(is_err_result(t3) == 1, "D_e = ∞");
+}
+
+fn _t_morse_width_parameter_hcl() {
+    test_group("morse_width_parameter_hcl");
+    # H³⁵Cl: ω_e = 5.634e14 rad/s, μ = 1.6267e-27 kg, D_e = 7.399e-19 J; a ≈ 1.868e10 m⁻¹ (literature ≈ 1.87 Å⁻¹).
+    var t, v = morse_width_parameter(563400000000000.0, 0.0000000000000000000000000016267, 0.0000000000000000007399);
+    var a: f64 = ok_f(t, v, "morse_width_parameter: Ok");
+    assert(near(a, 18680000000.0, 50000000.0) == 1, "HCl a ≈ 1.87e10 m⁻¹");
+}
+
+fn _t_morse_width_parameter_matches_force_constant() {
+    test_group("morse_width_parameter_matches_force_constant");
+    # 2·D_e·a² must equal the harmonic k = μω²; ω is spectroscopy::vibrational_frequency(k, μ) = √(k/μ) (M4e).
+    var k: f64 = 516.0;
+    var mu: f64 = 0.0000000000000000000000000016267;
+    var d_e: f64 = 0.0000000000000000007399;
+    var omega: f64 = f64_sqrt(k / mu);
+    var t, v = morse_width_parameter(omega, mu, d_e);
+    var a: f64 = ok_f(t, v, "morse_width_parameter: Ok");
+    var c: f64 = (((2.0 * d_e) * a) * a) / k;
+    assert(near(c, 1.0, 0.000000000001) == 1, "2·D_e·a² = k");
+}
+
+fn _t_morse_width_parameter_nan_is_error() {
+    test_group("morse_width_parameter_nan_is_error");
+    var t1, v1 = morse_width_parameter(_km_nan(), 1.0, 1.0);
+    assert(is_err_result(t1) == 1, "ω = NaN");
+    var t2, v2 = morse_width_parameter(1.0, _km_nan(), 1.0);
+    assert(is_err_result(t2) == 1, "μ = NaN");
+    var t3, v3 = morse_width_parameter(1.0, 1.0, _KM_INF);
+    assert(is_err_result(t3) == 1, "D_e = ∞");
+}
+
+# ── Coulomb ──
+
+# The elementary charge the Rust tests write as 1.602176634e-19 C.
+#must_use
+fn e_charge(): f64 {
+    var e: f64 = 0.0000000000000000001602176634;
+    return e;
+}
+
+fn _t_coulomb_opposite_charges_attractive() {
+    test_group("coulomb_opposite_charges_attractive");
+    var e: f64 = e_charge();
+    var t, v = coulomb(e, -e, 0.0000000001);
+    var x: f64 = ok_f(t, v, "coulomb: Ok");
+    assert(x < 0.0, "opposite charges should attract");
+}
+
+fn _t_coulomb_same_charges_repulsive() {
+    test_group("coulomb_same_charges_repulsive");
+    var e: f64 = e_charge();
+    var t, v = coulomb(e, e, 0.0000000001);
+    var x: f64 = ok_f(t, v, "coulomb: Ok");
+    assert(x > 0.0, "same charges should repel");
+}
+
+fn _t_coulomb_inverse_r() {
+    test_group("coulomb_inverse_r");
+    var e: f64 = e_charge();
+    var t1, v1 = coulomb(e, e, 0.0000000001);
+    var x1: f64 = ok_f(t1, v1, "coulomb: Ok");
+    var t2, v2 = coulomb(e, e, 0.0000000002);
+    var x2: f64 = ok_f(t2, v2, "coulomb: Ok");
+    var q: f64 = x1 / x2;
+    assert(near(q, 2.0, 0.001) == 1, "V should scale as 1/r");
+}
+
+fn _t_coulomb_zero_distance_is_error() {
+    test_group("coulomb_zero_distance_is_error");
+    var t, v = coulomb(1.0, 1.0, 0.0);
+    assert(is_err_result(t) == 1, "r = 0 is an error");
+}
+
+fn _t_coulomb_nan_distance_is_error() {
+    test_group("coulomb_nan_distance_is_error");
+    var t1, v1 = coulomb(1.0, 1.0, _km_nan());
+    assert(is_err_result(t1) == 1, "coulomb: r = NaN");
+    var t2, v2 = coulomb_force(1.0, 1.0, _km_nan());
+    assert(is_err_result(t2) == 1, "coulomb_force: r = NaN");
+    var ninf: f64 = -_KM_INF;
+    var t3, v3 = coulomb_force(1.0, 1.0, ninf);
+    assert(is_err_result(t3) == 1, "coulomb_force: r = −∞");
+}
+
+fn _t_coulomb_force_basic() {
+    test_group("coulomb_force_basic");
+    var e: f64 = e_charge();
+    var t, v = coulomb_force(e, e, 0.0000000001);
+    var x: f64 = ok_f(t, v, "coulomb_force: Ok");
+    assert(x > 0.00000002 && x < 0.00000003, "proton-proton force should be ~2.3e-8 N");
+}
+
+# ── 3D geometry ──
+
+fn _t_distance_3d_basic() {
+    test_group("distance_3d_basic");
+    var d: f64 = distance_3d(pt(0, 0.0, 0.0, 0.0), pt(1, 3.0, 4.0, 0.0));
+    assert(near(d, 5.0, eps64()) == 1, "|(3, 4, 0)| = 5");
+}
+
+fn _t_distance_3d_same_point() {
+    test_group("distance_3d_same_point");
+    var d: f64 = distance_3d(pt(0, 1.0, 2.0, 3.0), pt(1, 1.0, 2.0, 3.0));
+    var ad: f64 = f64_abs(d);
+    assert(ad < eps64(), "the same point: 0");
+}
+
+# bond_angle of A, B, C given as nine coordinates (written to points 0, 1, 2): the Result.
+#must_use
+fn angle3(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64, cx: f64, cy: f64, cz: f64): (i64, i64) {
+    var t, v = bond_angle(pt(0, ax, ay, az), pt(1, bx, by, bz), pt(2, cx, cy, cz));
+    return (t, v);
+}
+
+fn _t_bond_angle_right_angle() {
+    test_group("bond_angle_right_angle");
+    var t, v = angle3(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+    var a: f64 = ok_f(t, v, "bond_angle: Ok");
+    assert(near(a, frac_pi_2(), 0.0000000001) == 1, "should be 90°");
+}
+
+fn _t_bond_angle_linear() {
+    test_group("bond_angle_linear");
+    var t, v = angle3(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0);
+    var a: f64 = ok_f(t, v, "bond_angle: Ok");
+    assert(near(a, pi(), 0.0000000001) == 1, "should be 180°");
+}
+
+fn _t_bond_angle_coincident_is_error() {
+    test_group("bond_angle_coincident_is_error");
+    var t1, v1 = angle3(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    assert(is_err_result(t1) == 1, "A = B");
+    # Differs from B only by rounding noise relative to the coordinates.
+    var ax: f64 = 1.0 + 0.000000000000001;
+    var t2, v2 = angle3(ax, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0);
+    assert(is_err_result(t2) == 1, "A − B below the coordinates' resolution");
+}
+
+fn _t_bond_angle_nan_is_error() {
+    test_group("bond_angle_nan_is_error");
+    var t1, v1 = angle3(_km_nan(), 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    assert(is_err_result(t1) == 1, "NaN coordinate");
+    var t2, v2 = angle3(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, _KM_INF, 0.0, 0.0);
+    assert(is_err_result(t2) == 1, "∞ coordinate");
+}
+
+fn _t_bond_angle_metre_scale() {
+    test_group("bond_angle_metre_scale");
+    # Water in SI metres: O–H 0.9572 Å, H–O–H 104.52°.
+    var r: f64 = 0.00000000009572;
+    var deg: f64 = pi() / 180.0;
+    var theta: f64 = 104.52 * deg;            # 104.52_f64.to_radians()
+    var ct: f64 = _km_cr_cos(theta);
+    var st: f64 = _km_cr_sin(theta);
+    var t, v = angle3(r, 0.0, 0.0, 0.0, 0.0, 0.0, r * ct, r * st, 0.0);
+    var a: f64 = ok_f(t, v, "bond_angle: Ok");
+    assert(near(a, theta, 0.000000000001) == 1, "water's angle at metre scale");
+    # Femtometre scale works too.
+    var fm: f64 = 0.000000000000001;
+    var t2, v2 = angle3(fm, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, fm, 0.0);
+    var a2: f64 = ok_f(t2, v2, "bond_angle: Ok");
+    assert(near(a2, frac_pi_2(), 0.000000000001) == 1, "90° at femtometre scale");
+}
+
+fn _t_bond_angle_small_angle_is_accurate() {
+    test_group("bond_angle_small_angle_is_accurate");
+    # acos(cos θ) collapses to 0 for θ ≲ 1e-8; atan2 does not.
+    var theta: f64 = 0.000000001;
+    var ct: f64 = _km_cr_cos(theta);
+    var st: f64 = _km_cr_sin(theta);
+    var t, v = angle3(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, ct, st, 0.0);
+    var a: f64 = ok_f(t, v, "bond_angle: Ok");
+    var q: f64 = a / theta;
+    assert(near(q, 1.0, 0.000001) == 1, "θ = 1e-9 to 1e-6 relative");
+}
+
+# dihedral_angle of A, B, C, D given as twelve coordinates (points 0 … 3): the Result.
+#must_use
+fn dih(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64, j: f64, k: f64, l: f64): (i64, i64) {
+    var t, v = dihedral_angle(pt(0, a, b, c), pt(1, d, e, f), pt(2, g, h, i), pt(3, j, k, l));
+    return (t, v);
+}
+
+fn _t_dihedral_angle_planar_trans_is_pi() {
+    test_group("dihedral_angle_planar_trans_is_pi");
+    # All in the xy-plane, A and D on opposite sides of B–C: trans, φ = π.
+    var t, v = dih(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 1.0, 0.0, 3.0, 1.0, 0.0);
+    var a: f64 = ok_f(t, v, "dihedral_angle: Ok");
+    assert_bits_eq(a, 0x400921FB54442D18, "trans: π exactly");
+    # Mirror image through the B–C axis: still +π.
+    var t2, v2 = dih(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, -1.0, 0.0, 3.0, -1.0, 0.0);
+    var a2: f64 = ok_f(t2, v2, "dihedral_angle: Ok");
+    assert_bits_eq(a2, 0x400921FB54442D18, "the mirror image: π exactly");
+}
+
+fn _t_dihedral_angle_planar_cis_is_zero() {
+    test_group("dihedral_angle_planar_cis_is_zero");
+    var t, v = dih(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0);
+    var a: f64 = ok_f(t, v, "dihedral_angle: Ok");
+    var aa: f64 = f64_abs(a);
+    assert(aa < 0.000000000000001, "cis: 0");
+}
+
+fn _t_dihedral_angle_perpendicular() {
+    test_group("dihedral_angle_perpendicular");
+    # Viewed along B→C (+y), B–A points along +x and C–D along +z: eclipsing needs a counter-clockwise turn → −90°.
+    var t, v = dih(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0);
+    var a: f64 = ok_f(t, v, "dihedral_angle: Ok");
+    var s: f64 = a + frac_pi_2();
+    var as: f64 = f64_abs(s);
+    assert(as < 0.000000000001, "should be −90°");
+    # Mirror image (D along −z) → +90°.
+    var t2, v2 = dih(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, -1.0);
+    var a2: f64 = ok_f(t2, v2, "dihedral_angle: Ok");
+    assert(near(a2, frac_pi_2(), 0.000000000001) == 1, "+90°");
+}
+
+fn _t_dihedral_angle_metre_scale() {
+    test_group("dihedral_angle_metre_scale");
+    # Butane-like gauche geometry: Å vs SI metres must agree (the old absolute 1e-15 check rejected every metre-scale
+    # input as collinear).
+    var t, v = dih(1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.5, 0.0, 0.0, 2.5, 0.0, 1.0);
+    var ang: f64 = ok_f(t, v, "dihedral_angle: Ok");
+    var m: f64 = 0.0000000001;
+    var t2, v2 = dih(m, m, 0.0, 0.0, 0.0, 0.0, 1.5 * m, 0.0, 0.0, 2.5 * m, 0.0, m);
+    var met: f64 = ok_f(t2, v2, "dihedral_angle: Ok");
+    assert(near(ang, met, 0.000000000001) == 1, "Å and metres agree");
+    # Viewed along B→C (+x): B–A at 3 o'clock, C–D at 6 o'clock → +90°.
+    assert(near(ang, frac_pi_2(), 0.000000000001) == 1, "+90°");
+}
+
+fn _t_dihedral_angle_collinear_is_error() {
+    test_group("dihedral_angle_collinear_is_error");
+    var t1, v1 = dih(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2.0, 1.0, 0.0);
+    assert(is_err_result(t1) == 1, "A-B-C collinear");
+    # Collinear in metres too.
+    var m: f64 = 0.0000000001;
+    var t2, v2 = dih(0.0, 0.0, 0.0, m, 0.0, 0.0, 2.0 * m, m, 0.0, 3.0 * m, 2.0 * m, 0.0);
+    assert(is_err_result(t2) == 1, "B-C-D collinear, in metres");
+    var n: f64 = _km_nan();
+    var t3, v3 = dih(n, n, n, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0);
+    assert(is_err_result(t3) == 1, "NaN coordinates");
+}
+
+# ── Cyrius-only ──
+
+# Rust's [f64; 3] is a pointer to three contiguous f64; a null pointer gives NaN (distance_3d) or Err(InvalidInput),
+# before any coordinate is read.
+fn _t_cyrius_pointers() {
+    test_group("cyrius_pointers");
+    var p = pt(0, 1.0, 2.0, 3.0);
+    var d0: f64 = distance_3d(0, p);
+    assert(is_nan(d0) == 1, "distance_3d(null, p) = NaN");
+    var d1: f64 = distance_3d(p, 0);
+    assert(is_nan(d1) == 1, "distance_3d(p, null) = NaN");
+    var q = pt(1, 2.0, 2.0, 3.0);
+    var r = pt(2, 2.0, 3.0, 3.0);
+    var s = pt(3, 3.0, 3.0, 4.0);
+    var t1, v1 = bond_angle(0, q, r);
+    assert(is_invalid(t1, v1) == 1, "bond_angle(null, b, c): Err(InvalidInput)");
+    var t2, v2 = bond_angle(p, 0, r);
+    assert(is_invalid(t2, v2) == 1, "bond_angle(a, null, c)");
+    var t3, v3 = bond_angle(p, q, 0);
+    assert(is_invalid(t3, v3) == 1, "bond_angle(a, b, null)");
+    var t4, v4 = dihedral_angle(p, q, r, 0);
+    assert(is_invalid(t4, v4) == 1, "dihedral_angle(a, b, c, null)");
+    var t5, v5 = dihedral_angle(0, q, r, s);
+    assert(is_invalid(t5, v5) == 1, "dihedral_angle(null, b, c, d)");
+    var t6, v6 = bond_angle(p, q, r);
+    assert(is_ok(t6) == 1, "the same points through the 24-byte layout: Ok");
+    # The layout: point k's x, y, z at +0, +8, +16 of its own 24 bytes; a buffer of two points read as two.
+    var two: f64[6];
+    two[0] = 0.0;
+    two[1] = 0.0;
+    two[2] = 0.0;
+    two[3] = 2.0;
+    two[4] = 3.0;
+    two[5] = 6.0;
+    var d2: f64 = distance_3d(&two, &two + 24);
+    assert_bits_eq(d2, 0x401C000000000000, "|(2, 3, 6)| = 7 exactly");
+}
+
+# Rust's private sub3 / cross / dot3, each a multi-value return in Rust's operation order: dot3 is (a0·b0 + a1·b1) +
+# a2·b2, so (1, 2⁵³, −2⁵³)·(1, 1, 1) is (1 + 2⁵³) − 2⁵³ = 0 (to even), not 1.
+fn _t_cyrius_helpers() {
+    test_group("cyrius_helpers");
+    var d0, d1, d2 = _km_sub3(3.0, 2.0, 1.0, 1.0, 1.0, 1.0);
+    assert(d0 == 2.0 && d1 == 1.0 && d2 == 0.0, "sub3");
+    var c0, c1, c2 = _km_cross(1.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+    assert(c0 == 0.0 && c1 == 0.0 && c2 == 1.0, "x × y = z");
+    var e0, e1, e2 = _km_cross(1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
+    assert(e0 == -3.0 && e1 == 6.0 && e2 == -3.0, "(1, 2, 3) × (4, 5, 6) = (−3, 6, −3)");
+    var big: f64 = 9007199254740992.0;          # 2⁵³
+    var nb: f64 = -big;
+    var s: f64 = _km_dot3(1.0, big, nb, 1.0, 1.0, 1.0);
+    assert_bits_eq(s, 0, "dot3 sums left to right: (1 + 2⁵³) − 2⁵³ = +0");
+    var s2: f64 = _km_dot3(big, nb, 1.0, 1.0, 1.0, 1.0);
+    assert_bits_eq(s2, 0x3FF0000000000000, "(2⁵³ − 2⁵³) + 1 = 1");
+}
+
+# The typed tolerances on their thresholds (Rust's private COINCIDENT_REL_TOL = 10⁻¹², squared at run time, and
+# COLLINEAR_SIN_SQ_TOL = 10⁻²⁰): bond_angle's A = (1, 0, δ) against B = (1, 0, 0) and dihedral_angle's A = (−1, h, 0)
+# against B = 0, C = (1, 0, 0), on either side of Rust's threshold to the ulp (the doubles' threshold, found with the
+# golden generator's replica: δ = RN(10⁻¹²) still coincides, the next double does not; h = RN(10⁻¹⁰) is no longer
+# collinear, the double below it is). And π for atan2's −π.
+fn _t_cyrius_tolerances() {
+    test_group("cyrius_tolerances");
+    var tol: f64 = 0.000000000001;
+    var tsq: f64 = tol * tol;
+    assert_bits_eq(tsq, 0x3AF357C299A88EA7, "tol_sq = RN(RN(1e-12)²)");
+    var d: f64 = 0.000000000001;              # δ = RN(1e-12): RN(δ²) = tol_sq·|A|², coincident
+    var t1, v1 = angle3(1.0, 0.0, d, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0);
+    assert(is_invalid(t1, v1) == 1, "δ = RN(1e-12): coincident (Err)");
+    var du: f64 = 0.0000000000010000000000000002;
+    assert_bits_eq(du, 0x3D719799812DEA12, "… the next double up");
+    var t2, v2 = angle3(1.0, 0.0, du, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0);
+    assert(is_ok(t2) == 1, "one ulp above: a bond (Ok)");
+    var hd: f64 = 0.00000000009999999999999999;
+    assert_bits_eq(hd, 0x3DDB7CDFD9D7BDBA, "h one ulp below RN(1e-10)");
+    var t3, v3 = dih(-1.0, hd, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 1.0);
+    assert(is_invalid(t3, v3) == 1, "one ulp below RN(1e-10): collinear (Err)");
+    var h: f64 = 0.0000000001;
+    var t4, v4 = dih(-1.0, h, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 1.0);
+    assert(is_ok(t4) == 1, "h = RN(1e-10): a dihedral (Ok)");
+    # atan2(−0.0, x < 0) = −π, which Rust reports as π: the Rust test's mirrored trans geometry with B = (1, −0, −0)
+    # (found by the golden generator's sign sweep), where b₁·n₂ is −0.0.
+    var nz: f64 = -0.0;
+    var t5, v5 = dih(0.0, 0.0, 0.0, 1.0, nz, nz, 2.0, -1.0, 0.0, 3.0, -1.0, 0.0);
+    var a5: f64 = ok_f(t5, v5, "dihedral_angle: Ok");
+    assert_bits_eq(a5, 0x400921FB54442D18, "trans with a −0.0 y-term: −π reported as π");
+    var yv: f64 = _km_cr_atan2(nz, -1.0);
+    assert_bits_eq(yv, 0xC00921FB54442D18, "… where atan2 itself gives −π");
+}
+
+# ADR 0002 #16: r_min = σ·2^(1/6) correctly rounded (one rounding) where Rust's σ·RN(2^(1/6)) rounds twice. Expected
+# values are the golden notes' and validate.py's (2·σ⁶ against each midpoint's sixth power, exactly).
+fn _t_cyrius_exact_rmin() {
+    test_group("cyrius_exact_rmin (ADR 0002 #16)");
+    var r1: f64 = lj_equilibrium_distance(1.0);
+    assert_bits_eq(r1, 0x3FF1F59AC3C7D6C0, "σ = 1: RN(2^(1/6)) = Rust's constant");
+    var r0: f64 = lj_equilibrium_distance(0.0);
+    assert_bits_eq(r0, 0, "+0");
+    var nz: f64 = -0.0;
+    var rnz: f64 = lj_equilibrium_distance(nz);
+    assert_bits_eq(rnz, 0x8000000000000000, "−0");
+    var ri: f64 = lj_equilibrium_distance(_KM_INF);
+    assert(ri == _KM_INF, "+∞");
+    var rn: f64 = lj_equilibrium_distance(_km_nan());
+    assert(is_nan(rn) == 1, "NaN");
+    var sub: f64 = from_bits(1);
+    var rs: f64 = lj_equilibrium_distance(sub);
+    assert_bits_eq(rs, 1, "2⁻¹⁰⁷⁴·2^(1/6) = 1.12·2⁻¹⁰⁷⁴: 2⁻¹⁰⁷⁴");
+    var big: f64 = 0x7FEFFFFFFFFFFFFF;
+    var rb: f64 = lj_equilibrium_distance(big);
+    assert(rb == _KM_INF, "DBL_MAX·2^(1/6) overflows");
+    var m: f64 = lj_equilibrium_distance(-1.0);
+    assert_bits_eq(m, 0xBFF1F59AC3C7D6C0, "the sign is σ's");
+}
+
+# ADR 0002 #17 and #18: where Rust's 4·ε (ε ≥ 2¹⁰²²) or 2·D_e (D_e ≥ 2¹⁰²³) overflows, the port's exact reorder.
+fn _t_cyrius_exact_overflow_edges() {
+    test_group("cyrius_exact_overflow_edges (ADR 0002 #17, #18)");
+    var big: f64 = 0x7FEFFFFFFFFFFFFF;
+    var v0: f64 = lj(big, 1.0, 1.0);
+    assert_bits_eq(v0, 0, "ε = DBL_MAX at r = σ: 4·ε·0 = 0 (Rust ∞·0 = NaN)");
+    var v1: f64 = lj(big, 1.0, 2.0);
+    assert_bits_eq(v1, 0xFFAF7FFFFFFFFFFF, "ε = DBL_MAX, σ/r = ½: 4·DBL_MAX·(2⁻¹² − 2⁻⁶), rounded once (Rust −∞)");
+    var e22: f64 = 0x7FD0000000000000;      # 2¹⁰²²
+    var v2: f64 = lj(e22, 1.0, 2.0);
+    assert_bits_eq(v2, 0xFF8F800000000000, "ε = 2¹⁰²²: −2¹⁰²⁴·63/4096 exactly");
+    var below: f64 = 0x7FCFFFFFFFFFFFFF;    # the double below 2¹⁰²²: Rust's form, 4·ε finite
+    var v3: f64 = lj(below, 1.0, 2.0);
+    var four: f64 = 4.0 * below;
+    var want3: f64 = four * (0.000244140625 - 0.015625);
+    assert(v3 == want3, "below 2¹⁰²²: Rust's (4·ε)·d");
+    var t4, v4 = morse_width_parameter(1.0, 1.0, big);
+    var a4: f64 = ok_f(t4, v4, "morse_width_parameter: Ok");
+    assert(a4 > 0.0, "D_e = DBL_MAX: a > 0 (Rust: μ/∞ = 0, a = 0)");
+    var q: f64 = 0.5 / big;
+    var sq: f64 = f64_sqrt(q);
+    assert(a4 == sq, "… = √(RN(½/DBL_MAX))");
+    var d23: f64 = 0x7FE0000000000000;      # 2¹⁰²³
+    var t5, v5 = morse_width_parameter(4.0, 1.0, d23);
+    var a5: f64 = ok_f(t5, v5, "morse_width_parameter: Ok");
+    assert_bits_eq(a5, 0x2010000000000000, "ω = 4, μ = 1, D_e = 2¹⁰²³: 4·2⁻⁵¹² = 2⁻⁵¹⁰");
+    var sub: f64 = from_bits(1);
+    var t6, v6 = morse_width_parameter(1.0, sub, d23);
+    var a6: f64 = ok_f(t6, v6, "morse_width_parameter: Ok");
+    assert_bits_eq(a6, 0, "μ = 2⁻¹⁰⁷⁴: μ/(2·D_e) < 2⁻²⁰⁹⁷ rounds to 0");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_lj_at_equilibrium_is_negative();
+    _t_lj_at_sigma_is_zero();
+    _t_lj_repulsive_at_short_range();
+    _t_lj_approaches_zero_at_long_range();
+    _t_lj_zero_distance_is_error();
+    _t_lj_invalid_epsilon_is_error();
+    _t_lj_nan_inputs_are_errors();
+    _t_morse_at_equilibrium_is_zero();
+    _t_morse_at_infinity_is_de();
+    _t_morse_symmetric_near_equilibrium();
+    _t_morse_nan_inputs_are_errors();
+    _t_morse_width_parameter_hcl();
+    _t_morse_width_parameter_matches_force_constant();
+    _t_morse_width_parameter_nan_is_error();
+    _t_coulomb_opposite_charges_attractive();
+    _t_coulomb_same_charges_repulsive();
+    _t_coulomb_inverse_r();
+    _t_coulomb_zero_distance_is_error();
+    _t_coulomb_nan_distance_is_error();
+    _t_coulomb_force_basic();
+    _t_distance_3d_basic();
+    _t_distance_3d_same_point();
+    _t_bond_angle_right_angle();
+    _t_bond_angle_linear();
+    _t_bond_angle_coincident_is_error();
+    _t_bond_angle_nan_is_error();
+    _t_bond_angle_metre_scale();
+    _t_bond_angle_small_angle_is_accurate();
+    _t_dihedral_angle_planar_trans_is_pi();
+    _t_dihedral_angle_planar_cis_is_zero();
+    _t_dihedral_angle_perpendicular();
+    _t_dihedral_angle_metre_scale();
+    _t_dihedral_angle_collinear_is_error();
+    _t_cyrius_pointers();
+    _t_cyrius_helpers();
+    _t_cyrius_tolerances();
+    _t_cyrius_exact_rmin();
+    _t_cyrius_exact_overflow_edges();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

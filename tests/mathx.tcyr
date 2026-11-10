@@ -1,8 +1,9 @@
-# mathx.tcyr — the correctly rounded exp, exp10, expm1, ln, log10 (M3c-2a) and pow (M3c-2b) of src/mathx.cyr
-# (ADR 0006).
+# mathx.tcyr — the correctly rounded exp, exp10, expm1, ln, log10 (M3c-2a), pow (M3c-2b), sin, cos, sincos,
+# atan2 and acos (M4a) and x·2^y (M4d) of src/mathx.cyr (ADR 0006).
 #
 # Special values, the exact and tie cases, the thresholds, subnormal results (rounded once), the known
-# hardest-to-round arguments (Lefèvre–Muller's binary64 worst cases for exp and ln) and arguments on which
+# hardest-to-round arguments (Lefèvre–Muller's binary64 worst cases for exp, ln, sin, cos, arctan and arccos),
+# Payne–Hanek arguments, atan2's sign and zero matrix, and arguments on which
 # the fast path's rounding test fails, and a seeded check that the accurate path (_km_cr_<f>_acc) agrees
 # with the full function. Every expected bit pattern is MPFR 4.2.2's correctly rounded value
 # (scripts/oracle/mpfr_ref.py). scripts/oracle/cr_verify.py checks millions of arguments on every target.
@@ -502,6 +503,577 @@ fn _t_ln_values() {
     assert_bits_eq(rb, 0xC0026BB1BBB55515, "ln(0.1) (MPFR; 0.1 is not 1/10, so not -ln 10 rounded)");
 }
 
+# ── M4a: sin, cos, sincos, atan2 and acos ───────────────────────────────────────────────────────
+
+# f(x) by the id: 0 sin, 1 cos, 2 acos; acc = 1 for the accurate path alone.
+#must_use
+fn tri(fid, acc, x: f64): f64 {
+    if (acc == 0) {
+        if (fid == 0) { var a: f64 = _km_cr_sin(x); return a; }
+        if (fid == 1) { var b: f64 = _km_cr_cos(x); return b; }
+        var c: f64 = _km_cr_acos(x);
+        return c;
+    }
+    if (fid == 0) { var d: f64 = _km_cr_sin_acc(x); return d; }
+    if (fid == 1) { var e: f64 = _km_cr_cos_acc(x); return e; }
+    var f: f64 = _km_cr_acos_acc(x);
+    return f;
+}
+
+# The fast path alone: (its result, 1), or (0, 0) when its rounding test fails.
+#must_use
+fn trif(fid, x: f64): (f64, i64) {
+    if (fid == 0) { var a, oa = _km_cr_sin_fast(x); return (a, oa); }
+    if (fid == 1) { var b, ob = _km_cr_cos_fast(x); return (b, ob); }
+    var c, oc = _km_cr_acos_fast(x);
+    return (c, oc);
+}
+
+# Checks the `n` (id, argument, expected) rows at `t` by the full function, the accurate path alone and, where
+# its test passes, the fast path; returns how many rows the fast test sends to the accurate path.
+#must_use
+fn check_tri(t, n, name): i64 {
+    var k = 0;
+    var sent = 0;
+    while (k < n) {
+        var fid = load64(t + 24 * k);
+        var x: f64 = from_bits(load64(t + 24 * k + 8));
+        var want = load64(t + 24 * k + 16);
+        var y: f64 = tri(fid, 0, x);
+        assert_bits_eq(y, want, name);
+        var z: f64 = tri(fid, 1, x);
+        assert_bits_eq(z, want, name);
+        var yf, ok = trif(fid, x);
+        if (ok == 0) { sent = sent + 1; }
+        if (ok == 1) { assert_bits_eq(yf, want, name); }
+        k = k + 1;
+    }
+    return sent;
+}
+
+# The same for `n` (y, x, expected) rows of atan2.
+#must_use
+fn check_atan2(t, n, name): i64 {
+    var k = 0;
+    var sent = 0;
+    while (k < n) {
+        var y: f64 = from_bits(load64(t + 24 * k));
+        var x: f64 = from_bits(load64(t + 24 * k + 8));
+        var want = load64(t + 24 * k + 16);
+        var r: f64 = _km_cr_atan2(y, x);
+        assert_bits_eq(r, want, name);
+        var a: f64 = _km_cr_atan2_acc(y, x);
+        assert_bits_eq(a, want, name);
+        var rf, ok = _km_cr_atan2_fast(y, x);
+        if (ok == 0) { sent = sent + 1; }
+        if (ok == 1) { assert_bits_eq(rf, want, name); }
+        k = k + 1;
+    }
+    return sent;
+}
+
+# sin and cos: (id, argument, expected) with MPFR's bits. ±0, ±∞, NaN, subnormals, the tiny ends (sin x = x below
+# 2^-26, cos x = 1 below 2^-27, and cos at x = √2·2^-27 rounded either side, where 1 − x²/2 straddles the midpoint
+# 1 − 2^-54), RN(π) and RN(π/2) (r is tiny: the accurate path), DBL_MAX, 1e22, and both sides of the
+# Cody–Waite / Payne–Hanek switch at 2^20.
+var _T_SC_SPECIAL: i64[126] = {
+    0, 0x0000000000000000, 0x0000000000000000,   # sin(0)
+    0, 0x8000000000000000, 0x8000000000000000,   # sin(-0)
+    0, 0x7FF0000000000000, 0x7FF8000000000000,   # sin(inf) = NaN
+    0, 0xFFF0000000000000, 0x7FF8000000000000,   # sin(-inf) = NaN
+    0, 0x0000000000000001, 0x0000000000000001,   # sin(4.9406564584124654e-324)
+    0, 0x8000000000000001, 0x8000000000000001,   # sin(-4.9406564584124654e-324)
+    0, 0x3E4FFFFFFFFFFFFF, 0x3E4FFFFFFFFFFFFF,   # sin(1.4901161193847655e-08) (2^-26 − ulp)
+    0, 0x3E50000000000000, 0x3E50000000000000,   # sin(1.4901161193847656e-08)
+    0, 0xBE50000000000000, 0xBE50000000000000,   # sin(-1.4901161193847656e-08)
+    0, 0x3E3FFFFFFFFFFFFF, 0x3E3FFFFFFFFFFFFF,   # sin(7.4505805969238273e-09) (2^-27 − ulp)
+    0, 0x3E40000000000000, 0x3E40000000000000,   # sin(7.4505805969238281e-09)
+    0, 0x3E46A09E667F3BCC, 0x3E46A09E667F3BCC,   # sin(1.0536712127723507e-08) (x²/2 just below 2^-54)
+    0, 0x3E46A09E667F3BCD, 0x3E46A09E667F3BCD,   # sin(1.0536712127723509e-08) (x²/2 just above 2^-54)
+    0, 0x400921FB54442D18, 0x3CA1A62633145C07,   # sin(3.1415926535897931) (RN(π))
+    0, 0x3FF921FB54442D18, 0x3FF0000000000000,   # sin(1.5707963267948966) (RN(π/2))
+    0, 0xBFF921FB54442D18, 0xBFF0000000000000,   # sin(-1.5707963267948966)
+    0, 0x401921FB54442D18, 0xBCB1A62633145C07,   # sin(6.2831853071795862)
+    0, 0x7FEFFFFFFFFFFFFF, 0x3F7452FC98B34E97,   # sin(1.7976931348623157e+308) (DBL_MAX)
+    0, 0x4480F0CF064DD592, 0xBFEB453AB76BF397,   # sin(1e+22)
+    0, 0x4130000000000000, 0x3FD526CCB2FC8656,   # sin(1048576) (the Payne–Hanek edge)
+    0, 0x412FFFFFFFFFFFFF, 0x3FD526CCB2DE52A8,   # sin(1048575.9999999999) (the last Cody–Waite argument)
+    1, 0x0000000000000000, 0x3FF0000000000000,   # cos(0)
+    1, 0x8000000000000000, 0x3FF0000000000000,   # cos(-0)
+    1, 0x7FF0000000000000, 0x7FF8000000000000,   # cos(inf) = NaN
+    1, 0xFFF0000000000000, 0x7FF8000000000000,   # cos(-inf) = NaN
+    1, 0x3E4FFFFFFFFFFFFF, 0x3FEFFFFFFFFFFFFF,   # cos(1.4901161193847655e-08) (2^-26 − ulp)
+    1, 0x3E50000000000000, 0x3FEFFFFFFFFFFFFF,   # cos(1.4901161193847656e-08)
+    1, 0xBE50000000000000, 0x3FEFFFFFFFFFFFFF,   # cos(-1.4901161193847656e-08)
+    1, 0x3E3FFFFFFFFFFFFF, 0x3FF0000000000000,   # cos(7.4505805969238273e-09) (2^-27 − ulp)
+    1, 0x3E40000000000000, 0x3FF0000000000000,   # cos(7.4505805969238281e-09)
+    1, 0x3E46A09E667F3BCC, 0x3FF0000000000000,   # cos(1.0536712127723507e-08) (x²/2 just below 2^-54)
+    1, 0x3E46A09E667F3BCD, 0x3FEFFFFFFFFFFFFF,   # cos(1.0536712127723509e-08) (x²/2 just above 2^-54)
+    1, 0x400921FB54442D18, 0xBFF0000000000000,   # cos(3.1415926535897931) (RN(π))
+    1, 0x3FF921FB54442D18, 0x3C91A62633145C07,   # cos(1.5707963267948966) (RN(π/2))
+    1, 0xBFF921FB54442D18, 0x3C91A62633145C07,   # cos(-1.5707963267948966)
+    1, 0x401921FB54442D18, 0x3FF0000000000000,   # cos(6.2831853071795862)
+    1, 0x7FEFFFFFFFFFFFFF, 0xBFEFFFE62ECFAB75,   # cos(1.7976931348623157e+308) (DBL_MAX)
+    1, 0x4480F0CF064DD592, 0x3FE0BE2CEF01C8F4,   # cos(1e+22)
+    1, 0x4130000000000000, 0x3FEE33ADA92FE2AE,   # cos(1048576) (the Payne–Hanek edge)
+    1, 0x412FFFFFFFFFFFFF, 0x3FEE33ADA9352C61,   # cos(1048575.9999999999) (the last Cody–Waite argument)
+    0, 0x7FF8000000000000, 0x7FF8000000000000,     # sin(NaN) = NaN
+    1, 0x7FF8000000000000, 0x7FF8000000000000      # cos(NaN) = NaN
+};
+
+# atan2's C99 Annex F special values, the sign and zero matrix included (glibc's and MPFR's agree on every one):
+# atan2(±0, +0) = ±0, atan2(±0, −0) = ±π, atan2(±0, x < 0) = ±π, atan2(±0, x > 0) = ±0, atan2(y ≠ 0, ±0) = ±π/2,
+# atan2(±∞, +∞) = ±π/4, atan2(±∞, −∞) = ±3π/4, atan2(±∞, finite) = ±π/2, atan2(finite, +∞) = ±0, atan2(finite, −∞)
+# = ±π; a NaN argument gives NaN.
+var _T_ATAN2_SPECIAL: i64[126] = {
+    0x0000000000000000, 0x0000000000000000, 0x0000000000000000,   # atan2(0, 0)
+    0x0000000000000000, 0x8000000000000000, 0x400921FB54442D18,   # atan2(0, -0)
+    0x0000000000000000, 0x3FF0000000000000, 0x0000000000000000,   # atan2(0, 1)
+    0x0000000000000000, 0xBFF0000000000000, 0x400921FB54442D18,   # atan2(0, -1)
+    0x0000000000000000, 0x0000000000000001, 0x0000000000000000,   # atan2(0, 4.941e-324)
+    0x0000000000000000, 0x8000000000000001, 0x400921FB54442D18,   # atan2(0, -4.941e-324)
+    0x0000000000000000, 0x7FF0000000000000, 0x0000000000000000,   # atan2(0, inf)
+    0x0000000000000000, 0xFFF0000000000000, 0x400921FB54442D18,   # atan2(0, -inf)
+    0x8000000000000000, 0x0000000000000000, 0x8000000000000000,   # atan2(-0, 0)
+    0x8000000000000000, 0x8000000000000000, 0xC00921FB54442D18,   # atan2(-0, -0)
+    0x8000000000000000, 0x3FF0000000000000, 0x8000000000000000,   # atan2(-0, 1)
+    0x8000000000000000, 0xBFF0000000000000, 0xC00921FB54442D18,   # atan2(-0, -1)
+    0x8000000000000000, 0x0000000000000001, 0x8000000000000000,   # atan2(-0, 4.941e-324)
+    0x8000000000000000, 0x8000000000000001, 0xC00921FB54442D18,   # atan2(-0, -4.941e-324)
+    0x8000000000000000, 0x7FF0000000000000, 0x8000000000000000,   # atan2(-0, inf)
+    0x8000000000000000, 0xFFF0000000000000, 0xC00921FB54442D18,   # atan2(-0, -inf)
+    0x3FF0000000000000, 0x0000000000000000, 0x3FF921FB54442D18,   # atan2(1, 0) = ±π/2
+    0x3FF0000000000000, 0x8000000000000000, 0x3FF921FB54442D18,   # atan2(1, -0) = ±π/2
+    0xBFF0000000000000, 0x0000000000000000, 0xBFF921FB54442D18,   # atan2(-1, 0) = ±π/2
+    0xBFF0000000000000, 0x8000000000000000, 0xBFF921FB54442D18,   # atan2(-1, -0) = ±π/2
+    0x0000000000000001, 0x0000000000000000, 0x3FF921FB54442D18,   # atan2(4.941e-324, 0) = ±π/2
+    0x0000000000000001, 0x8000000000000000, 0x3FF921FB54442D18,   # atan2(4.941e-324, -0) = ±π/2
+    0x7FF0000000000000, 0x7FF0000000000000, 0x3FE921FB54442D18,   # atan2(inf, inf)
+    0x7FF0000000000000, 0xFFF0000000000000, 0x4002D97C7F3321D2,   # atan2(inf, -inf)
+    0x7FF0000000000000, 0x3FF0000000000000, 0x3FF921FB54442D18,   # atan2(inf, 1)
+    0x7FF0000000000000, 0xBFF0000000000000, 0x3FF921FB54442D18,   # atan2(inf, -1)
+    0x7FF0000000000000, 0x0000000000000000, 0x3FF921FB54442D18,   # atan2(inf, 0)
+    0xFFF0000000000000, 0x7FF0000000000000, 0xBFE921FB54442D18,   # atan2(-inf, inf)
+    0xFFF0000000000000, 0xFFF0000000000000, 0xC002D97C7F3321D2,   # atan2(-inf, -inf)
+    0xFFF0000000000000, 0x3FF0000000000000, 0xBFF921FB54442D18,   # atan2(-inf, 1)
+    0xFFF0000000000000, 0xBFF0000000000000, 0xBFF921FB54442D18,   # atan2(-inf, -1)
+    0xFFF0000000000000, 0x0000000000000000, 0xBFF921FB54442D18,   # atan2(-inf, 0)
+    0x3FF0000000000000, 0x7FF0000000000000, 0x0000000000000000,   # atan2(1, inf)
+    0x3FF0000000000000, 0xFFF0000000000000, 0x400921FB54442D18,   # atan2(1, -inf)
+    0xBFF0000000000000, 0x7FF0000000000000, 0x8000000000000000,   # atan2(-1, inf)
+    0xBFF0000000000000, 0xFFF0000000000000, 0xC00921FB54442D18,   # atan2(-1, -inf)
+    0x7FEFFFFFFFFFFFFF, 0x7FF0000000000000, 0x0000000000000000,   # atan2(1.798e+308, inf)
+    0x7FEFFFFFFFFFFFFF, 0xFFF0000000000000, 0x400921FB54442D18,   # atan2(1.798e+308, -inf)
+    0x7FF8000000000000, 0x3FF0000000000000, 0x7FF8000000000000,   # atan2(NaN, 1) = NaN
+    0x3FF0000000000000, 0x7FF8000000000000, 0x7FF8000000000000,   # atan2(1, NaN) = NaN
+    0x7FF8000000000000, 0x0000000000000000, 0x7FF8000000000000,   # atan2(NaN, +0) = NaN
+    0x0000000000000000, 0x7FF8000000000000, 0x7FF8000000000000,   # atan2(+0, NaN) = NaN
+};
+
+fn _t_trig_special_values() {
+    test_group("cr_trig_special_values");
+    var s1 = check_tri(&_T_SC_SPECIAL, 42, "sin / cos special value");
+    assert(s1 >= 2, "the fast test sends sin(RN(π)) and cos(RN(π/2)) to the accurate path");
+    var s2 = check_atan2(&_T_ATAN2_SPECIAL, 42, "atan2 special value (C99 Annex F)");
+    assert_eq(s2, 0, "atan2's special values never reach the accurate path");
+}
+
+# Hard-to-round arguments: Lefèvre and Muller's 2003 worst cases of sin (Table 8) and cos (Table 10), the run after
+# the round bit in the comment (only 0 1^59 and 1 0^54 are near a midpoint, and hard for rounding to nearest), and
+# arguments where the fast test fails, found by scripts/oracle/cr_verify.py (fall-back rate 7·10^-5 and 9·10^-5).
+var _T_SC_HARD: i64[81] = {
+    0, 0x3EBE0000000001C2, 0x3EBDFFFFFFFFF02E,   # sin(1.788139343261814e-06) LM Table 8: 0 0^72
+    0, 0x3F8598BAE9E632F6, 0x3F8598A0AEA48996,   # sin(0.010545215857541628) LM Table 8: 0 1^59
+    0, 0x3FDFE767739D0F6D, 0x3FDE9950730C4696,   # sin(0.49849878588087543) LM Table 8: 1 1^65
+    0, 0x3FF921FB54442D18, 0x3FF0000000000000,   # sin(1.5707963267948966) LM Table 8: 1 1^54
+    0, 0x4006756745770A51, 0x3FD4FF350E412821,   # sin(2.8073258807137695) LM Table 8: 0 0^54
+    1, 0x3E88000000000009, 0x3FEFFFFFFFFFFF70,   # cos(1.7881393432617211e-07) LM Table 10: 0 0^88
+    1, 0x3E98000000000024, 0x3FEFFFFFFFFFFDC0,   # cos(3.5762786865234566e-07) LM Table 10: 0 0^82
+    1, 0x3ED2000000000F30, 0x3FEFFFFFFFFEBC00,   # cos(4.2915344238314183e-06) LM Table 10: 0 0^60
+    1, 0x3F606B505550E6B2, 0x3FEFFFFBC9A3FBFE,   # cos(0.0020042962082954191) LM Table 10: 0 0^58
+    1, 0x3F997CCD3D2C438F, 0x3FEFFD766BA870A9,   # cos(0.024890143259714) LM Table 10: 1 1^55
+    1, 0x3FF6B8A6273D7C21, 0x3FC337FC5B072C53,   # cos(1.4200803311175678) LM Table 10: 1 0^54
+    0, 0x3FFBF2EFD01AF67C, 0x3FEF816DC6ABE0EC,   # sin(1.746810734664364) the fast test fails
+    0, 0xBFC9AC9B39605550, 0xBFC9809F7E1D9A4F,   # sin(-0.20058002759530291) the fast test fails
+    0, 0x412EADE872E0B9D9, 0x3D46C464BDB40721,   # sin(1005300.2243707731) the fast test fails
+    0, 0x40E635E3D74BEFCA, 0x3CBA15417E407485,   # sin(45487.120031326616) the fast test fails
+    0, 0xBF183449D72185E3, 0xBF183449D68DD0AA,   # sin(-9.2331892831441382e-05) the fast test fails
+    0, 0x6CA09C1A404D220E, 0x3FB4B70238B9843B,   # sin(1.7893309797576845e+215) the fast test fails
+    0, 0xBEBF973FE6615EF1, 0xBEBF973FE6614A6A,   # sin(-1.8829595318704937e-06) the fast test fails
+    0, 0x3FF1D9FB54442D1B, 0x3FECBE45E78E2080,   # sin(1.1157182017948972) the fast test fails
+    1, 0x3FF7CB1EE3DE4EB8, 0x3FB5675F99DAD3D5,   # cos(1.4870900059803898) the fast test fails
+    1, 0x4017CCA92666763C, 0x3FEE3D1E9B1FC1E2,   # cos(5.9498640060460808) the fast test fails
+    1, 0xC257EC8AC31FFFF1, 0x3FEFFFFFFC2FEAF5,   # cos(-411011058815.99908) the fast test fails
+    1, 0x40CEC4C2182196D5, 0x3CD6A067F1499398,   # cos(15753.516361426018) the fast test fails
+    1, 0xBF7D14844933FB7B, 0x3FEFFFCB2594B44A,   # cos(-0.0070996444148921879) the fast test fails
+    1, 0x4952B404F33B9124, 0x3FE4709CCE1FDC3E,   # cos(1.6683812379297121e+45) the fast test fails
+    1, 0x3EC3FA8C0E8876D3, 0x3FEFFFFFFFFF9C36,   # cos(2.3816465850718992e-06) the fast test fails
+    1, 0x3FD0200000000000, 0x3FEEFD5B61A30A38,   # cos(0.251953125) the fast test fails
+};
+
+fn _t_trig_hard_cases() {
+    test_group("cr_trig_hard_cases");
+    var sent = check_tri(&_T_SC_HARD, 27, "sin / cos hard-to-round argument");
+    assert_eq(sent, 18, "the fast test fails on the 2 midpoint-adjacent worst cases and the 16 found arguments");
+}
+
+# Payne–Hanek arguments (|x| ≥ 2^20): Hanrot, Lefèvre, Stehlé and Zimmermann's sin cases in [2^1023, 2^1024)
+# (ARITH 18, 2007), Lefèvre and Muller's double closest to a multiple of π/2 (|x mod π/2| = 4.7·10^-19) and its
+# neighbour, ±2^1023 and other large arguments; sin and cos of each.
+var _T_SC_PH: i64[66] = {
+    0, 0x7FE06B35E60E78C2, 0xBFD2C75C879E2021,   # sin(9.2237338074664014e+307) Hanrot et al.: 1^43
+    1, 0x7FE06B35E60E78C2, 0xBFEE976C3C423963,   # cos(9.2237338074664014e+307)
+    0, 0x7FE38B535699485D, 0x3FC319CBA78DA47F,   # sin(1.0979545867913763e+308) Hanrot et al.: 0^45
+    1, 0x7FE38B535699485D, 0x3FEFA446D647B5D1,   # cos(1.0979545867913763e+308)
+    0, 0x7506AC5B262CA1FF, 0x3FF0000000000000,   # sin(5.3193726483265414e+255) closest to kπ/2 (LM 2003)
+    1, 0x7506AC5B262CA1FF, 0xBC214AE72E6BA22F,   # cos(5.3193726483265414e+255)
+    0, 0x7506AC5B262CA200, 0xBFE392680B64726C,   # sin(5.3193726483265423e+255) its neighbour
+    1, 0x7506AC5B262CA200, 0xBFE9511A46CE5CDD,   # cos(5.3193726483265423e+255)
+    0, 0x7FE0000000000000, 0x3FE205248CBDB760,   # sin(8.9884656743115795e+307)
+    1, 0x7FE0000000000000, 0xBFEA719F26C232BF,   # cos(8.9884656743115795e+307)
+    0, 0xFFE0000000000000, 0xBFE205248CBDB760,   # sin(-8.9884656743115795e+307)
+    1, 0xFFE0000000000000, 0xBFEA719F26C232BF,   # cos(-8.9884656743115795e+307)
+    0, 0x7E37E43C8800759C, 0xBFEA2C16B010E385,   # sin(1.0000000000000001e+300)
+    1, 0x7E37E43C8800759C, 0xBFE2699022ADC4C1,   # cos(1.0000000000000001e+300)
+    0, 0x4348000000000000, 0xBFA98611ABF5343B,   # sin(13510798882111488)
+    1, 0x4348000000000000, 0x3FEFF5D08A5FAFC7,   # cos(13510798882111488)
+    0, 0x43B0000000000000, 0xBFEA94ADAB06665C,   # sin(1.152921504606847e+18)
+    1, 0x43B0000000000000, 0xBFE1D146047D6947,   # cos(1.152921504606847e+18)
+    0, 0x42DC12218377DE6B, 0x3F9EC48FA73ABDA2,   # sin(123456789012345.67)
+    1, 0x42DC12218377DE6B, 0x3FEFFC4D20AFA8CB,   # cos(123456789012345.67)
+    0, 0xC6515ADD579E60E1, 0xBFEFFF3DDF47D266,   # sin(-5.5000000000000003e+30)
+    1, 0xC6515ADD579E60E1, 0xBF8BDD84B89D20BD,   # cos(-5.5000000000000003e+30)
+};
+
+fn _t_trig_payne_hanek() {
+    test_group("cr_trig_payne_hanek");
+    var sent = check_tri(&_T_SC_PH, 22, "sin / cos of a Payne–Hanek argument");
+    # The reduction keeps 2^-150 relative accuracy even 4.7·10^-19 from a multiple of π/2, so the fast test passes.
+    assert_eq(sent, 0, "the fast test passes on every Payne–Hanek row");
+}
+
+# (x, sin x, cos x) for M4d's FFT twiddle angles −2π/2^k, k = 1 … 20 (x is the double −(2·RN(π))/2^k).
+var _T_FFT: i64[60] = {
+    0xC00921FB54442D18, 0xBCA1A62633145C07, 0xBFF0000000000000,   # -2π/2^1
+    0xBFF921FB54442D18, 0xBFF0000000000000, 0x3C91A62633145C07,   # -2π/2^2
+    0xBFE921FB54442D18, 0xBFE6A09E667F3BCC, 0x3FE6A09E667F3BCD,   # -2π/2^3
+    0xBFD921FB54442D18, 0xBFD87DE2A6AEA963, 0x3FED906BCF328D46,   # -2π/2^4
+    0xBFC921FB54442D18, 0xBFC8F8B83C69A60A, 0x3FEF6297CFF75CB0,   # -2π/2^5
+    0xBFB921FB54442D18, 0xBFB917A6BC29B42C, 0x3FEFD88DA3D12526,   # -2π/2^6
+    0xBFA921FB54442D18, 0xBFA91F65F10DD814, 0x3FEFF621E3796D7E,   # -2π/2^7
+    0xBF9921FB54442D18, 0xBF992155F7A3667E, 0x3FEFFD886084CD0D,   # -2π/2^8
+    0xBF8921FB54442D18, 0xBF8921D1FCDEC784, 0x3FEFFF62169B92DB,   # -2π/2^9
+    0xBF7921FB54442D18, 0xBF7921F0FE670071, 0x3FEFFFD8858E8A92,   # -2π/2^10
+    0xBF6921FB54442D18, 0xBF6921F8BECCA4BA, 0x3FEFFFF621621D02,   # -2π/2^11
+    0xBF5921FB54442D18, 0xBF5921FAAEE6472D, 0x3FEFFFFD88586EE6,   # -2π/2^12
+    0xBF4921FB54442D18, 0xBF4921FB2AECB360, 0x3FEFFFFF62161A34,   # -2π/2^13
+    0xBF3921FB54442D18, 0xBF3921FB49EE4EA6, 0x3FEFFFFFD8858675,   # -2π/2^14
+    0xBF2921FB54442D18, 0xBF2921FB51AEB57B, 0x3FEFFFFFF621619C,   # -2π/2^15
+    0xBF1921FB54442D18, 0xBF1921FB539ECF31, 0x3FEFFFFFFD885867,   # -2π/2^16
+    0xBF0921FB54442D18, 0xBF0921FB541AD59E, 0x3FEFFFFFFF62161A,   # -2π/2^17
+    0xBEF921FB54442D18, 0xBEF921FB5439D73A, 0x3FEFFFFFFFD88586,   # -2π/2^18
+    0xBEE921FB54442D18, 0xBEE921FB544197A0, 0x3FEFFFFFFFF62162,   # -2π/2^19
+    0xBED921FB54442D18, 0xBED921FB544387BA, 0x3FEFFFFFFFFD8858,   # -2π/2^20
+};
+
+# _km_cr_sincos gives MPFR's sin and cos at the FFT angles, by the full function and the accurate pair alone, and
+# _km_cr_sin's and _km_cr_cos's bits on seeded arguments over every binade and [−8, 8].
+fn _t_sincos() {
+    test_group("cr_sincos");
+    var k = 0;
+    while (k < 20) {
+        var x: f64 = from_bits(load64(&_T_FFT + 24 * k));
+        var ws = load64(&_T_FFT + 24 * k + 8);
+        var wc = load64(&_T_FFT + 24 * k + 16);
+        var s, c = _km_cr_sincos(x);
+        assert_bits_eq(s, ws, "sincos(-2π/2^k): sin");
+        assert_bits_eq(c, wc, "sincos(-2π/2^k): cos");
+        var sa, ca = _km_cr_sincos_acc(x);
+        assert_bits_eq(sa, ws, "sincos(-2π/2^k): sin (accurate path)");
+        assert_bits_eq(ca, wc, "sincos(-2π/2^k): cos (accurate path)");
+        var s1: f64 = _km_cr_sin(x);
+        assert_bits_eq(s1, ws, "sin(-2π/2^k)");
+        var c1: f64 = _km_cr_cos(x);
+        assert_bits_eq(c1, wc, "cos(-2π/2^k)");
+        k = k + 1;
+    }
+    var st = 0x9E3779B97F4A7C15;
+    var u53: f64 = 0x3CA0000000000000;          # 2^-53
+    var bad = 0;
+    k = 0;
+    while (k < 3000) {
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var f: f64 = f64_from(st >> 11) * u53;
+        var x2: f64 = (16.0 * f) - 8.0;
+        if ((k & 1) == 1) { x2 = from_bits(((st >> 1) % 0x7FE0000000000000) | (st & 0x8000000000000000)); }
+        var s2, c2 = _km_cr_sincos(x2);
+        var s3: f64 = _km_cr_sin(x2);
+        var c3: f64 = _km_cr_cos(x2);
+        if (ulp_bits_match(_km_bits(s2), _km_bits(s3)) != 1) { bad = bad + 1; }
+        if (ulp_bits_match(_km_bits(c2), _km_bits(c3)) != 1) { bad = bad + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "sincos = (sin, cos) on 3,000 seeded arguments");
+}
+
+# atan2 values: subnormal quotients rounded once, exact midpoint quotients (atan(q) < q, so they round toward zero,
+# not to even), quotients below half of 2^-1074, the tiny route's edge (|y/x| = 2^-60 against 2^-59), huge
+# exponent differences, results near ±π and ±π/2, ±π/4 and ±3π/4, bond and dihedral angles where the fast test
+# fails (found by cr_verify.py; fall-back rate 2·10^-5), and Lefèvre and Muller's arctan worst cases (Table 13) as
+# atan2(y, 1), scaled, and inverted.
+var _T_ATAN2: i64[114] = {
+    0x3C48000000000000, 0x7F60000000000000, 0x0000000000000001,   # 3·2^-60 / 2^1015 = 1.5·2^-1074: toward zero
+    0xBC48000000000000, 0x7F60000000000000, 0x8000000000000001,   # atan2(-2.602e-18, 3.511e+305)
+    0x3C5C000000000000, 0x7F60000000000000, 0x0000000000000003,   # 7·2^-60 / 2^1015 = 3.5·2^-1074: to 3, not even
+    0x3C44000000000000, 0x7F60000000000000, 0x0000000000000001,   # 5·2^-61 / 2^1015 = 1.25·2^-1074
+    0x0000000000000001, 0x3FF8000000000000, 0x0000000000000001,   # 2^-1074 / 1.5: up to 2^-1074
+    0x0000000000000001, 0x7FE0000000000000, 0x0000000000000000,   # atan2(4.941e-324, 8.988e+307) far below: +0
+    0x0000000000000001, 0xFFE0000000000000, 0x400921FB54442D18,   # atan2(4.941e-324, -8.988e+307) = π
+    0x0000000000000003, 0x4000000000000000, 0x0000000000000001,   # 3·2^-1074 / 2 = 1.5·2^-1074: to 2^-1074
+    0x000FFFFFFFFFFFFF, 0x3FE0000000000000, 0x001FFFFFFFFFFFFE,   # atan2(2.225e-308, 0.5)
+    0x01A56E1FC2F8F359, 0x4202A05F20000000, 0x000012688B70E62B,   # atan2(1e-300, 1e+10) subnormal
+    0x3FF0000000000000, 0x7E37E43C8800759C, 0x01A56E1FC2F8F359,   # atan2(1, 1e+300)
+    0x7E37E43C8800759C, 0x01A56E1FC2F8F359, 0x3FF921FB54442D18,   # atan2(1e+300, 1e-300) = π/2
+    0x81A56E1FC2F8F359, 0xFE37E43C8800759C, 0xC00921FB54442D18,   # atan2(-1e-300, -1e+300) ≈ −π
+    0x3FF0000000000000, 0x43B0000000000000, 0x3C30000000000000,   # atan2(1, 1.153e+18) 2^-60: the tiny route
+    0x3FF0000000000000, 0x43A0000000000000, 0x3C40000000000000,   # atan2(1, 5.765e+17) 2^-59: the general route
+    0x3FF0000000000000, 0xC3B0000000000000, 0x400921FB54442D18,   # atan2(1, -1.153e+18)
+    0x43B0000000000000, 0x3FF0000000000000, 0x3FF921FB54442D18,   # atan2(1.153e+18, 1)
+    0xC3B0000000000000, 0xBFF0000000000000, 0xBFF921FB54442D18,   # atan2(-1.153e+18, -1)
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FE921FB54442D18,   # atan2(1, 1) = π/4
+    0xBFF0000000000000, 0xBFF0000000000000, 0xC002D97C7F3321D2,   # atan2(-1, -1) = −3π/4
+    0x16687E92154EF7AC, 0x16687E92154EF7AC, 0x3FE921FB54442D18,   # atan2(1e-200, 1e-200)
+    0x3C1240C7947E7F9F, 0xBC38557EFC44D80A, 0x4007A65641DA3364,   # atan2(2.474e-19, -1.319e-18) a bond angle (metres)
+    0x3FD346DB449BC850, 0xC0148F10C423B219, 0x4008AA19DE13F84B,   # atan2(0.3012, -5.14) a dihedral angle
+    0xB6B2052C5C09DD05, 0x36B2052C5C09DD07, 0xBFE921FB54442D16,   # atan2(-3.156e-45, 3.156e-45) near −π/4
+    0x3FE11680991029E3, 0xC000B9662D1BDCB4, 0x400721CCC8157B12,   # a bond angle (Å): the fast test fails
+    0x3B92CF3345BB5CB0, 0x3B80F983F9D64F91, 0x3FF259C9B42B4D48,   # a bond angle (m): the fast test fails
+    0xBFD642D379639CDD, 0x3FD4F2447342D681, 0xBFEA1B2A38D0570C,   # a dihedral angle: the fast test fails
+    0xCC2AA35BEB3F114D, 0xCC3B63116502202E, 0xC00582F426CB2D86,   # atan2(-8.361e+58, -1.719e+59) the fast test fails
+    0x3365F73B700AA590, 0xB38523D51CE98651, 0x4007197C507883BF,   # atan2(4.272e-61, -1.644e-60) the fast test fails
+    0x42C7AE72E8326CFE, 0xC5B69619649ADD6B, 0x400921FB54442D07,   # near π: the fast test fails
+    0x3EAE000000000546, 0x3FF0000000000000, 0x3EADFFFFFFFFFC7C,   # atan2(8.941e-07, 1) LM Table 13: 0 0^72
+    0x3F422E8D75E2BC7F, 0x3FF0000000000000, 0x3F422E8D5694AD2C,   # atan2(0.0005549, 1) LM: 1 0^59, the fast test fails
+    0x3FCA933FE176B375, 0x3FF0000000000000, 0x3FCA33F32AC5CEB5,   # atan2(0.2076, 1) LM Table 13: 1 1^55
+    0x3FE7BA49F739829F, 0x3FF0000000000000, 0x3FE46AC372243536,   # atan2(0.7415, 1) LM Table 13: 0 0^55
+    0x07022E8D75E2BC7F, 0x07B0000000000000, 0x3F422E8D5694AD2C,   # atan2(6.564e-275, 1.183e-271) the same, scaled
+    0x3FF0000000000000, 0x3F422E8D75E2BC7F, 0x3FF91FB582995A83,   # atan2(1, 0.0005549) π/2 − arctan
+    0x3EE4F8B588E368F1, 0x3FF0000000000000, 0x3EE4F8B588E06854,   # atan2(1e-05, 1) a bond angle near 0
+    0x3CD203AF9EE75616, 0xBFF0000000000000, 0x400921FB54442D16,   # atan2(1e-15, -1) near π
+};
+
+fn _t_atan2_values() {
+    test_group("cr_atan2_values");
+    var sent = check_atan2(&_T_ATAN2, 38, "atan2 value");
+    assert(sent >= 7, "the fast test fails on the 6 found arguments and the midpoint-adjacent arctan worst case");
+}
+
+# acos: (2, argument, expected). acos(1) = +0, acos(−1) = π and acos(±0) = π/2 rounded; |x| < 2^-56 gives π/2;
+# the branch points 1/2 and 1/√2 (either side), 1 − 2^-53, Lefèvre and Muller's arccos worst case (Table 11:
+# 1 1^62), arguments where the fast test fails (fall-back rate 1.4·10^-5), NaN for |x| > 1 and NaN.
+var _T_ACOS: i64[96] = {
+    2, 0x3FF0000000000000, 0x0000000000000000,   # acos(1) = +0
+    2, 0xBFF0000000000000, 0x400921FB54442D18,   # acos(-1) = π
+    2, 0x0000000000000000, 0x3FF921FB54442D18,   # acos(0) = π/2
+    2, 0x8000000000000000, 0x3FF921FB54442D18,   # acos(-0) = π/2
+    2, 0x3C6FFFFFFFFFFFFF, 0x3FF921FB54442D18,   # acos(1.3877787807814455e-17)
+    2, 0x3C70000000000000, 0x3FF921FB54442D18,   # acos(1.3877787807814457e-17)
+    2, 0xBC70000000000000, 0x3FF921FB54442D18,   # acos(-1.3877787807814457e-17)
+    2, 0x0000000000000001, 0x3FF921FB54442D18,   # acos(4.9406564584124654e-324)
+    2, 0x3FE0000000000000, 0x3FF0C152382D7366,   # acos(0.5)
+    2, 0xBFE0000000000000, 0x4000C152382D7366,   # acos(-0.5)
+    2, 0x3FE6A09E667F3BCD, 0x3FE921FB54442D18,   # acos(0.70710678118654757)
+    2, 0x3FE6A09E667F3BCC, 0x3FE921FB54442D19,   # acos(0.70710678118654746)
+    2, 0x3FEFFFFFFFFFFFFF, 0x3E50000000000000,   # acos(0.99999999999999989) (1 − 2^-53)
+    2, 0xBFEFFFFFFFFFFFFF, 0x400921FB52442D18,   # acos(-0.99999999999999989)
+    2, 0x3F4FD737BE914578, 0x3FF91E006D41D8D9,   # acos(0.00097170087713942168) LM Table 11: arccos 1 1^62
+    2, 0x3FEFE6744FB2F338, 0x3FB438EB74E8E5BF,   # acos(0.9968816334363515)
+    2, 0x3D382C6975598EE2, 0x3FF921FB54442B96,   # acos(8.5881467865955868e-14)
+    2, 0x3FD000000000005B, 0x3FF51700E0C14B0E,   # acos(0.25000000000000505)
+    2, 0xBFC5C12A6CADE308, 0x3FFBDD85F1CAEA2D,   # acos(-0.16995744997600348) the fast test fails
+    2, 0x3FDFE5A69ED96C2C, 0x3FF0C8EC66B20C2D,   # acos(0.49839177620532626) the fast test fails
+    2, 0x3FEFFE6474D1F246, 0x3F9449705FA5ED37,   # acos(0.99980376068521859) the fast test fails
+    2, 0x3FEFFFFF82308CF1, 0x3F466EDBE79651E5,   # acos(0.99999976565996296) the fast test fails
+    2, 0x3CE18D3094D8B41A, 0x3FF921FB54442D10,   # acos(1.948610444537385e-15) the fast test fails
+    2, 0xBFEFFFFFFFF7FB1D, 0x400921F5AA628B57,   # acos(-0.99999999994165345) the fast test fails
+    2, 0x3FB9999999999F3B, 0x3FF787B22CE3F535,   # acos(0.10000000000002) the fast test fails
+    2, 0xBFED3F15C700F91D, 0x4005CA292E211AE5,   # acos(-0.91395081394128719) the fast test fails
+    2, 0x3FD3333333333333, 0x3FF441F5ECBEEF59,   # acos(0.29999999999999999)
+    2, 0xBFEFFFFFCA501ACB, 0x40092110DC45EA89,   # acos(-0.99999990000000005)
+    2, 0x3FF0000000000001, 0x7FF8000000000000,     # acos(1 + 2^-52) = NaN
+    2, 0xC000000000000000, 0x7FF8000000000000,     # acos(−2) = NaN
+    2, 0x7FF0000000000000, 0x7FF8000000000000,     # acos(+∞) = NaN
+    2, 0x7FF8000000000000, 0x7FF8000000000000      # acos(NaN) = NaN
+};
+
+fn _t_acos_values() {
+    test_group("cr_acos_values");
+    var sent = check_tri(&_T_ACOS, 32, "acos value");
+    assert(sent >= 8, "the fast test fails on the 8 found arguments");
+}
+
+# The accurate paths give the full functions' bits on seeded arguments (sin and cos over [−8, 8] and every binade,
+# atan2 over every quadrant and exponent difference, acos over [−1, 1]). (Until M4d this group also checked M2a's
+# double-double _km_acos and _km_cos against them, bit-identical here and on cr_verify.py's 1,026,077 acos and 494,663
+# cos arguments; M4d moved gas.cyr onto _km_cr_acos and _km_cr_cos and removed the two.)
+fn _t_trig_accurate_path_agrees() {
+    test_group("cr_trig_accurate_path_agrees");
+    var st = 0x2545F4914F6CDD1D;
+    var u53: f64 = 0x3CA0000000000000;          # 2^-53
+    var bad = 0;
+    var k = 0;
+    while (k < 2000) {
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var f: f64 = f64_from(st >> 11) * u53;
+        var x: f64 = (16.0 * f) - 8.0;
+        if ((k & 3) == 3) { x = from_bits(((st >> 1) % 0x7FE0000000000000) | (st & 0x8000000000000000)); }
+        var fid = 0;
+        while (fid < 2) {
+            var y: f64 = tri(fid, 0, x);
+            var z: f64 = tri(fid, 1, x);
+            if (ulp_bits_match(_km_bits(y), _km_bits(z)) != 1) { bad = bad + 1; }
+            fid = fid + 1;
+        }
+        var c: f64 = (2.0 * f) - 1.0;
+        var a1: f64 = _km_cr_acos(c);
+        var a2: f64 = _km_cr_acos_acc(c);
+        if (ulp_bits_match(_km_bits(a1), _km_bits(a2)) != 1) { bad = bad + 1; }
+        var yb = ((st >> 1) % 0x7FE0000000000000) | ((st << 1) & 0x8000000000000000);
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var xb = ((st >> 1) % 0x7FE0000000000000) | (st & 0x8000000000000000);
+        var ty: f64 = from_bits(yb);
+        var tx: f64 = from_bits(xb);
+        var t1: f64 = _km_cr_atan2(ty, tx);
+        var t2: f64 = _km_cr_atan2_acc(ty, tx);
+        if (ulp_bits_match(_km_bits(t1), _km_bits(t2)) != 1) { bad = bad + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "fast and accurate paths agree on 2,000 seeded arguments each (sin, cos, atan2, acos)");
+}
+
+# x·2^y rounded once (M4d, ADR 0002 #13: nuclear's N₀/2ⁿ past the normal range): (x, y, expected) with MPFR's bits
+# (mpfr_ref.scaled_exp2; the special values src/mathx.cyr's). x NaN, ±0, ±∞ give x; y NaN NaN; y = ±∞ IEEE's product;
+# |y| > 2200 ±∞ or ±0 at once. Exact scalings round once at the subnormal grid, ties to even; a fractional y's 2^f is
+# irrational, so never a tie. M4c's faithful N₀·CR(2⁻ᶠ)·2⁻ᵏ was one ulp off on three of these; the last eight are
+# seeded pairs on which the fast test fails.
+var _T_E2S: i64[171] = {
+    0x0000000000000000, 0x4016000000000000, 0x0000000000000000,   # x = +0: x
+    0x8000000000000000, 0xC008000000000000, 0x8000000000000000,   # x = −0: x
+    0x7FF0000000000000, 0xC0B3880000000000, 0x7FF0000000000000,   # x = +∞: x
+    0xFFF0000000000000, 0x3FD0000000000000, 0xFFF0000000000000,   # x = −∞: x
+    0x7FF8000000000000, 0x3FF0000000000000, 0x7FF8000000000000,   # x NaN: NaN
+    0x3FF0000000000000, 0x7FF8000000000000, 0x7FF8000000000000,   # y NaN: NaN
+    0x4000000000000000, 0x7FF0000000000000, 0x7FF0000000000000,   # y = +∞: +∞
+    0xC000000000000000, 0x7FF0000000000000, 0xFFF0000000000000,   # y = +∞: −∞
+    0x0000000000000000, 0x7FF0000000000000, 0x7FF8000000000000,   # 0·2^+∞: NaN
+    0x4008000000000000, 0xFFF0000000000000, 0x0000000000000000,   # y = −∞: +0
+    0xC008000000000000, 0xFFF0000000000000, 0x8000000000000000,   # y = −∞: −0
+    0x7FF0000000000000, 0xFFF0000000000000, 0x7FF8000000000000,   # ∞·2^−∞: NaN
+    0x3FF8000000000000, 0x40A1310000000000, 0x7FF0000000000000,   # y > 2200: +∞
+    0xBFF8000000000000, 0xC0A1310000000000, 0x8000000000000000,   # y < −2200: −0
+    0x0000000000000001, 0x40A1300000000000, 0x7FF0000000000000,   # 2^−1074·2^2200 = 2^1126: +∞
+    0x7FEFFFFFFFFFFFFF, 0xC0A1300000000000, 0x0000000000000000,   # DBL_MAX·2^−2200: 0
+    0x408F400000000000, 0xC090CC0000000000, 0x00000000000001F4,   # 500·2^−1074
+    0x3FF0000000000000, 0xC090CC0000000000, 0x0000000000000000,   # 2^−1075: a tie, to even 0
+    0x4008000000000000, 0xC090CC0000000000, 0x0000000000000002,   # 1.5·2^−1074: a tie, to 2
+    0x4014000000000000, 0xC090CC0000000000, 0x0000000000000002,   # 2.5·2^−1074: a tie, to 2
+    0x401C000000000000, 0xC090CC0000000000, 0x0000000000000004,   # 3.5·2^−1074: a tie, to 4
+    0x7FEFFFFFFFFFFFFF, 0xC090CC0000000000, 0x3CBFFFFFFFFFFFFF,   # DBL_MAX·2^−1075 exactly
+    0x0000000000000001, 0x4090E00000000000, 0x4050000000000000,   # 2^−1074·2^1080 = 64
+    0x0000000000000001, 0x40A0620000000000, 0x7FE0000000000000,   # 2^1023
+    0x3FF0000000000000, 0x4090000000000000, 0x7FF0000000000000,   # 2^1024: +∞
+    0x7FEFFFFFFFFFFFFF, 0x3FF0000000000000, 0x7FF0000000000000,   # 2·DBL_MAX: +∞
+    0x7FEFFFFFFFFFFFFF, 0xBFF0000000000000, 0x7FDFFFFFFFFFFFFF,   # DBL_MAX/2, exact
+    0x3FF8000000000000, 0xC090C80000000000, 0x0000000000000002,   # 1.5·2^−1074: a tie, to 2
+    0x3FFFFFFFFFFFFFFF, 0xC08FF80000000000, 0x0010000000000000,   # (2 − 2^−52)·2^−1023: to 2^−1022
+    0xC01A000000000000, 0x0000000000000000, 0xC01A000000000000,   # y = 0: x
+    0x3FF0000000000000, 0x8000000000000000, 0x3FF0000000000000,   # y = −0: x
+    0x3FF0000000000000, 0x3FE0000000000000, 0x3FF6A09E667F3BCD,   # √2
+    0xC000000000000000, 0xBFE0000000000000, 0xBFF6A09E667F3BCD,   # −√2
+    0x3FF0000000000000, 0xC090CA0000000000, 0x0000000000000001,   # 2^−1074.5 above the tie: 2^−1074
+    0x3FF0000000000000, 0xC090CE0000000000, 0x0000000000000000,   # 2^−1075.5 below it: 0
+    0x4008000000000000, 0xC090CA0000000000, 0x0000000000000002,   # 3·2^−1074.5: 2
+    0x7FEFFFFFFFFFFFFF, 0xC08FF20000000000, 0x400AE89F995AD3AD,   # DBL_MAX·2^−1022.25 (M4c's faithful: …AC)
+    0x7E37E43C8800759C, 0xC08FF20000000000, 0x3E54171F0DE63805,   # 1e300·2^−1022.25 (M4c's: …04)
+    0x73D658E3AB795204, 0xC08FF40000000000, 0x33EF9A8F2D6A2BC1,   # 1e250·2^−1022.5 (M4c's: …C2)
+    0x408F400000000000, 0xC090CD3333333333, 0x0000000000000196,   # a subnormal
+    0xC23176592E000000, 0xC090E2CCCCCCCCCD, 0x800000002AFF49F0,   # a negative subnormal
+    0x3DE12E0BE826D695, 0x409019999999999A, 0x7E46AB41D5750EA3,   # normal from tiny x
+    0x7FEFFFFFFFFFFFFF, 0xC0A0638000000000, 0x0000000000000001,   # to 2^−1074
+    0x0000000000000001, 0x40A0630000000000, 0x7FE6A09E667F3BCD,   # 2^1023.5
+    0x7FEFFFFFFFFFFFFF, 0x3E7AD7F29ABCAF48, 0x7FF0000000000000,   # just above 2^1024·(1 − 2^−54): +∞
+    0x3FF0000000000000, 0x0000000000000001, 0x3FF0000000000000,   # 2^(2^−1074): 1
+    0x3FF0000000000000, 0x8000000000000001, 0x3FF0000000000000,   # 2^(−2^−1074): 1
+    0x3FF0000000000000, 0xBFD3333333333333, 0x3FE9FDF8BCCE533E,   # 2^−0.3
+    0x0008000000000000, 0xBFE8000000000000, 0x0004C1BF828C6DC5,   # a subnormal x
+    0x110AD82239C0E57D, 0x407FD884AE880FC8, 0x30E369AC7397BB69,   # the fast test fails
+    0x34B68A94E166E407, 0x4089CDA9DAFA9850, 0x68526906E46785C5,   # the fast test fails
+    0x30872C16C0C598A3, 0xC0873782F7B5A20A, 0x02182C818EC674DD,   # the fast test fails
+    0x5E2DCD1B9EA28321, 0xC0911C1FF4416282, 0x19BD29DD1A5E899D,   # the fast test fails
+    0x4D4C1B6569F9F285, 0xC090BFA40EDEEDE7, 0x0A4DE96F41F1D10F,   # the fast test fails
+    0x3625700084B21BD7, 0x407B59BF86770D88, 0x518059E814A22D91,   # the fast test fails
+    0x0E94EE6650A6A58E, 0xC0654F9662A82A90, 0x03EDDDF19EDA4FF5,   # the fast test fails
+    0x457632A2B4D74A2E, 0x4057C87DEB923EE0, 0x4B68560F072EE2E6    # the fast test fails
+};
+
+# Checks x·2^y = want, by the full function and the accurate path alone, and the fast path wherever its test passes.
+fn _t_exp2_scaled_values() {
+    test_group("cr_exp2_scaled_values");
+    var k = 0;
+    var sent = 0;
+    while (k < 57) {
+        var x: f64 = from_bits(load64(&_T_E2S + 24 * k));
+        var y: f64 = from_bits(load64(&_T_E2S + 24 * k + 8));
+        var want = load64(&_T_E2S + 24 * k + 16);
+        var r: f64 = _km_cr_exp2_scaled(x, y);
+        assert_bits_eq(r, want, "x·2^y");
+        var a: f64 = _km_cr_exp2_scaled_acc(x, y);
+        assert_bits_eq(a, want, "x·2^y, accurate path");
+        var rf, ok = _km_cr_exp2_scaled_fast(x, y);
+        if (ok == 0) { sent = sent + 1; }
+        if (ok == 1) { assert_bits_eq(rf, want, "x·2^y, fast path"); }
+        k = k + 1;
+    }
+    assert(sent >= 8, "the fast test fails on the eight found pairs");
+}
+
+# The accurate path gives the full function's bits on 4,000 seeded pairs: x over every binade, y over [−2200, 2200], and
+# nuclear's edge (y = −n, n past 1022 or −1024, x of every magnitude).
+fn _t_exp2_scaled_agrees() {
+    test_group("cr_exp2_scaled_agrees");
+    var st = 0x9E3779B97F4A7C15;
+    var u53: f64 = 0x3CA0000000000000;          # 2^-53
+    var bad = 0;
+    var k = 0;
+    while (k < 4000) {
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var xb = ((st >> 1) % 0x7FE0000000000000) | (st & 0x8000000000000000);
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var g: f64 = f64_from(st >> 11) * u53;
+        var x: f64 = from_bits(xb);
+        var y: f64 = (g * 4400.0) - 2200.0;
+        if ((k & 1) == 1) {
+            y = -(1022.0 + (g * 178.0));
+            if ((k & 2) == 2) { y = 1024.0 + (g * 176.0); }
+        }
+        var r: f64 = _km_cr_exp2_scaled(x, y);
+        var a: f64 = _km_cr_exp2_scaled_acc(x, y);
+        if (ulp_bits_match(_km_bits(r), _km_bits(a)) != 1) { bad = bad + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "fast and accurate paths agree on 4,000 seeded pairs");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_special_values();
@@ -515,6 +1087,15 @@ fn main() {
     _t_pow_exact_and_midpoint();
     _t_pow_hard_cases();
     _t_pow_agreement();
+    _t_trig_special_values();
+    _t_trig_hard_cases();
+    _t_trig_payne_hanek();
+    _t_sincos();
+    _t_atan2_values();
+    _t_acos_values();
+    _t_trig_accurate_path_agrees();
+    _t_exp2_scaled_values();
+    _t_exp2_scaled_agrees();
     return assert_summary();
 }
 

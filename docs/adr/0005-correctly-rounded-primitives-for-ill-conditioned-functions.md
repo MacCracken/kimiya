@@ -13,6 +13,11 @@
 > rounded `_km_cr_log10`; its near-cancellation rows where glibc's log10 misrounds are compared against the corrected
 > oracle (`tests/golden/solution.cr.tsv`) and are 0 ulp from it. `_km_log10` (fdlibm) is removed too. The text below is
 > kept as the record.
+>
+> **Status note (2026-11-09, M4d).** The double-double `_km_acos` and `_km_cos` are gone too: gas.cyr calls M4a's two-phase
+> `_km_cr_acos` and `_km_cr_cos` (correctly rounded on the whole double range, about 40 and 20 times faster), which gave the
+> same bits on every golden row and on cr_verify.py's 1,026,077 acos and 494,663 cos arguments; their double-double helpers
+> went with them (port-parity.md §13–§14).
 
 ## Context
 

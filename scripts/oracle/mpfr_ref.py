@@ -73,6 +73,50 @@ def cr2(name, x, y):
     return _finish(t)
 
 
+# x·2^y rounded once (ADR 0002 #13, M4d): the port's _km_cr_exp2_scaled. 2^f (f = y − trunc(y), |f| < 1) to _HP bits,
+# bounded from below and from above (RNDD, RNDU); each bound times x's significand exactly (_HP + 53 bits), then scaled
+# by 2^(trunc(y) + x's exponent) into a 53-bit result with binary64's exponent range and subnormalized, as cr() rounds. The two must agree, which they
+# do unless x·2^y is within 2^-_HP (relative) of a rounding boundary: for f ≠ 0 it is irrational (2^q is, for every
+# rational q that is not an integer), so a disagreement means only that _HP is too small, and it raises.
+_HP = 400
+_RNDU, _RNDD = 2, 3
+_m.mpfr_mul_d.argtypes = [_P, _P, ctypes.c_double, ctypes.c_int]
+_m.mpfr_mul_2si.argtypes = [_P, _P, ctypes.c_long, ctypes.c_int]
+_m.mpfr_exp2.argtypes = [_P, _P, ctypes.c_int]
+_f = _MPFR_T()
+_e2 = _MPFR_T()
+_xe = _MPFR_T()
+_m.mpfr_init2(ctypes.byref(_f), 53)
+_m.mpfr_init2(ctypes.byref(_e2), _HP)
+_m.mpfr_init2(ctypes.byref(_xe), _HP + 60)
+
+
+def _scaled_bound(x, f, k, rnd):
+    _m.mpfr_set_d(ctypes.byref(_f), f, _RNDN)
+    _m.mpfr_exp2(ctypes.byref(_e2), ctypes.byref(_f), rnd)                    # 2^f in [1/2, 2], bounded
+    _m.mpfr_mul_d(ctypes.byref(_xe), ctypes.byref(_e2), x, _RNDN)             # exact: _HP + 53 bits fit
+    t = _m.mpfr_mul_2si(ctypes.byref(_r), ctypes.byref(_xe), k, _RNDN)        # one rounding to 53 bits, binary64 range
+    return _finish(t)
+
+
+def scaled_exp2(x, y):
+    """RN(x·2^y), rounded once (subnormal results at the 2^-1074 grid, ±∞ past DBL_MAX), for finite x and y; x = ±0
+    gives x. The correctly rounded binary64 value of the exact product."""
+    import math
+    if x == 0.0 or not math.isfinite(x) or not math.isfinite(y):
+        raise ValueError((x, y))
+    k = math.trunc(y)
+    f = y - k                                       # exact
+    m, e = math.frexp(x)                            # x = m·2^e, |m| in [1/2, 1): the intermediates stay in range
+    if f == 0.0:
+        return _scaled_bound(m, 0.0, k + e, _RNDN)  # 2^0 = 1: exact, one rounding
+    lo = _scaled_bound(m, f, k + e, _RNDD)
+    hi = _scaled_bound(m, f, k + e, _RNDU)
+    if bits(lo) != bits(hi):
+        raise ArithmeticError(f"scaled_exp2({x!r}, {y!r}) undecided at {_HP} bits")
+    return lo
+
+
 def exp(x): return cr("exp", x)
 def expm1(x): return cr("expm1", x)
 def exp10(x): return cr("exp10", x)
@@ -110,4 +154,10 @@ if __name__ == "__main__":
     assert log(0.0) == -math.inf and exp(-math.inf) == 0.0
     # Agrees with glibc where glibc is correctly rounded.
     assert exp(1.0) == math.e and log(10.0) == math.log(10.0) and acos(-1.0) == math.pi
+    # x·2^y rounded once (ADR 0002 #13): exact scalings and their ties, a subnormal result from a fractional y, overflow.
+    assert bits(scaled_exp2(1000.0, -1075.0)) == 500 and scaled_exp2(1.0, -1075.0) == 0.0
+    assert bits(scaled_exp2(1.5, -1074.0)) == 2 and bits(scaled_exp2(3.0, -1076.0)) == 1
+    assert scaled_exp2(1.0, 0.5) == math.sqrt(2.0) and scaled_exp2(-2.0, -0.5) == -math.sqrt(2.0)
+    assert scaled_exp2(fb := from_bits(0x7FEFFFFFFFFFFFFF), 1.0) == math.inf and scaled_exp2(fb, -1.0) == fb / 2
+    assert bits(scaled_exp2(1.0, -1074.5)) == 1 and scaled_exp2(1.0, -1075.5) == 0.0   # 2^-0.5 above / below the tie
     print(f"mpfr_ref: MPFR {VERSION}, self-checks ok")

@@ -1,0 +1,435 @@
+# nuclear.cyr — nuclear chemistry: radioactive decay, binding energy, the semi-empirical mass formula, Q-values,
+# the two-step decay chain and isotope data (port of rust-old/src/nuclear.rs).
+#
+# Times are in any unit with decay constants in its reciprocal (s and s⁻¹ for the ISOTOPES half-lives); masses in
+# atomic mass units u (neutral-atom masses, as AME2020 tabulates them), energies in MeV. AMU_MEV (m_u·c²),
+# PROTON_MASS_U, NEUTRON_MASS_U and HYDROGEN_ATOM_MASS_U are src/constants.cyr's KM_* (generated); the 18 ISOTOPES rows
+# are src/nuclear_data.cyr (generated). Fallible functions return a value-form Result whose Err payload is a KM_ERR_*
+# code, and reject NaN and ±∞ inputs where Rust does. Every expression keeps Rust's operation order, so the
+# arithmetic functions are bit-identical (class B: + − × ÷, √ and cbrt, each correctly rounded on both sides); the exp,
+# exp_m1, ln and pow functions are class C, on src/mathx.cyr's correctly rounded _km_cr_exp, _km_cr_expm1, _km_cr_ln
+# and _km_cr_pow (ADR 0006), and compared exactly against the corrected oracle (docs/development/port-parity.md §12).
+#
+# - ADR 0002 #3: semi_empirical_binding_energy returns a Result, Err(KM_ERR_INVALID_INPUT) where Rust 1.2 returns NaN
+#   (z > a, or a = 0: no such nucleus). cbrt is ganita_f64_cbrt, correctly rounded as the oracle's (Rust's
+#   compiler-builtins, CORE-MATH) is.
+# - Rust's `u32` (z, n, a) are words here, never wrapped (port plan §6.4): one outside 0 ..= u32::MAX is
+#   Err(KM_ERR_INVALID_INPUT) for a Result function (binding_energy_per_nucleon, semi_empirical_binding_energy, at the
+#   position of Rust's first check: the checked add / sub) and NaN for a bare f64 (mass_defect).
+# - `2.0_f64.powf(−n)` is _km_cr_pow(2, −n), the correctly rounded 2⁻ⁿ (the release oracle calls glibc's exp2: LLVM
+#   rewrites the pow; both round the same real number), wherever 2⁻ⁿ is a normal double.
+# - ADR 0002 #13 and #14 (the user's decision, 2026-11-09: where Rust's rounding misses an exact value, fix it exactly):
+#   atoms_after_half_lives returns N₀/2ⁿ correctly rounded (rounded once, src/mathx.cyr's _km_cr_exp2_scaled) where
+#   Rust's 2⁻ⁿ overflows, underflows or is subnormal (M4c's version was faithful for a fractional n; M4d completed it),
+#   and is_secular_equilibrium compares λ_parent < λ_daughter/100 exactly. The golden rows keep the oracle's values;
+#   where the port's differ, the note names them and the harness maps the two (accepted under ADR 2, counted).
+# - Rust's std::f64::consts::LN_2, its private EQUAL_RATE_REL_TOL (10⁻¹²) and SEMF_* coefficients and the asymmetry
+#   term's 4 are typed formula constants inline (port plan §6.4): LN_2 by its bits, as src/kinetics.cyr writes it. Each
+#   is pinned by golden rows (validate.py perturbs it one ulp, the tolerance also by halving and doubling, and requires
+#   some row to change): decay_constant(1) is LN_2 exactly, the chain's rows on the threshold itself pin 10⁻¹² to the
+#   ulp, the SEMF grid every coefficient. (Rust's secular 0.01 is gone with ADR 0002 #14.)
+# - q_value's slices are a pointer and a count each, summed by src/thermo.cyr's _km_sum: Rust's `.sum()` from −0.0, and
+#   NaN for a negative count or a null pointer with values (port plan §6.4; there is no error channel).
+# - decay_chain_two_step's (N_A, N_B, N_C) tuple becomes the caller's buffer of three f64 (24 bytes, `var nabc[24];`),
+#   as src/kinetics.cyr's lineweaver_burk: Ok(3), the count written; on Err the buffer is untouched.
+# - lookup_isotope(symbol) returns a handle, ISOTOPES row + 1, or 0 for None; Isotope's fields are isotope_symbol(h)
+#   and isotope_decay_mode(h) ("" for an invalid handle), isotope_z(h) and isotope_a(h) (0: no row has either) and
+#   isotope_half_life_s(h) (NaN).
+
+include "lib/string.cyr"
+include "lib/ganita.cyr"
+
+# 1 if the word x is a Rust u32 (0 ..= 2³² − 1).
+#must_use
+fn _km_is_u32(x): i64 {
+    if (x < 0 || x > 0xFFFFFFFF) { return 0; }
+    return 1;
+}
+
+# ── radioactive decay ───────────────────────────────────────────────────────────────
+
+# The decay constant λ = ln 2 / t½ from a half-life in any time unit, in the reciprocal unit. A half-life of +∞ (the
+# stable-isotope convention of isotope_half_life_s) gives λ = 0. Ok(λ), or Err(KM_ERR_INVALID_INPUT) if the half-life
+# is not positive (0, negative, NaN or −∞); a subnormal half-life overflows to Ok(+∞), as in Rust. Computed as Rust's
+# `LN_2 / half_life`, one division. Mirrors `nuclear::decay_constant`.
+#must_use
+fn decay_constant(half_life: f64): Result {
+    var stable = 0;
+    if (half_life == _KM_INF) { stable = 1; }
+    if (_km_is_positive(half_life) != 1 && stable != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var ln2: f64 = 0x3FE62E42FEFA39EF;     # std::f64::consts::LN_2
+    var l: f64 = ln2 / half_life;
+    return Ok(l);
+}
+
+# The number of atoms remaining, N(t) = N₀·exp(−λt), from N₀, the decay constant λ and the time t in reciprocal units
+# (s⁻¹ and s). Inputs are not validated: non-finite input propagates to the result (0·∞ in the exponent, or N₀·e^x as
+# 0·∞ or ∞·0, gives NaN, as in Rust). Mirrors `nuclear::atoms_remaining`.
+#must_use
+fn atoms_remaining(initial: f64, decay_const: f64, time: f64): f64 {
+    var nl: f64 = -decay_const;
+    var x: f64 = nl * time;
+    var e: f64 = _km_cr_exp(x);
+    var n: f64 = initial * e;
+    return n;
+}
+
+# The activity A = λN, in decays per unit time (Bq when λ is in s⁻¹), from λ and the number of atoms N. Inputs are not
+# validated. Mirrors `nuclear::activity`.
+#must_use
+fn activity(decay_const: f64, num_atoms: f64): f64 {
+    var a: f64 = decay_const * num_atoms;
+    return a;
+}
+
+# The number of atoms remaining after n half-lives, N = N₀ / 2ⁿ. Where 2⁻ⁿ is a normal double (−1024 < n ≤ 1022) this is
+# Rust's `initial * 2.0.powf(−n)`: the correctly rounded 2⁻ⁿ, then one multiply (for an integer n, 2⁻ⁿ is exact, so the
+# correctly rounded N₀/2ⁿ). ADR 0002 #13: where Rust's 2⁻ⁿ overflows (n ≤ −1024), underflows to 0 or is subnormal and so
+# inexact (n > 1022), the port returns N₀/2ⁿ correctly rounded (rounded once) instead of Rust's ±∞, 0, NaN or a value
+# off by up to 2⁵² ulp: src/mathx.cyr's _km_cr_exp2_scaled(N₀, −n), N₀·2⁻ⁿ rounded once for every N₀ and n (1000 after
+# 1075 half-lives is 500·2⁻¹⁰⁷⁴ ≈ 2.47 × 10⁻³²¹; a tie such as 2⁻¹⁰⁷⁵ goes to even, 0; a fractional n has its 2⁻ᶠ to
+# 2⁻¹⁵⁰ before the one rounding). ±0, ±∞ and NaN N₀ give N₀ there (scaleB's semantics: 0 after −1100 half-lives is 0,
+# where Rust gives 0·∞ = NaN). Inputs are not validated; an infinite n keeps Rust's limits (0 or ±∞, NaN for 0·∞ and
+# ∞·0). Mirrors `nuclear::atoms_after_half_lives`, with ADR 0002 #13.
+#must_use
+fn atoms_after_half_lives(initial: f64, n_half_lives: f64): f64 {
+    var nn: f64 = -n_half_lives;
+    if (_km_is_finite(n_half_lives) == 1 && (n_half_lives > 1022.0 || n_half_lives <= -1024.0)) {
+        var edge: f64 = _km_cr_exp2_scaled(initial, nn);   # ADR 0002 #13: N₀·2⁻ⁿ rounded once
+        return edge;
+    }
+    var p: f64 = _km_cr_pow(2.0, nn);
+    var r: f64 = initial * p;
+    return r;
+}
+
+# x > 0 finite as s·2^e with s in [1, 2) (subnormals normalised first, by an exact ×2⁵⁴).
+#must_use
+fn _km_frexp1(x: f64): (f64, i64) {
+    var y: f64 = x;
+    var e = 0;
+    var b = _km_bits(y);
+    if (b < 0x0010000000000000) {
+        var two54: f64 = _km_cr_pow2(54);
+        y = y * two54;
+        b = _km_bits(y);
+        e = 0 - 54;
+    }
+    e = e + (b >> 52) - 1023;
+    var sb = (b & 0x000FFFFFFFFFFFFF) | 0x3FF0000000000000;
+    var s: f64 = sb;
+    return (s, e);
+}
+
+# The time for a fraction of the atoms to remain, t = −ln(fraction)/λ, in the reciprocal unit of λ. Ok(t) (−0.0 for a
+# fraction of 1: −ln 1 is −0.0, as in Rust); Err(KM_ERR_INVALID_INPUT) if the fraction is not in (0, 1] (NaN
+# included), then if λ is not positive and finite. Mirrors `nuclear::time_for_fraction`.
+#must_use
+fn time_for_fraction(fraction_remaining: f64, decay_const: f64): Result {
+    if (_km_is_positive(fraction_remaining) != 1 || fraction_remaining > 1.0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(decay_const) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var lnf: f64 = _km_cr_ln(fraction_remaining);
+    var nlnf: f64 = -lnf;
+    var t: f64 = nlnf / decay_const;
+    return Ok(t);
+}
+
+# ── binding energy ──────────────────────────────────────────────────────────────────
+
+# The mass defect Δm = Z·m(¹H) + N·m_n − M_atom in u, from the proton and neutron counts Z and N (Rust u32s, as words)
+# and the neutral-atom mass M_atom in u (as AME2020 tabulates it). The ¹H atom mass (KM_HYDROGEN_ATOM_MASS_U), not the
+# bare proton's, makes the Z electrons in M_atom cancel (electron binding energies, at most a few hundred keV in all,
+# are neglected). Computed as Rust's `z·m_H + n·m_n − M`, left to right. The mass is not validated; NaN for a count
+# outside 0 ..= u32::MAX (there is no error channel). Mirrors `nuclear::mass_defect`.
+#must_use
+fn mass_defect(z, n, atomic_mass_u: f64): f64 {
+    if (_km_is_u32(z) != 1 || _km_is_u32(n) != 1) { return _km_nan(); }
+    var zf: f64 = f64_from(z);
+    var nf: f64 = f64_from(n);
+    var md: f64 = _km_mass_defect(zf, nf, atomic_mass_u);
+    return md;
+}
+
+# Rust's `z as f64 * HYDROGEN_ATOM_MASS_U + n as f64 * NEUTRON_MASS_U - atomic_mass_u`, from the counts already
+# converted (exactly: a u32 fits a double), left to right; the counts' checks are the callers'.
+#must_use
+fn _km_mass_defect(zf: f64, nf: f64, atomic_mass_u: f64): f64 {
+    var mh: f64 = KM_HYDROGEN_ATOM_MASS_U;
+    var mn: f64 = KM_NEUTRON_MASS_U;
+    var md: f64 = (zf * mh) + (nf * mn);
+    md = md - atomic_mass_u;
+    return md;
+}
+
+# The binding energy BE = Δm·m_u·c² in MeV from a mass defect in u (KM_AMU_MEV, CODATA 2018). Mirrors
+# `nuclear::binding_energy_mev`.
+#must_use
+fn binding_energy_mev(mass_defect_u: f64): f64 {
+    var be: f64 = mass_defect_u * KM_AMU_MEV;
+    return be;
+}
+
+# The binding energy per nucleon BE/A in MeV, from Z, N (Rust u32s, as words) and the neutral-atom mass in u (see
+# mass_defect). Ok(BE/A); Err(KM_ERR_INVALID_INPUT) if Z or N is outside 0 ..= u32::MAX or A = Z + N overflows u32
+# (Rust's checked_add), then if A = 0, then if the mass is not positive and finite. Mirrors
+# `nuclear::binding_energy_per_nucleon`.
+#must_use
+fn binding_energy_per_nucleon(z, n, atomic_mass_u: f64): Result {
+    if (_km_is_u32(z) != 1 || _km_is_u32(n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var a = z + n;
+    if (a > 0xFFFFFFFF) { return Err(KM_ERR_INVALID_INPUT); }
+    if (a == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(atomic_mass_u) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var zf: f64 = f64_from(z);
+    var nf: f64 = f64_from(n);
+    var md: f64 = _km_mass_defect(zf, nf, atomic_mass_u);
+    var be: f64 = md * KM_AMU_MEV;          # binding_energy_mev(md)
+    var af: f64 = f64_from(a);
+    var bea: f64 = be / af;
+    return Ok(bea);
+}
+
+# The semi-empirical mass formula (Weizsäcker, the liquid-drop model), the binding energy in MeV of the nucleus with Z
+# protons and mass number A (Rust u32s, as words):
+#   BE = a_v·A − a_s·A^(2/3) − a_c·Z²/A^(1/3) − a_a·(N − Z)²/(4A) + δ/√A,
+# with Povh, Rith, Scholz & Zetsche's coefficients (*Particles and Nuclei*, eq. 2.8): a_v = 15.67, a_s = 17.23,
+# a_c = 0.714, a_a = 93.15, δ = +11.2 (even-even), 0 (odd A), −11.2 (odd-odd), all MeV. About 0.4 % for medium and heavy
+# nuclei (Fe-56: 494.0 against 492.26 MeV; U-238: 1808.0 against 1801.69 MeV, AME2020), poor for very light ones.
+# A^(2/3) is cbrt(A)², and each term is evaluated in Rust's order. Ok(BE); Err(KM_ERR_INVALID_INPUT) if Z or A is
+# outside 0 ..= u32::MAX, Z > A or A = 0 — no such nucleus (ADR 0002 #3: Rust 1.2 returns NaN). Mirrors
+# `nuclear::semi_empirical_binding_energy`.
+#must_use
+fn semi_empirical_binding_energy(z, a): Result {
+    if (_km_is_u32(z) != 1 || _km_is_u32(a) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (z > a) { return Err(KM_ERR_INVALID_INPUT); }     # Rust's a.checked_sub(z)
+    if (a == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    var semf_volume: f64 = 15.67;           # SEMF_VOLUME, a_v (MeV)
+    var semf_surface: f64 = 17.23;          # SEMF_SURFACE, a_s (MeV)
+    var semf_coulomb: f64 = 0.714;          # SEMF_COULOMB, a_c (MeV)
+    var semf_asymmetry: f64 = 93.15;        # SEMF_ASYMMETRY, a_a (MeV)
+    var semf_pairing: f64 = 11.2;           # SEMF_PAIRING, δ (MeV)
+    var af: f64 = f64_from(a);
+    var zf: f64 = f64_from(z);
+    var nf: f64 = f64_from(a - z);
+    var asym: f64 = nf - zf;
+    var cbrt_a: f64 = ganita_f64_cbrt(af);
+    var volume: f64 = semf_volume * af;
+    var surface: f64 = (semf_surface * cbrt_a) * cbrt_a;
+    var coulomb: f64 = ((semf_coulomb * zf) * zf) / cbrt_a;
+    var asymmetry: f64 = ((semf_asymmetry * asym) * asym) / (4.0 * af);
+    var pairing: f64 = 0.0;                 # odd A
+    if ((a & 1) == 0) {
+        var sq: f64 = f64_sqrt(af);
+        if ((z & 1) == 0) {
+            pairing = semf_pairing / sq;    # even-even
+        } else {
+            var neg: f64 = -semf_pairing;
+            pairing = neg / sq;             # odd-odd
+        }
+    }
+    var be: f64 = volume - surface;
+    be = be - coulomb;
+    be = be - asymmetry;
+    be = be + pairing;
+    return Ok(be);
+}
+
+# The Q-value of a nuclear reaction, Q = (Σ m_reactants − Σ m_products)·c², in MeV (positive: exothermic), from the
+# nr reactant and np product atomic masses in u at `reactant_masses_u` and `product_masses_u`. Each sum is Rust's
+# `.sum()`, from −0.0 in order (src/thermo.cyr's _km_sum); NaN if either is no slice (a negative count, or a null
+# pointer with values). Mirrors `nuclear::q_value`.
+#must_use
+fn q_value(reactant_masses_u, nr, product_masses_u, np): f64 {
+    var sum_r: f64 = _km_sum(reactant_masses_u, nr);
+    var sum_p: f64 = _km_sum(product_masses_u, np);
+    var d: f64 = sum_r - sum_p;
+    var q: f64 = d * KM_AMU_MEV;
+    return q;
+}
+
+# ── decay chains ────────────────────────────────────────────────────────────────────
+
+# The two-step decay chain A →(λ₁) B →(λ₂) C (the Bateman equations) from N_A(0) = N₀ and no B or C at t = 0, with λ₁,
+# λ₂ and t in reciprocal units:
+#   N_A = N₀·e^(−λ₁t),  N_B = N₀·λ₁/(λ₂ − λ₁)·(e^(−λ₁t) − e^(−λ₂t)),  N_C = N₀(1 − e^(−λ₁t)) − N_B.
+# N_B is evaluated in Rust's cancellation-free form N₀·λ₁·e^(−λ_min·t)·g with g = (1 − e^(−|Δλ|t))/|Δλ| =
+# −expm1(−|Δλ|·t)/|Δλ|, or g = t (the analytic limit N_B = N₀·λ·t·e^(−λt)) when |λ₂ − λ₁| ≤ 10⁻¹²·max(λ₁, λ₂) (Rust's
+# private EQUAL_RATE_REL_TOL, typed inline); N_C uses expm1 for accuracy at small t. `out` is the caller's buffer of
+# three f64 (24 bytes, `var nabc[24];`): Ok(3), the count written, with N_A at out, N_B at out + 8 and N_C at out + 16;
+# or Err(KM_ERR_INVALID_INPUT) if λ₁ or λ₂ is not positive and finite, then if N₀, then t, is negative or not finite,
+# and the buffer is untouched. Mirrors `nuclear::decay_chain_two_step`, whose (N_A, N_B, N_C) tuple the buffer replaces.
+#must_use
+fn decay_chain_two_step(n0: f64, lambda1: f64, lambda2: f64, time: f64, out): Result {
+    if (_km_is_positive(lambda1) != 1 || _km_is_positive(lambda2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(n0) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(time) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var nl1: f64 = -lambda1;
+    var x1: f64 = nl1 * time;
+    var e1: f64 = _km_cr_exp(x1);
+    var na: f64 = n0 * e1;
+    # (e^(−λ₁t) − e^(−λ₂t)) / (λ₂ − λ₁) = e^(−λ_min·t) · (1 − e^(−|Δλ|t)) / |Δλ|: no catastrophic cancellation, and it
+    # tends to e^(−λt)·t as Δλ → 0.
+    var dl: f64 = lambda2 - lambda1;
+    var delta: f64 = f64_abs(dl);
+    var lambda_min: f64 = _km_min(lambda1, lambda2);
+    var lambda_max: f64 = _km_max(lambda1, lambda2);
+    var tol: f64 = 0.000000000001;          # EQUAL_RATE_REL_TOL = 1e-12
+    var threshold: f64 = tol * lambda_max;
+    var growth: f64 = 0.0;
+    if (delta <= threshold) {
+        growth = time;
+    } else {
+        var nd: f64 = -delta;
+        var xd: f64 = nd * time;
+        var em: f64 = _km_cr_expm1(xd);
+        var nem: f64 = -em;
+        growth = nem / delta;
+    }
+    var nlm: f64 = -lambda_min;
+    var xm: f64 = nlm * time;
+    var em_min: f64 = _km_cr_exp(xm);
+    var nb: f64 = ((n0 * lambda1) * em_min) * growth;
+    # N_C = N₀(1 − e^(−λ₁t)) − N_B, with expm1 for accuracy at small t.
+    var nn0: f64 = -n0;
+    var em1: f64 = _km_cr_expm1(x1);
+    var nc: f64 = (nn0 * em1) - nb;
+    store64(out, na);
+    store64(out + 8, nb);
+    store64(out + 16, nc);
+    return Ok(3);
+}
+
+# 1 if a parent → daughter pair is in secular equilibrium's regime, λ_parent ≪ λ_daughter (the parent much longer-lived:
+# then the daughter's activity equals the parent's), tested as λ_parent < λ_daughter/100; 0 otherwise. ADR 0002 #14: the
+# comparison is exact (100·λ_parent against λ_daughter, _km_cmp_hundred), not Rust's λ_parent < 0.01·λ_daughter, whose
+# 0.01 is not 1/100 and whose product rounds or underflows: (0.03, 3) is 1 (0.03 is 0.029999…, below 3/100; Rust 0) and
+# (0, 5 × 10⁻³²⁴) is 1 (Rust's 0.01·λ_d underflows to 0). As in Rust, NaN gives 0, ±∞ compare as themselves (∞/100 = ∞),
+# ±0 as 0, and negative inputs are compared as given. Inputs are not validated. Mirrors
+# `nuclear::is_secular_equilibrium`, with ADR 0002 #14.
+#must_use
+fn is_secular_equilibrium(lambda_parent: f64, lambda_daughter: f64): i64 {
+    var lp: f64 = lambda_parent;
+    var ld: f64 = lambda_daughter;
+    if (lp != lp || ld != ld) { return 0; }
+    if (_km_is_finite(lp) != 1 || _km_is_finite(ld) != 1) {
+        if (lp < ld) { return 1; }                  # an infinite λ_d/100 is λ_d; λ_p = ±∞ against any finite bound
+        return 0;
+    }
+    if (lp == 0.0) {
+        if (ld > 0.0) { return 1; }                 # 0 < λ_d/100 ⟺ λ_d > 0
+        return 0;
+    }
+    if (ld == 0.0) {
+        if (lp < 0.0) { return 1; }
+        return 0;
+    }
+    if (lp < 0.0 && ld > 0.0) { return 1; }
+    if (lp > 0.0 && ld < 0.0) { return 0; }
+    var ap: f64 = f64_abs(lp);
+    var ad: f64 = f64_abs(ld);
+    var c = _km_cmp_hundred(ap, ad);
+    if (lp > 0.0) {
+        if (c < 0) { return 1; }                    # 100·λ_p < λ_d
+        return 0;
+    }
+    if (c > 0) { return 1; }                        # both negative: λ_p < λ_d/100 ⟺ 100·|λ_p| > |λ_d|
+    return 0;
+}
+
+# The sign of 100·a − b, exactly, for finite a, b > 0: −1, 0 or 1. With a = sa·2^ea and b = sb·2^eb (sa, sb in [1, 2)),
+# 100·a is in [2^(ea + 6), 2^(ea + 8)), so the exponents decide unless eb is ea + 6 or ea + 7; then 100·sa = p + e
+# exactly (_km_two_prod on [1, 2) × 100: neither overflow nor an underflowing error term, whatever a's magnitude) is
+# compared with the exact sb·2^(eb − ea): p first (p < b' ⇒ p + e < b', as |e| is at most half the gap to p's
+# neighbour), then e.
+#must_use
+fn _km_cmp_hundred(a: f64, b: f64): i64 {
+    var sa, ea = _km_frexp1(a);
+    var sb, eb = _km_frexp1(b);
+    if (eb >= ea + 8) { return 0 - 1; }
+    if (eb <= ea + 5) { return 1; }
+    var hundred: f64 = 100.0;
+    var p, e = _km_two_prod(sa, hundred);
+    var bs: f64 = sb * 64.0;
+    if (eb == ea + 7) { bs = sb * 128.0; }
+    if (p < bs) { return 0 - 1; }
+    if (p > bs) { return 1; }
+    if (e < 0.0) { return 0 - 1; }
+    if (e > 0.0) { return 1; }
+    return 0;
+}
+
+# ── isotope data ────────────────────────────────────────────────────────────────────
+
+# The ISOTOPES row of handle h (h − 1), or -1 if h is no handle.
+#must_use
+fn _km_isotope_row(h): i64 {
+    if (h >= 1 && h <= KM_ISOTOPES_COUNT) { return h - 1; }
+    return 0 - 1;
+}
+
+# The isotope whose label is the C string `symbol`, exactly and case-sensitively ("C-14", "Tc-99m"), as a handle (its
+# ISOTOPES row + 1); 0 when none matches (or `symbol` is 0). The first match in table order, as Rust's linear `find`
+# (the labels are unique). Mirrors `nuclear::lookup_isotope`.
+#must_use
+fn lookup_isotope(symbol): i64 {
+    if (symbol == 0) { return 0; }
+    var c0 = load8(symbol);
+    if (c0 == 0) { return 0; }
+    var n = strlen(symbol);
+    var row = 0;
+    while (row < KM_ISOTOPES_COUNT) {
+        var p = &_KM_ISOTOPES_SYMBOL_BYTES + _KM_ISOTOPES_SYMBOL_OFF[row];
+        # The first byte decides most rows; memeq stops at p's NUL, which differs from symbol's byte.
+        if (load8(p) == c0) {
+            if (memeq(p, symbol, n) == 1 && load8(p + n) == 0) { return row + 1; }
+        }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# The nuclide label of ISOTOPES handle h ("C-14", "Tc-99m" for a metastable state) as a C string in the baked table;
+# "" for an invalid handle. Mirrors `Isotope::symbol`.
+#must_use
+fn isotope_symbol(h): i64 {
+    var row = _km_isotope_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_ISOTOPES_SYMBOL_BYTES + _KM_ISOTOPES_SYMBOL_OFF[row];
+}
+
+# The atomic number Z (protons) of ISOTOPES handle h; 0 for an invalid handle, which no row has. Mirrors `Isotope::z`.
+#must_use
+fn isotope_z(h): i64 {
+    var row = _km_isotope_row(h);
+    if (row < 0) { return 0; }
+    return KM_ISOTOPES_Z[row];
+}
+
+# The mass number A (protons + neutrons) of ISOTOPES handle h; 0 for an invalid handle, which no row has. Mirrors
+# `Isotope::a`.
+#must_use
+fn isotope_a(h): i64 {
+    var row = _km_isotope_row(h);
+    if (row < 0) { return 0; }
+    return KM_ISOTOPES_A[row];
+}
+
+# The half-life of ISOTOPES handle h in s (NUBASE2020 / ENSDF, the Julian year; +∞ would be a stable isotope, which the
+# table has none of); NaN for an invalid handle. Mirrors `Isotope::half_life_s`.
+#must_use
+fn isotope_half_life_s(h): f64 {
+    var row = _km_isotope_row(h);
+    if (row < 0) { return _km_nan(); }
+    var t: f64 = KM_ISOTOPES_HALF_LIFE_S[row];
+    return t;
+}
+
+# The principal decay mode(s) of ISOTOPES handle h as a C string of UTF-8 bytes in the baked table: "α", "β⁻", "β⁺",
+# "EC" (electron capture), "IT" (isomeric transition), several `/`-separated ("β⁻/β⁺/EC"); "" for an invalid handle.
+# Mirrors `Isotope::decay_mode`.
+#must_use
+fn isotope_decay_mode(h): i64 {
+    var row = _km_isotope_row(h);
+    if (row < 0) { return ""; }
+    return &_KM_ISOTOPES_DECAY_MODE_BYTES + _KM_ISOTOPES_DECAY_MODE_OFF[row];
+}

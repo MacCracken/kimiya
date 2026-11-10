@@ -179,3 +179,67 @@ benched). Redlich–Kwong's Tc^2.5 went from `_km_pow_2_5` (85 ns, double-double
 not benched in Rust. `nernst_potential`'s 1.94 µs → 84 ns (23× faster) is M3c-2a's, ADR 0005's double-double ln
 replaced by the two-phase one. The benches whose bodies have no transcendental are unchanged within the host's noise.
 ADR 0006 asks the fast paths to stay "within a small factor of the stdlib primitives": exp is 3.5×, log10 1.3×, pow 0.7×.
+
+## M4b organic, inorganic (2026-11-09)
+
+`rust-old/benches/benchmarks.rs` has no organic or inorganic bench, so these two are Cyrius-only: there is no Rust
+baseline to compare against (they are recorded for later milestones to compare with).
+
+| Bench | Body | Rust | Cyrius | Cyrius / Rust |
+|---|---|---|---|---|
+| `organic/enthalpy_from_bonds` | the integration test's CH₄ + 2O₂: `enthalpy_from_bonds([(CH, 4), (OODouble, 2)], [(CODouble, 2), (OH, 4)])`, two lists of two records (each value and count checked), two sums from −0.0, one subtraction | — | 49.5 ns | — |
+| `inorganic/lookup_ionic_radius` | `lookup_ionic_radius("Sn", 2)`: a linear scan to the last of the 30 rows (the i8 charge and the first byte decide each row) | — | 107 ns | — |
+
+The same run's other benches were 5–10 % above their M3c figures (`vant_hoff_k` 83.4 ns, `arrhenius_rate` 70.6 ns,
+`lookup_half_reaction` 127 ns), none of whose code changed: the host was shared with another build that day, so read
+these two numbers with that margin.
+
+## M4c nuclear (2026-11-09)
+
+`rust-old/benches/benchmarks.rs` has two nuclear benches, ported with the same inputs; the decay chain is Cyrius-only.
+
+| Bench | Body | Rust | Cyrius | Cyrius / Rust |
+|---|---|---|---|---|
+| `nuclear/binding_energy_per_nucleon_fe56` | `binding_energy_per_nucleon(26, 30, 55.934_936_33)`: the u32 checks and checked add, A = 0, the mass guard, Δm, × m_u·c², one division, a `Result` | 2.02 ns | 27 ns | 13× |
+| `nuclear/semi_empirical_fe56` | `semi_empirical_binding_energy(26, 56)`: the checks, one cbrt (ganita's, correctly rounded), one √, the five terms; a `Result` in the port (ADR 0002 #3) | 18.50 ns | 131 ns | 7.1× |
+| `nuclear/decay_chain_two_step` | the Rust test's `decay_chain_two_step(1000, 0.1, 0.05, 10)`: three guards, two `_km_cr_exp` and two `_km_cr_expm1` (the Bateman branch), into the caller's buffer | — | 256 ns | — |
+
+`binding_energy_per_nucleon` first measured 41 ns calling `mass_defect` (which checks its u32 words again) and
+`binding_energy_mev`; it now calls a private, unchecked `_km_mass_defect` and multiplies by `KM_AMU_MEV` inline: 29 ns
+back to back on the same host, 27 ns in the final run (the corpus pins the bits: 618 rows, 0 ulp). The SEMF's cost is
+mostly ganita's cbrt. The same run's other benches were within 5 % of their M4b and M3c figures.
+
+
+## M4a correctly rounded trigonometry (2026-11-09)
+
+Cyrius-only (`mathx/*`, no Rust counterpart: Rust calls glibc's): each correctly rounded primitive beside the stdlib
+function it replaces or could replace. sin and cos at 2π/3 + 0.1 (a Peng–Robinson angle), atan2 at (0.866, −0.5) (a 120°
+bond angle), acos at −0.35.
+
+| Bench | Correctly rounded | Stdlib | Ratio |
+|---|---|---|---|
+| sin | `mathx/cr_sin` 74 ns | `f64_sin` 37 ns (x87 on x86_64; not correctly rounded) | 2.0× |
+| cos | `mathx/cr_cos` 82 ns | `f64_cos` 40 ns | 2.1× |
+| sin and cos | `mathx/cr_sincos` 115 ns | — | — |
+| atan2 | `mathx/cr_atan2` 113 ns | `ganita_f64_atan2` 53 ns | 2.1× |
+| acos | `mathx/cr_acos` 140 ns | ADR 0005's double-double `_km_acos` 5.8 µs | 0.024× |
+
+ADR 0005's double-double `_km_cos` was 1.68 µs; M4d moved gas.cyr to `_km_cr_cos` and `_km_cr_acos` and removed both.
+
+## M4d potential (2026-11-09)
+
+`rust-old/benches/benchmarks.rs` has one potential bench, ported with the same input; the others are Cyrius-only.
+
+| Bench | Body | Rust | Cyrius | Cyrius / Rust |
+|---|---|---|---|---|
+| `potential/dihedral_angle` | Rust's butane-like gauche geometry in ångströms, A (1, 1, 0), B (0, 0, 0), C (1.5, 0, 0), D (2.5, 0, 1), through four pointers: three sub3, two cross, seven dot3, the two collinearity tests, one √ and one atan2, which here is the x = 0 special case (+90°) | 20.35 ns | 130 ns | 6.4× |
+| `potential/bond_angle` | water at metre scale (O–H 0.9572 Å, 104.52°): two sub3, a cross, six dot3, the coincidence tests, √ and a full `_km_cr_atan2` (fast path) | — | 215 ns | — |
+| `potential/lennard_jones` | Ar at r ≈ r_min: three guards, σ/r, five products, the square, (4·ε)·d | — | 35 ns | — |
+| `potential/lj_equilibrium_distance` | Ar's σ: `_km_cr_sixth_root2_mul`, a triple-double product and one `_km_cr_finish` (ADR 0002 #16) | — | 109 ns | — |
+| `potential/morse` | HCl at 1.1·r_e: two guards, one `_km_cr_exp`, (D_e·x)·x | — | 66 ns | — |
+| `mathx/cr_exp2_scaled` | 1000 after 1075.3 half-lives, a subnormal result (ADR 0002 #13's N₀·2⁻ⁿ): exp's fast core and rounding test at the subnormal grid | — | 151 ns | — |
+
+The same run's M4a trig benches matched the M4a figures within 2 % (`cr_sin` 74 ns, `cr_cos` 81, `cr_atan2` 111, `cr_acos`
+142), and the other benches were within 5 % of their M4c figures but `thermochem/adiabatic_flame_ch4_air` (3.80 µs against
+3.24; nothing on its path changed, + − × ÷ only) and `gas/peng_robinson_z_n2_1mpa` (283 ns against 270; the one-root
+branch, which calls no trig): host noise, as M4b's note describes.

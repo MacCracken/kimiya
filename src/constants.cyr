@@ -8,7 +8,8 @@
 # correctly rounded (6.6.10+). tests/golden/constants.tsv pins every bit.
 #
 # Module data constants are generated with their module's data, not here: K_b/K_f in
-# src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung and Born exponents at M4.
+# src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung and Born exponents in
+# src/inorganic_data.cyr (M4b).
 # The exceptions are the solution constants (M3a: K_w, Debye–Hückel A / B, Λ°) and
 # thermo::WATER_SPECIFIC_HEAT (M2a): neither module has a data file, and this file
 # precedes both in [lib].

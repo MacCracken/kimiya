@@ -1,0 +1,174 @@
+# organic.cyr — organic chemistry: average bond energies, VSEPR geometry and functional groups (port of
+# rust-old/src/organic.rs).
+#
+# Energies are in kJ/mol, angles in degrees. The data — the enums KmBondType, KmGeometry and KmFunctionalGroup
+# and their per-variant properties — is src/organic_data.cyr (generated). Every function is a table read or
+# + − × of table values in Rust's operation order, so every result is bit-identical (classes A and B).
+#
+# - The enums have explicit, append-only values in Rust variant order (KM_BOND_TYPE_CH = 0, …). Rust's const
+#   property methods are free functions of the value, named <enum>_<method>: bond_type_energy_kj(b),
+#   geometry_ideal_bond_angle(g), functional_group_pattern(g), functional_group_is_polar(g). Rust's type admits
+#   only its variants; here any word can arrive, and one that is no value of the enum gets the property's
+#   documented "none" (NaN, "" or 0), never an out-of-bounds read.
+# - ADR 0002 #6: Rust's `Geometry::TShapedThreeLonePairs` (three bonding groups and two lone pairs, ClF₃) is
+#   KM_GEOMETRY_T_SHAPED, at its Rust position (7); `FunctionalGroup::hydrogen_bonding` is
+#   functional_group_is_hydrogen_bond_donor; functional_group_is_hydrogen_bond_acceptor is new, its column a cited
+#   classification: IUPAC 2011's electron-rich region, a lone pair or a π-bonded pair, the weak acceptors included,
+#   so every group but the alkane accepts (the sources, one per weak family, are in src/organic_data.cyr).
+# - predict_geometry(bonding_groups, lone_pairs) takes Rust's two u8s as words and returns the value-form Option of
+#   a KmGeometry value. A word outside 0 ..= 255 is None (there is no error channel), never wrapped mod 256.
+# - enthalpy_from_bonds(broken, nb, formed, nf): Rust's `&[(BondType, u32)]` is a pointer to n 16-byte records —
+#   the KmBondType value as a word, then the count as a word — and n, as thermochem's species lists. Each list is
+#   Σ energy·count in list order from −0.0 (Rust's `.sum()`), so two empty lists give −0.0 − −0.0 = +0.0. It has
+#   no error channel (Rust returns a bare f64): a negative n, a null pointer with n > 0, an invalid KmBondType
+#   value or a count outside 0 ..= u32::MAX (never wrapped) gives NaN.
+
+# 1 if the word v is a value of an enum with `count` members (0 ..= count − 1).
+#must_use
+fn _km_is_enum_value(v, count): i64 {
+    if (v < 0 || v >= count) { return 0; }
+    return 1;
+}
+
+# ── bond energies ───────────────────────────────────────────────────────────────────
+
+# Average bond dissociation energy of bond type b (a KmBondType value) in kJ/mol (gas phase, averaged over typical
+# compounds); NaN for a word that is no KmBondType value. Mirrors `BondType::energy_kj`.
+#must_use
+fn bond_type_energy_kj(b): f64 {
+    if (_km_is_enum_value(b, KM_BOND_TYPE_COUNT) != 1) { return _km_nan(); }
+    var e: f64 = KM_BOND_TYPE_ENERGY_KJ[b];
+    return e;
+}
+
+# Σ energy × count over the n (KmBondType, count) records at `bonds`, in list order from −0.0 (Rust's
+# `.map(|(b, n)| b.energy_kj() * *n as f64).sum()`); NaN if (bonds, n) is no list, a type is no KmBondType value or
+# a count is outside 0 ..= u32::MAX.
+#must_use
+fn _km_bond_energy_sum(bonds, n): f64 {
+    if (n < 0 || (n > 0 && bonds == 0)) { return _km_nan(); }
+    var s: f64 = -0.0;
+    var k = 0;
+    while (k < n) {
+        var b = load64(bonds + k * 16);
+        var count = load64(bonds + k * 16 + 8);
+        if (_km_is_enum_value(b, KM_BOND_TYPE_COUNT) != 1) { return _km_nan(); }
+        if (count < 0 || count > 0xFFFFFFFF) { return _km_nan(); }
+        var e: f64 = KM_BOND_TYPE_ENERGY_KJ[b];
+        var c: f64 = f64_from(count);
+        var term: f64 = e * c;
+        s = s + term;
+        k = k + 1;
+    }
+    return s;
+}
+
+# Reaction enthalpy estimated from average bond energies, in kJ (per mole of reaction as written):
+# ΔH ≈ Σ(bonds broken) − Σ(bonds formed), negative = exothermic. `broken` and `formed` each point to their n
+# (KmBondType value, count) records of 16 bytes (the value as a word, then the count). NaN if either is no list,
+# names a word that is no KmBondType value, or has a count outside 0 ..= u32::MAX (Rust's type). Mirrors
+# `organic::enthalpy_from_bonds`.
+#must_use
+fn enthalpy_from_bonds(broken, nb, formed, nf): f64 {
+    var sb: f64 = _km_bond_energy_sum(broken, nb);
+    var sf: f64 = _km_bond_energy_sum(formed, nf);
+    var dh: f64 = sb - sf;
+    return dh;
+}
+
+# ── VSEPR geometry ──────────────────────────────────────────────────────────────────
+
+# The ideal bond angle of geometry g (a KmGeometry value) in degrees (where applicable; the equatorial angle for
+# the trigonal-bipyramidal family); NaN for a word that is no KmGeometry value. Mirrors
+# `Geometry::ideal_bond_angle`.
+#must_use
+fn geometry_ideal_bond_angle(g): f64 {
+    if (_km_is_enum_value(g, KM_GEOMETRY_COUNT) != 1) { return _km_nan(); }
+    var a: f64 = KM_GEOMETRY_IDEAL_BOND_ANGLE[g];
+    return a;
+}
+
+# The molecular geometry VSEPR theory predicts for a central atom with `bonding_groups` bonding electron groups
+# (atoms bonded to it) and `lone_pairs` lone pairs, as Some(KmGeometry value); None for an arrangement it doesn't
+# cover. A single bonding group (a diatomic such as HCl, or a terminal atom) is always linear for 0–3 lone pairs.
+# Read it with `var t, g = predict_geometry(b, lp); if (is_some(t) == 1) { .. }`. Rust's arguments are u8s: a word
+# outside 0 ..= 255 is None, never wrapped. Mirrors `organic::predict_geometry`.
+#must_use
+fn predict_geometry(bonding_groups, lone_pairs): Option {
+    if (bonding_groups == 1) {
+        if (lone_pairs >= 0 && lone_pairs <= 3) { return Some(KM_GEOMETRY_LINEAR); }  # diatomic: HCl, N₂, F₂
+        return None();
+    }
+    if (bonding_groups == 2) {
+        if (lone_pairs == 0) { return Some(KM_GEOMETRY_LINEAR); }
+        if (lone_pairs == 1) { return Some(KM_GEOMETRY_BENT_ONE_LONE_PAIR); }
+        if (lone_pairs == 2) { return Some(KM_GEOMETRY_BENT_TWO_LONE_PAIRS); }
+        if (lone_pairs == 3) { return Some(KM_GEOMETRY_LINEAR); }  # XeF2-like
+        return None();
+    }
+    if (bonding_groups == 3) {
+        if (lone_pairs == 0) { return Some(KM_GEOMETRY_TRIGONAL_PLANAR); }
+        if (lone_pairs == 1) { return Some(KM_GEOMETRY_TRIGONAL_PYRAMIDAL); }
+        if (lone_pairs == 2) { return Some(KM_GEOMETRY_T_SHAPED); }
+        return None();
+    }
+    if (bonding_groups == 4) {
+        if (lone_pairs == 0) { return Some(KM_GEOMETRY_TETRAHEDRAL); }
+        if (lone_pairs == 1) { return Some(KM_GEOMETRY_SEESAW_SHAPED); }
+        if (lone_pairs == 2) { return Some(KM_GEOMETRY_SQUARE_PLANAR); }
+        return None();
+    }
+    if (bonding_groups == 5) {
+        if (lone_pairs == 0) { return Some(KM_GEOMETRY_TRIGONAL_BIPYRAMIDAL); }
+        if (lone_pairs == 1) { return Some(KM_GEOMETRY_SQUARE_PYRAMIDAL); }
+        return None();
+    }
+    if (bonding_groups == 6 && lone_pairs == 0) { return Some(KM_GEOMETRY_OCTAHEDRAL); }
+    return None();
+}
+
+# ── functional groups ───────────────────────────────────────────────────────────────
+
+# The general formula or identifying pattern of functional group g (a KmFunctionalGroup value) as a C string of
+# UTF-8 bytes in the baked table ("C≡C (sp)", "-NH₂ / -NHR / -NR₂"); "" for a word that is no KmFunctionalGroup
+# value. Mirrors `FunctionalGroup::pattern`.
+#must_use
+fn functional_group_pattern(g): i64 {
+    if (_km_is_enum_value(g, KM_FUNCTIONAL_GROUP_COUNT) != 1) { return ""; }
+    return &_KM_FUNCTIONAL_GROUP_PATTERN_BYTES + _KM_FUNCTIONAL_GROUP_PATTERN_OFF[g];
+}
+
+# 1 if functional group g is typically polar (qualitative): every group but alkane, alkene, alkyne and the
+# aromatic ring; 0 otherwise and for a word that is no KmFunctionalGroup value. Mirrors `FunctionalGroup::is_polar`.
+#must_use
+fn functional_group_is_polar(g): i64 {
+    if (_km_is_enum_value(g, KM_FUNCTIONAL_GROUP_COUNT) != 1) { return 0; }
+    if (KM_FUNCTIONAL_GROUP_IS_POLAR[g]) { return 1; }
+    return 0;
+}
+
+# 1 if functional group g can act as a hydrogen-bond donor (has an O–H, N–H or S–H): alcohol, carboxylic acid,
+# amine (primary and secondary; a tertiary amine has no N–H), amide, phenol and thiol (S–H is only a weak donor);
+# 0 otherwise and for a word that is no KmFunctionalGroup value. The acceptor-only groups (ethers, aldehydes,
+# ketones, esters, nitriles) give 0: see functional_group_is_hydrogen_bond_acceptor. Mirrors
+# `FunctionalGroup::hydrogen_bonding` (renamed by ADR 0002 #6).
+#must_use
+fn functional_group_is_hydrogen_bond_donor(g): i64 {
+    if (_km_is_enum_value(g, KM_FUNCTIONAL_GROUP_COUNT) != 1) { return 0; }
+    if (KM_FUNCTIONAL_GROUP_IS_HYDROGEN_BOND_DONOR[g]) { return 1; }
+    return 0;
+}
+
+# 1 if functional group g can act as a hydrogen-bond acceptor, by the IUPAC 2011 criterion (Arunan et al., Pure Appl.
+# Chem. 83, 1637): it has an electron-rich region, a lone pair or a π-bonded pair — the O and N lone pairs of
+# alcohol, aldehyde, ketone, carboxylic acid, ester, ether, amine (tertiary included), amide, nitrile and phenol, and
+# the weak acceptors: the π electrons of alkenes, alkynes and aromatic rings (Steiner 2002), thiol S (Allen et al.
+# 1997) and C–X halogens (Brammer et al. 2001; organic F the weakest, Dunitz & Taylor 1997). 0 for the alkane (σ bonds
+# only) and for a word that is no KmFunctionalGroup value. No strength is implied. New in the Cyrius API (ADR 0002 #6);
+# the classification and its sources are in src/organic_data.cyr. No Rust counterpart.
+#must_use
+fn functional_group_is_hydrogen_bond_acceptor(g): i64 {
+    if (_km_is_enum_value(g, KM_FUNCTIONAL_GROUP_COUNT) != 1) { return 0; }
+    if (KM_FUNCTIONAL_GROUP_IS_HYDROGEN_BOND_ACCEPTOR[g]) { return 1; }
+    return 0;
+}

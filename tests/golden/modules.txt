@@ -3,10 +3,14 @@ constants
 electrochemistry
 element
 gas
+inorganic
 kinetics
 math
 molecule
+nuclear
+organic
 phase
+potential
 reaction
 solution
 thermo

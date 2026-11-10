@@ -10,8 +10,9 @@
 //!   `constants.cyr` precedes both in `[lib]`.
 //! - **Module data** stays with its module and is generated with that module's data at its
 //!   milestone: `Home::Data` names the generated file (M2a: K_b/K_f into `src/phase_data.cyr`,
-//!   STP into `src/gas_data.cyr`); `Home::Module` is a later milestone (M4: Madelung, Born
-//!   exponents), whose golden rows are *pending* in the harness until then.
+//!   STP into `src/gas_data.cyr`; M4b: the Madelung constants and Born exponents into
+//!   `src/inorganic_data.cyr`). Since M4b every constant has a generated home, so no golden
+//!   `constants` row is pending.
 //!
 //! Values come from the oracle's API; the comments are the Rust doc comments, which carry
 //! the citations (CODATA 2018, SI 2019, AME2020, …). The struct-valued consts (`gas::PR_*`)
@@ -28,8 +29,6 @@ pub enum Home {
     Constants,
     /// With its module's data, in the named generated file (`src/<name>.cyr`).
     Data(&'static str),
-    /// With its module's data, at the named (later) milestone.
-    Module(&'static str),
 }
 
 /// One public `f64` const of the oracle.
@@ -61,7 +60,7 @@ macro_rules! constants {
 const PHYS: Home = Home::Constants;
 const PHASE: Home = Home::Data("phase_data");
 const GAS: Home = Home::Data("gas_data");
-const M4: Home = Home::Module("M4");
+const INORGANIC: Home = Home::Data("inorganic_data");
 
 /// Every public scalar `f64` const of kimiya 1.2.0: modules in file-name order, then
 /// source order.
@@ -72,16 +71,16 @@ const ALL: &[Constant] = constants!(
     element::GAS_CONSTANT => PHYS,
     gas::STP_TEMPERATURE => GAS,
     gas::STP_PRESSURE => GAS,
-    inorganic::MADELUNG_NACL => M4,
-    inorganic::MADELUNG_CSCL => M4,
-    inorganic::MADELUNG_ZNS => M4,
-    inorganic::MADELUNG_FLUORITE => M4,
-    inorganic::MADELUNG_RUTILE => M4,
-    inorganic::BORN_EXP_HE => M4,
-    inorganic::BORN_EXP_NE => M4,
-    inorganic::BORN_EXP_AR => M4,
-    inorganic::BORN_EXP_KR => M4,
-    inorganic::BORN_EXP_XE => M4,
+    inorganic::MADELUNG_NACL => INORGANIC,
+    inorganic::MADELUNG_CSCL => INORGANIC,
+    inorganic::MADELUNG_ZNS => INORGANIC,
+    inorganic::MADELUNG_FLUORITE => INORGANIC,
+    inorganic::MADELUNG_RUTILE => INORGANIC,
+    inorganic::BORN_EXP_HE => INORGANIC,
+    inorganic::BORN_EXP_NE => INORGANIC,
+    inorganic::BORN_EXP_AR => INORGANIC,
+    inorganic::BORN_EXP_KR => INORGANIC,
+    inorganic::BORN_EXP_XE => INORGANIC,
     kinetics::BOLTZMANN => PHYS,
     nuclear::AMU_MEV => PHYS,
     nuclear::PROTON_MASS_U => PHYS,
@@ -179,7 +178,8 @@ pub fn emit(root: &Path, provenance: &str) -> Result<String, String> {
              positionally: the Cyrius lexer has no exponent notation, and decimal literals are\n\
              correctly rounded (6.6.10+). tests/golden/constants.tsv pins every bit.",
             "Module data constants are generated with their module's data, not here: K_b/K_f in\n\
-             src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung and Born exponents at M4.\n\
+             src/phase_data.cyr and STP in src/gas_data.cyr (M2a); Madelung and Born exponents in\n\
+             src/inorganic_data.cyr (M4b).\n\
              The exceptions are the solution constants (M3a: K_w, Debye–Hückel A / B, Λ°) and\n\
              thermo::WATER_SPECIFIC_HEAT (M2a): neither module has a data file, and this file\n\
              precedes both in [lib].",
@@ -194,10 +194,16 @@ pub fn emit(root: &Path, provenance: &str) -> Result<String, String> {
 /// `probe_tables.py` read to tie it to its golden row). `t_phase` and `t_gas` emit their
 /// `Home::Data` constants with this.
 pub fn consts(root: &Path, home: Home) -> Result<String, String> {
+    consts_where(root, home, |_| true)
+}
+
+/// As [`consts`], for the constants of `home` whose name `keep` accepts (M4b: `t_inorganic` emits the
+/// Madelung constants and the Born exponents as two groups, each under its source section comment).
+pub fn consts_where(root: &Path, home: Home, keep: impl Fn(&str) -> bool) -> Result<String, String> {
     complete(root)?;
     let mut out = String::new();
     let mut sources = BTreeMap::new();
-    for c in ALL.iter().filter(|c| c.home == home) {
+    for c in ALL.iter().filter(|c| c.home == home && keep(c.name)) {
         if !sources.contains_key(c.module) {
             let p = root.join(format!("rust-old/src/{}.rs", c.module));
             let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -209,7 +215,7 @@ pub fn consts(root: &Path, home: Home) -> Result<String, String> {
         out.push_str(&format!("const KM_{} = {};\n\n", c.name, f64_lit(c.value)?));
     }
     if out.is_empty() {
-        return Err("t_constants::consts: no constant has that home".to_string());
+        return Err("t_constants::consts: no constant has that home and name".to_string());
     }
     Ok(out)
 }

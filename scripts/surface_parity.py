@@ -11,6 +11,8 @@ Cyrius name the porting rules give (CLAUDE.md, port plan §6.4):
                                         bare Rust name would be ambiguous in one flat namespace
 - `pub(crate) fn f` (validate)       -> `fn _km_f(` (private helpers carry `_km_`)
 - `impl Struct { pub fn m }`         -> `fn m(` inside `impl Km<Struct> {`
+- `impl Enum { pub const fn m }`     -> a free `fn <prefix>m(` of the enum value, the prefix ENUM_METHODS
+                                        names (`bond_type_energy_kj(b)`, M4b)
 - `pub const X`                      -> `const KM_X =`, or for a struct-valued const (gas::PR_*) a
                                         top-level struct value `var KM_X = Km<Struct> {`
 - `pub enum E` and each variant V    -> `enum Km<E> {` and `KM_<SNAKE(E)>_<SNAKE(V)> =`
@@ -40,6 +42,19 @@ MODULES = {
     "solution": {"prefix": "", "structs": set()},
     "electrochemistry": {"prefix": "", "structs": set()},
     "kinetics": {"prefix": "", "structs": set()},
+    "organic": {"prefix": "", "structs": set()},
+    "inorganic": {"prefix": "", "structs": set()},
+    "nuclear": {"prefix": "", "structs": set()},
+    "potential": {"prefix": "", "structs": set()},
+}
+
+# Rust enums with `impl` methods (M4b): their const property methods are free functions of the enum value,
+# `<prefix><method>(v)` (port plan §6.4).
+ENUM_METHODS = {
+    "BondType": "bond_type_",
+    "Geometry": "geometry_",
+    "FunctionalGroup": "functional_group_",
+    "Ligand": "ligand_",
 }
 
 # Rust structs that became handles (port plan §6.4: `Option<&'static T>` → a handle, 0 for None):
@@ -50,6 +65,8 @@ STRUCT_ACCESSORS = {
     "Atom": "atom_",                          # entry k of a KmMolecule: `m.atom_<field>(k)`
     "ThermochemData": "thermochem_data_",     # handle = THERMOCHEM_DATA row + 1 (1–76)
     "HalfReaction": "half_reaction_",         # handle = STANDARD_POTENTIALS row + 1 (1–49)
+    "IonicRadius": "ionic_radius_",           # handle = IONIC_RADII row + 1 (1–30)
+    "Isotope": "isotope_",                    # handle = ISOTOPES row + 1 (1–18)
 }
 
 # Rust item -> why it has no direct Cyrius name (it is still checked to exist in Rust).
@@ -85,12 +102,22 @@ EXCEPTIONS = {
                                                     "src/electrochemistry_data.cyr (KM_STANDARD_POTENTIALS_COUNT "
                                                     "rows), read through handles (row + 1): lookup_half_reaction and "
                                                     "the half_reaction_* accessors (port plan §6.4)",
+    "organic::Geometry::TShapedThreeLonePairs": "renamed KM_GEOMETRY_T_SHAPED by ADR 0002 #6 (at its Rust position, 7): "
+                                                "the Rust name is a misnomer, ClF₃ has two lone pairs",
+    "organic::FunctionalGroup::hydrogen_bonding": "renamed functional_group_is_hydrogen_bond_donor by ADR 0002 #6 (with "
+                                                  "the new functional_group_is_hydrogen_bond_acceptor beside it)",
+    "inorganic::static IONIC_RADII": "the generated columns KM_IONIC_RADII_CHARGE / _COORDINATION / _RADIUS_PM and the "
+                                     "symbol blob _KM_IONIC_RADII_SYMBOL_BYTES in src/inorganic_data.cyr "
+                                     "(KM_IONIC_RADII_COUNT rows), read through handles (row + 1): lookup_ionic_radius and "
+                                     "the ionic_radius_* accessors (port plan §6.4)",
+    "nuclear::static ISOTOPES": "the generated columns KM_ISOTOPES_Z / _A / _HALF_LIFE_S, the symbol blob and the UTF-8 "
+                                "decay-mode blob in src/nuclear_data.cyr (KM_ISOTOPES_COUNT rows), read through handles "
+                                "(row + 1): lookup_isotope and the isotope_* accessors (port plan §6.4)",
 }
 
 # Later milestones (port plan §2.1): counted, not checked.
 PENDING_MODULES = {
-    "stoichiometry": "M4", "organic": "M4", "inorganic": "M4", "potential": "M4", "nuclear": "M4",
-    "spectroscopy": "M4",
+    "stoichiometry": "M4", "spectroscopy": "M4",
     "reaction_dynamics": "M5", "network": "M5", "fitting": "M5", "sensitivity": "M5",
 }
 DEFERRED_MODULES = {
@@ -105,7 +132,17 @@ NOT_APPLICABLE_MODULES = {
 
 
 def snake(camel):
-    return re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", camel).upper()
+    """scripts/oracle/src/cyr.rs's snake (tanmatra's rule): `_` before a capital after a lowercase letter or digit, or
+    before a capital that starts a capitalised word after a run of capitals (`CCDouble` → `CC_DOUBLE`, `HCl` → `H_CL`;
+    M4b: the regex this replaced gave `CCDOUBLE`, which no generated name uses)."""
+    out = []
+    for k, ch in enumerate(camel):
+        if ch.isupper() and k > 0:
+            prev, nxt = camel[k - 1], camel[k + 1] if k + 1 < len(camel) else ""
+            if prev.islower() or prev.isdigit() or (prev.isupper() and nxt.islower()):
+                out.append("_")
+        out.append(ch.upper())
+    return "".join(out)
 
 
 def rust_items(module):
@@ -198,6 +235,8 @@ def has_counterpart(module, kind, owner, name):
         prefix = STRUCT_ACCESSORS.get(owner)
         return prefix is not None and re.search(rf"\bfn {prefix}{name}\(", cyr) is not None
     if kind == "method":
+        if owner in ENUM_METHODS:
+            return re.search(rf"^fn {ENUM_METHODS[owner]}{name}\(", cyr, re.M) is not None
         return name in impl_methods(owner)
     return False
 

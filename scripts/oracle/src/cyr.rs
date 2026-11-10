@@ -151,6 +151,19 @@ pub enum Elem {
 /// `var NAME: T[N] = { .. };`, one element per line with a trailing label comment, under the
 /// `doc` lines as `#` comments.
 pub fn table(name: &str, doc: &str, elem: &Elem, labels: &[String]) -> Result<String, String> {
+    table_sectioned(name, doc, elem, labels, &[])
+}
+
+/// As [`table`], with comment lines inside the initializer: `sections[i]` (when present and not
+/// empty) is written as `# <line>` lines before element i. M4b: the `// Carbon bonds` headings of a
+/// Rust `match` travel to the rows they head.
+pub fn table_sectioned(
+    name: &str,
+    doc: &str,
+    elem: &Elem,
+    labels: &[String],
+    sections: &[Vec<String>],
+) -> Result<String, String> {
     let (ty, vals): (&str, Vec<String>) = match elem {
         Elem::F64(v) => (
             "f64",
@@ -174,7 +187,10 @@ pub fn table(name: &str, doc: &str, elem: &Elem, labels: &[String]) -> Result<St
         let _ = writeln!(out, "{}", comment_line(line));
     }
     let _ = writeln!(out, "var {name}: {ty}[{}] = {{", vals.len());
-    for (v, label) in vals.iter().zip(labels) {
+    for (k, (v, label)) in vals.iter().zip(labels).enumerate() {
+        for line in sections.get(k).map_or(&[][..], Vec::as_slice) {
+            let _ = writeln!(out, "    {}", comment_line(line));
+        }
         let _ = writeln!(out, "    {v},  # {label}");
     }
     out.push_str("};\n\n");
@@ -276,4 +292,143 @@ pub fn header(title: &str, provenance: &str, notes: &[&str]) -> String {
     }
     out.push('\n');
     out
+}
+
+/// One variant of a Rust enum as the source declares it (M4b).
+pub struct SourceVariant {
+    /// The `//` comment lines between the previous variant and this one (a section heading such as
+    /// `── Carbon bonds ───`), without the `//`.
+    pub sections: Vec<String>,
+    /// The variant's name.
+    pub name: String,
+}
+
+/// The unit variants of `pub enum <name> {` in the Rust source, in declaration order, each with the
+/// `//` comments before it (doc comments and attributes are skipped). Names only: a generator proves
+/// its variant list against this, since a `#[non_exhaustive]` enum can't be matched exhaustively
+/// from outside its crate.
+pub fn enum_variants(src: &str, name: &str) -> Result<Vec<SourceVariant>, String> {
+    let anchor = format!("pub enum {name} {{");
+    let at = src.find(&anchor).ok_or_else(|| format!("no `{anchor}`"))?;
+    let body = &src[at + anchor.len()..];
+    let body = &body[..body
+        .find("\n}")
+        .ok_or_else(|| format!("{name}: no closing brace"))?];
+    let mut out = Vec::new();
+    let mut sections = Vec::new();
+    for l in body.lines().map(str::trim) {
+        if l.is_empty() || l.starts_with("///") || l.starts_with("#[") {
+            continue;
+        }
+        if let Some(c) = l.strip_prefix("//") {
+            sections.push(c.trim().to_string());
+            continue;
+        }
+        let v = l
+            .strip_suffix(',')
+            .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric()))
+            .ok_or_else(|| format!("{name}: {l:?} is no unit variant"))?;
+        out.push(SourceVariant {
+            sections: std::mem::take(&mut sections),
+            name: v.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// One arm `Self::<Variant> => <value>,` of a `match self` in the Rust source (M4b).
+pub struct SourceArm {
+    /// The `//` comment lines between the previous arm and this one (`Carbon bonds`).
+    pub sections: Vec<String>,
+    /// The variant the arm matches.
+    pub variant: String,
+    /// The arm's trailing `// note`, if any (`~117° due to lone pair compression`).
+    pub note: Option<String>,
+}
+
+/// The arms of the `match self {` in the body of the first item whose line starts with `item` (after
+/// leading whitespace), e.g. `pub const fn energy_kj(`. Comments only: the values come from the API.
+pub fn match_arms(src: &str, item: &str) -> Result<Vec<SourceArm>, String> {
+    let at = src
+        .lines()
+        .position(|l| l.trim_start().starts_with(item))
+        .ok_or_else(|| format!("no `{item}` in the Rust source"))?;
+    let lines: Vec<&str> = src.lines().skip(at).collect();
+    let open = lines
+        .iter()
+        .position(|l| l.trim() == "match self {")
+        .ok_or_else(|| format!("{item}: no `match self {{`"))?;
+    let mut arms = Vec::new();
+    let mut sections = Vec::new();
+    for l in lines[open + 1..].iter().map(|l| l.trim()) {
+        if l == "}" {
+            return Ok(arms);
+        }
+        if l.is_empty() {
+            continue;
+        }
+        if let Some(c) = l.strip_prefix("//") {
+            sections.push(c.trim().to_string());
+            continue;
+        }
+        let rest = l
+            .strip_prefix("Self::")
+            .ok_or_else(|| format!("{item}: {l:?} is no `Self::X => …` arm"))?;
+        let (variant, after) = rest
+            .split_once(" =>")
+            .ok_or_else(|| format!("{item}: {l:?} has no `=>`"))?;
+        arms.push(SourceArm {
+            sections: std::mem::take(&mut sections),
+            variant: variant.to_string(),
+            note: after.split_once("//").map(|(_, n)| n.trim().to_string()),
+        });
+    }
+    Err(format!("{item}: the match has no closing brace"))
+}
+
+/// One member of a generated Cyrius enum: the Rust variant it mirrors, its Cyrius name, and doc lines
+/// added below the variant's Rust doc (an ADR rename's note).
+pub struct Member {
+    pub variant: String,
+    pub name: String,
+    pub extra: Vec<String>,
+}
+
+/// `enum <cyr> { … }` then `const <count> = N;` for the Rust `pub enum <rust>`, under the enum's doc
+/// comment: member k is `= k`, in declaration order (append-only), under the variant's `//` section
+/// comments and doc comment. `members` must be the source's variants, in order.
+pub fn enum_decl(
+    src: &str,
+    rust: &str,
+    cyr: &str,
+    count: &str,
+    members: &[Member],
+) -> Result<String, String> {
+    let source = enum_variants(src, rust)?;
+    let names: Vec<&str> = source.iter().map(|v| v.name.as_str()).collect();
+    let listed: Vec<&str> = members.iter().map(|m| m.variant.as_str()).collect();
+    if names != listed {
+        return Err(format!(
+            "{rust}: the generator lists {listed:?}, the source declares {names:?}"
+        ));
+    }
+    let anchor = format!("pub enum {rust} {{");
+    let mut out = doc_comment(src, &anchor)?;
+    let _ = writeln!(out, "enum {cyr} {{");
+    for (k, (m, sv)) in members.iter().zip(&source).enumerate() {
+        for s in &sv.sections {
+            let _ = writeln!(out, "    {}", comment_line(s));
+        }
+        let docs = doc_comment_after(src, &anchor, &format!("{},", m.variant))?;
+        for l in docs.lines() {
+            let _ = writeln!(out, "    {l}");
+        }
+        for l in &m.extra {
+            let _ = writeln!(out, "    {}", comment_line(l));
+        }
+        let _ = writeln!(out, "    {} = {k};", m.name);
+    }
+    out.push_str("}\n");
+    let _ = writeln!(out, "const {count} = {};\n", members.len());
+    Ok(out)
 }

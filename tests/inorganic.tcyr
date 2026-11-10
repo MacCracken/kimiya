@@ -1,0 +1,642 @@
+# inorganic.tcyr — the tests of rust-old/src/inorganic.rs, ported one for one (each test_group is the Rust test's
+# name; all 30), plus Cyrius-only tests of Rust's integer and bool types as words (out-of-u8 d-electron counts, bool
+# words other than 0 and 1, out-of-u32 ion charges, out-of-i8 radius charges), invalid ligand values and ionic-radius
+# handles, the exact CFSE of ADR 0002 #12, and Δ_tet's correctly rounded 4Δ/9 past Rust's Δ·4 overflow (ADR 0002 #15).
+# The golden corpus separately checks every function over its grid (tests/parity.tcyr).
+#
+# No Rust test needed adapting beyond the port's form (port plan §6.4): `Result::unwrap` is `is_ok` + the payload,
+# `lookup_ionic_radius(..).unwrap()` is a non-zero handle read with the ionic_radius_* accessors, `for r in
+# IONIC_RADII` loops over handles 1 ..= KM_IONIC_RADII_COUNT, a Rust `bool` is 0 / 1, and `Ligand::X.method()` is
+# ligand_<method>(KM_LIGAND_X). ADR 0002 #12 makes the CFSE exact; the Rust CFSE tests' tolerances (1e-10, 1e-12,
+# f64::EPSILON on 0) hold for the exact values as for Rust's, so none changed: cyrius_cfse_exact asserts the exact bits
+# (+0.0 for high-spin d⁵ and d¹⁰). ADR 0002 #15 changes no Rust test (`delta_tet_ratio` is Δ = 10000).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/inorganic_data.cyr"
+include "src/inorganic.cyr"
+
+alloc_init();
+
+# 1 if |a − b| < eps.
+#must_use
+fn near(a: f64, b: f64, eps: f64): i64 {
+    var d: f64 = f64_abs(a - b);
+    if (d < eps) { return 1; }
+    return 0;
+}
+
+# 1 if the Result (t, v) is Err(code).
+#must_use
+fn is_err_code(t, v, code): i64 {
+    if (is_err_result(t) == 1 && v == code) { return 1; }
+    return 0;
+}
+
+# f64::EPSILON.
+#must_use
+fn eps64(): f64 {
+    var e: f64 = 0.0000000000000002220446049250313;
+    return e;
+}
+
+# 1 if x is NaN.
+#must_use
+fn is_nan(x: f64): i64 {
+    if (x != x) { return 1; }
+    return 0;
+}
+
+# cfse_octahedral(d, hs).unwrap(): the Ok payload (the test fails on Err).
+#must_use
+fn cfse(d, hs): f64 {
+    var t, v = cfse_octahedral(d, hs);
+    assert(is_ok(t) == 1, "cfse_octahedral: Ok");
+    var c: f64 = v;
+    return c;
+}
+
+# unpaired_electrons_oct(d, hs).unwrap().
+#must_use
+fn unpaired(d, hs): i64 {
+    var t, v = unpaired_electrons_oct(d, hs);
+    assert(is_ok(t) == 1, "unpaired_electrons_oct: Ok");
+    return v;
+}
+
+# born_lande_lattice_energy(..).unwrap().
+#must_use
+fn lande(m: f64, zc, za, r0: f64, n: f64): f64 {
+    var t, v = born_lande_lattice_energy(m, zc, za, r0, n);
+    assert(is_ok(t) == 1, "born_lande_lattice_energy: Ok");
+    var u: f64 = v;
+    return u;
+}
+
+# 1 if born_lande_lattice_energy(..) is Err(InvalidInput).
+#must_use
+fn lande_err(m: f64, zc, za, r0: f64, n: f64): i64 {
+    var t, v = born_lande_lattice_energy(m, zc, za, r0, n);
+    return is_err_code(t, v, KM_ERR_INVALID_INPUT);
+}
+
+# The handle of an ion that must be in the table.
+#must_use
+fn ion(sym, q): i64 {
+    var h = lookup_ionic_radius(sym, q);
+    assert(h != 0, "lookup_ionic_radius");
+    return h;
+}
+
+# ── crystal field theory ────────────────────────────────────────────────────────────
+
+fn _t_cfse_d0() {
+    test_group("cfse_d0");
+    var c: f64 = cfse(0, 1);
+    var a: f64 = f64_abs(c);
+    assert(a < eps64(), "d⁰: 0");
+}
+
+fn _t_cfse_d3_high_spin() {
+    test_group("cfse_d3_high_spin");
+    # d³: 3 in t2g → -1.2 Δ_oct
+    var c: f64 = cfse(3, 1);
+    assert(near(c, -1.2, 0.0000000001) == 1, "d³: −1.2");
+}
+
+fn _t_cfse_d6_high_vs_low() {
+    test_group("cfse_d6_high_vs_low");
+    var hs: f64 = cfse(6, 1);
+    var ls: f64 = cfse(6, 0);
+    # Low-spin d⁶ (all in t2g) → -2.4, high-spin d⁶ → -0.4
+    assert(ls < hs, "low-spin should have more negative CFSE");
+}
+
+fn _t_cfse_d10() {
+    test_group("cfse_d10");
+    # d¹⁰: full → CFSE = 0
+    var c: f64 = cfse(10, 1);
+    var a: f64 = f64_abs(c);
+    assert(a < 0.0000000001, "d¹⁰: 0");
+}
+
+fn _t_cfse_invalid_d_electrons() {
+    test_group("cfse_invalid_d_electrons");
+    var t1, v1 = cfse_octahedral(11, 1);
+    assert(is_err_result(t1) == 1, "d¹¹, high spin");
+    var t2, v2 = cfse_octahedral(11, 0);
+    assert(is_err_result(t2) == 1, "d¹¹, low spin");
+    var t3, v3 = cfse_octahedral(255, 0);
+    assert(is_err_result(t3) == 1, "u8::MAX");
+}
+
+fn _t_cfse_all_d_counts_both_spins() {
+    test_group("cfse_all_d_counts_both_spins");
+    # CFSE in units of Δ_oct, pairing energy excluded.
+    var high: f64[11];
+    var low: f64[11];
+    high[0] = 0.0;
+    high[1] = -0.4;
+    high[2] = -0.8;
+    high[3] = -1.2;
+    high[4] = -0.6;
+    high[5] = 0.0;
+    high[6] = -0.4;
+    high[7] = -0.8;
+    high[8] = -1.2;
+    high[9] = -0.6;
+    high[10] = 0.0;
+    low[0] = 0.0;
+    low[1] = -0.4;
+    low[2] = -0.8;
+    low[3] = -1.2;
+    low[4] = -1.6;
+    low[5] = -2.0;
+    low[6] = -2.4;
+    low[7] = -1.8;
+    low[8] = -1.2;
+    low[9] = -0.6;
+    low[10] = 0.0;
+    var n = 0;
+    while (n <= 10) {
+        var hs: f64 = cfse(n, 1);
+        var ls: f64 = cfse(n, 0);
+        var wh: f64 = high[n];
+        var wl: f64 = low[n];
+        assert(near(hs, wh, 0.000000000001) == 1, "HS dⁿ");
+        assert(near(ls, wl, 0.000000000001) == 1, "LS dⁿ");
+        n = n + 1;
+    }
+}
+
+fn _t_unpaired_all_d_counts_both_spins() {
+    test_group("unpaired_all_d_counts_both_spins");
+    var high: i64[11];
+    var low: i64[11];
+    high[0] = 0;
+    high[1] = 1;
+    high[2] = 2;
+    high[3] = 3;
+    high[4] = 4;
+    high[5] = 5;
+    high[6] = 4;
+    high[7] = 3;
+    high[8] = 2;
+    high[9] = 1;
+    high[10] = 0;
+    low[0] = 0;
+    low[1] = 1;
+    low[2] = 2;
+    low[3] = 3;
+    low[4] = 2;
+    low[5] = 1;
+    low[6] = 0;
+    low[7] = 1;
+    low[8] = 2;
+    low[9] = 1;
+    low[10] = 0;
+    var n = 0;
+    while (n <= 10) {
+        assert_eq(unpaired(n, 1), high[n], "HS dⁿ");
+        assert_eq(unpaired(n, 0), low[n], "LS dⁿ");
+        n = n + 1;
+    }
+}
+
+fn _t_unpaired_low_spin_d9_is_one() {
+    test_group("unpaired_low_spin_d9_is_one");
+    # Cu²⁺ (d⁹) has one unpaired electron in any octahedral field.
+    assert_eq(unpaired(9, 0), 1, "d⁹ low spin: 1");
+}
+
+fn _t_unpaired_invalid_d_electrons() {
+    test_group("unpaired_invalid_d_electrons");
+    var t1, v1 = unpaired_electrons_oct(11, 1);
+    assert(is_err_result(t1) == 1, "d¹¹, high spin");
+    var t2, v2 = unpaired_electrons_oct(11, 0);
+    assert(is_err_result(t2) == 1, "d¹¹, low spin");
+}
+
+fn _t_delta_tet_ratio() {
+    test_group("delta_tet_ratio");
+    var tet: f64 = delta_tet_from_oct(10000.0);
+    assert(near(tet, 4444.4, 1.0) == 1, "4/9 of 10000");
+}
+
+# ── spectrochemical series ──────────────────────────────────────────────────────────
+
+fn _t_ligand_ordering() {
+    test_group("ligand_ordering");
+    assert(ligand_field_strength(KM_LIGAND_CYANIDE) > ligand_field_strength(KM_LIGAND_WATER), "CN⁻ > H₂O");
+    assert(ligand_field_strength(KM_LIGAND_WATER) > ligand_field_strength(KM_LIGAND_CHLORIDE), "H₂O > Cl⁻");
+}
+
+fn _t_strong_field_ligands() {
+    test_group("strong_field_ligands");
+    assert_eq(ligand_is_strong_field(KM_LIGAND_CYANIDE), 1, "CN⁻: strong");
+    assert_eq(ligand_is_strong_field(KM_LIGAND_CARBON_MONOXIDE), 1, "CO: strong");
+    assert_eq(ligand_is_strong_field(KM_LIGAND_WATER), 0, "H₂O: weak");
+    assert_eq(ligand_is_strong_field(KM_LIGAND_CHLORIDE), 0, "Cl⁻: weak");
+}
+
+# ── magnetic moment ─────────────────────────────────────────────────────────────────
+
+fn _t_spin_only_moment_fe3_high_spin() {
+    test_group("spin_only_moment_fe3_high_spin");
+    # Fe³⁺ high-spin d⁵: 5 unpaired → μ = √35 ≈ 5.92 BM
+    var n = unpaired(5, 1);
+    assert_eq(n, 5, "5 unpaired");
+    var mu: f64 = spin_only_moment(n);
+    assert(near(mu, 5.92, 0.01) == 1, "√35 BM");
+}
+
+fn _t_spin_only_moment_zero_unpaired() {
+    test_group("spin_only_moment_zero_unpaired");
+    var mu: f64 = spin_only_moment(0);
+    var a: f64 = f64_abs(mu);
+    assert(a < eps64(), "0 BM");
+}
+
+# ── lattice energy ──────────────────────────────────────────────────────────────────
+
+fn _t_nacl_lattice_energy() {
+    test_group("nacl_lattice_energy");
+    # NaCl: M=1.747565, z+=1, z-=1, r0=2.82e-10 m, n=8 (mean of Ne 7, Ar 9)
+    # Analytic Born–Landé: −k_e·N_A·M·e²/r₀·(1 − 1/8) = −753.365 kJ/mol
+    # (the Born–Haber value, −786 kJ/mol, differs by model error).
+    var u: f64 = lande(KM_MADELUNG_NACL, 1, 1, 0.000000000282, 8.0);
+    var u_kj: f64 = u / 1000.0;
+    assert(near(u_kj, -753.365, 0.5) == 1, "NaCl Born–Landé lattice energy should be -753.4 kJ/mol");
+}
+
+fn _t_lattice_energy_scales_with_charges() {
+    test_group("lattice_energy_scales_with_charges");
+    var u1: f64 = lande(KM_MADELUNG_NACL, 1, 1, 0.000000000282, 8.0);
+    var u4: f64 = lande(KM_MADELUNG_NACL, 2, 2, 0.000000000282, 8.0);
+    var ratio: f64 = u4 / u1;
+    assert(near(ratio, 4.0, 0.000000000001) == 1, "×4 for 2:2");
+}
+
+fn _t_lattice_energy_zero_distance_is_error() {
+    test_group("lattice_energy_zero_distance_is_error");
+    assert(lande_err(1.748, 1, 1, 0.0, 8.0) == 1, "r₀ = 0");
+}
+
+fn _t_lattice_energy_born_exp_too_low_is_error() {
+    test_group("lattice_energy_born_exp_too_low_is_error");
+    assert(lande_err(1.748, 1, 1, 0.000000000282, 1.0) == 1, "n = 1");
+}
+
+fn _t_lattice_energy_non_finite_inputs_are_errors() {
+    test_group("lattice_energy_non_finite_inputs_are_errors");
+    var t, v = born_lande_lattice_energy(1.748, 1, 1, 0.000000000282, 8.0);
+    assert(is_ok(t) == 1, "valid inputs: Ok");
+    var nan: f64 = _km_nan();
+    var inf: f64 = 1.0 / 0.0;
+    var r0s: f64[3];
+    r0s[0] = nan;
+    r0s[1] = inf;
+    r0s[2] = -0.000000000282;
+    var ns: f64[3];
+    ns[0] = nan;
+    ns[1] = inf;
+    ns[2] = 0.5;
+    var ms: f64[4];
+    ms[0] = nan;
+    ms[1] = inf;
+    ms[2] = 0.0;
+    ms[3] = -1.748;
+    var k = 0;
+    while (k < 3) {
+        var r0: f64 = r0s[k];
+        assert(lande_err(1.748, 1, 1, r0, 8.0) == 1, "r0");
+        var n: f64 = ns[k];
+        assert(lande_err(1.748, 1, 1, 0.000000000282, n) == 1, "n");
+        k = k + 1;
+    }
+    k = 0;
+    while (k < 4) {
+        var m: f64 = ms[k];
+        assert(lande_err(m, 1, 1, 0.000000000282, 8.0) == 1, "M");
+        k = k + 1;
+    }
+}
+
+fn _t_lattice_energy_zero_charge_is_error() {
+    test_group("lattice_energy_zero_charge_is_error");
+    assert(lande_err(1.748, 0, 1, 0.000000000282, 8.0) == 1, "z⁺ = 0");
+    assert(lande_err(1.748, 1, 0, 0.000000000282, 8.0) == 1, "z⁻ = 0");
+}
+
+# ── ionic radii ─────────────────────────────────────────────────────────────────────
+
+fn _t_lookup_na_plus() {
+    test_group("lookup_na_plus");
+    var r: f64 = ionic_radius_radius_pm(ion("Na", 1));
+    assert(near(r, 102.0, 0.1) == 1, "Na⁺: 102 pm");
+}
+
+fn _t_lookup_cl_minus() {
+    test_group("lookup_cl_minus");
+    var r: f64 = ionic_radius_radius_pm(ion("Cl", 0 - 1));
+    assert(near(r, 181.0, 0.1) == 1, "Cl⁻: 181 pm");
+}
+
+fn _t_lookup_fe_two_oxidation_states() {
+    test_group("lookup_fe_two_oxidation_states");
+    var fe2: f64 = ionic_radius_radius_pm(ion("Fe", 2));
+    var fe3: f64 = ionic_radius_radius_pm(ion("Fe", 3));
+    assert(fe2 > fe3, "Fe²⁺ should be larger than Fe³⁺");
+}
+
+fn _t_lookup_nonexistent() {
+    test_group("lookup_nonexistent");
+    assert_eq(lookup_ionic_radius("Xx", 1), 0, "Xx: none");
+}
+
+fn _t_cation_smaller_than_anion() {
+    test_group("cation_smaller_than_anion");
+    var na: f64 = ionic_radius_radius_pm(ion("Na", 1));
+    var cl: f64 = ionic_radius_radius_pm(ion("Cl", 0 - 1));
+    assert(na < cl, "cation should be smaller");
+}
+
+fn _t_lookup_sn2_is_shannon_cn8() {
+    test_group("lookup_sn2_is_shannon_cn8");
+    var sn = ion("Sn", 2);
+    assert_eq(ionic_radius_coordination(sn), 8, "Sn²⁺: CN 8");
+    var r: f64 = ionic_radius_radius_pm(sn);
+    assert(near(r, 122.0, 0.000000001) == 1, "Sn²⁺: 122 pm");
+}
+
+fn _t_radii_coordination_matches_doc() {
+    test_group("radii_coordination_matches_doc");
+    # Doc: every entry is 6-coordinate except Sn²⁺ (CN 8).
+    var h = 1;
+    while (h <= KM_IONIC_RADII_COUNT) {
+        var expected = 6;
+        if (streq(ionic_radius_symbol(h), "Sn") == 1 && ionic_radius_charge(h) == 2) { expected = 8; }
+        assert_eq(ionic_radius_coordination(h), expected, "CN");
+        h = h + 1;
+    }
+}
+
+fn _t_radii_count() {
+    test_group("radii_count");
+    assert(KM_IONIC_RADII_COUNT >= 30, "30+ ionic radii");
+}
+
+# ── Born-Haber cycle ────────────────────────────────────────────────────────────────
+
+fn _t_born_haber_nacl() {
+    test_group("born_haber_nacl");
+    # NaCl Born-Haber cycle:
+    # ΔH_f° = -411.15, ΔH_sub(Na) = 107.3, IE(Na) = 495.8
+    # ΔH_diss(Cl₂) = 242.0, EA(Cl) = -349.0
+    var u: f64 = born_haber_lattice_energy(-411.15, 107.3, 495.8, 242.0, -349.0);
+    # U = -411.15 - 107.3 - 495.8 - 121.0 - (-349.0) = -786.25
+    assert(near(u, -786.25, 1.0) == 1, "NaCl Born-Haber U should be ~-786 kJ/mol");
+}
+
+fn _t_born_haber_matches_born_lande() {
+    test_group("born_haber_matches_born_lande");
+    # Born-Haber (−786) and Born-Landé (−753) agree only to within the
+    # ~4 % model error of Born-Landé, hence the loose tolerance.
+    var u_bh: f64 = born_haber_lattice_energy(-411.15, 107.3, 495.8, 242.0, -349.0);
+    var u_j: f64 = lande(KM_MADELUNG_NACL, 1, 1, 0.000000000282, 8.0);
+    var u_bl: f64 = u_j / 1000.0;
+    assert(near(u_bh, u_bl, 50.0) == 1, "Born-Haber and Born-Landé should roughly agree");
+}
+
+# ── Cyrius-only ─────────────────────────────────────────────────────────────────────
+
+# Rust's u8 (d electrons, unpaired electrons) as a word: outside 0 ..= 255 is Err for a Result function and NaN for
+# spin_only_moment, never wrapped mod 256.
+fn _t_cyrius_out_of_u8() {
+    test_group("cyrius_out_of_u8");
+    var bad: i64[4];
+    bad[0] = 256;
+    bad[1] = 259;
+    bad[2] = 0 - 1;
+    bad[3] = 4294967299;
+    var k = 0;
+    while (k < 4) {
+        var t1, v1 = cfse_octahedral(bad[k], 1);
+        assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "cfse: not 3 mod 256");
+        var t2, v2 = unpaired_electrons_oct(bad[k], 0);
+        assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "unpaired: not wrapped");
+        var mu: f64 = spin_only_moment(bad[k]);
+        assert(is_nan(mu) == 1, "spin_only_moment: NaN");
+        k = k + 1;
+    }
+    var m255: f64 = spin_only_moment(255);
+    var want: f64 = f64_sqrt(65535.0);
+    assert(_km_bits(m255) == _km_bits(want), "u8::MAX: √(255 · 257)");
+}
+
+# Rust's bool as a word: 0 is false, 1 is true, any other word is Err(InvalidInput) (checked where Rust picks its
+# table, so before the count).
+fn _t_cyrius_bool_words() {
+    test_group("cyrius_bool_words");
+    var bad: i64[4];
+    bad[0] = 2;
+    bad[1] = 0 - 1;
+    bad[2] = 256;
+    bad[3] = 4294967296;
+    var k = 0;
+    while (k < 4) {
+        var t1, v1 = cfse_octahedral(3, bad[k]);
+        assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "cfse: no bool");
+        var t2, v2 = unpaired_electrons_oct(3, bad[k]);
+        assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "unpaired: no bool");
+        k = k + 1;
+    }
+    assert(unpaired(4, 1) == 4 && unpaired(4, 0) == 2, "1 is high spin, 0 low spin");
+}
+
+# Rust's u32 ion charges as words: 0 and anything outside 0 ..= u32::MAX are Err(InvalidInput), never wrapped.
+fn _t_cyrius_u32_charges() {
+    test_group("cyrius_u32_charges");
+    assert(lande_err(1.748, 4294967296, 1, 0.000000000282, 8.0) == 1, "z⁺ = 2^32 is not 0 mod 2^32");
+    assert(lande_err(1.748, 1, 4294967297, 0.000000000282, 8.0) == 1, "z⁻ = 2^32 + 1 is not 1");
+    assert(lande_err(1.748, 0 - 1, 1, 0.000000000282, 8.0) == 1, "z⁺ = -1");
+    assert(lande_err(1.748, 1, 0 - 2, 0.000000000282, 8.0) == 1, "z⁻ = -2");
+    var u: f64 = lande(1.748, 4294967295, 4294967295, 0.000000000282, 8.0);
+    var u1: f64 = lande(1.748, 1, 1, 0.000000000282, 8.0);
+    assert(u < u1 && _km_is_finite(u) == 1, "u32::MAX charges: Ok, finite");
+}
+
+# Rust's i8 radius charge as a word: outside −128 ..= 127 is None, never wrapped mod 256.
+fn _t_cyrius_i8_charge() {
+    test_group("cyrius_i8_charge");
+    assert(lookup_ionic_radius("Na", 1) != 0, "Na⁺");
+    assert_eq(lookup_ionic_radius("Na", 257), 0, "257 is not 1 mod 256");
+    assert_eq(lookup_ionic_radius("Cl", 255), 0, "255 is not −1");
+    assert_eq(lookup_ionic_radius("Cl", 0 - 257), 0, "−257 is not −1");
+    assert_eq(lookup_ionic_radius("Cl", 0 - 129), 0, "−129: no i8");
+    assert_eq(lookup_ionic_radius(0, 1), 0, "null symbol");
+    assert_eq(lookup_ionic_radius("", 1), 0, "\"\"");
+    assert_eq(lookup_ionic_radius("na", 1), 0, "case-sensitive");
+    assert_eq(lookup_ionic_radius("Na ", 1), 0, "exact");
+    assert_eq(lookup_ionic_radius("N", 1), 0, "a prefix of Na");
+    assert_eq(lookup_ionic_radius("Fe", 4), 0, "no Fe⁴⁺ row");
+}
+
+# Handles and accessors: every row is reached by its own (symbol, charge); an invalid handle reads nothing.
+fn _t_cyrius_handles() {
+    test_group("cyrius_handles");
+    var h = 1;
+    while (h <= KM_IONIC_RADII_COUNT) {
+        assert_eq(lookup_ionic_radius(ionic_radius_symbol(h), ionic_radius_charge(h)), h, "one row per ion");
+        h = h + 1;
+    }
+    var bad: i64[3];
+    bad[0] = 0;
+    bad[1] = KM_IONIC_RADII_COUNT + 1;
+    bad[2] = 0 - 1;
+    var k = 0;
+    while (k < 3) {
+        assert(streq(ionic_radius_symbol(bad[k]), "") == 1, "symbol: \"\"");
+        assert_eq(ionic_radius_charge(bad[k]), 0, "charge: 0");
+        assert_eq(ionic_radius_coordination(bad[k]), 0, "coordination: 0");
+        var r: f64 = ionic_radius_radius_pm(bad[k]);
+        assert(is_nan(r) == 1, "radius: NaN");
+        k = k + 1;
+    }
+    assert_eq(ionic_radius_charge(ion("S", 0 - 2)), 0 - 2, "i8 sign-extended: S²⁻");
+    # Ligands: append-only values; a word that is no KmLigand value gives 0.
+    assert(KM_LIGAND_IODIDE == 0 && KM_LIGAND_CARBON_MONOXIDE == 10 && KM_LIGAND_COUNT == 11, "KmLigand 0 … 10");
+    assert_eq(ligand_field_strength(0 - 1), 0, "strength(-1): 0");
+    assert_eq(ligand_field_strength(KM_LIGAND_COUNT), 0, "strength(11): 0");
+    assert_eq(ligand_is_strong_field(KM_LIGAND_COUNT), 0, "strong(11): 0");
+    assert_eq(ligand_is_strong_field(KM_LIGAND_AMMONIA), 1, "NH₃: rank 8, the borderline, strong");
+    assert_eq(ligand_is_strong_field(KM_LIGAND_HYDROXIDE), 0, "OH⁻: weak");
+}
+
+# ADR 0002 #12: the CFSE is exact, (3·eg − 2·t2g)/5 in one correctly rounded division. Rust's t2g·(−0.4) + eg·0.6 misses
+# it on 13 of the 22 cases: high-spin d⁵ gives 3·(−0.4) + 2·0.6 = −1.2000000000000002 + 1.2 = −2⁻⁵² (3 × 0.4 is a tie
+# that rounds up), d¹⁰ −2⁻⁵¹, d³ −1.2000000000000002, low-spin d⁶ −2.4000000000000004. The port gives the doubles
+# nearest −6/5, −12/5, … exactly (the decimal literals below), and +0.0 where the numerator is 0.
+fn _t_cyrius_cfse_exact() {
+    test_group("cyrius_cfse_exact (ADR 0002 #12)");
+    var c5: f64 = cfse(5, 1);
+    assert(_km_bits(c5) == 0, "HS d⁵: +0.0 exactly (ADR 0002 #12; Rust −2⁻⁵²)");
+    var c10h: f64 = cfse(10, 1);
+    var c10l: f64 = cfse(10, 0);
+    assert(_km_bits(c10h) == 0 && _km_bits(c10l) == 0, "d¹⁰: +0.0 exactly (ADR 0002 #12; Rust −2⁻⁵¹)");
+    var c0: f64 = cfse(0, 1);
+    assert(_km_bits(c0) == 0, "d⁰: +0.0");
+    var high: f64[11];
+    var low: f64[11];
+    high[0] = 0.0;
+    high[1] = -0.4;
+    high[2] = -0.8;
+    high[3] = -1.2;
+    high[4] = -0.6;
+    high[5] = 0.0;
+    high[6] = -0.4;
+    high[7] = -0.8;
+    high[8] = -1.2;
+    high[9] = -0.6;
+    high[10] = 0.0;
+    low[0] = 0.0;
+    low[1] = -0.4;
+    low[2] = -0.8;
+    low[3] = -1.2;
+    low[4] = -1.6;
+    low[5] = -2.0;
+    low[6] = -2.4;
+    low[7] = -1.8;
+    low[8] = -1.2;
+    low[9] = -0.6;
+    low[10] = 0.0;
+    var n = 0;
+    while (n <= 10) {
+        var hs: f64 = cfse(n, 1);
+        var ls: f64 = cfse(n, 0);
+        var wh: f64 = high[n];
+        var wl: f64 = low[n];
+        assert(_km_bits(hs) == _km_bits(wh), "HS dⁿ: the double nearest the exact fifth");
+        assert(_km_bits(ls) == _km_bits(wl), "LS dⁿ: the double nearest the exact fifth");
+        n = n + 1;
+    }
+    var tet: f64 = delta_tet_from_oct(9.0);
+    assert(tet == 4.0, "9 · 4 / 9 = 4");
+}
+
+# ADR 0002 #15 (the user's decision, 2026-11-09): Δ_tet is the correctly rounded 4Δ/9 also where Rust's Δ·4 overflows,
+# |Δ| ≥ 2¹⁰²² (there Rust gives ±∞): the port takes (Δ/9)·4. Expected bits from Python's Fraction. (Until this decision
+# this group asserted Rust's +∞ for Δ = 2¹⁰²³.)
+fn _t_cyrius_exact_delta_tet() {
+    test_group("cyrius_exact_delta_tet (ADR 0002 #15)");
+    var x: f64 = 1.0;
+    var k = 0;
+    while (k < 1023) {
+        x = x * 2.0;
+        k = k + 1;
+    }
+    var t1023: f64 = delta_tet_from_oct(x);
+    assert(_km_bits(t1023) == 0x7FCC71C71C71C71C, "2¹⁰²³: CR(4·2¹⁰²³/9), finite (Rust +∞)");
+    var big: f64 = 0x7FEFFFFFFFFFFFFF;
+    var tmax: f64 = delta_tet_from_oct(big);
+    assert(_km_bits(tmax) == 0x7FDC71C71C71C71C, "DBL_MAX: CR(4·DBL_MAX/9) ≈ 7.99e307 (Rust +∞)");
+    var m1022: f64 = 0xFFD0000000000000;    # −2¹⁰²²
+    var tm: f64 = delta_tet_from_oct(m1022);
+    assert(_km_bits(tm) == 0xFFBC71C71C71C71C, "−2¹⁰²²: CR(−4·2¹⁰²²/9) (Rust −∞)");
+    var below: f64 = 0x7FCFFFFFFFFFFFFF;    # DBL_MAX/4, the largest Δ whose Δ·4 is finite
+    var tb: f64 = delta_tet_from_oct(below);
+    var want: f64 = (below * 4.0) / 9.0;
+    assert(_km_bits(tb) == _km_bits(want), "DBL_MAX/4: Rust's (Δ·4)/9, unchanged");
+    var inf: f64 = delta_tet_from_oct(_KM_INF);
+    assert(inf == _KM_INF, "+∞ stays +∞");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_cfse_d0();
+    _t_cfse_d3_high_spin();
+    _t_cfse_d6_high_vs_low();
+    _t_cfse_d10();
+    _t_cfse_invalid_d_electrons();
+    _t_cfse_all_d_counts_both_spins();
+    _t_unpaired_all_d_counts_both_spins();
+    _t_unpaired_low_spin_d9_is_one();
+    _t_unpaired_invalid_d_electrons();
+    _t_delta_tet_ratio();
+    _t_ligand_ordering();
+    _t_strong_field_ligands();
+    _t_spin_only_moment_fe3_high_spin();
+    _t_spin_only_moment_zero_unpaired();
+    _t_nacl_lattice_energy();
+    _t_lattice_energy_scales_with_charges();
+    _t_lattice_energy_zero_distance_is_error();
+    _t_lattice_energy_born_exp_too_low_is_error();
+    _t_lattice_energy_non_finite_inputs_are_errors();
+    _t_lattice_energy_zero_charge_is_error();
+    _t_lookup_na_plus();
+    _t_lookup_cl_minus();
+    _t_lookup_fe_two_oxidation_states();
+    _t_lookup_nonexistent();
+    _t_cation_smaller_than_anion();
+    _t_lookup_sn2_is_shannon_cn8();
+    _t_radii_coordination_matches_doc();
+    _t_radii_count();
+    _t_born_haber_nacl();
+    _t_born_haber_matches_born_lande();
+    _t_cyrius_out_of_u8();
+    _t_cyrius_bool_words();
+    _t_cyrius_u32_charges();
+    _t_cyrius_i8_charge();
+    _t_cyrius_handles();
+    _t_cyrius_cfse_exact();
+    _t_cyrius_exact_delta_tet();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

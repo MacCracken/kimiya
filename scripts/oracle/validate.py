@@ -58,6 +58,29 @@ and no Python packages. Usage, from the repo root:
    stale or has an extra row; it recomputes every correction (the outputs through the replica, each listed
    call against MPFR). Per-primitive counts of glibc's misroundings over every golden call are printed, and
    glibc's cbrt (the oracle's is Rust's correctly rounded one) is measured on the golden cbrt arguments.
+13. organic.tsv (M4b), every row against rust-old/src/organic.rs: the enums BondType, Geometry and FunctionalGroup
+   parsed from their declarations (which proves the generated enums complete and in order, ADR 0002 #6's
+   KM_GEOMETRY_T_SHAPED included: the generator's lists can't be matched exhaustively, the enums being
+   #[non_exhaustive]), each const fn's match arms or matches! set, predict_geometry's match parsed and replayed over
+   its grid (the 0..15 square and every u8 against the edges), enthalpy_from_bonds recomputed as two .sum()s from
+   -0.0. src/organic_data.cyr is checked against the source (the section comments and notes of the matches carried),
+   and ADR 0002 #6's acceptor column, which has no oracle, against its stated rule recomputed from the patterns (IUPAC
+   2011's electron-rich region: a lone-pair atom O, N, S or a halogen, or a π bond).
+14. inorganic.tsv (M4b), every row recomputed from rust-old/src/inorganic.rs: Ligand and field_strength, the private
+   occupancy and unpaired-electron literals, IONIC_RADII, the formulas in Rust's order with the guards in Rust's
+   order; every d count and spin, every u8 moment, every table symbol × every i8 charge covered. Each typed formula
+   constant (the oracle's CFSE -0.4 and 0.6, 4/9, the 2.0s, Born-Lande's 1.0, the strong-field threshold 8 from above,
+   the exact CFSE's divisor 5) must change some golden row when perturbed. ADR 0002 #12: every Ok CFSE row is checked
+   both as the oracle's value and against the exact (3·eg − 2·t2g)/5 (Fraction arithmetic): the oracle within 1e-9 of
+   the same fifth, and the note naming the exact value on exactly the 13 rows where the two differ. src/inorganic_data.cyr is checked against the literals, its ten constants
+   against constants.tsv. Every golden module must have a section here (VALIDATED).
+15. nuclear.tsv (M4c), every row recomputed from rust-old/src/nuclear.rs (glibc's exp, expm1, log and exp2), the grids'
+   coverage, ADR 0002 #3's notes, the typed constants' pinning, src/nuclear_data.cyr against the literal, and ADR 0002
+   #13 / #14 / #15's notes proven exactly (since M4d #13's correctly rounded N₀/2ⁿ by MPFR's scaled_exp2 and a 60-digit
+   2⁻ᶠ).
+16. potential.tsv (M4d), every row recomputed from rust-old/src/potential.rs (glibc's exp, atan2 and exp2), ADR 0002
+   #16's correctly rounded σ·2^(1/6) proven with exact sixth powers, #17's RN(4·ε·d) and #18's RN(μ/(2·D_e)) with
+   Fraction, Rust's forms proven equal to them where they don't overflow, and both private tolerances pinned to the ulp.
 Every function in every .tsv must have a rule here: a new one fails until it gets one.
 
     python3 -I scripts/oracle/validate.py . --write-corrections
@@ -82,7 +105,7 @@ its S (port-parity.md §10; §5–§8 hold the bounds the rule set before).
 
 MPFR (libmpfr.so.6, 4.x) is the one system library this needs, through ctypes (scripts/oracle/mpfr_ref.py).
 """
-import importlib.util, math, platform, re, struct, sys
+import decimal, importlib.util, math, platform, random, re, struct, sys
 from fractions import Fraction
 from pathlib import Path
 
@@ -521,7 +544,7 @@ def running_platform():
     return f"{lib} {ver} {arch} {cpu}"
 
 LIBM_EXACT = all(recorded_platform(n) == running_platform() for n in ("reaction", "phase", "gas", "thermochem", "solution", "electrochemistry",
-                                                                     "kinetics"))
+                                                                     "kinetics", "nuclear", "potential"))
 print(f"M2a class-C recompute: {'bit-exact' if LIBM_EXACT else 'shape only'} (corpus libm "
       f"{recorded_platform('gas')}, running {running_platform()})")
 
@@ -561,8 +584,10 @@ def cbrt_cr(x):
 # arguments and result), and the call NUDGE[0] gets its result moved one ulp in direction NUDGE[1]
 # (the sensitivity mode). The kinds name the port's correctly rounded counterpart (ADR 0006, M3c-3): "exp"
 # _km_cr_exp, "expm1" _km_cr_expm1, "ln" _km_cr_ln, "log10" _km_cr_log10, "pow" _km_cr_pow, "pow10"
-# _km_cr_exp10 (= a correctly rounded pow(10, y)), "pow25" _km_cr_pow(x, 2.5), "cos" _km_cos (correctly
-# rounded for |x| ≤ 8, which every Peng–Robinson argument is) and "acos" _km_acos.
+# _km_cr_exp10 (= a correctly rounded pow(10, y)), "pow25" _km_cr_pow(x, 2.5), "cos" _km_cr_cos and "acos" _km_cr_acos
+# (since M4d; ADR 0005's double-double _km_cos and _km_acos until then), (M4c) "exp2", glibc's exp2 in the release
+# oracle (LLVM's rewrite of 2.0_f64.powf(y)), _km_cr_pow(2, y) in the port: the same real 2^y, and (M4d) "atan2"
+# _km_cr_atan2 (potential's angles; its args are (y, x)).
 # With CORRECT[0] set (the corrected oracle, ADR 0006), every result is replaced by its correctly rounded
 # value from MPFR before it is logged or used. cbrt is not logged: the oracle's (Rust's) is correctly rounded.
 CALLS = [0]
@@ -571,7 +596,7 @@ CORRECT = [False]
 CALL_LOG = []
 # The MPFR function each kind rounds; pow10's arguments are (10.0, y) and pow25's (x, 2.5).
 KIND_MPFR = {"exp": "exp", "expm1": "expm1", "ln": "log", "log10": "log10", "pow": "pow", "pow10": "pow",
-             "pow25": "pow", "cos": "cos", "acos": "acos"}
+             "pow25": "pow", "cos": "cos", "acos": "acos", "exp2": "exp2", "atan2": "atan2"}
 def _prim(y, kind, args):
     k = CALLS[0]
     CALLS[0] += 1
@@ -1216,6 +1241,144 @@ def r_eyring_act(dh, ds, t):
     es = p_exp(dv(ds, R_GAS))
     return prefactor * es * p_exp(dv(-dh, R_GAS * t))
 
+# nuclear.rs (M4c): the constants from the golden corpus, Rust's private ones from the source literals (they are typed
+# inline in src/nuclear.cyr; the pinning checks below perturb each), the ISOTOPES table from its literal.
+nsrc = (root / "rust-old/src/nuclear.rs").read_text()
+def n_private(name):
+    m = re.search(rf"^const {name}: f64 = ([0-9_.e-]+);", nsrc, re.M)
+    check(m is not None, f"nuclear.rs: no private const {name}")
+    return float(m.group(1).replace("_", "")) if m else math.nan
+N_TOL = n_private("EQUAL_RATE_REL_TOL")
+SEMF = tuple(n_private(f"SEMF_{k}") for k in ("VOLUME", "SURFACE", "COULOMB", "ASYMMETRY", "PAIRING"))
+check(N_TOL == 1e-12 and SEMF == (15.67, 17.23, 0.714, 93.15, 11.2), f"nuclear.rs: private consts {N_TOL}, {SEMF}")
+AMU_MEV = b2f(golden_consts["nuclear::AMU_MEV"])
+M_H = b2f(golden_consts["nuclear::HYDROGEN_ATOM_MASS_U"])
+M_N = b2f(golden_consts["nuclear::NEUTRON_MASS_U"])
+N_ISO = [(sym, int(z), int(a), float(hl.replace("_", "")), mode) for sym, z, a, hl, mode in re.findall(
+    r'Isotope \{\s*symbol: "([^"]+)",\s*z: (\d+),\s*a: (\d+),\s*half_life_s: ([0-9_.e]+),(?:\s*//[^\n]*)?\s*'
+    r'decay_mode: "([^"]+)",\s*\}', nsrc[nsrc.index("pub static ISOTOPES:"):])]
+check(len(N_ISO) == 18 and len({r[0] for r in N_ISO}) == 18, f"nuclear.rs: ISOTOPES parsed as {len(N_ISO)} rows")
+def iso_toks(r):
+    return [("s", r[0], None), ("i", r[1], None), ("i", r[2], None), ("f", r[3], f2b(r[3])), ("s", r[4], None)]
+def p_exp2(x):
+    """glibc's exp2 (Python's math): the release oracle's 2.0_f64.powf(y), which LLVM rewrites to exp2(y)."""
+    if math.isnan(x): return _prim(x, "exp2", (x,))
+    try: return _prim(math.exp2(x), "exp2", (x,))
+    except OverflowError: return _prim(math.inf, "exp2", (x,))
+def r_decay_constant(t, ln2=LN2):
+    stable = t == math.inf
+    if not is_positive(t) and not stable: return Err("InvalidInput")
+    return dv(ln2, t)
+def r_atoms_remaining(n0, l, t): return n0 * p_exp(-l * t)
+def r_after_half_lives(n0, n): return n0 * p_exp2(-n)
+def r_time_for_fraction(fr, l):
+    if not is_positive(fr) or fr > 1.0: return Err("InvalidInput")
+    if not is_positive(l): return Err("InvalidInput")
+    return dv(-p_ln(fr), l)
+def r_mass_defect(z, n, m): return float(z) * M_H + float(n) * M_N - m
+def r_bea(z, n, m):
+    a = z + n
+    if a > 0xFFFFFFFF: return Err("InvalidInput")        # Rust's checked_add
+    if a == 0: return Err("InvalidInput")
+    if not is_positive(m): return Err("InvalidInput")
+    return dv(r_mass_defect(z, n, m) * AMU_MEV, float(a))
+_semf_cbrt = {}
+def r_semf(z, a, c=SEMF, four=4.0):
+    """Rust 1.2's semi_empirical_binding_energy: NaN for z > a or a = 0 (the port's Err, ADR 0002 #3)."""
+    if z > a or a == 0: return math.nan
+    af, zf = float(a), float(z)
+    asym = float(a - z) - zf
+    cb = _semf_cbrt.get(a)
+    if cb is None:
+        cb = _semf_cbrt[a] = cbrt_cr(af)
+    volume = c[0] * af
+    surface = c[1] * cb * cb
+    coulomb = dv(c[2] * zf * zf, cb)
+    asymmetry = dv(c[3] * asym * asym, four * af)
+    if a % 2: pairing = 0.0
+    elif z % 2 == 0: pairing = dv(c[4], math.sqrt(af))
+    else: pairing = dv(-c[4], math.sqrt(af))
+    return volume - surface - coulomb - asymmetry + pairing
+def r_q_value(a):
+    r, p_ = slice_args(a)
+    return (r_sum(r) - r_sum(p_)) * AMU_MEV
+def r_chain(n0, l1, l2, t, tol=N_TOL):
+    if not is_positive(l1) or not is_positive(l2): return Err("InvalidInput")
+    if not is_non_negative(n0): return Err("InvalidInput")
+    if not is_non_negative(t): return Err("InvalidInput")
+    na = n0 * p_exp(-l1 * t)
+    delta = abs(l2 - l1)
+    lmin = r_min(l1, l2)
+    growth = t if delta <= tol * r_max(l1, l2) else dv(-p_expm1(-delta * t), delta)
+    nb = n0 * l1 * p_exp(-lmin * t) * growth
+    nc = -n0 * p_expm1(-l1 * t) - nb
+    return (na, nb, nc)
+def r_secular(lp, ld, hundredth=0.01): return lp < hundredth * ld
+
+# M4d: potential.rs, transcribed in its operation order (Rust's [f64; 3] points flattened, three floats each). Its typed
+# private tolerances are parsed from the source; the replicas take them as parameters for the pinning checks.
+psrc_pot = (root / "rust-old/src/potential.rs").read_text()
+def pot_private(name):
+    return float(re.search(rf"^const {name}: f64 = ([0-9_.e-]+);", psrc_pot, re.M).group(1).replace("_", ""))
+P_TOL = pot_private("COINCIDENT_REL_TOL")
+P_CTOL = pot_private("COLLINEAR_SIN_SQ_TOL")
+KE_POT = b2f(golden_consts["potential::COULOMB_CONSTANT"])
+def p_atan2(y, x):
+    """glibc's atan2 (Python's math), Rust's y.atan2(x)."""
+    return _prim(math.atan2(y, x), "atan2", (y, x))
+def v_sub(a, b): return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+def v_cross(a, b): return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+def v_dot(a, b): return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+def r_lj(e, sg, r, four=4.0):
+    if not is_positive(e) or not is_positive(sg) or not is_positive(r): return Err("InvalidInput")
+    sr = dv(sg, r)
+    sr6 = sr * sr * sr * sr * sr * sr
+    sr12 = sr6 * sr6
+    return four * e * (sr12 - sr6)
+def r_lj_rmin(sg, six=6.0): return sg * p_exp2(1.0 / six)
+def r_morse(d, a, re_, r):
+    if not is_positive(d) or not is_positive(a): return Err("InvalidInput")
+    x = 1.0 - p_exp(-a * (r - re_))
+    return d * x * x
+def r_width(w, mu, d, two=2.0):
+    if not is_positive(d) or not is_positive(mu) or not is_positive(w): return Err("InvalidInput")
+    return w * r_sqrt(dv(mu, two * d))
+def r_coulomb(q1, q2, r):
+    if not is_positive(r): return Err("InvalidInput")
+    return dv(KE_POT * q1 * q2, r)
+def r_coulomb_force(q1, q2, r):
+    if not is_positive(r): return Err("InvalidInput")
+    return dv(KE_POT * q1 * q2, r * r)
+def r_distance(v):
+    dx, dy, dz = v[3] - v[0], v[4] - v[1], v[5] - v[2]
+    return r_sqrt(dx * dx + dy * dy + dz * dz)
+def r_bond_angle(v, tol=None):
+    a, b, c = v[0:3], v[3:6], v[6:9]
+    t = P_TOL if tol is None else tol
+    ba, bc = v_sub(a, b), v_sub(c, b)
+    ba_sq, bc_sq = v_dot(ba, ba), v_dot(bc, bc)
+    tol_sq = t * t
+    b_sq = v_dot(b, b)
+    if (not is_positive(ba_sq) or not is_positive(bc_sq) or ba_sq <= tol_sq * r_max(v_dot(a, a), b_sq)
+            or bc_sq <= tol_sq * r_max(v_dot(c, c), b_sq)):
+        return Err("InvalidInput")
+    cr = v_cross(ba, bc)
+    return p_atan2(r_sqrt(v_dot(cr, cr)), v_dot(ba, bc))
+POT_MAPPED = [0]   # dihedral rows where atan2's −π became π (recomputed)
+def r_dihedral(v, tol=None, pi=math.pi):
+    a, b, c, d = v[0:3], v[3:6], v[6:9], v[9:12]
+    t = P_CTOL if tol is None else tol
+    b1, b2, b3 = v_sub(b, a), v_sub(c, b), v_sub(d, c)
+    n1, n2 = v_cross(b1, b2), v_cross(b2, b3)
+    n1_sq, n2_sq, b2_sq = v_dot(n1, n1), v_dot(n2, n2), v_dot(b2, b2)
+    if (not is_positive(n1_sq) or not is_positive(n2_sq) or n1_sq <= t * v_dot(b1, b1) * b2_sq
+            or n2_sq <= t * b2_sq * v_dot(b3, b3)):
+        return Err("InvalidInput")
+    phi = p_atan2(r_sqrt(b2_sq) * v_dot(b1, n2), v_dot(n1, n2))
+    if phi <= -pi:
+        POT_MAPPED[0] += 1
+        return pi
+    return phi
 
 RULES = {
     "reaction::gibbs_free_energy": ("B", lambda a: r_gibbs(*fl(a))),
@@ -1299,6 +1462,27 @@ RULES = {
     "kinetics::collision_theory_rate": ("C", lambda a: r_collision(*fl(a))),
     "kinetics::eyring_rate": ("C", lambda a: r_eyring(*fl(a))),
     "kinetics::eyring_rate_from_activation": ("C", lambda a: r_eyring_act(*fl(a))),
+    "nuclear::decay_constant": ("B", lambda a: r_decay_constant(*fl(a))),
+    "nuclear::atoms_remaining": ("C", lambda a: r_atoms_remaining(*fl(a))),
+    "nuclear::activity": ("B", lambda a: fl(a)[0] * fl(a)[1]),
+    "nuclear::atoms_after_half_lives": ("C", lambda a: r_after_half_lives(*fl(a))),
+    "nuclear::time_for_fraction": ("C", lambda a: r_time_for_fraction(*fl(a))),
+    "nuclear::mass_defect": ("B", lambda a: r_mass_defect(*fl(a))),
+    "nuclear::binding_energy_mev": ("B", lambda a: fl(a)[0] * AMU_MEV),
+    "nuclear::binding_energy_per_nucleon": ("B", lambda a: r_bea(*fl(a))),
+    "nuclear::semi_empirical_binding_energy": ("B", lambda a: r_semf(*fl(a))),
+    "nuclear::q_value": ("B", r_q_value),
+    "nuclear::decay_chain_two_step": ("C", lambda a: r_chain(*fl(a))),
+    "nuclear::is_secular_equilibrium": ("A", lambda a: r_secular(*fl(a))),
+    "potential::lennard_jones": ("B", lambda a: r_lj(*fl(a))),
+    "potential::lj_equilibrium_distance": ("C", lambda a: r_lj_rmin(*fl(a))),
+    "potential::morse": ("C", lambda a: r_morse(*fl(a))),
+    "potential::morse_width_parameter": ("B", lambda a: r_width(*fl(a))),
+    "potential::coulomb": ("B", lambda a: r_coulomb(*fl(a))),
+    "potential::coulomb_force": ("B", lambda a: r_coulomb_force(*fl(a))),
+    "potential::distance_3d": ("B", lambda a: r_distance(fl(a))),
+    "potential::bond_angle": ("C", lambda a: r_bond_angle(fl(a))),
+    "potential::dihedral_angle": ("C", lambda a: r_dihedral(fl(a))),
 }
 TABLE_RULES = {}
 for name, v in PRESETS.items():
@@ -1307,6 +1491,7 @@ TABLE_RULES["phase::ANTOINE_DATA"] = [("v", len(ANTOINE), None)]
 TABLE_RULES["thermochem::THERMOCHEM_DATA"] = [("v", len(TC), None)]
 TABLE_RULES["thermochem::SHOMATE_DATA"] = [("v", len(SH), None)]
 TABLE_RULES["electrochemistry::STANDARD_POTENTIALS"] = [("v", len(SP), None)]
+TABLE_RULES["nuclear::ISOTOPES"] = [("v", len(N_ISO), None)]
 def tc_toks(row):
     return [("s", row[0], None), ("s", row[1], None)] + [("f", x, f2b(x)) for x in row[2]]
 def sh_toks(c):
@@ -1385,7 +1570,8 @@ shape_only = 0
 sens = {}       # fn -> [S, rows nudged, branch flips, worst row]
 sens_rows = {}  # fn -> [(row S, branch flips, a nudged result is subnormal, inputs)] (M3b: the rows past K = 64)
 flame_paths = {}  # "newton" / "bisection" / "err" -> rows
-for mod in ("reaction", "thermo", "phase", "gas", "thermochem", "solution", "electrochemistry", "kinetics"):
+for mod in ("reaction", "thermo", "phase", "gas", "thermochem", "solution", "electrochemistry", "kinetics", "nuclear",
+            "potential"):
     for fn, cls, ins, outs, where in R.get(mod, []):
         m2a_counts[fn] = m2a_counts.get(fn, 0) + 1
         if fn in TABLE_RULES:
@@ -1425,6 +1611,16 @@ for mod in ("reaction", "thermo", "phase", "gas", "thermochem", "solution", "ele
             hit = sp_lookup(ins[0][1])            # exact, case-sensitive, first in table order
             want = [("n", "", None)] if hit is None else sp_toks(hit)
             check(cls == "A" and toks_equal(outs, want), f"{where}: lookup_half_reaction({ins[0][1]!r})")
+            continue
+        if fn == "nuclear::ISOTOPES[]":
+            k = ins[0][1]
+            want = iso_toks(N_ISO[k]) if 0 <= k < len(N_ISO) else []
+            check(cls == "A" and toks_equal(outs, want), f"{where}: ISOTOPES[{k}]")
+            continue
+        if fn == "nuclear::lookup_isotope":
+            hit = next((r for r in N_ISO if r[0] == ins[0][1]), None)    # exact, case-sensitive, first in table order
+            want = [("n", "", None)] if hit is None else iso_toks(hit)
+            check(cls == "A" and toks_equal(outs, want), f"{where}: lookup_isotope({ins[0][1]!r})")
             continue
         if fn == "phase::lookup_antoine":
             hit = next((c for n, c in ANTOINE if n == ins[0][1]), None)
@@ -1486,7 +1682,7 @@ for mod in ("reaction", "thermo", "phase", "gas", "thermochem", "solution", "ele
 known = set(RULES) | set(TABLE_RULES) | {"phase::ANTOINE_DATA[]", "phase::lookup_antoine",
     "thermochem::THERMOCHEM_DATA[]", "thermochem::SHOMATE_DATA[]", "thermochem::lookup_thermochem",
     "thermochem::lookup_shomate", "thermochem::lookup_shomate_at", "electrochemistry::STANDARD_POTENTIALS[]",
-    "electrochemistry::lookup_half_reaction"}
+    "electrochemistry::lookup_half_reaction", "nuclear::ISOTOPES[]", "nuclear::lookup_isotope"}
 for fn in sorted(known):
     check(fn in m2a_counts, f"M2/M3: no golden rows for {fn}")
 print("M2/M3 rows checked:", sum(m2a_counts.values()), "over", len(m2a_counts), "functions"
@@ -1641,6 +1837,792 @@ check(len(re.findall(r"CRC Handbook, Electrochemical Series", etext)) == 2 and
       len(re.findall(r"CRC Handbook, Electrochemical Series", _ec_body)) == 2,
       f"{rel_e}: the literal's two CRC Handbook notes are not carried over")
 print(f"{rel_e} checked against electrochemistry.rs (49 rows: a UTF-8 equation blob, a couple blob, electrons, E°)")
+
+# ── 13. organic.tsv (M4b) against the Rust source ───────────────────────────────────────
+# The enums are parsed from rust-old/src/organic.rs (which proves the generated enums complete and in order: the
+# generator's variant lists can't be matched exhaustively, the enums being #[non_exhaustive]), the const fns' match
+# arms and matches! sets give each property, and predict_geometry's match is parsed and replayed; enthalpy_from_bonds
+# is recomputed as Rust's two .sum()s from -0.0 and one subtraction.
+osrc = (root / "rust-old/src/organic.rs").read_text()
+def rust_enum(src, name):
+    body = src[src.index(f"pub enum {name} {{"):]
+    return re.findall(r"^    ([A-Z]\w*),$", body[:body.index("\n}")], re.M)
+def rust_fn_body(src, item):
+    body = src[src.index(item):]
+    return body[:body.index("\n    }\n")]
+def rust_arms(src, item):
+    body = rust_fn_body(src, item)
+    return {v: x for v, x in re.findall(r'Self::(\w+) => ("(?:[^"\\]|\\.)*"|[^,\n]+),', body)}
+def rust_matches(src, item):
+    body = rust_fn_body(src, item)
+    return set(re.findall(r"Self::(\w+)", body[body.index("matches!("):]))
+def snake_t(camel):
+    """cyr.rs's snake (tanmatra's rule): `_` before a capital after a lowercase letter or digit, or before a capital
+    that starts a capitalised word after a run of capitals (`CCDouble` → `CC_DOUBLE`, `HCl` → `H_CL`)."""
+    out = []
+    for k, ch in enumerate(camel):
+        if ch.isupper() and k > 0:
+            prev, nxt = camel[k - 1], camel[k + 1] if k + 1 < len(camel) else ""
+            if prev.islower() or prev.isdigit() or (prev.isupper() and nxt.islower()):
+                out.append("_")
+        out.append(ch.upper())
+    return "".join(out)
+O_BONDS = rust_enum(osrc, "BondType")
+O_GEOMS = rust_enum(osrc, "Geometry")
+O_GROUPS = rust_enum(osrc, "FunctionalGroup")
+check((len(O_BONDS), len(O_GEOMS), len(O_GROUPS)) == (45, 12, 16),
+      f"organic.rs: enums parsed as {len(O_BONDS)}, {len(O_GEOMS)}, {len(O_GROUPS)} variants")
+O_ENERGY = {v: float(x) for v, x in rust_arms(osrc, "pub const fn energy_kj(").items()}
+O_ANGLE = {v: float(x) for v, x in rust_arms(osrc, "pub const fn ideal_bond_angle(").items()}
+O_PATTERN = {v: x[1:-1] for v, x in rust_arms(osrc, "pub const fn pattern(").items()}
+O_NONPOLAR = rust_matches(osrc, "pub const fn is_polar(")
+O_DONOR = rust_matches(osrc, "pub const fn hydrogen_bonding(")
+check(set(O_ENERGY) == set(O_BONDS) and set(O_ANGLE) == set(O_GEOMS) and set(O_PATTERN) == set(O_GROUPS)
+      and O_NONPOLAR <= set(O_GROUPS) and O_DONOR <= set(O_GROUPS), "organic.rs: a property's arms are not its enum's variants")
+check(all('\\' not in p for p in O_PATTERN.values()), "organic.rs: an escape in a pattern literal")
+O_VSEPR = []   # (bonding, lone lo, lone hi, geometry) from predict_geometry's match
+for b_, lo, hi, g in re.findall(r"\((\d+), (\d+)(?:\.\.=(\d+))?\) => Some\(Geometry::(\w+)\)",
+                                rust_fn_body(osrc, "pub fn predict_geometry(")):
+    O_VSEPR.append((int(b_), int(lo), int(hi or lo), g))
+check(len(O_VSEPR) == 14 and all(g in O_GEOMS for *_, g in O_VSEPR), f"organic.rs: predict_geometry parsed as {O_VSEPR}")
+def r_predict(bonding, lone):
+    for b_, lo, hi, g in O_VSEPR:          # first matching arm, as Rust's match
+        if bonding == b_ and lo <= lone <= hi:
+            return g
+    return None
+def r_bond_sum(ins, k):
+    """Rust's .map(|(b, n)| b.energy_kj() * *n as f64).sum() over the list at token k: (sum, tokens used)."""
+    n = ins[k][1]
+    check(ins[k][0] == "v", "organic: a bond list without its v: length")
+    s_ = -0.0
+    for j in range(n):
+        (ek, ev, _), (ik, iv, _) = ins[k + 1 + 2 * j], ins[k + 2 + 2 * j]
+        check(ek == "e" and ev.startswith("BondType.") and ik == "i" and 0 <= iv <= 0xFFFFFFFF,
+              f"organic: bond list token {ev!r} {iv!r}")
+        s_ += O_ENERGY[ev.split(".", 1)[1]] * float(iv)
+    return s_, 1 + 2 * n
+def o_enum(tok, enum, variants):
+    check(tok[0] == "e" and tok[1].startswith(enum + ".") and tok[1].split(".", 1)[1] in variants,
+          f"organic: {tok!r} is no {enum} variant")
+    return tok[1].split(".", 1)[1]
+ocount, oseen, opairs = {}, {}, set()
+for fn, cls, ins, outs, where in R.get("organic", []):
+    ocount[fn] = ocount.get(fn, 0) + 1
+    if fn == "organic::enthalpy_from_bonds":
+        check(cls == "B", f"{where}: {fn} class {cls}")
+        sb, used = r_bond_sum(ins, 0)
+        sf, used2 = r_bond_sum(ins, used)
+        check(used + used2 == len(ins), f"{where}: {fn} has {len(ins)} input tokens")
+        check(toks_equal(outs, out_toks(sb - sf)), f"{where}: {fn} -> {outs}, recomputed {sb - sf!r}")
+        continue
+    check(cls == "A", f"{where}: {fn} class {cls}")
+    if fn == "organic::predict_geometry":
+        b_, lp = ins[0][1], ins[1][1]
+        check(ins[0][0] == ins[1][0] == "i" and 0 <= b_ <= 255 and 0 <= lp <= 255, f"{where}: inputs {ins}")
+        opairs.add((b_, lp))
+        g = r_predict(b_, lp)
+        check(toks_equal(outs, [("n", "", None)] if g is None else [("e", f"Geometry.{g}", None)]),
+              f"{where}: predict_geometry({b_}, {lp}) -> {outs}, recomputed {g}")
+        continue
+    if fn == "BondType::energy_kj":
+        v = o_enum(ins[0], "BondType", O_BONDS)
+        want = [("f", O_ENERGY[v], f2b(O_ENERGY[v]))]
+    elif fn == "Geometry::ideal_bond_angle":
+        v = o_enum(ins[0], "Geometry", O_GEOMS)
+        want = [("f", O_ANGLE[v], f2b(O_ANGLE[v]))]
+    elif fn == "FunctionalGroup::pattern":
+        v = o_enum(ins[0], "FunctionalGroup", O_GROUPS)
+        want = [("s", O_PATTERN[v], None)]
+    elif fn == "FunctionalGroup::is_polar":
+        v = o_enum(ins[0], "FunctionalGroup", O_GROUPS)
+        want = [("i", int(v not in O_NONPOLAR), None)]
+    elif fn == "FunctionalGroup::hydrogen_bonding":
+        v = o_enum(ins[0], "FunctionalGroup", O_GROUPS)
+        want = [("i", int(v in O_DONOR), None)]
+    else:
+        check(False, f"{where}: organic.tsv function {fn} has no rule here")
+        continue
+    oseen.setdefault(fn, []).append(v)
+    check(toks_equal(outs, want), f"{where}: {fn}({v}) -> {outs}, want {want}")
+for fn, variants in (("BondType::energy_kj", O_BONDS), ("Geometry::ideal_bond_angle", O_GEOMS),
+                     ("FunctionalGroup::pattern", O_GROUPS), ("FunctionalGroup::is_polar", O_GROUPS),
+                     ("FunctionalGroup::hydrogen_bonding", O_GROUPS)):
+    check(oseen.get(fn) == variants, f"organic.tsv: {fn} rows are not every variant once, in declaration order")
+edges_o = [0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 127, 128, 254, 255]
+need = {(x, y) for x in range(16) for y in range(16)} | {(x, e_) for e_ in edges_o for x in range(256)} \
+    | {(e_, x) for e_ in edges_o for x in range(256)}
+check(opairs == need, f"organic.tsv: predict_geometry covers {len(opairs)} pairs, the grid is {len(need)}")
+check(ocount.get("organic::enthalpy_from_bonds", 0) >= 1000, "organic.tsv: fewer than 1000 enthalpy_from_bonds rows")
+print(f"organic rows checked: {sum(ocount.values())} ({', '.join(f'{k} {v}' for k, v in ocount.items())}) against "
+      f"organic.rs's {len(O_BONDS)} + {len(O_GEOMS)} + {len(O_GROUPS)} variants and predict_geometry's {len(O_VSEPR)} arms")
+
+# src/organic_data.cyr against the Rust source: the enums (ADR 0002 #6's rename), the columns, the UTF-8 pattern blob,
+# the bool columns, the match's section comments and notes, and the acceptor column against its stated rule.
+otext = (root / "src/organic_data.cyr").read_text()
+rel_o = "src/organic_data.cyr"
+def cyr_enum(text, name):
+    m = re.search(rf"^enum {name} \{{(.*?)\n\}}", text, re.M | re.S)
+    return [] if m is None else [(n, int(v)) for n, v in re.findall(r"^    (KM_[A-Z0-9_]+) = (\d+);", m.group(1), re.M)]
+def cyr_bools(text, rel, name):
+    m = re.search(rf"^var {name}: bool\[(\d+)\] = \{{(.*?)\}};", text, re.M | re.S)
+    check(m is not None, f"{rel}: no {name}")
+    if m is None: return []
+    vals = [x == "true" for line in m.group(2).splitlines() for x in re.findall(r"\b(true|false),", line.split("#", 1)[0])]
+    check(len(vals) == int(m.group(1)), f"{rel}: {name} declares {m.group(1)}, holds {len(vals)}")
+    return vals
+for enum, cyr_name, prefix, variants, count in (("BondType", "KmBondType", "KM_BOND_TYPE_", O_BONDS, "KM_BOND_TYPE_COUNT"),
+                                                 ("Geometry", "KmGeometry", "KM_GEOMETRY_", O_GEOMS, "KM_GEOMETRY_COUNT"),
+                                                 ("FunctionalGroup", "KmFunctionalGroup", "KM_FUNCTIONAL_GROUP_", O_GROUPS,
+                                                  "KM_FUNCTIONAL_GROUP_COUNT")):
+    want = [("KM_GEOMETRY_T_SHAPED" if v == "TShapedThreeLonePairs" else prefix + snake_t(v), k)
+            for k, v in enumerate(variants)]
+    check(cyr_enum(otext, cyr_name) == want, f"{rel_o}: enum {cyr_name} is not {enum}'s variants in order")
+    check(re.search(rf"^const {count} = {len(variants)};$", otext, re.M), f"{rel_o}: {count}")
+check(cyr_col_in(otext, rel_o, "KM_BOND_TYPE_ENERGY_KJ") == [O_ENERGY[v] for v in O_BONDS], f"{rel_o}: energies")
+check(cyr_col_in(otext, rel_o, "KM_GEOMETRY_IDEAL_BOND_ANGLE") == [O_ANGLE[v] for v in O_GEOMS], f"{rel_o}: angles")
+got_s, one_each = cyr_strings_in(otext, rel_o, "KM_FUNCTIONAL_GROUP_PATTERN", "utf-8")
+check(got_s == [O_PATTERN[v] for v in O_GROUPS] and one_each, f"{rel_o}: the pattern blob is not organic.rs's strings")
+check(cyr_bools(otext, rel_o, "KM_FUNCTIONAL_GROUP_IS_POLAR") == [v not in O_NONPOLAR for v in O_GROUPS], f"{rel_o}: is_polar")
+check(cyr_bools(otext, rel_o, "KM_FUNCTIONAL_GROUP_IS_HYDROGEN_BOND_DONOR") == [v in O_DONOR for v in O_GROUPS],
+      f"{rel_o}: the donor column is not hydrogen_bonding's set")
+# ADR 0002 #6's acceptor column has no oracle: its stated rule, IUPAC 2011's electron-rich region (a lone pair or a
+# π-bonded pair, the weak acceptors included: the user's decision), is recomputed from the patterns — an atom that
+# carries lone pairs in these groups (O, N, S, a halogen: F, Cl, Br, I or the placeholder X) or a π bond (=, ≡, or an
+# aryl ring, Ar / C₆H₅).
+def has_acceptor_site(pattern):
+    atoms = set(re.findall(r"[A-Z][a-z]?", pattern))
+    return bool(atoms & {"O", "N", "S", "F", "Cl", "Br", "I", "X"}) or "=" in pattern or "≡" in pattern \
+        or "Ar" in atoms or "C₆H₅" in pattern
+acc = [has_acceptor_site(O_PATTERN[v]) for v in O_GROUPS]
+check(cyr_bools(otext, rel_o, "KM_FUNCTIONAL_GROUP_IS_HYDROGEN_BOND_ACCEPTOR") == acc,
+      f"{rel_o}: the acceptor column is not 'the pattern has a lone-pair atom or a π bond'")
+check(all(a for v, a in zip(O_GROUPS, acc) if v in O_DONOR), f"{rel_o}: a donor that is no acceptor")
+sections = re.findall(r"^\s+// (.+)$", rust_fn_body(osrc, "pub const fn energy_kj("), re.M)
+ebody = re.search(r"^var KM_BOND_TYPE_ENERGY_KJ: f64\[45\] = \{(.*?)\};", otext, re.M | re.S).group(1)
+check(re.findall(r"^    # (.+)$", ebody, re.M) == sections and len(sections) == 9,
+      f"{rel_o}: energy_kj's section comments are not carried into the initializer")
+for v, note in re.findall(r"Self::(\w+) => [0-9.]+, // (.+)$", rust_fn_body(osrc, "pub const fn ideal_bond_angle("), re.M):
+    check(f"# {v}: {note}" in otext, f"{rel_o}: ideal_bond_angle's note on {v} is not carried")
+print(f"{rel_o} checked against organic.rs (3 enums, ADR 0002 #6's rename; energies, angles, the UTF-8 pattern blob, "
+      f"polar and donor flags; the acceptor column by its rule: {sum(acc)} of {len(acc)} groups, all but "
+      f"{', '.join(v for v, a in zip(O_GROUPS, acc) if not a)})")
+
+# ── 14. inorganic.tsv (M4b) against the Rust source ─────────────────────────────────────
+# KmLigand and field_strength from the enum and its match, the four private d-electron tables and IONIC_RADII from
+# their literals, the formulas transcribed in Rust's operation order (Python floats are IEEE doubles), the guards in
+# Rust's order. Every typed formula constant must change some golden row when perturbed (the corpus pins it).
+isrc = (root / "rust-old/src/inorganic.rs").read_text()
+I_LIGANDS = rust_enum(isrc, "Ligand")
+I_STRENGTH = {v: int(x) for v, x in rust_arms(isrc, "pub const fn field_strength(").items()}
+check(len(I_LIGANDS) == 11 and set(I_STRENGTH) == set(I_LIGANDS), f"inorganic.rs: Ligand parsed as {I_LIGANDS}")
+I_THRESHOLD = int(re.search(r"self\.field_strength\(\) >= (\d+)", isrc).group(1))
+def literal_u8s(name):
+    body = isrc[isrc.index(f"const {name}:"):]
+    body = body[body.index("= [") + 3:body.index("];")]
+    return [int(x) for x in re.findall(r"\d+", body)]
+I_OCC = {hs: list(zip(*[iter(literal_u8s(n))] * 2)) for hs, n in ((True, "OCT_OCCUPANCY_HIGH_SPIN"), (False, "OCT_OCCUPANCY_LOW_SPIN"))}
+I_UNP = {True: literal_u8s("OCT_UNPAIRED_HIGH_SPIN"), False: literal_u8s("OCT_UNPAIRED_LOW_SPIN")}
+check(all(len(I_OCC[h]) == 11 and len(I_UNP[h]) == 11 for h in (True, False))
+      and all(t + e_ == n for h in (True, False) for n, (t, e_) in enumerate(I_OCC[h])),
+      "inorganic.rs: the d-electron tables are not 11 rows of dⁿ")
+I_RADII = [(sym, int(q), int(cn), float(r)) for sym, q, cn, r in re.findall(
+    r'IonicRadius \{\s*symbol: "(\w+)",\s*charge: (-?\d+),\s*(?://[^\n]*\s*)*coordination: (\d+),\s*radius_pm: ([0-9.]+),\s*\}',
+    isrc[isrc.index("pub static IONIC_RADII:"):])]
+check(len(I_RADII) == 30, f"inorganic.rs: IONIC_RADII parsed as {len(I_RADII)} rows")
+KE = b2f(golden_consts["potential::COULOMB_CONSTANT"])
+NA = b2f(golden_consts["element::AVOGADRO"])
+QE = b2f(golden_consts["electrochemistry::ELEMENTARY_CHARGE"])
+INVALID = Err("InvalidInput")
+def r_cfse(d, hs, a=-0.4, b_=0.6):
+    if not 0 <= d <= 10: return INVALID
+    t2g, eg = I_OCC[hs][d]
+    return float(t2g) * a + float(eg) * b_
+def r_cfse_exact(d, hs, five=5):
+    """ADR 0002 #12, the port's CFSE: the exact (3·eg − 2·t2g)/5, correctly rounded (Python's Fraction → float is)."""
+    t2g, eg = I_OCC[hs][d]
+    return float(Fraction(3 * eg - 2 * t2g) / Fraction(five))
+def r_unpaired(d, hs):
+    return I_UNP[hs][d] if 0 <= d <= 10 else INVALID
+def r_tet(x, four=4.0, nine=9.0): return dv(x * four, nine)
+def r_spin(n, two=2.0):
+    n = float(n)
+    return math.sqrt(n * (n + two))
+def r_lande(m, zc, za, r0, n, one=1.0):
+    if not is_positive(r0): return INVALID
+    if not is_finite(n) or n <= 1.0: return INVALID
+    if not is_positive(m): return INVALID
+    if zc == 0 or za == 0: return INVALID
+    u = -KE * NA * m * float(zc) * float(za) * QE * QE
+    return dv(u, r0) * (one - dv(one, n))
+def r_haber(h, s_, ie, d, ea, two=2.0): return h - s_ - ie - dv(d, two) - ea
+def radius_toks(r):
+    return [("s", r[0], None), ("i", r[1], None), ("i", r[2], None), ("f", r[3], f2b(r[3]))]
+def i_bool(tok):
+    check(tok[0] == "i" and tok[1] in (0, 1), f"inorganic: {tok!r} is no bool token")
+    return tok[1] == 1
+I_RULES = {
+    "inorganic::cfse_octahedral": ("A", lambda a: r_cfse(a[0][1], i_bool(a[1]))),
+    "inorganic::unpaired_electrons_oct": ("A", lambda a: r_unpaired(a[0][1], i_bool(a[1]))),
+    "inorganic::delta_tet_from_oct": ("B", lambda a: r_tet(a[0][1])),
+    "inorganic::spin_only_moment": ("B", lambda a: r_spin(a[0][1])),
+    "inorganic::born_lande_lattice_energy": ("B", lambda a: r_lande(*fl(a))),
+    "inorganic::born_haber_lattice_energy": ("B", lambda a: r_haber(*fl(a))),
+}
+icount, igrid = {}, {}
+cfse_exact_rows = [0, 0]     # Ok cfse rows where the exact value equals / differs from the oracle's (ADR 0002 #12)
+for fn, cls, ins, outs, where in R.get("inorganic", []):
+    icount[fn] = icount.get(fn, 0) + 1
+    if fn == "inorganic::IONIC_RADII":
+        check(cls == "A" and ins == [] and toks_equal(outs, [("v", len(I_RADII), None)]), f"{where}: {fn}")
+        continue
+    if fn == "inorganic::IONIC_RADII[]":
+        k = ins[0][1]
+        check(cls == "A" and 0 <= k < len(I_RADII) and toks_equal(outs, radius_toks(I_RADII[k])), f"{where}: IONIC_RADII[{k}]")
+        igrid.setdefault(fn, set()).add(k)
+        continue
+    if fn == "inorganic::lookup_ionic_radius":
+        sym, q = ins[0][1], ins[1][1]
+        check(ins[1][0] == "i" and -128 <= q <= 127, f"{where}: charge {q!r} is no i8")
+        hit = next((r for r in I_RADII if r[0] == sym and r[1] == q), None)     # exact, case-sensitive, first match
+        check(cls == "A" and toks_equal(outs, [("n", "", None)] if hit is None else radius_toks(hit)),
+              f"{where}: lookup_ionic_radius({sym!r}, {q})")
+        igrid.setdefault(fn, set()).add((sym, q))
+        continue
+    if fn in ("Ligand::field_strength", "Ligand::is_strong_field"):
+        v = o_enum(ins[0], "Ligand", I_LIGANDS)
+        want = I_STRENGTH[v] if fn == "Ligand::field_strength" else I_STRENGTH[v] >= I_THRESHOLD
+        check(cls == "A" and toks_equal(outs, out_toks(want)), f"{where}: {fn}({v}) -> {outs}")
+        igrid.setdefault(fn, []).append(v)
+        continue
+    if fn not in I_RULES:
+        check(False, f"{where}: inorganic.tsv function {fn} has no rule here")
+        continue
+    want_cls, rule = I_RULES[fn]
+    check(cls == want_cls, f"{where}: {fn} class {cls}")
+    if fn in ("inorganic::cfse_octahedral", "inorganic::unpaired_electrons_oct"):
+        check(ins[0][0] == "i" and 0 <= ins[0][1] <= 255, f"{where}: d = {ins[0]!r} is no u8")
+        igrid.setdefault(fn, set()).add((ins[0][1], ins[1][1]))
+    if fn == "inorganic::spin_only_moment":
+        check(ins[0][0] == "i" and 0 <= ins[0][1] <= 255, f"{where}: n = {ins[0]!r} is no u8")
+        igrid.setdefault(fn, set()).add(ins[0][1])
+    if fn == "inorganic::born_lande_lattice_energy":
+        check(all(ins[k][0] == "i" and 0 <= ins[k][1] <= 0xFFFFFFFF for k in (1, 2)), f"{where}: a charge is no u32")
+    got = rule(ins)
+    check(toks_equal(outs, out_toks(got)), f"{where}: {fn}{tuple(fl(ins))} -> {[t[1] for t in outs]}, recomputed {got!r}")
+    if fn == "inorganic::cfse_octahedral" and not isinstance(got, Err):
+        # ADR 0002 #12: the port returns the exact value; the oracle's is within a few ulps of the same fifth (the
+        # harness's mapping, round(5v)), and the row's note names the exact value exactly where the two differ.
+        d, hs = ins[0][1], i_bool(ins[1])
+        exact = r_cfse_exact(d, hs)
+        t2g, eg = I_OCC[hs][d]
+        q = round(got * 5.0)
+        check(q == 3 * eg - 2 * t2g and abs(got * 5.0 - q) < 1e-9, f"{where}: the oracle's {got!r} is not near (3·eg − 2·t2g)/5")
+        tag = f"[ADR 0002 #12: the port returns the exact (3·e_g − 2·t2g)/5 = {exact!r} (f:{f2b(exact):016x})]"
+        noted = NOTES.get(where, "").endswith(tag)
+        differs = f2b(exact) != f2b(got)
+        check(noted == differs and ("ADR 0002 #12" in NOTES.get(where, "")) == differs,
+              f"{where}: cfse({d}, {hs}) exact {exact!r}, oracle {got!r}: the ADR 0002 #12 note is {'missing' if differs else 'stray'}")
+        cfse_exact_rows[differs] += 1
+check(cfse_exact_rows == [9, 13], f"inorganic: ADR 0002 #12 rows (equal, differing) = {cfse_exact_rows}, not [9, 13]")
+check(igrid.get("inorganic::cfse_octahedral") == igrid.get("inorganic::unpaired_electrons_oct")
+      == {(d, h) for d in range(256) for h in (0, 1)}, "inorganic.tsv: the d-electron functions don't cover every u8 × spin")
+check(igrid.get("inorganic::spin_only_moment") == set(range(256)), "inorganic.tsv: spin_only_moment doesn't cover every u8")
+check(igrid.get("inorganic::IONIC_RADII[]") == set(range(len(I_RADII))), "inorganic.tsv: an IONIC_RADII row is not probed")
+check({(r[0], q) for r in I_RADII for q in range(-128, 128)} <= igrid.get("inorganic::lookup_ionic_radius", set()),
+      "inorganic.tsv: lookup_ionic_radius doesn't probe every table symbol × every i8")
+check(igrid.get("Ligand::field_strength") == I_LIGANDS == igrid.get("Ligand::is_strong_field"),
+      "inorganic.tsv: the Ligand rows are not every variant once, in declaration order")
+print(f"inorganic rows checked: {sum(icount.values())} ({', '.join(f'{k} {v}' for k, v in icount.items())}) against "
+      f"inorganic.rs's Ligand ({len(I_LIGANDS)}), d-electron tables (2 × 11 + 2 × 11) and IONIC_RADII ({len(I_RADII)})")
+# The typed formula constants (src/inorganic.cyr has them inline, as Rust): each must change some golden row.
+def changes(fn, rule):
+    for f_, cls, ins, outs, where in R.get("inorganic", []):
+        if f_ == fn and not toks_equal(outs, out_toks(rule(ins))):
+            return True
+    return False
+for label, fn, rule in (
+        # The oracle's −0.4 and 0.6 (this replica's; since ADR 0002 #12 the port computes (3·eg − 2·t2g)/5).
+        ("cfse −0.4 + 1 ulp", "inorganic::cfse_octahedral", lambda a: r_cfse(a[0][1], i_bool(a[1]), a=nextup(-0.4))),
+        ("cfse 0.6 − 1 ulp", "inorganic::cfse_octahedral", lambda a: r_cfse(a[0][1], i_bool(a[1]), b_=nextdown(0.6))),
+        ("delta_tet 4.0 + 1 ulp", "inorganic::delta_tet_from_oct", lambda a: r_tet(a[0][1], four=nextup(4.0))),
+        ("delta_tet 9.0 + 1 ulp", "inorganic::delta_tet_from_oct", lambda a: r_tet(a[0][1], nine=nextup(9.0))),
+        ("spin_only 2.0 + 1 ulp", "inorganic::spin_only_moment", lambda a: r_spin(a[0][1], two=nextup(2.0))),
+        ("Born–Landé 1.0 + 1 ulp", "inorganic::born_lande_lattice_energy", lambda a: r_lande(*fl(a), one=nextup(1.0))),
+        ("Born–Haber 2.0 + 1 ulp", "inorganic::born_haber_lattice_energy", lambda a: r_haber(*fl(a), two=nextup(2.0)))):
+    check(changes(fn, rule), f"inorganic: {label} changes no golden row: the typed constant is not pinned")
+# The port's divisor 5 (ADR 0002 #12, typed inline): another divisor must change some row's exact value (its note).
+check(any(r_cfse_exact(d, h, five=6) != r_cfse_exact(d, h) for d in range(11) for h in (True, False)),
+      "inorganic: the exact CFSE's divisor 5 is not pinned")
+strong = [(f_, ins, outs) for f_, cls, ins, outs, w in R.get("inorganic", []) if f_ == "Ligand::is_strong_field"]
+for thr, observable in ((I_THRESHOLD + 1, True), (I_THRESHOLD - 1, False)):
+    moved = any(outs[0][1] != int(I_STRENGTH[ins[0][1].split(".")[1]] >= thr) for _, ins, outs in strong)
+    check(moved == observable, f"inorganic: is_strong_field's threshold {thr} {'changes' if moved else 'changes no'} row")
+print(f"inorganic: ADR 0002 #12 exact CFSE: {cfse_exact_rows[1]} Ok rows where (3·eg − 2·t2g)/5 differs from the "
+      f"oracle's t2g·(−0.4) + eg·0.6 (noted; the oracle within 1e-9 of the same fifth), {cfse_exact_rows[0]} equal")
+print(f"inorganic: typed constants pinned (the oracle's −0.4, 0.6; 4.0, 9.0, the 2.0s, 1.0; the strong-field threshold "
+      f"{I_THRESHOLD} from above: {I_THRESHOLD - 1} is unobservable, no ligand has rank {I_THRESHOLD - 1})")
+
+# src/inorganic_data.cyr against the Rust source.
+itext = (root / "src/inorganic_data.cyr").read_text()
+rel_i = "src/inorganic_data.cyr"
+check(cyr_enum(itext, "KmLigand") == [("KM_LIGAND_" + snake_t(v), k) for k, v in enumerate(I_LIGANDS)],
+      f"{rel_i}: enum KmLigand is not Ligand's variants in order")
+check(re.search(r"^const KM_LIGAND_COUNT = 11;$", itext, re.M), f"{rel_i}: KM_LIGAND_COUNT")
+check(cyr_col_in(itext, rel_i, "KM_LIGAND_FIELD_STRENGTH", int) == [I_STRENGTH[v] for v in I_LIGANDS], f"{rel_i}: strengths")
+for hs, name in ((True, "HIGH_SPIN"), (False, "LOW_SPIN")):
+    check(cyr_col_in(itext, rel_i, f"_KM_OCT_OCCUPANCY_{name}_T2G", int) == [p[0] for p in I_OCC[hs]], f"{rel_i}: {name} t2g")
+    check(cyr_col_in(itext, rel_i, f"_KM_OCT_OCCUPANCY_{name}_EG", int) == [p[1] for p in I_OCC[hs]], f"{rel_i}: {name} eg")
+    check(cyr_col_in(itext, rel_i, f"_KM_OCT_UNPAIRED_{name}", int) == I_UNP[hs], f"{rel_i}: {name} unpaired")
+nk = 0
+for m in re.finditer(r"^# Rust: kimiya::(\S+)\nconst (KM_[A-Z0-9_]+) = (.+);$", itext, re.M):
+    path, name, lit = m.groups()
+    check(name == "KM_" + path.split("::")[1] and path.startswith("inorganic::"), f"{rel_i}: {name} names kimiya::{path}")
+    check(re.fullmatch(r"-?[0-9]+\.[0-9]+", lit) and f2b(float(lit)) == golden_consts.get(path) == f2b(lits.get(path, math.nan)),
+          f"{rel_i}: {name} = {lit} is not the golden and literal {path}")
+    nk += 1
+check(nk == 10, f"{rel_i}: {nk} constants, not the 10 MADELUNG_* / BORN_EXP_*")
+for heading in ("Madelung constants (dimensionless), referred to the nearest cation–anion",
+                "Born exponents n (dimensionless) by the ion's noble-gas electron"):
+    check(f"# {heading}" in itext, f"{rel_i}: the section comment {heading!r} is not carried")
+check(re.search(r"^const KM_IONIC_RADII_COUNT = 30;$", itext, re.M), f"{rel_i}: KM_IONIC_RADII_COUNT")
+got_s, one_each = cyr_strings_in(itext, rel_i, "KM_IONIC_RADII_SYMBOL", "ascii")
+check(got_s == [r[0] for r in I_RADII] and one_each, f"{rel_i}: the symbol blob is not inorganic.rs's symbols")
+check(cyr_col_in(itext, rel_i, "KM_IONIC_RADII_CHARGE", int) == [r[1] for r in I_RADII], f"{rel_i}: charges")
+check(cyr_col_in(itext, rel_i, "KM_IONIC_RADII_COORDINATION", int) == [r[2] for r in I_RADII], f"{rel_i}: coordination")
+check(cyr_col_in(itext, rel_i, "KM_IONIC_RADII_RADIUS_PM") == [r[3] for r in I_RADII], f"{rel_i}: radii")
+check("Shannon (1976) lists Sn²⁺ only at CN 8." in itext, f"{rel_i}: the literal's Sn²⁺ note is not carried")
+print(f"{rel_i} checked against inorganic.rs (KmLigand, field strengths, the 4 d-electron tables, 10 constants, "
+      f"30 IONIC_RADII rows: symbol blob, charge, coordination, radius)")
+# ── 15. nuclear.tsv (M4c): beyond the row recomputation ─────────────────────────────────
+# Every nuclear row was recomputed in the M2/M3 loop above (Rust 1.2.0's nuclear.rs transcribed in its operation order;
+# glibc's exp, expm1, ln and exp2 via Python, and the corrected oracle through _prim). Here: the grids' coverage, ADR 0002
+# #3's notes, the typed formula constants' pinning, the generated data file against the literal, and the M4b policy's
+# diagnostics of the formulas that miss an exact value (ADR 0002, "the policy for inexact formulas").
+nrows = {}
+for fn, cls, ins, outs, where in R.get("nuclear", []):
+    nrows.setdefault(fn, []).append((ins, outs, where))
+semf_pairs, adr3 = set(), 0
+SEMF_TAG = "[ADR 0002 #3: the port returns Err(InvalidInput)]"
+for ins, outs, where in nrows.get("nuclear::semi_empirical_binding_energy", []):
+    z, a = ins[0][1], ins[1][1]
+    check(ins[0][0] == ins[1][0] == "i" and 0 <= z <= 0xFFFFFFFF and 0 <= a <= 0xFFFFFFFF, f"{where}: inputs {ins}")
+    semf_pairs.add((z, a))
+    nan = outs[0][0] == "f" and isnan_b(outs[0][2])
+    check(nan == (z > a or a == 0), f"{where}: SEMF({z}, {a}) is {'NaN' if nan else 'finite'}")
+    check(NOTES.get(where, "").endswith(SEMF_TAG) == nan, f"{where}: the ADR 0002 #3 note is {'missing' if nan else 'stray'}")
+    adr3 += nan
+check({(z, a) for z in range(1, 301) for a in range(z, min(3 * z, 300) + 1)} <= semf_pairs,
+      "nuclear.tsv: semi_empirical_binding_energy doesn't cover every Z ≤ A ≤ 3Z with A ≤ 300 (port plan §4)")
+check({(0xFFFFFFFF, 0xFFFFFFFF), (0, 0), (0xFFFFFFFF, 0)} <= semf_pairs, "nuclear.tsv: SEMF misses a u32 extreme")
+check({ins[0][1] for ins, _, _ in nrows.get("nuclear::ISOTOPES[]", [])} == set(range(len(N_ISO))),
+      "nuclear.tsv: an ISOTOPES row is not probed")
+check({r[0] for r in N_ISO} <= {ins[0][1] for ins, _, _ in nrows.get("nuclear::lookup_isotope", [])},
+      "nuclear.tsv: lookup_isotope doesn't probe every table symbol")
+for fn in ("nuclear::mass_defect", "nuclear::binding_energy_per_nucleon"):
+    for ins, outs, where in nrows.get(fn, []):
+        check(all(ins[k][0] == "i" and 0 <= ins[k][1] <= 0xFFFFFFFF for k in (0, 1)), f"{where}: a count is no u32")
+# The chain's branches: the equal-rate limit (λ₁ = λ₂ exactly, and within 1e-12), the rows on the threshold itself (where
+# 1e-12 ± 1 ulp moves the branch), and the rows whose e^(−λ_min·t) is subnormal (ADR 0006 item 6).
+def chain_equal(a, tol=N_TOL):
+    """The branch Rust's chain takes on inputs a: True for the equal-rate limit, None for an Err row."""
+    n0, l1, l2, t = a
+    if isinstance(r_chain(n0, l1, l2, t), Err): return None
+    return abs(l2 - l1) <= tol * r_max(l1, l2)
+ok_chain = [fl(ins) for ins, outs, w in nrows.get("nuclear::decay_chain_two_step", []) if outs[0][0] == "f"]
+CALLS[0] = 0
+br = [chain_equal(a) for a in ok_chain]
+exact_eq = sum(1 for a in ok_chain if a[1] == a[2])
+on_thr = sum(1 for a in ok_chain if chain_equal(a) != chain_equal(a, nextup(N_TOL))
+             or chain_equal(a) != chain_equal(a, nextdown(N_TOL)))
+def _sub_exponent(a):
+    x = -r_min(a[1], a[2]) * a[3]
+    return -745.1332 < x < -708.3964
+sub_rows = sum(1 for a in ok_chain if _sub_exponent(a))
+check(exact_eq >= 100 and on_thr >= 4 and sub_rows >= 100,
+      f"nuclear.tsv: the chain has {exact_eq} λ₁ = λ₂ rows, {on_thr} on the threshold, {sub_rows} with a subnormal e^(−λ_min·t)")
+print(f"nuclear rows checked: {sum(len(v) for v in nrows.values())} ({', '.join(f'{k} {len(v)}' for k, v in nrows.items())})")
+print(f"nuclear: ADR 0002 #3: {adr3} semi_empirical_binding_energy rows where the oracle's NaN (z > a or a = 0) is the "
+      f"port's Err (noted), {len(semf_pairs) - adr3} finite pairs; decay_chain_two_step: {sum(1 for x in br if x)} Ok rows "
+      f"on the equal-rate branch ({exact_eq} with λ₁ = λ₂ exactly), {sum(1 for x in br if x is False)} on the Bateman "
+      f"branch, {on_thr} where 1e-12 ± 1 ulp moves the branch, {sub_rows} with a subnormal e^(−λ_min·t)")
+# The typed formula constants (src/nuclear.cyr has them inline): each must change some golden row when perturbed.
+def n_changes(fn, rule):
+    return sum(1 for ins, outs, where in nrows.get(fn, []) if not toks_equal(out_toks(rule(ins)), outs))
+def semf_c(k, d):
+    return tuple(math.nextafter(c, math.inf if d > 0 else -math.inf) if j == k else c for j, c in enumerate(SEMF))
+N_PINS = [
+    ("LN_2 + 1 ulp", "nuclear::decay_constant", lambda a: r_decay_constant(*fl(a), ln2=nextup(LN2))),
+    ("LN_2 − 1 ulp", "nuclear::decay_constant", lambda a: r_decay_constant(*fl(a), ln2=nextdown(LN2))),
+    ("EQUAL_RATE_REL_TOL × 0.5", "nuclear::decay_chain_two_step", lambda a: r_chain(*fl(a), tol=N_TOL * 0.5)),
+    ("EQUAL_RATE_REL_TOL × 2", "nuclear::decay_chain_two_step", lambda a: r_chain(*fl(a), tol=N_TOL * 2.0)),
+    ("EQUAL_RATE_REL_TOL + 1 ulp", "nuclear::decay_chain_two_step", lambda a: r_chain(*fl(a), tol=nextup(N_TOL))),
+    ("EQUAL_RATE_REL_TOL − 1 ulp", "nuclear::decay_chain_two_step", lambda a: r_chain(*fl(a), tol=nextdown(N_TOL))),
+]
+for k, name in enumerate(("VOLUME", "SURFACE", "COULOMB", "ASYMMETRY", "PAIRING")):
+    for d in (1, -1):
+        N_PINS.append((f"SEMF_{name} {'+' if d > 0 else '−'} 1 ulp", "nuclear::semi_empirical_binding_energy",
+                       (lambda c: lambda a: r_semf(*fl(a), c=c))(semf_c(k, d))))
+N_PINS += [
+    ("the asymmetry term's 4.0 + 1 ulp", "nuclear::semi_empirical_binding_energy", lambda a: r_semf(*fl(a), four=nextup(4.0))),
+]   # (Rust's secular 0.01 is no port constant since ADR 0002 #14: the comparison is exact, checked below)
+for label, fn, rule in N_PINS:
+    n_ch = n_changes(fn, rule)
+    print(f"  pinning: with {label}, {n_ch} of {len(nrows.get(fn, []))} {fn.split('::')[1]} rows change")
+    check(n_ch > 0, f"nuclear: no golden {fn} row pins {label}")
+# ADR 0002 #13, #14 (the user's decision, 2026-11-09: fix exactly). The golden rows keep the oracle's values; a row where
+# the port's value differs carries it in its note, `[ADR 0002 #N: the port returns <how> = <x> (f:<bits>)]` or `(i:<b>)]`,
+# and the harness maps the two. Here every row's port value is recomputed with exact arithmetic (Fraction, MPFR for the
+# correctly rounded 2^y) and the notes checked against it: present exactly where it differs from the oracle's, with its
+# value. Rust's form is checked to stay wherever it is already correctly rounded.
+def rn_frac(q):
+    """A Fraction rounded once to binary64 (CPython's int true division is correctly rounded, subnormals and ties
+    included); ±∞ past DBL_MAX."""
+    try: return float(q)
+    except OverflowError: return math.inf if q > 0 else -math.inf
+def same_bits(x, y): return (math.isnan(x) and math.isnan(y)) or f2b(x) == f2b(y)
+def port_half_lives(n0, n):
+    """ADR 0002 #13: the port's N₀/2ⁿ where Rust's 2⁻ⁿ is not a normal double, with how it is obtained; None elsewhere."""
+    if not math.isfinite(n) or not (n > 1022.0 or n <= -1024.0): return None
+    if math.isnan(n0) or n0 == 0 or math.isinf(n0): return n0, "N₀ itself (scaleB)"
+    neg = n0 < 0
+    if n > 2200: return (-0.0 if neg else 0.0), "the correctly rounded N₀/2ⁿ"
+    if n < -2200: return (-math.inf if neg else math.inf), "the correctly rounded N₀/2ⁿ"
+    mfr, efr = math.frexp(abs(n0))
+    k = math.floor(n)
+    f_ = n - k
+    if mfr == 0.5:
+        j = efr - 1
+        y = float(j) - n
+        if Fraction(y) == Fraction(j) - Fraction(n):
+            v = cr_of("exp2", (y,))
+            return (-v if neg else v), "the correctly rounded N₀/2ⁿ (2^(j − n))"
+    if f_ == 0:
+        return rn_frac(Fraction(n0) * Fraction(2) ** (-k)), "the correctly rounded N₀/2ⁿ"
+    # M4d: N₀·2⁻ⁿ rounded once for a fractional n too (M4c's port was N₀·CR(2⁻ᶠ)·2⁻ᵏ rounded once, faithful): MPFR,
+    # 2^f to 400 bits bounded from both sides (mpfr_ref.scaled_exp2), checked below against a 60-digit 2⁻ᶠ as well
+    return MPFR.scaled_exp2(n0, -n), "the correctly rounded N₀/2ⁿ (2⁻ᶠ to 320 bits)"
+_dec50 = decimal.Context(prec=60)
+def true_half_lives(n0, n):
+    """CR(N₀·2⁻ⁿ) for a finite nonzero N₀ and finite n, |n| ≤ 2200: 2⁻ᶠ to 60 digits (decimal), the rest exact."""
+    k = math.floor(n)
+    f_ = n - k
+    t = Fraction(_dec50.power(decimal.Decimal(2), decimal.Decimal(-f_))) if f_ else Fraction(1)
+    return rn_frac(Fraction(n0) * t * Fraction(2) ** (-k))
+def note_value(where, tag):
+    note = NOTES.get(where, "")
+    m = re.search(rf"\[{re.escape(tag)}: the port returns (.+) = (\S+) \((f|i):([0-9a-f]+)\)\]$", note)
+    return m
+n13 = {"N₀ itself (scaleB)": 0, "the correctly rounded N₀/2ⁿ": 0, "the correctly rounded N₀/2ⁿ (2^(j − n))": 0,
+       "the correctly rounded N₀/2ⁿ (2⁻ᶠ to 320 bits)": 0}
+edge_rows, frac_rows, rust_cr = 0, 0, 0   # rows past the normal range; of them, fractional n; Rust correctly rounded
+for ins, outs, where in nrows.get("nuclear::atoms_after_half_lives", []):
+    n0, n = fl(ins)
+    oracle = outs[0][1]
+    pv = port_half_lives(n0, n)
+    noted = "[ADR 0002 #13:" in NOTES.get(where, "")
+    if pv is None:
+        check(not noted, f"{where}: an ADR 0002 #13 note where Rust's 2⁻ⁿ is a normal double")
+        if math.isfinite(n0) and n0 != 0 and math.isfinite(n) and n == math.floor(n):
+            check(same_bits(oracle, rn_frac(Fraction(n0) * Fraction(2) ** int(-n))),
+                  f"{where}: Rust's N₀·2⁻ⁿ is not the correctly rounded N₀/2ⁿ for an integer n with 2⁻ⁿ normal")
+        continue
+    v, how = pv
+    edge_rows += 1
+    differs = not same_bits(v, oracle)
+    check(noted == differs, f"{where}: atoms_after_half_lives{tuple(fl(ins))}: port {v!r}, oracle {oracle!r}: the ADR 0002 #13 "
+          f"note is {'missing' if differs else 'stray'}")
+    if noted:
+        mm = note_value(where, "ADR 0002 #13")
+        check(mm is not None and mm.group(1) == how and mm.group(3) == "f" and int(mm.group(4), 16) == f2b(v),
+              f"{where}: the ADR 0002 #13 note does not name {how} = {v!r}")
+        n13[how] += 1
+    if math.isfinite(n0) and n0 != 0 and abs(n) <= 2200:
+        tr = true_half_lives(n0, n)
+        frac_rows += how.endswith("(2⁻ᶠ to 320 bits)")
+        rust_cr += same_bits(oracle, tr)
+        check(same_bits(v, tr), f"{where}: {how} {v!r} is not CR(N₀/2ⁿ) = {tr!r} (60-digit 2⁻ᶠ)")
+        check(same_bits(v, MPFR.scaled_exp2(n0, -n)), f"{where}: {how} {v!r} is not MPFR's N₀·2⁻ⁿ rounded once")
+# an exact-arithmetic sweep beyond the golden rows (seeded): MPFR's N₀·2⁻ⁿ against the 60-digit decimal 2⁻ᶠ, both rounded
+# once with exact rational arithmetic (scripts/oracle/cr_verify.py runs the port's _km_cr_exp2_scaled on far more)
+_rs = random.Random(0x4c13)
+sw_n = 0
+for _ in range(4000):
+    n = _rs.uniform(1022.0, 1200.0) if _rs.random() < 0.5 else _rs.uniform(-1200.0, -1024.0)
+    n0 = math.ldexp(_rs.uniform(1.0, 2.0), _rs.randint(-1074, 1023) if n > 0 else _rs.randint(-1074, 0))
+    v, how = port_half_lives(n0, n)
+    tr = true_half_lives(n0, n)
+    sw_n += 1
+    check(same_bits(v, tr), f"ADR 0002 #13 sweep: N₀ = {n0!r}, n = {n!r}: {v!r} is not CR(N₀/2ⁿ) = {tr!r}")
+print(f"nuclear: ADR 0002 #13: {sum(n13.values())} atoms_after_half_lives rows noted with the port's value ("
+      + ", ".join(f"{k} {c}" for k, c in n13.items()) + f") of {edge_rows} rows where 2⁻ⁿ is not a normal double "
+      f"({frac_rows} with a fractional n); every one with a finite N₀ ≠ 0 is CR(N₀/2ⁿ), by MPFR and by a 60-digit 2⁻ᶠ "
+      f"(Rust's value is too on {rust_cr}), and so are {sw_n} seeded pairs beyond the corpus")
+
+def exact_secular(lp, ld):
+    """ADR 0002 #14: λ_p < λ_d/100 exactly, Rust's NaN (false) and ±∞ (compared as themselves) semantics."""
+    if math.isnan(lp) or math.isnan(ld): return False
+    if math.isinf(lp) or math.isinf(ld): return lp < ld
+    return Fraction(lp) < Fraction(ld) / 100
+n14 = 0
+for ins, outs, where in nrows.get("nuclear::is_secular_equilibrium", []):
+    lp, ld = fl(ins)
+    ex = exact_secular(lp, ld)
+    differs = ex != bool(outs[0][1])
+    noted = "[ADR 0002 #14:" in NOTES.get(where, "")
+    check(noted == differs, f"{where}: secular({lp!r}, {ld!r}): exact {ex}, Rust {bool(outs[0][1])}: the ADR 0002 #14 "
+          f"note is {'missing' if differs else 'stray'}")
+    if noted:
+        mm = note_value(where, "ADR 0002 #14")
+        check(mm is not None and mm.group(1) == "the exact λ_p < λ_d/100" and mm.group(2) == str(ex).lower()
+              and mm.group(3) == "i" and int(mm.group(4)) == int(ex), f"{where}: the ADR 0002 #14 note does not say {ex}")
+        n14 += 1
+# The port's comparison (src/nuclear.cyr's _km_cmp_hundred, its case analysis replayed with exact arithmetic) against
+# Fraction, over a seeded sweep that crowds the boundary and the exponent shortcuts.
+def cmp_hundred_replica(a, b):
+    ma, ea = math.frexp(a)
+    mb, eb = math.frexp(b)
+    sa, ea = ma * 2, ea - 1
+    sb, eb = mb * 2, eb - 1
+    if eb >= ea + 8: return -1
+    if eb <= ea + 5: return 1
+    p = sa * 100.0
+    e = Fraction(sa) * 100 - Fraction(p)
+    bs = sb * (128.0 if eb == ea + 7 else 64.0)
+    if p != bs: return -1 if p < bs else 1
+    return (e > 0) - (e < 0)
+sw14 = 0
+for _ in range(20000):
+    ld = math.ldexp(_rs.uniform(1.0, 2.0), _rs.randint(-1070, 1020))
+    lp = ld / 100.0
+    for d in (-2, -1, 0, 1, 2):
+        x = lp
+        for _k in range(abs(d)): x = math.nextafter(x, math.inf if d > 0 else -math.inf)
+        if x <= 0: continue
+        want = (Fraction(x) * 100 > Fraction(ld)) - (Fraction(x) * 100 < Fraction(ld))
+        check(cmp_hundred_replica(x, ld) == want, f"ADR 0002 #14 sweep: 100·{x!r} against {ld!r}")
+        sw14 += 1
+print(f"nuclear: ADR 0002 #14: {n14} is_secular_equilibrium rows noted where the exact λ_p < λ_d/100 differs from "
+      f"Rust's λ_p < 0.01·λ_d; the port's comparison replayed against Fraction on {sw14} seeded pairs at the boundary")
+# decay_constant's LN_2 / t½ is kept (ADR 0002's policy: ln 2/t½ is irrational, a product of rounded constants).
+_dc = decimal.Context(prec=80)
+_ln2_dec = _dc.ln(decimal.Decimal(2))
+miss_dc, n_dc = 0, 0
+for ins, outs, where in nrows.get("nuclear::decay_constant", []):
+    t_ = ins[0][1]
+    if outs[0][0] == "f" and math.isfinite(t_) and math.isfinite(outs[0][1]) and outs[0][1] != 0:
+        n_dc += 1
+        if not same_f(float(_dc.divide(_ln2_dec, decimal.Decimal(t_))), outs[0][1]): miss_dc += 1
+print(f"nuclear: decay_constant's LN_2/t½ is 1 ulp from the correctly rounded ln 2/t½ on {miss_dc} of {n_dc} finite "
+      f"nonzero rows (kept: LN_2 is itself rounded and ln 2/t½ irrational)")
+
+# ADR 0002 #15 (M4b's inorganic, the user's decision of 2026-11-09): Δ_tet is the correctly rounded 4Δ/9. Rust's
+# (Δ·4)/9 already is wherever Δ·4 doesn't overflow (Δ·4 is exact); where it does (|Δ| ≥ 2¹⁰²²) the port takes (Δ/9)·4.
+# Every golden row's port value is checked against Fraction, and the notes sit exactly where it differs from Rust's.
+n15 = 0
+for f_, cls, ins, outs, where in R.get("inorganic", []):
+    if f_ != "inorganic::delta_tet_from_oct": continue
+    x, oracle = ins[0][1], outs[0][1]
+    exact = rn_frac(Fraction(4) * Fraction(x) / 9) if math.isfinite(x) and x != 0 else oracle   # ±0, ±∞, NaN: as Rust
+    port = (x / 9.0) * 4.0 if (math.isinf(x * 4.0) and math.isfinite(x)) else oracle
+    check(same_bits(port, exact), f"{where}: delta_tet_from_oct({x!r}): the port's {port!r} is not CR(4Δ/9) = {exact!r}")
+    differs = not same_bits(exact, oracle)
+    noted = "[ADR 0002 #15:" in NOTES.get(where, "")
+    check(noted == differs and (not differs or abs(x) >= 2.0 ** 1022),
+          f"{where}: delta_tet_from_oct({x!r}): the ADR 0002 #15 note is {'missing' if differs else 'stray'}")
+    if noted:
+        mm = note_value(where, "ADR 0002 #15")
+        check(mm is not None and mm.group(1) == "the correctly rounded 4Δ/9" and mm.group(3) == "f"
+              and int(mm.group(4), 16) == f2b(exact), f"{where}: the ADR 0002 #15 note does not name {exact!r}")
+        n15 += 1
+sw15 = 0
+for _ in range(20000):
+    big = math.ldexp(_rs.uniform(1.0, 2.0), 1022 + _rs.randint(0, 1)) * (1 if _rs.random() < 0.5 else -1)
+    if math.isinf(big): continue
+    check(same_bits((big / 9.0) * 4.0, rn_frac(Fraction(4) * Fraction(big) / 9)), f"ADR 0002 #15 sweep: Δ = {big!r}")
+    any_ = math.ldexp(_rs.uniform(1.0, 2.0), _rs.randint(-1074, 1021)) * (1 if _rs.random() < 0.5 else -1)
+    check(same_bits((any_ * 4.0) / 9.0, rn_frac(Fraction(4) * Fraction(any_) / 9)), f"ADR 0002 #15 sweep: Rust's form, Δ = {any_!r}")
+    sw15 += 2
+print(f"inorganic: ADR 0002 #15: {n15} delta_tet_from_oct rows noted (Rust's Δ·4 overflows; the port's (Δ/9)·4 is "
+      f"CR(4Δ/9)); the port's value is CR(4Δ/9) on every golden row and {sw15} seeded ones (both branches)")
+
+# src/nuclear_data.cyr against the Rust literal.
+ntext = (root / "src/nuclear_data.cyr").read_text()
+rel_n = "src/nuclear_data.cyr"
+check(re.search(rf"^const KM_ISOTOPES_COUNT = {len(N_ISO)};$", ntext, re.M), f"{rel_n}: KM_ISOTOPES_COUNT")
+got_s, one_each = cyr_strings_in(ntext, rel_n, "KM_ISOTOPES_SYMBOL", "ascii")
+check(got_s == [r[0] for r in N_ISO] and one_each, f"{rel_n}: the symbol blob is not nuclear.rs's labels")
+check(cyr_col_in(ntext, rel_n, "KM_ISOTOPES_Z", int) == [r[1] for r in N_ISO], f"{rel_n}: Z")
+check(cyr_col_in(ntext, rel_n, "KM_ISOTOPES_A", int) == [r[2] for r in N_ISO], f"{rel_n}: A")
+check(cyr_col_in(ntext, rel_n, "KM_ISOTOPES_HALF_LIFE_S") == [r[3] for r in N_ISO], f"{rel_n}: half-lives")
+got_s, one_each = cyr_strings_in(ntext, rel_n, "KM_ISOTOPES_DECAY_MODE", "utf-8")
+check(got_s == [r[4] for r in N_ISO] and one_each, f"{rel_n}: the UTF-8 decay-mode blob is not nuclear.rs's modes")
+n_notes = re.findall(r"half_life_s: [0-9_.e]+, // (.+)$", nsrc, re.M)
+check(len(n_notes) == 3 and all(f"half_life_s: {note}" in ntext for note in n_notes),
+      f"{rel_n}: the literal's NUBASE2020 notes {n_notes} are not carried")
+check(re.findall(r"^const (_?KM_\w+)", ntext, re.M) == ["KM_ISOTOPES_COUNT"], f"{rel_n}: a const other than the count")
+print(f"{rel_n} checked against nuclear.rs ({len(N_ISO)} ISOTOPES rows: symbol blob, Z, A, half-life, the UTF-8 "
+      f"decay-mode blob, the literal's {len(n_notes)} NUBASE2020 notes)")
+
+# ── 16. potential.tsv (M4d): beyond the row recomputation ──────────────────────────────────────────────
+# Every potential row was recomputed in the M2/M3 loop above (Rust 1.2.0's potential.rs transcribed in its operation
+# order; glibc's exp, atan2 and exp2 via Python, the corrected oracle through _prim). Here: ADR 0002 #16, #17 and #18's
+# notes, proven exactly; Rust's form proven exact where it stays; the typed tolerances' pinning; the grid's coverage.
+prows = {}
+for fn, cls, ins, outs, where in R.get("potential", []):
+    prows.setdefault(fn, []).append((ins, outs, where))
+def cr_root6_2(x):
+    """RN(x·2^(1/6)) for a finite x ≠ 0, decided exactly: x·2^(1/6) > t ⟺ 2·x⁶ > t⁶ (t > 0), so each candidate's two
+    midpoints are compared in rational arithmetic and the candidate moved until they bracket the value (never a
+    midpoint: 2^(1/6) is irrational). Past DBL_MAX + ulp/2 = 2^1024 − 2^970, ±∞."""
+    two_x6 = 2 * abs(Fraction(x)) ** 6
+    v = abs(x) * 1.122462048309373
+    if math.isinf(v): v = sys.float_info.max
+    while True:
+        up, down = nextup(v), nextdown(v)
+        hi = (Fraction(v) + Fraction(up)) / 2 if math.isfinite(up) else Fraction(2) ** 1024 - Fraction(2) ** 970
+        lo = (Fraction(v) + Fraction(down)) / 2
+        if two_x6 > hi ** 6:
+            if not math.isfinite(up): return math.copysign(math.inf, x)
+            v = up
+        elif two_x6 < lo ** 6:
+            v = down
+        else:
+            return math.copysign(v, x)
+def note_val(where, tag, how):
+    m = re.search(rf"\[{re.escape(tag)}: the port returns {re.escape(how)} = (\S+) \(f:([0-9a-f]+)\)\]$", NOTES.get(where, ""))
+    return None if m is None else b2f(int(m.group(2), 16))
+# #16: σ·2^(1/6) rounded once, against Rust's σ·RN(2^(1/6)).
+P16_HOW = "the correctly rounded σ·2^(1/6)"
+n16, n16_rows, rust16 = 0, 0, 0
+for ins, outs, where in prows.get("potential::lj_equilibrium_distance", []):
+    sg = ins[0][1]
+    oracle = outs[0][1]
+    noted = "[ADR 0002 #16:" in NOTES.get(where, "")
+    if not math.isfinite(sg) or sg == 0:
+        check(not noted and same_bits(oracle, sg), f"{where}: lj_equilibrium_distance({sg!r}) is not σ itself, or noted")
+        continue
+    n16_rows += 1
+    v = cr_root6_2(sg)
+    differs = not same_bits(v, oracle)
+    rust16 += not differs
+    check(noted == differs, f"{where}: lj_equilibrium_distance({sg!r}): port {v!r}, oracle {oracle!r}: the #16 note is "
+          f"{'missing' if differs else 'stray'}")
+    if noted:
+        nv = note_val(where, "ADR 0002 #16", P16_HOW)
+        check(nv is not None and same_bits(nv, v), f"{where}: the ADR 0002 #16 note does not name {v!r}")
+        n16 += 1
+check(f2b(MPFR.cr("exp2", 1.0 / 6.0)) == 0x3FF1F59AC3C7D6C0 == f2b(1.122462048309373),
+      "Rust's 2.0.powf(1.0 / 6.0) = CR(2^RN(1/6)) is not RN(2^(1/6)) = 0x3FF1F59AC3C7D6C0")
+# #17: (ε·d)·4 where Rust's 4·ε overflows; Rust's (4·ε)·d is RN(4·ε·d) wherever 4·ε is finite (4·ε exact).
+P17_HOW = "(ε·d)·4, the correctly rounded 4·ε·d for Rust's d = (σ/r)¹² − (σ/r)⁶"
+n17, edge17 = 0, 0
+for ins, outs, where in prows.get("potential::lennard_jones", []):
+    e_, sg, r = fl(ins)
+    noted = "[ADR 0002 #17:" in NOTES.get(where, "")
+    if outs[0][0] != "f":
+        check(not noted, f"{where}: an ADR 0002 #17 note on an Err row")
+        continue
+    sr = dv(sg, r)
+    sr6 = sr * sr * sr * sr * sr * sr
+    d = sr6 * sr6 - sr6
+    exact = math.nan if not math.isfinite(d) or not math.isfinite(e_) else rn_frac(4 * Fraction(e_) * Fraction(d))
+    if e_ < 2.0 ** 1022:
+        check(not noted, f"{where}: an ADR 0002 #17 note where 4·ε is finite")
+        if math.isfinite(d):
+            check(same_bits(outs[0][1], exact), f"{where}: Rust's (4·ε)·d is not RN(4·ε·d)")
+        continue
+    edge17 += 1
+    port = e_ * d * 4.0
+    if math.isfinite(d):
+        check(same_bits(port, exact), f"{where}: (ε·d)·4 = {port!r} is not RN(4·ε·d) = {exact!r}")
+    differs = not same_bits(port, outs[0][1])
+    check(noted == differs, f"{where}: lennard_jones{tuple(fl(ins))}: port {port!r}, oracle {outs[0][1]!r}: the #17 note "
+          f"is {'missing' if differs else 'stray'}")
+    if noted:
+        nv = note_val(where, "ADR 0002 #17", P17_HOW)
+        check(nv is not None and same_bits(nv, port), f"{where}: the ADR 0002 #17 note does not name {port!r}")
+        n17 += 1
+# #18: (μ·½)/D_e where Rust's 2·D_e overflows; Rust's μ/(2·D_e) is RN(μ/(2·D_e)) wherever 2·D_e is finite.
+P18_HOW = "ω·√((μ·½)/D_e), with the correctly rounded μ/(2·D_e)"
+n18, edge18 = 0, 0
+for ins, outs, where in prows.get("potential::morse_width_parameter", []):
+    w, mu, d = fl(ins)
+    noted = "[ADR 0002 #18:" in NOTES.get(where, "")
+    if outs[0][0] != "f":
+        check(not noted, f"{where}: an ADR 0002 #18 note on an Err row")
+        continue
+    q = rn_frac(Fraction(mu) / (2 * Fraction(d)))
+    if d < 2.0 ** 1023:
+        check(not noted and same_bits(dv(mu, 2.0 * d), q), f"{where}: Rust's μ/(2·D_e) is not RN(μ/(2·D_e)), or noted")
+        continue
+    edge18 += 1
+    check(same_bits((mu * 0.5) / d, q), f"{where}: (μ·½)/D_e is not RN(μ/(2·D_e)) = {q!r}")
+    port = w * r_sqrt(q)
+    differs = not same_bits(port, outs[0][1])
+    check(noted == differs, f"{where}: morse_width_parameter{tuple(fl(ins))}: port {port!r}, oracle {outs[0][1]!r}: the "
+          f"#18 note is {'missing' if differs else 'stray'}")
+    if noted:
+        nv = note_val(where, "ADR 0002 #18", P18_HOW)
+        check(nv is not None and same_bits(nv, port), f"{where}: the ADR 0002 #18 note does not name {port!r}")
+        n18 += 1
+# seeded exact sweeps beyond the corpus: #16's σ over every binade, #18's (μ·½)/D_e over its region
+_rp = random.Random(0x9016)
+sw16 = 0
+for _ in range(20000):
+    x = b2f(_rp.randrange(1, 0x7FEFFFFFFFFFFFFF))
+    v = cr_root6_2(x)
+    rust = x * 1.122462048309373
+    sw16 += not same_bits(v, rust)
+    check(abs(ulp_dist(f2b(v), f2b(rust))) <= 1, f"#16 sweep: RN(σ·2^(1/6)) {v!r} is not within an ulp of Rust's {rust!r}")
+for _ in range(20000):
+    d = 2.0 ** 1023 * _rp.uniform(1.0, 2.0)
+    mu = b2f(_rp.randrange(1, 0x7FEFFFFFFFFFFFFF))
+    check(same_bits((mu * 0.5) / d, rn_frac(Fraction(mu) / (2 * Fraction(d)))), f"#18 sweep: μ = {mu!r}, D = {d!r}")
+print(f"potential rows checked: {sum(len(v) for v in prows.values())} ({', '.join(f'{k} {len(v)}' for k, v in prows.items())})")
+print(f"potential: ADR 0002 #16: {n16} lj_equilibrium_distance rows noted with the correctly rounded σ·2^(1/6) (of "
+      f"{n16_rows} finite nonzero σ; Rust's σ·RN(2^(1/6)) is correctly rounded on {rust16}), proven exactly (2·σ⁶ against "
+      f"each midpoint's sixth power), and Rust's value differs on {sw16} of 20,000 seeded σ (always by one ulp); #17: "
+      f"{n17} of {edge17} lennard_jones Ok rows with ε ≥ 2¹⁰²² noted with RN(4·ε·d), which Rust's (4·ε)·d is on every "
+      f"other finite row; #18: {n18} of {edge18} morse_width_parameter Ok rows with D_e ≥ 2¹⁰²³ noted, (μ·½)/D_e proven "
+      f"RN(μ/(2·D_e)) there and on 20,000 seeded pairs")
+# The typed tolerances (src/potential.cyr has them inline): each must change some golden row when perturbed.
+def p_changes(fn, rule):
+    return sum(1 for ins, outs, where in prows.get(fn, []) if not toks_equal(out_toks(rule(ins)), outs))
+P_PINS = [
+    ("COINCIDENT_REL_TOL + 1 ulp", "potential::bond_angle", lambda a: r_bond_angle(fl(a), tol=nextup(P_TOL))),
+    ("COINCIDENT_REL_TOL − 1 ulp", "potential::bond_angle", lambda a: r_bond_angle(fl(a), tol=nextdown(P_TOL))),
+    ("COINCIDENT_REL_TOL × 0.5", "potential::bond_angle", lambda a: r_bond_angle(fl(a), tol=P_TOL * 0.5)),
+    ("COINCIDENT_REL_TOL × 2", "potential::bond_angle", lambda a: r_bond_angle(fl(a), tol=P_TOL * 2.0)),
+    ("COLLINEAR_SIN_SQ_TOL + 1 ulp", "potential::dihedral_angle", lambda a: r_dihedral(fl(a), tol=nextup(P_CTOL))),
+    ("COLLINEAR_SIN_SQ_TOL − 1 ulp", "potential::dihedral_angle", lambda a: r_dihedral(fl(a), tol=nextdown(P_CTOL))),
+    ("COLLINEAR_SIN_SQ_TOL × 0.5", "potential::dihedral_angle", lambda a: r_dihedral(fl(a), tol=P_CTOL * 0.5)),
+    ("COLLINEAR_SIN_SQ_TOL × 2", "potential::dihedral_angle", lambda a: r_dihedral(fl(a), tol=P_CTOL * 2.0)),
+    ("the −π → π mapping's π − 1 ulp", "potential::dihedral_angle", lambda a: r_dihedral(fl(a), pi=nextdown(math.pi))),
+    ("Lennard-Jones' 4.0 + 1 ulp", "potential::lennard_jones", lambda a: r_lj(*fl(a), four=nextup(4.0))),
+    ("the width's 2.0 + 1 ulp", "potential::morse_width_parameter", lambda a: r_width(*fl(a), two=nextup(2.0))),
+]
+for label, fn, rule in P_PINS:
+    CALLS[0] = 0
+    n_ch = p_changes(fn, rule)
+    print(f"  pinning: with {label}, {n_ch} of {len(prows.get(fn, []))} {fn.split('::')[1]} rows change")
+    check(n_ch > 0, f"potential: no golden {fn} row pins {label}")
+POT_MAPPED[0] = 0
+for ins, outs, where in prows.get("potential::dihedral_angle", []):
+    r_dihedral(fl(ins))
+mapped_pi = POT_MAPPED[0]
+neg_zero = sum(1 for ins, outs, w in prows.get("potential::dihedral_angle", []) if outs[0][0] == "f" and outs[0][2] == 0x8000000000000000)
+check(mapped_pi >= 8, f"potential: only {mapped_pi} dihedral rows take Rust's −π → π mapping")
+for fn, need in (("potential::bond_angle", [[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]]),
+                 ("potential::dihedral_angle", [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, -1.0, 0.0, 3.0, -1.0, 0.0]]),
+                 ("potential::distance_3d", [[0.0, 0.0, 0.0, 3.0, 4.0, 0.0]])):
+    have = {tuple(fl(ins)) for ins, _, _ in prows.get(fn, [])}
+    check(all(tuple(v) in have for v in need), f"potential: {fn} misses a Rust test's geometry")
+print(f"potential: dihedral_angle: {mapped_pi} rows where atan2 gives −π and Rust reports π, {neg_zero} rows of −0.0")
+
+VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
+             "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential"}
+check(set(tsvs) == VALIDATED, f"golden modules with no section here: {sorted(set(tsvs) - VALIDATED)}; "
+      f"sections with no module: {sorted(VALIDATED - set(tsvs))}")
 
 # ── 12. ADR 0006: the corrected oracle, tests/golden/<module>.cr.tsv ─────────────────────
 def tok_text(t):

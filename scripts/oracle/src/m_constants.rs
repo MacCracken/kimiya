@@ -2,8 +2,8 @@
 //!
 //! One row per constant, `const A s:<module>::<NAME> f:<bits>`. The list is shared with the
 //! `src/constants.cyr` generator (`t_constants::all`), so the two can't drift apart. The rows
-//! pin the physical constants in `src/constants.cyr` now, and the module data constants
-//! when their module's data is generated (M2–M4); until then those rows are pending.
+//! pin the physical constants in `src/constants.cyr` and the module data constants in their
+//! module's generated data file (M2a: phase, gas; M4b: inorganic). None is pending since M4b.
 
 use crate::t_constants;
 use crate::tsv::{Class, Module, f, s};

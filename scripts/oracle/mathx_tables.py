@@ -1,5 +1,5 @@
 """Generate src/mathx_data.cyr: the tables and constants of the correctly rounded exp, expm1, exp10, ln
-and log10 in src/mathx.cyr (ADR 0006, M3c-2a).
+and log10 (ADR 0006, M3c-2a), sin, cos, atan2 and acos (M4a) and x·2^(1/6) (M4d) in src/mathx.cyr.
 
 Every value is computed from MPFR (through scripts/oracle/mpfr_ref.py's ctypes binding, at 400 bits)
 or from exact rational arithmetic (Python's Fraction), then split into doubles, each the round-to-
@@ -17,6 +17,15 @@ Besides writing the values, the generator checks the properties the code's error
 - ln: for each of the 512 intervals of m, r = m·c_j − 1 is exactly representable for every double m
   in the interval and |r| < 2^-9 (a bit-count argument on the interval's end points); c = 1 and
   L = 0 on the interval holding 1; |L_j| ≥ max |r| elsewhere (the Fast2Sum precondition).
+- sin and cos: the 26-bit heads of sin(i/256) and cos(i/256) (A·t1 exact), |B| ≤ 2^-26·|A|, A + B to 2^-78
+  and A + B + C + D to 2^-180; 201 rows cover |r| ≤ π/4 + 2^-30; π/2's Cody–Waite parts P1, P2 have at most
+  33 bits, |P2| < 2^-32, |P3| < 2^-65 and the tail below 2^-225; the bits of 2/π agree with Machin's
+  formula computed in integers and cover every exponent; no double is closer than 4.687·10^-19 to a nonzero
+  multiple of π/2 (a continued-fraction bound in each binade, attained by Lefèvre and Muller's worst case
+  6381956970095103·2^797: the reduction's precision rests on it).
+- atan: atan(j/256) as triple-doubles to 2^-158.
+- 2^(1/6) (M4d, ADR 0002 #16): H + M + L to 2^-158 from an exact integer root, H Rust's RN(2^(1/6)), and the
+  continued-fraction bound that makes the triple-double product x·(H + M + L) round correctly once.
 """
 from fractions import Fraction
 import ctypes
@@ -317,6 +326,269 @@ def ln_acc():
     return [_fsplit(Fraction((-1) ** (k + 1), k), 3) for k in range(2, 17)]
 
 
+# ── sin and cos (M4a): π/2 reduction, sin and cos of i/256, the bits of 2/π ────────────────────
+
+for _f in ("mpfr_sin", "mpfr_cos", "mpfr_atan", "mpfr_floor"):
+    getattr(_m, _f).argtypes = [_P, _P, ctypes.c_int] if _f != "mpfr_floor" else [_P, _P]
+_m.mpfr_const_pi.argtypes = [_P, ctypes.c_int]
+_m.mpfr_mul_2ui.argtypes = [_P, _P, ctypes.c_ulong, ctypes.c_int]
+_m.mpfr_div_2ui.argtypes = [_P, _P, ctypes.c_ulong, ctypes.c_int]
+_m.mpfr_ui_div.argtypes = [_P, ctypes.c_ulong, _P, ctypes.c_int]
+_m.mpfr_mul_ui.argtypes = [_P, _P, ctypes.c_ulong, ctypes.c_int]
+
+N_SC = 256         # the fast and accurate paths' table step: a = i/256
+SC_ROWS = 202      # i = 0 … 201
+N_TWOPI = 44       # 32-bit words of 2/π (after 64 zero bits): bits 1 … 1344
+TWOPI_PREC = 1600
+
+
+def _pi(prec=PREC):
+    r = _V(prec)
+    _m.mpfr_const_pi(r.p, _RNDN)
+    return r
+
+
+def _pio2():
+    p = _pi()
+    r = _V()
+    _m.mpfr_div_2ui(r.p, p.p, 1, _RNDN)
+    return r
+
+
+def sc_table():
+    """sin(i/256) and cos(i/256) for i = 0 … 201, each split A (26 bits) + B + C + D."""
+    pio4 = _get(_pio2()) / 2
+    # |r| ≤ π/4 + 2^-30 (the reduction's slack) gives |round(r·256)| ≤ 201 < SC_ROWS − 1/2.
+    assert (pio4 + 2.0 ** -30) * N_SC < SC_ROWS - 0.5
+    rows = []
+    for i in range(SC_ROWS):
+        a = _d(i / N_SC)                              # i/256 is exact
+        sv = _op("mpfr_sin", a)
+        cv = _op("mpfr_cos", a)
+        s = _split(sv, 4, first_bits=26)
+        c = _split(cv, 4, first_bits=26)
+        assert _sigbits(s[0]) <= 26 and _sigbits(c[0]) <= 26, i
+        assert abs(s[1]) <= 2.0 ** -26 * abs(s[0]) and abs(c[1]) <= 2.0 ** -26 * abs(c[0]), i
+        if i == 0:
+            assert s == [0.0, 0.0, 0.0, 0.0] and c == [1.0, 0.0, 0.0, 0.0]
+        else:
+            assert _rel(_exact(s[:2]), sv) < 2.0 ** -78 and _rel(_exact(c[:2]), cv) < 2.0 ** -78, i
+            assert _rel(_exact(s), sv) < 2.0 ** -180 and _rel(_exact(c), cv) < 2.0 ** -180, i
+        rows.append(s + c)
+    return rows
+
+
+def sc_consts():
+    """π/2 = P1 + P2 + P3 + P4 + P5 (Cody–Waite: 33, 33, 53, 53, 53 bits), 2/π, π/2 and π as triple-doubles,
+    the fast paths' coefficients and the atan2 results at ±∞."""
+    pio2 = _pio2()
+    parts = []
+    rest = _op("mpfr_set", pio2)
+    for nb in (33, 33, 53, 53, 53):
+        h = _round_bits(rest, nb)
+        parts.append(h)
+        rest = _op("mpfr_sub", rest, _d(h))
+    p1, p2, p3, p4, p5 = parts
+    assert _sigbits(p1) <= 33 and _sigbits(p2) <= 33
+    assert abs(p2) < 2.0 ** -32 and abs(p3) < 2.0 ** -65       # the fast path's bounds on k·P2, k·P3
+    assert abs(_get(rest)) < 2.0 ** -225                       # the dropped tail, times |k| < 2^20
+    pi = _pi()                                   # kept alive: a temporary's __del__ would free its limbs
+    two = _V()
+    _m.mpfr_ui_div(two.p, 2, pi.p, _RNDN)
+    pih, pim, pil = _split(pi, 3)
+    three = _V()
+    _m.mpfr_mul_ui(three.p, pi.p, 3, _RNDN)
+    _m.mpfr_div_2ui(three.p, three.p, 2, _RNDN)
+    return {
+        "P1": p1, "P2": p2, "P3": p3, "P4": p4, "P5": p5, "INVPIO2": _get(two),
+        "PIH": pih, "PIM": pim, "PIL": pil, "PIO2H": pih / 2, "PIO2M": pim / 2, "PIO2L": pil / 2,
+        "PIO4": pih / 4, "PI3O4": _get(three),
+        "S3": float(Fraction(-1, 6)), "S5": float(Fraction(1, 120)), "S7": float(Fraction(-1, 5040)),
+        "C4": float(Fraction(1, 24)), "C6": float(Fraction(-1, 720)),
+        "A3": float(Fraction(-1, 3)), "A5": float(Fraction(1, 5)), "A7": float(Fraction(-1, 7)),
+        "A9": float(Fraction(1, 9)),
+    }
+
+
+def _machin_pi(bits):
+    """floor(π·2^bits), from Machin's formula π = 16·atan(1/5) − 4·atan(1/239) in integers (a check of MPFR's)."""
+    guard = 64
+    one = 1 << (bits + guard)
+
+    def atan_inv(n):
+        total, term, k, n2 = 0, one // n, 1, n * n
+        while term:
+            total += term // k if (k // 2) % 2 == 0 else -(term // k)
+            term //= n2
+            k += 2
+        return total
+    return (16 * atan_inv(5) - 4 * atan_inv(239)) >> guard
+
+
+def twopi_words():
+    """2/π after 64 zero bits, in 32-bit words: word w holds bits 32w − 63 … 32w − 32 of 2/π (bit j has
+    weight 2^-j), most significant first. From MPFR at 1600 bits, checked against Machin's formula."""
+    pi = _pi(TWOPI_PREC)
+    v = _V(TWOPI_PREC)
+    _m.mpfr_ui_div(v.p, 2, pi.p, _RNDN)
+    words = [0, 0]
+    fl = _V(TWOPI_PREC)
+    for _ in range(N_TWOPI - 2):
+        _m.mpfr_mul_2ui(v.p, v.p, 32, _RNDN)
+        _m.mpfr_floor(fl.p, v.p)
+        w = int(_get(fl))
+        assert 0 <= w < 2 ** 32 and float(w) == _get(fl)
+        words.append(w)
+        _m.mpfr_sub(v.p, v.p, fl.p, _RNDN)
+    assert ((971 + 62) >> 5) + 9 < N_TWOPI    # _km_ph_reduce reads words w … w + 9, w ≤ 32 (|x| < 2^1024)
+    nbits = 32 * (N_TWOPI - 2)
+    acc = 0
+    for w in words[2:]:
+        acc = (acc << 32) | w
+    pis = _machin_pi(nbits + 80)
+    want = (1 << (2 * nbits + 81)) // pis      # floor(2/π·2^nbits), within one unit of the exact value
+    assert abs(acc - want) <= 1, "2/π: MPFR and Machin disagree"
+    return words
+
+
+def atan_table():
+    """atan(j/256) for j = 0 … 256 as triple-doubles."""
+    rows = []
+    for j in range(N_SC + 1):
+        v = _op("mpfr_atan", _d(j / N_SC))
+        t = _split(v, 3)
+        if j == 0:
+            assert t == [0.0, 0.0, 0.0]
+        else:
+            assert _rel(_exact(t), v) < 2.0 ** -158, j
+        rows.append(t)
+    return rows
+
+
+def atan_acc():
+    """(−1)^k/(2k + 1) for k = 1 … 8 as triple-doubles: the accurate atan series."""
+    return [_fsplit(Fraction((-1) ** k, 2 * k + 1), 3) for k in range(1, 9)]
+
+
+def reduction_worst_case():
+    """Lefèvre and Muller's (2003, §2.3) double closest to a nonzero multiple of π/2, 6381956970095103·2^797:
+    the bound |x − kπ/2| > 2^-61 that the accurate reduction's precision rests on, recomputed here."""
+    x = _V(2200)
+    _m.mpfr_set_d(x.p, 6381956970095103.0, _RNDN)
+    _m.mpfr_mul_2ui(x.p, x.p, 797, _RNDN)
+    pi = _pi(2200)
+    q = _V(2200)
+    _m.mpfr_div(q.p, x.p, pi.p, _RNDN)           # x/π
+    _m.mpfr_mul_2ui(q.p, q.p, 1, _RNDN)          # x/(π/2)
+    fl = _V(2200)
+    _m.mpfr_floor(fl.p, q.p)
+    _m.mpfr_sub(q.p, q.p, fl.p, _RNDN)           # frac(x/(π/2)) in [0, 1)
+    if _get(q) > 0.5:
+        one = _V(2200)
+        _m.mpfr_set_d(one.p, 1.0, _RNDN)
+        _m.mpfr_sub(q.p, one.p, q.p, _RNDN)
+    d = _get(q) * _get(_pio2())
+    assert 4.6e-19 < d < 4.8e-19 and d > 2.0 ** -61, d
+    assert reduction_bound() > 0.99 * d
+    return d
+
+
+def reduction_bound():
+    """A lower bound on |x − kπ/2| over every double x ≥ 1 (k ≥ 1; below 1 the distance is at least π/2 − 1),
+    binade by binade: x = m·2^(e − 52) with 2^52 ≤ m < 2^53 and |x − kπ/2| = (π/2)·|m·α − k|, α = 2^(e−52)·2/π.
+    If q_n ≤ 2^53 − 1 < q_(n+1) are consecutive continued-fraction denominators of α, every m < q_(n+1) has
+    |m·α − k| ≥ |q_n·α − p_n| (best approximations of the second kind), so (π/2)·|q_n·α − p_n| bounds the binade.
+    α is taken from the 1,344 bits of 2/π (an error below 2^-320 after multiplying by m)."""
+    t = 0
+    for w in twopi_words()[2:]:
+        t = (t << 32) | w
+    nb = 32 * (N_TWOPI - 2)
+    best = None
+    for e in range(0, 1024):
+        num, den = t, 1 << (nb - (e - 52))        # α = num/den
+        a, b = num, den
+        p0, q0, p1, q1 = 0, 1, 1, 0
+        while b:
+            c = a // b
+            a, b = b, a - c * b
+            p2, q2 = c * p1 + p0, c * q1 + q0
+            if q2 >= 1 << 53:
+                break
+            p0, q0, p1, q1 = p1, q1, p2, q2
+        dist = abs(Fraction(q1 * num, den) - p1)    # |q_n·α − p_n|, q_n the last denominator below 2^53
+        bound = float(dist) * 1.5707963267948966
+        if best is None or bound < best[0]:
+            best = (bound, e)
+    assert best[0] > 2.0 ** -61 and best[1] == 849, best   # the binade of 6381956970095103·2^797
+    return best[0]
+
+
+# ── 2^(1/6) (M4d): ADR 0002 #16's lj_equilibrium_distance ───────────────────────────────────────
+
+ROOT6_BITS = 450
+
+
+def _iroot(n, k):
+    """⌊n^(1/k)⌋ for an integer n ≥ 0 (Newton's method in integers)."""
+    if n < 2:
+        return n
+    x = 1 << ((n.bit_length() + k - 1) // k)
+    while True:
+        y = ((k - 1) * x + n // x ** (k - 1)) // k
+        if y >= x:
+            return x
+        x = y
+
+
+def root6_2_bounds():
+    """2^(1/6) between two exact rationals 2^-450 apart: ⌊2^(1/6)·2^450⌋ = ⌊(2^2701)^(1/6)⌋, an integer root."""
+    c = _iroot(1 << (6 * ROOT6_BITS + 1), 6)
+    assert c ** 6 <= 1 << (6 * ROOT6_BITS + 1) < (c + 1) ** 6
+    return Fraction(c, 1 << ROOT6_BITS), Fraction(c + 1, 1 << ROOT6_BITS)
+
+
+def root6_2_min_distance():
+    """min over 1 ≤ q ≤ 2^54 of |q·2^(1/6) − p| (p the nearest integer): |q_N·c − p_N| for the last continued-fraction
+    denominator q_N ≤ 2^54 of c = 2^(1/6) (best approximations of the second kind), on the two rational bounds of c,
+    whose expansions agree far past q_N. Every midpoint test of x·2^(1/6) (port: _km_cr_sixth_root2_mul) reduces to it:
+    with x = S·2^e (S < 2^53) the result in ulps is S·c (or S·c/2 in the binade [2, 4)), and its distance δ to a
+    midpoint k + 1/2 gives ||q·c|| ≤ 2δ for q = 2S (or S) ≤ 2^54, so δ ≥ (this)/2."""
+    lo, hi = root6_2_bounds()
+    out = []
+    for v in (lo, hi):
+        a, b = v.numerator, v.denominator
+        p0, q0, p1, q1 = 0, 1, 1, 0
+        cf = []
+        while b:
+            t = a // b
+            a, b = b, a - t * b
+            p2, q2 = t * p1 + p0, t * q1 + q0
+            if q2 > 1 << 54:
+                break
+            cf.append(t)
+            p0, q0, p1, q1 = p1, q1, p2, q2
+        out.append((cf, p1, q1))
+    assert out[0] == out[1], "2^(1/6)'s continued fraction is not settled at 450 bits"
+    _, p, q = out[0]
+    d = min(abs(q * lo - p), abs(q * hi - p))
+    assert d > 0
+    return d, q
+
+
+def root6_2():
+    """2^(1/6) = H + M + L (each the nearest double to what is left), with the properties _km_cr_sixth_root2_mul's proof
+    uses: H is Rust's RN(2^(1/6)) = 2.0.powf(1.0 / 6.0); |H + M + L − 2^(1/6)| < 2^-158; and no x·2^(1/6) is within
+    2^-100 ulp of a rounding boundary (the continued-fraction bound above), so the triple-double product, accurate to
+    2^-102.6 ulp, rounds correctly by _km_cr_finish with no rounding test."""
+    lo, hi = root6_2_bounds()
+    h, m, l_ = _fsplit(lo, 3)
+    assert bits(h) == 0x3FF1F59AC3C7D6C0, hex(bits(h))
+    assert abs(_exact([h, m, l_]) - lo) < Fraction(1, 1 << 158)
+    d, q = root6_2_min_distance()
+    assert d / 2 > Fraction(1, 1 << 100), float(d)
+    return {"H": h, "M": m, "L": l_}, d, q
+
+
 # ── thresholds, from the correctly rounded MPFR functions ───────────────────────────────────────
 
 def _last_true(pred, lo_b, hi_b):
@@ -382,6 +654,8 @@ EXPM1_ORDER = ["Q3", "Q4", "Q5", "Q6", "Q7", "Q8", "Q9"]
 LN_K_ORDER = ["LN2H", "LN2M", "LN2L", "C3", "C4", "C5", "C6", "C7", "C8",
               "IVH", "IVM", "IVL", "IVH1", "IVH2"]
 LIM_ORDER = ["EXP_OVF", "EXP_UNF", "EXP10_OVF", "EXP10_UNF", "EXPM1_OVF", "EXPM1_M1"]
+SC_K_ORDER = ["P1", "P2", "P3", "P4", "P5", "INVPIO2", "PIH", "PIM", "PIL", "PIO2H", "PIO2M", "PIO2L",
+              "PIO4", "PI3O4", "S3", "S5", "S7", "C4", "C6", "A3", "A5", "A7", "A9"]
 
 
 def render():
@@ -392,7 +666,8 @@ def render():
     lim = limits()
     L = []
     L += [
-        "# kimiya — tables of the correctly rounded exp, expm1, exp10, ln and log10 (src/mathx.cyr)",
+        "# kimiya — tables of the correctly rounded exp, expm1, exp10, ln, log10, sin, cos, atan2 and acos",
+        "# (src/mathx.cyr)",
         "#",
         f"# GENERATED by scripts/oracle/mathx_tables.py from MPFR {mpfr_ref.VERSION} (400-bit values) and exact",
         "# rationals. Do not edit.",
@@ -443,6 +718,40 @@ def render():
         "MPFR's correctly rounded function): EXP_OVF the largest x with exp(x) finite, EXP_UNF the",
         "most negative x with exp(x) > 0 (below it exp(x) < 2^-1075 rounds to +0), the same for exp10,",
         "EXPM1_OVF the largest x with expm1(x) finite, EXPM1_M1 the most negative x with expm1(x) > −1.",
+    ])
+    reduction_worst_case()
+    L += _table("_KM_CR_SC_T", [_hex(v) for row in sc_table() for v in row], [
+        "sin and cos (M4a): sin(i/256) then cos(i/256) for i = 0 … 201, eight words per i at index 8i, each",
+        "value split A (26 significant bits, so A·t1 is exact for a 27-bit t1) + B + C + D, each the nearest",
+        "double to the rest. The fast paths read A + B (to 2^-78), the accurate paths all four (to 2^-180).",
+        "|r| ≤ π/4 + 2^-30 after the π/2 reduction, so |round(256·r)| ≤ 201. Row 0 is (0, 0, 0, 0, 1, 0, 0, 0).",
+    ], per_line=4)
+    L += _scalars("SC_", sc_consts(), SC_K_ORDER, [
+        "π/2 = P1 + P2 + P3 + P4 + P5 (Cody–Waite: P1 and P2 at 33 bits, so k·P1 and k·P2 are exact for",
+        "|k| < 2^20; |P2| < 2^-32, |P3| < 2^-65, the rest below 2^-225), INVPIO2 = 2/π rounded; π =",
+        "PIH + PIM + PIL and π/2 = PIO2H + PIO2M + PIO2L (triple-doubles); PIO4 and PI3O4 = π/4 and 3π/4",
+        "rounded. S3 … S7 (−1/6, 1/120, −1/5040) and C4, C6 (1/24, −1/720): the fast sin and cos",
+        "polynomials; A3 … A9 (−1/3, 1/5, −1/7, 1/9): the fast atan polynomial.",
+    ])
+    L += _table("_KM_CR_TWOPI", [f"0x{w:08X}" for w in twopi_words()], [
+        "The bits of 2/π for Payne–Hanek reduction, 32 per word after 64 zero bits: word w holds bits",
+        "32w − 63 … 32w − 32 of 2/π (bit j weighs 2^-j), the first bit in the word's bit 31. 1,344 bits",
+        "from MPFR at 1600 bits, checked against Machin's formula in integers; |x| < 2^1024 reads bits",
+        "up to 1,280 (words 32 … 41).",
+    ], per_line=4)
+    L += _table("_KM_CR_ATAN_T", [_hex(v) for row in atan_table() for v in row], [
+        "atan(j/256) for j = 0 … 256 as triple-doubles (index 3j): the atan2 and acos table.",
+    ], per_line=3)
+    L += _table("_KM_CR_ATAN_ACC", [_hex(v) for row in atan_acc() for v in row], [
+        "(−1)^k/(2k + 1) for k = 1 … 8 as triple-doubles (index 3·(k − 1)): the accurate atan series.",
+    ], per_line=3)
+    r6, d6, q6 = root6_2()
+    import math
+    L += _scalars("ROOT6_2_", r6, ["H", "M", "L"], [
+        "2^(1/6) = H + M + L (M4d, ADR 0002 #16: potential.cyr's lj_equilibrium_distance through",
+        "_km_cr_sixth_root2_mul), from the exact integer root ⌊(2^2701)^(1/6)⌋; H is Rust's 2.0.powf(1.0 / 6.0).",
+        f"min over q ≤ 2^54 of |q·2^(1/6) − p| is 2^{math.log2(float(d6)):.2f} (q = {q6}, from the continued fraction),",
+        "so no x·2^(1/6) is nearer a rounding boundary than half of it in ulps, far beyond the product's 2^-102.6.",
     ])
     return "\n".join(L).rstrip("\n") + "\n"
 
