@@ -11,8 +11,9 @@ Next: **Cyrius port** — plan of record: [`kimiya-port-plan.md`](kimiya-port-pl
 M0–M3 and M3c are done (M3c, ADR 0006: every transcendental the port calls is correctly rounded, and every class-C row
 is gated at 0 ulp against the corrected oracle); M4 (structure, nuclear, spectroscopy) is in progress, its M4b (organic,
 inorganic), M4c (nuclear), M4a (correctly rounded sin, cos, atan2, acos), M4d (potential, the trig switch), M4e
-(spectroscopy, hisab 1.4.0's FFT transcribed) and M4e-2 (potential's geometry with an unbounded exponent, ADR 0002 #20)
-done, M4f (stoichiometry) next — live status in [`state.md`](state.md).
+(spectroscopy, hisab 1.4.0's FFT transcribed), M4e-2 (potential's geometry with an unbounded exponent, ADR 0002 #20) and
+M4e-3 (the Bohr model, the Rydberg formula and the reduced mass rounded once, ADR 0002 #21 and #22) done, M4f
+(stoichiometry) next — live status in [`state.md`](state.md).
 
 ---
 
@@ -79,8 +80,13 @@ type for average oxidation states, no separate extrapolating Antoine function. I
 - [x] `potential::distance_3d` / `bond_angle` / `dihedral_angle` → no over- or underflow of the squared coordinates: Rust's
   sequence evaluated with an unbounded exponent, the final √ / atan2 rounded once, Rust's bits wherever its chain stays
   normal, the angles exactly scale-invariant — done in the Cyrius API (M4e-2, ADR 0002 #20, the user's decision)
+- [x] `spectroscopy::bohr_energy_level` / `bohr_transition_energy` / `rydberg_wavelength` / `SpectralSeries::wavelength` →
+  the exact rational rounded once (−R exactly at n = Z; no cancellation of 1/n₁² − 1/n₂² or E₂ − E₁ for close large n);
+  `reduced_mass` → the correctly rounded m₁·m₂/(m₁ + m₂) for every pair (m/2 exactly; no over- or underflow) — done in the
+  Cyrius API (M4e-3, ADR 0002 #21 and #22, the user's decisions)
 - [ ] after M4: the library-wide audit of intermediate over- and underflow of products and quotients of inputs, each edge
-  fixed as #20 (the user's decision; the `_km_ux_*` helpers exist; `state.md` lists the first candidates)
+  fixed as #20 (the user's decision; the `_km_ux_*` helpers and M4e-3's `_km_cr_ratio` exist; `state.md` lists the
+  first candidates, `reduced_mass` no longer among them)
 - [ ] *additive* — `fitting::fit_beer_lambert` → also return the intercept
 - [ ] *additive* — `spectroscopy::rydberg_wavelength` → nuclear-mass parameter for the reduced-mass correction
 - [ ] `integration::soorat::MolecularStructure::from_molecule` → `Result`

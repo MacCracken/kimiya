@@ -92,7 +92,10 @@ and no Python packages. Usage, from the repo root:
    SpectralSeries enum and n_lower, the isotope table) and R_H against RYDBERG / (1 + the private mass ratio) and the
    API; the typed thresholds' and constants' pinning where a row can reach them (the rest, and the stable order of
    equal masses, which no natural molecule's scratch shows with unequal intensities, are pinned by tests/spectroscopy.tcyr
-   on the private helpers); the grids' coverage; and the diagnostics of the formulas kept as Rust's.
+   on the private helpers); the grids' coverage; and, since M4e-3, ADR 0002 #21's and #22's exact rationals rounded
+   once, proven with Fraction on every Bohr, transition, Rydberg, series and reduced-mass row, with the structure that
+   decides their exact values and ties (R's odd significands factored, the transition energy's domain searched
+   exhaustively for midpoints).
 Every function in every .tsv must have a rule here: a new one fails until it gets one.
 
     python3 -I scripts/oracle/validate.py . --write-corrections
@@ -2970,8 +2973,8 @@ print(f"potential: dihedral_angle: {mapped_pi} rows where atan2 gives −π and 
 # Every spectroscopy row was recomputed in the M2/M3 loop above (Rust 1.2.0's spectroscopy.rs transcribed in its operation
 # order, with hisab 1.4.0's fft for fft_spectrum; glibc's pow(10, ·), log10, cos and sin via Python, the corrected oracle
 # through _prim). Here: ADR 0002 #19's notes, proven exactly; the generated data against the literal; the typed constants'
-# pinning; the stable sort's pinning; the grids' coverage; and the diagnostics of the formulas left as Rust's (the
-# borderline cases reported to the user).
+# pinning; the stable sort's pinning; the grids' coverage; and ADR 0002 #21's and #22's notes (M4e-3), proven exactly,
+# with the structure of their exact values and ties.
 srows = {}
 for fn, cls, ins, outs, where in R.get("spectroscopy", []):
     srows.setdefault(fn, []).append((ins, outs, where))
@@ -3111,27 +3114,188 @@ iso_atoms = [pattern_atoms(ins) for ins, outs, w in srows.get("spectroscopy::iso
 check([] in iso_atoms and [(0, 1)] in iso_atoms and all([(z, 1)] in iso_atoms for z in range(256)),
       "spectroscopy.tsv: isotope_pattern misses the empty molecule or a u8 Z")
 print(f"spectroscopy rows checked: {sum(len(v) for v in srows.values())} ({', '.join(f'{k} {len(v)}' for k, v in srows.items())})")
-# Diagnostics of what stays Rust's (port-parity.md §15; the report's borderline cases): reduced_mass(m, m) against m/2,
-# the Bohr levels with Z/n = 1 against −R, the Rydberg factor's cancellation for close large n against the exact
-# (n₂² − n₁²)/(n₁²n₂²) (the rest of Rust's chain kept), and the isotope intensities at the report threshold.
+# ADR 0002 #21 (M4e-3): bohr_energy_level, bohr_transition_energy, rydberg_wavelength and SpectralSeries::wavelength are
+# their exact rationals rounded once — −R·Z²/n², R·Z²·(n₂² − n₁²)/(n₁²·n₂²) and n₁²·n₂²/(R·Z²·(n₂² − n₁²)), R the double —
+# and #22 reduced_mass is m₁·m₂/(m₁ + m₂) rounded once. Every Ok row's exact value, with Fraction: a row is noted exactly
+# where it differs from the oracle's, and the note names it, bit for bit; so every unnoted row is the correctly rounded
+# value too. Err rows are never noted.
+def note_val_cr(where, adr):
+    m = re.search(rf"\[ADR 0002 #{adr}: the port returns the correctly rounded (.+) = (\S+) \(f:([0-9a-f]+)\)\]$",
+                  NOTES.get(where, ""))
+    return None if m is None else (m.group(1), b2f(int(m.group(3), 16)))
+def q_level(z, n): return -Fraction(S_RYD_EV) * z * z / (n * n)
+def q_trans(z, lo, hi): return Fraction(S_RYD_EV) * z * z * (hi * hi - lo * lo) / (lo * lo * hi * hi)
+def q_ryd(r, z, lo, hi): return Fraction(lo * lo * hi * hi) / (Fraction(r) * z * z * (hi * hi - lo * lo))
+def q_series(name, line):
+    nl = S_N_LOWER[name.split(".", 1)[1]]
+    return q_ryd(S_RYD_H, 1, nl, nl + line)
+def q_mass(m1, m2): return Fraction(m1) * Fraction(m2) / (Fraction(m1) + Fraction(m2))
+EXACT_CR = {   # fn: (ADR, the expression the note names, the exact value from the row's inputs)
+    "spectroscopy::bohr_energy_level": (21, "−R·Z²/n²", lambda a: q_level(*a)),
+    "spectroscopy::bohr_transition_energy": (21, "R·Z²·(n₂² − n₁²)/(n₁²·n₂²)", lambda a: q_trans(*a)),
+    "spectroscopy::rydberg_wavelength": (21, "n₁²·n₂²/(R∞·Z²·(n₂² − n₁²))", lambda a: q_ryd(S_RYD, *a)),
+    "SpectralSeries::wavelength": (21, "n₁²·n₂²/(R_H·(n₂² − n₁²))", lambda a: q_series(*a)),
+    "spectroscopy::reduced_mass": (22, "m₁·m₂/(m₁ + m₂)", lambda a: q_mass(*a)),
+}
+def is_midpoint(q):
+    """1 if the positive rational q is a binary64 midpoint: a dyadic with a 54-bit odd significand in the normal range, or
+    an odd multiple of 2⁻¹⁰⁷⁵ below 2⁻¹⁰²² (the subnormal grid's)."""
+    num, den = q.numerator, q.denominator
+    if den & (den - 1): return False
+    while num % 2 == 0 and num:
+        num //= 2
+    if q < Fraction(1, 2 ** 1022):
+        return (q * 2 ** 1075).denominator == 1 and (q * 2 ** 1075).numerator % 2 == 1
+    return num.bit_length() == 54
+ncr, okcr, tiescr, exactcr, worst = {}, {}, {}, {}, {}
+for fn, (adr, what, rule) in EXACT_CR.items():
+    ncr[fn] = okcr[fn] = tiescr[fn] = exactcr[fn] = 0
+    worst[fn] = (0, None)
+    for ins, outs, where in srows.get(fn, []):
+        a = fl(ins)
+        noted = f"[ADR 0002 #{adr}:" in NOTES.get(where, "")
+        if outs[0][0] != "f":
+            check(not noted, f"{where}: {fn}{tuple(a)}: an Err row noted")
+            continue
+        okcr[fn] += 1
+        q = rule(a)
+        exact = rn_frac(q)
+        mid = is_midpoint(abs(q))
+        tiescr[fn] += mid
+        exactcr[fn] += (not mid) and rn_frac(q) == q if math.isfinite(exact) else 0
+        differs = not same_bits(exact, outs[0][1])
+        check(noted == differs, f"{where}: {fn}{tuple(a)}: exact {exact!r}, oracle {outs[0][1]!r}: the #{adr} note is "
+              f"{'missing' if differs else 'stray'}")
+        if noted:
+            nv = note_val_cr(where, adr)
+            check(nv is not None and nv[0] == what and same_bits(nv[1], exact),
+                  f"{where}: the ADR 0002 #{adr} note does not name {what} = {exact!r}")
+            ncr[fn] += 1
+            if math.isfinite(outs[0][1]) and outs[0][1] != 0.0 and math.isfinite(exact):
+                d_ = ulp_dist(f2b(exact), outs[0][2])
+                if d_ > worst[fn][0]: worst[fn] = (d_, tuple(a))
+for fn in EXACT_CR:
+    w_ = f"; Rust's chain at most {worst[fn][0]:,} ulp from it on a finite row ({worst[fn][1]})" if worst[fn][1] else ""
+    print(f"spectroscopy: ADR 0002 #{EXACT_CR[fn][0]}: {ncr[fn]} of {okcr[fn]} {fn.split('::')[1]} Ok rows noted with "
+          f"the correctly rounded {EXACT_CR[fn][1]} (proven with Fraction; {tiescr[fn]} exact ties, {exactcr[fn]} exact "
+          f"values){w_}")
+
+# The structure behind #21's hard rows, proven independently of the generator. R's odd significand decides which
+# exact values and ties exist: for RYDBERG_EV it is 683·P with P prime above 2³² (so squarefree), for RYDBERG and R_H it
+# has a prime factor above 2³², which no product of n₁, n₂ < 2³² can cancel (λ is never dyadic: no exact value, no tie).
+def mr_prime(n):
+    if n < 2: return False
+    for p_ in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
+        if n % p_ == 0: return n == p_
+    d, r_ = n - 1, 0
+    while d % 2 == 0: d //= 2; r_ += 1
+    for a_ in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
+        x_ = pow(a_, d, n)
+        if x_ in (1, n - 1): continue
+        for _ in range(r_ - 1):
+            x_ = x_ * x_ % n
+            if x_ == n - 1: break
+        else: return False
+    return True
+_SMALL_PRIMES = [p_ for p_ in range(2, 1 << 17) if all(p_ % d for d in range(2, int(p_ ** 0.5) + 1))]
+def factor_trial(n):
+    """{prime: exponent} of n < 2⁶⁴ by trial division below 2¹⁷ and a Miller–Rabin prime cofactor."""
+    out = {}
+    for p_ in _SMALL_PRIMES:
+        if p_ * p_ > n: break
+        while n % p_ == 0: out[p_] = out.get(p_, 0) + 1; n //= p_
+    if n > 1:
+        check(n < 1 << 34 or mr_prime(n), f"factor_trial: composite cofactor {n}")
+        out[n] = out.get(n, 0) + 1
+    return out
+def odd_sig(x):
+    m_ = Fraction(x).numerator
+    while m_ % 2 == 0: m_ //= 2
+    return m_
+f_ev = factor_trial(odd_sig(S_RYD_EV))
+check(all(e_ == 1 for e_ in f_ev.values()) and max(f_ev) > 1 << 32,
+      f"RYDBERG_EV's odd significand {odd_sig(S_RYD_EV)} = {f_ev}: not squarefree with a prime above 2³²")
+for r_, nm in ((S_RYD, "RYDBERG"), (S_RYD_H, "R_H")):
+    f_r = factor_trial(odd_sig(r_))
+    check(max(f_r) > 1 << 32, f"{nm}'s odd significand {odd_sig(r_)} = {f_r}: no prime above 2³²")
+# Bohr levels: odd(n)² | odd(Z)²·683·P forces odd(n) | odd(Z); the significand 683·P·j² (j = odd(Z)/odd(n)) has 53 bits
+# for j = 1 and at least 56 otherwise (683·P·9 > 2⁵⁵): no tie, and an exact value exactly when n/Z is a power of two.
+K_EV = odd_sig(S_RYD_EV)
+lvl_bits = {(K_EV * j * j).bit_length() for z in range(1, 256) for j in range(1, 256, 2)
+            if (z >> ((z & -z).bit_length() - 1)) % j == 0}
+check(54 not in lvl_bits and min(b_ for b_ in lvl_bits if b_ > 53) >= 56 and 53 in lvl_bits,
+      f"the Bohr levels' significand bit lengths {sorted(lvl_bits)}")
+have_lvl = {tuple(fl(ins)) for ins, outs, w in srows.get("spectroscopy::bohr_energy_level", [])}
+want_lvl = {(z, (z >> ((z & -z).bit_length() - 1)) << k) for z in range(1, 256) for k in range(33)
+            if (z >> ((z & -z).bit_length() - 1)) << k <= 0xFFFFFFFF}
+check(want_lvl <= have_lvl, f"spectroscopy.tsv: {len(want_lvl - have_lvl)} exact Bohr levels (n = 2^k·Z) missing")
+check(tiescr["spectroscopy::bohr_energy_level"] == 0 and tiescr["spectroscopy::rydberg_wavelength"] == 0
+      and tiescr["SpectralSeries::wavelength"] == 0, "a Bohr-level or Rydberg-wavelength row is a midpoint")
+# Transition energies: with n₁ = g·x, n₂ = g·y (x, y coprime), the value is dyadic iff odd(x)·odd(y) | odd(Z) and odd(g)²
+# divides 683·P·j²·w (w = odd(y² − x²), j = odd(Z)/(odd(x)·odd(y))); the odd significand is that over odd(g)². Every
+# such (Z, n₁, n₂) with n₂ < 2³² is enumerated here and the midpoints (54 bits) collected.
+def transition_ties():
+    ties, exact = set(), 0
+    U = 0xFFFFFFFF
+    for ox in range(1, 256, 2):
+        for oy in range(1, 256, 2):
+            if ox * oy > 255 or math.gcd(ox, oy) != 1: continue
+            for a_ in range(33):
+                for b_ in range(33):
+                    if a_ and b_: continue
+                    x_, y_ = ox << a_, oy << b_
+                    if not x_ < y_ <= U: continue
+                    fw = {}
+                    for part in (y_ - x_, y_ + x_):
+                        for p_, e_ in factor_trial(part).items():
+                            if p_ != 2: fw[p_] = fw.get(p_, 0) + e_
+                    for z in range(1, 256):
+                        zo = z >> ((z & -z).bit_length() - 1)
+                        if zo % (ox * oy): continue
+                        j = zo // (ox * oy)
+                        ft = dict(f_ev)
+                        for p_, e_ in list(fw.items()) + [(p_, 2 * e_) for p_, e_ in factor_trial(j).items()]:
+                            ft[p_] = ft.get(p_, 0) + e_
+                        T = 1
+                        for p_, e_ in ft.items(): T *= p_ ** e_
+                        ogs = [1]
+                        for p_, e_ in ft.items():
+                            ogs = [d * p_ ** k for d in ogs for k in range(e_ // 2 + 1)]
+                        for og in ogs:
+                            if og * y_ > U: continue
+                            bl = (T // (og * og)).bit_length()
+                            if bl > 54: continue
+                            g = og
+                            while g * y_ <= U:
+                                if bl == 54: ties.add((z, g * x_, g * y_))
+                                else: exact += 1
+                                g *= 2
+    return ties, exact
+t_ties, t_exact = transition_ties()
+have_tr = {tuple(fl(ins)) for ins, outs, w in srows.get("spectroscopy::bohr_transition_energy", [])}
+have_ry = {tuple(fl(ins)) for ins, outs, w in srows.get("spectroscopy::rydberg_wavelength", [])}
+check(t_ties <= have_tr and t_ties <= have_ry, f"spectroscopy.tsv: {len(t_ties - have_tr)} transition ties missing")
+check(all(is_midpoint(q_trans(*t)) for t in t_ties), "a searched transition tie is not a midpoint")
+check(tiescr["spectroscopy::bohr_transition_energy"] == len(t_ties),
+      f"the corpus has {tiescr['spectroscopy::bohr_transition_energy']} midpoint transition rows, the search {len(t_ties)}")
+print(f"spectroscopy: ADR 0002 #21's structure: R's odd significands {K_EV} = {' · '.join(map(str, sorted(f_ev)))} "
+      f"(RYDBERG_EV), {odd_sig(S_RYD)} and {odd_sig(S_RYD_H)} (each with a prime above 2³²): no level is a midpoint, a level "
+      f"is exact iff n/Z = 2^k ({len(want_lvl)} such rows, all present), no Rydberg wavelength is dyadic; the exhaustive "
+      f"search of bohr_transition_energy's domain finds {t_exact} exact values and {len(t_ties)} ties "
+      f"({sorted(t_ties)[0]} … ×2^k), every tie in the corpus")
+mass_ties = [tuple(fl(ins)) for ins, outs, w in srows.get("spectroscopy::reduced_mass", [])
+             if outs[0][0] == "f" and is_midpoint(q_mass(*fl(ins)))]
+check(len(mass_ties) >= 40 and any(q_mass(*t) < Fraction(1, 2 ** 1022) for t in mass_ties)
+      and any(q_mass(*t) >= Fraction(1, 2 ** 1022) for t in mass_ties), f"reduced_mass: only {len(mass_ties)} tie rows")
 eq_m = [(fl(ins), outs) for ins, outs, w in srows.get("spectroscopy::reduced_mass", []) if outs[0][0] == "f" and fl(ins)[0] == fl(ins)[1]]
-eq_miss = sum(1 for (a, b_), outs in eq_m if not same_bits(outs[0][1], a * 0.5))
+eq_miss = sum(1 for (a, b_), outs in eq_m if not same_bits(outs[0][1], rn_frac(Fraction(a) / 2)))
 zn = [(fl(ins), outs) for ins, outs, w in srows.get("spectroscopy::bohr_energy_level", []) if outs[0][0] == "f" and fl(ins)[0] == fl(ins)[1]]
 zn_miss = sum(1 for a, outs in zn if not same_bits(outs[0][1], -S_RYD_EV))
-ryd_worst = (0, None)
-for ins, outs, w in srows.get("spectroscopy::rydberg_wavelength", []):
-    if outs[0][0] != "f": continue
-    z, lo, hi = fl(ins)
-    exact_d = rn_frac(Fraction(hi * hi - lo * lo, lo * lo * hi * hi))
-    alt = dv(1.0, S_RYD * float(z) * float(z) * exact_d)
-    d_ = ulp_dist(f2b(alt), outs[0][2])
-    if d_ > ryd_worst[0]: ryd_worst = (d_, (z, lo, hi))
 near_rep = sum(1 for ins, outs, w in srows.get("spectroscopy::isotope_pattern", []) if outs[0][0] == "v"
                for k in range(outs[0][1]) if outs[2 + 2 * k][1] == S_REPORT)
-print(f"spectroscopy: kept as Rust's — reduced_mass(m, m) misses m/2 on {eq_miss} of {len(eq_m)} equal-mass rows; "
-      f"bohr_energy_level(Z, Z) misses −R on {zn_miss} of {len(zn)}; the Rydberg factor computed exactly would move "
-      f"rydberg_wavelength by up to {ryd_worst[0]} ulp ({ryd_worst[1]}); {near_rep} isotope peaks exactly at the 0.001 "
-      f"report threshold")
+print(f"spectroscopy: reduced_mass has {len(mass_ties)} tie rows (normal and subnormal); the oracle misses m/2 on {eq_miss} "
+      f"of {len(eq_m)} equal-mass rows and −R on {zn_miss} of the {len(zn)} Z = n level rows (each noted); {near_rep} "
+      f"isotope peaks exactly at the 0.001 report threshold")
 
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
              "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy"}

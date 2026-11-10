@@ -801,6 +801,69 @@ fn bench_bohr_energy_level(per_batch, batches) {
     bench_report(b);
 }
 
+# M4e-3 (ADR 0002 #21, #22; Cyrius-only: rust-old/benches has none of these): the Rydberg family and the reduced mass,
+# rounded once. spectroscopy/bohr_transition_energy and rydberg_wavelength (Z = 1, n = 2 → 3, Hα),
+# series_wavelength_balmer_alpha (SpectralSeries::Balmer.wavelength(1)), reduced_mass_hcl (¹H and ³⁵Cl in u); the
+# exact slow path on the exact ties: bohr_transition_energy_tie (Z = 255, n = 58,055 → 524,544) and reduced_mass_tie
+# (2²⁷ − 1, 2²⁷ + 1).
+fn bench_rydberg(name, fid, per_batch, batches) {
+    var m1: f64 = load64(_bench_s + 40);
+    var m2: f64 = load64(_bench_s + 48);
+    var t1: f64 = load64(_bench_s + 56);
+    var t2: f64 = load64(_bench_s + 64);
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        if (fid == 0) {
+            while (i < per_batch) {
+                var t0, v0 = bohr_transition_energy(_bench_sz, _bench_sn3 - 1, _bench_sn3);
+                _bench_sink = v0;
+                i = i + 1;
+            }
+        }
+        if (fid == 1) {
+            while (i < per_batch) {
+                var tr, vr = rydberg_wavelength(_bench_sz, _bench_sn3 - 1, _bench_sn3);
+                _bench_sink = vr;
+                i = i + 1;
+            }
+        }
+        if (fid == 2) {
+            while (i < per_batch) {
+                var ts, vs = spectral_series_wavelength(KM_SPECTRAL_SERIES_BALMER, _bench_sz);
+                _bench_sink = vs;
+                i = i + 1;
+            }
+        }
+        if (fid == 3) {
+            while (i < per_batch) {
+                var tm, vm = reduced_mass(m1, m2);
+                _bench_sink = vm;
+                i = i + 1;
+            }
+        }
+        if (fid == 4) {
+            while (i < per_batch) {
+                var tt, vt = bohr_transition_energy(_bench_sz * 255, _bench_sn3 * 19352 - 1, _bench_sn3 * 174848);
+                _bench_sink = vt;
+                i = i + 1;
+            }
+        }
+        if (fid == 5) {
+            while (i < per_batch) {
+                var tq, vq = reduced_mass(t1, t2);
+                _bench_sink = vq;
+                i = i + 1;
+            }
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
 # spectroscopy/isotope_pattern_glucose: Rust's bench_isotope_pattern, C₆H₁₂O₆ (24 convolution steps; the working tables
 # stay in the stack tables, nothing is allocated).
 fn bench_isotope_pattern_glucose(per_batch, batches) {
@@ -1077,18 +1140,28 @@ fn main(): i64 {
     bench_potential("potential/bond_angle_2p600", 7, 100000, 20);
     bench_potential("potential/dihedral_angle_2p600", 8, 100000, 20);
     bench_potential("potential/bond_angle_linear", 9, 1000000, 20);
-    _bench_s = alloc(5 * 8);
-    var ins9: f64[5];
+    _bench_s = alloc(9 * 8);
+    var ins9: f64[9];
     ins9[0] = 100.0;                            # ε, l, c (A = 1)
     ins9[1] = 1.0;
     ins9[2] = 0.01;
     ins9[3] = 0.1;                              # find_peaks' threshold
     ins9[4] = 0.00000065647;                    # Hα in metres
-    memcpy(_bench_s, &ins9, 5 * 8);
+    ins9[5] = 1.007825;                         # ¹H, ³⁵Cl (u): reduced_mass_hcl
+    ins9[6] = 34.968853;
+    ins9[7] = 134217727.0;                      # 2²⁷ − 1, 2²⁷ + 1: reduced_mass_tie
+    ins9[8] = 134217729.0;
+    memcpy(_bench_s, &ins9, 9 * 8);
     _bench_sz = 1;
     _bench_sn3 = 3;
     bench_absorbance(1000000, 20);
     bench_bohr_energy_level(1000000, 20);
+    bench_rydberg("spectroscopy/bohr_transition_energy", 0, 1000000, 20);
+    bench_rydberg("spectroscopy/rydberg_wavelength", 1, 1000000, 20);
+    bench_rydberg("spectroscopy/series_wavelength_balmer_alpha", 2, 1000000, 20);
+    bench_rydberg("spectroscopy/reduced_mass_hcl", 3, 1000000, 20);
+    bench_rydberg("spectroscopy/bohr_transition_energy_tie", 4, 100000, 20);
+    bench_rydberg("spectroscopy/reduced_mass_tie", 5, 100000, 20);
     _bench_glucose = alloc(6 * 8);
     store64(_bench_glucose, 6);
     store64(_bench_glucose + 8, 6);

@@ -1,7 +1,9 @@
-//! Exact integer arithmetic for the exact values ADR 0002 #13, #16 and #19 name (M4c, M4d, M4e): binary64 rounding of
-//! m·2^e for a mantissa of any size, the two irrational factors the port rounds once, 2⁻ᶠ (N₀/2ⁿ for a fractional
-//! n) and 2^(1/6) (σ·2^(1/6)), and the rational 1/(100·x) (the wavenumber conversions). Integer arithmetic only,
-//! independent of the port's double-word code (`validate.py` checks every value again, with `Fraction` and MPFR).
+//! Exact integer arithmetic for the exact values ADR 0002 #13, #16, #19, #20, #21 and #22 name (M4c … M4e-3): binary64
+//! rounding of m·2^e for a mantissa of any size, the two irrational factors the port rounds once, 2⁻ᶠ (N₀/2ⁿ for a
+//! fractional n) and 2^(1/6) (σ·2^(1/6)), the rational 1/(100·x) (the wavenumber conversions), binary64 with an unbounded
+//! exponent (the geometry), and the exact rationals p/q·2^e of the Bohr model, the Rydberg formula and the reduced mass.
+//! Integer arithmetic only, independent of the port's double-word and multi-word code (`validate.py` checks every value
+//! again, with `Fraction` and MPFR).
 
 /// A finite nonzero |x| as (mant, exp) with |x| = mant·2^exp exactly, mant < 2^53.
 pub fn decompose(x: f64) -> (u64, i64) {
@@ -598,4 +600,62 @@ pub fn ux_atan2_f64(y: Ux, x: Ux) -> f64 {
     let (a, b) = (round_big(&lo, -p, y.neg), round_big(&hi, -p, y.neg));
     assert!(a.to_bits() == b.to_bits(), "ADR 0002 #20: atan2 undecided at 2^-380 ({y:?}, {x:?})");
     a
+}
+
+// ── ADR 0002 #21, #22 (M4e-3): exact rationals rounded once ─────────────────────────────────────────────────
+
+/// p/q·2^e rounded once to binary64 (nearest, ties to even; subnormal results on the 2⁻¹⁰⁷⁴ grid, ±∞ past DBL_MAX), for
+/// integers p ≥ 0 and q ≥ 1 of any size: Q = ⌊p·2^k/q⌋ with at least 60 bits and the remainder as a sticky bit
+/// (`round_big` drops at least seven bits below Q's, so the sticky bit decides every midpoint). Integer arithmetic only,
+/// independent of the port's multi-word long division (`validate.py` checks every value again with `Fraction`).
+fn cr_ratio(p: &Big, q: &Big, e: i64) -> f64 {
+    assert!(!q.is_zero(), "cr_ratio: q = 0");
+    if p.is_zero() {
+        return 0.0;
+    }
+    let k = (60 + i64::try_from(q.bits()).unwrap_or(0) - i64::try_from(p.bits()).unwrap_or(0)).max(0);
+    let (quo, rem) = p.shl(u64::try_from(k).unwrap_or(0)).divrem(q);
+    let mant = quo.shl(1).add(&Big::new(u128::from(!rem.is_zero())));
+    round_big(&mant, e - k - 1, false)
+}
+
+/// ADR 0002 #21: RN(r·Z²/n²) for a positive finite r (the Bohr level's magnitude), Z and n ≥ 1.
+pub fn cr_bohr_level(r: f64, z: u8, n: u32) -> f64 {
+    let (rm, re) = decompose(r);
+    let p = Big::new(u128::from(rm) * u128::from(z) * u128::from(z));
+    let q = Big::new(u128::from(n) * u128::from(n));
+    cr_ratio(&p, &q, re)
+}
+
+/// The exact Rydberg integers for n₁ < n₂ and r = M·2^E: (M·Z²·(n₂² − n₁²), n₁²·n₂², E).
+fn rydberg_ints(r: f64, z: u8, n_lower: u32, n_upper: u32) -> (Big, Big, i64) {
+    assert!(n_lower >= 1 && n_lower < n_upper, "rydberg_ints({n_lower}, {n_upper})");
+    let (rm, re) = decompose(r);
+    let (l, u) = (u128::from(n_lower), u128::from(n_upper));
+    let num = Big::new(u128::from(rm) * u128::from(z) * u128::from(z)).mul(&Big::new(u * u - l * l));
+    let w = Big::new(l * u);
+    (num, w.mul(&w), re)
+}
+
+/// ADR 0002 #21: RN(r·Z²·(n₂² − n₁²)/(n₁²·n₂²)) (the transition energy with r = RYDBERG_EV).
+pub fn cr_transition(r: f64, z: u8, n_lower: u32, n_upper: u32) -> f64 {
+    let (num, den, re) = rydberg_ints(r, z, n_lower, n_upper);
+    cr_ratio(&num, &den, re)
+}
+
+/// ADR 0002 #21: RN(n₁²·n₂²/(r·Z²·(n₂² − n₁²))) (the Rydberg wavelength with r = RYDBERG or R_H).
+pub fn cr_rydberg(r: f64, z: u8, n_lower: u32, n_upper: u32) -> f64 {
+    let (num, den, re) = rydberg_ints(r, z, n_lower, n_upper);
+    cr_ratio(&den, &num, -re)
+}
+
+/// ADR 0002 #22: RN(m₁·m₂/(m₁ + m₂)) for positive finite doubles, exactly at any exponent gap: m = M·2^E, and with
+/// E₁ ≥ E₂, μ = M₁·M₂·2^E₁/(M₁·2^(E₁ − E₂) + M₂) (no cutoff: the port's proven gap of 55 is checked, not assumed).
+pub fn cr_reduced_mass(m1: f64, m2: f64) -> f64 {
+    assert!(m1 > 0.0 && m1.is_finite() && m2 > 0.0 && m2.is_finite(), "cr_reduced_mass({m1:?}, {m2:?})");
+    let ((a, ea), (b, eb)) = (decompose(m1), decompose(m2));
+    let ((ma, e1), (mb, e2)) = if ea >= eb { ((a, ea), (b, eb)) } else { ((b, eb), (a, ea)) };
+    let p = Big::new(u128::from(ma) * u128::from(mb));
+    let q = Big::new(u128::from(ma)).shl(u64::try_from(e1 - e2).unwrap_or(0)).add(&Big::new(u128::from(mb)));
+    cr_ratio(&p, &q, e1)
 }

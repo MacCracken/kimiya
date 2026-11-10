@@ -1064,7 +1064,8 @@ By class: A 1,255, B 46,415, C 5,315 rows.
 - **Reviewed and kept as Rust's** (ADR 0002's M4e addition; reported to the user): `reduced_mass(m, m)` misses m/2 on 33 of
   the 315 equal-mass rows; `bohr_energy_level(Z, Z)` misses −R on 3 of 12; computing the Rydberg factor 1/n₁² − 1/n₂²
   exactly would move `rydberg_wavelength` by up to 38,777,186 ulp ((255, 2³¹, 2³¹ + 7)); no isotope peak sits exactly on
-  RN(0.001). The grids include them, so a later decision can be measured.
+  RN(0.001). The grids include them, so a later decision can be measured. (The user decided the first three in M4e-3:
+  ADR 0002 #21 and #22, §17.)
 
 **Verification of `_km_cr_hundredth_div`** (`scripts/oracle/cr_verify.py`'s `h100`, against `mpfr_ref.hundredth_div`):
 
@@ -1146,6 +1147,67 @@ Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **17 modules, 0 faili
 
 ```text
 === parity summary: 17 modules, 0 failing | rows: 297232 ok, 0 failed, 0 measured, 0 pending, 10023 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
+```
+
+## 17. M4e-3: the exact Rydberg rationals and the exact reduced mass, ADR 0002 #21 and #22 (2026-11-10)
+
+The user's decisions of 2026-11-10 ("Compute exactly", "Round once"; ADR 0002's M4e-3 addition quotes them): the Bohr
+levels, the transition energy, the Rydberg formula and the series return their exact rationals with the constant as its
+double, rounded once, and `reduced_mass` the correctly rounded m₁·m₂/(m₁ + m₂) for every pair of positive finite masses.
+Each has a double-double fast path with a proven bound and a rounding test, and an exact slow path on `src/mathx.cyr`'s
+multi-word integers (`_km_cr_ratio`, RN(p/q·2^e), ties to even, subnormal results on the 2⁻¹⁰⁷⁴ grid).
+
+| Function | Class | Rows (M4e → M4e-3) | Ok rows | #21 / #22 noted | Exact ties | Exact values | Rust's worst (ulp) | ulp (every target) |
+|---|---|---|---|---|---|---|---|---|
+| `spectroscopy::bohr_energy_level` | B | 5,120 → 11,899 | 11,624 | 3,823 | 0 (none exist) | 6,869 (every n = 2^k·Z) | 2 | 0 |
+| `spectroscopy::bohr_transition_energy` | B | 1,816 → 2,959 | 2,065 | 1,351 | 13 (all that exist) | 665 | 1,814,015,630 | 0 |
+| `spectroscopy::rydberg_wavelength` | B | 1,816 → 2,959 | 2,065 | 1,376 | 0 (none exist) | 0 (none exist) | 90,480,107 | 0 |
+| `SpectralSeries::wavelength` | B | 195 → 420 | 400 | 67 | 0 (none exist) | 0 (none exist) | 2 | 0 |
+| `spectroscopy::reduced_mass` | B | 966 → 5,382 | 5,350 | 2,837 | 195 | 2,575 | 7.0·10¹⁰ (an underflowed product) | 0 |
+
+- **Where the exact values and ties are.** R's odd significands decide (`validate.py` factors them): `KM_RYDBERG_EV`'s is
+  683·11214237642539, squarefree with a prime above 2³², so a level is a double exactly when n/Z is a power of two and has
+  at least 56 significant bits otherwise; `KM_RYDBERG`'s and R_H's carry a prime above 2³², so no wavelength is dyadic.
+  The transition energy's domain is searched exhaustively over its structure (n₁ = g·x, n₂ = g·y, odd(x)·odd(y) | odd(Z),
+  odd(g)² | 683·P·j²·w): 5,657 exact values and 13 ties, (255; 2^k·58,055, 2^k·524,544), k = 0 … 12, every one in the
+  corpus, and `validate.py` repeats the search with its own factorisation. The reduced mass has tie families: m = m at odd
+  multiples of 2⁻¹⁰⁷⁴, (6c, 2c)·2⁻¹⁰⁷⁴, and normal ties such as (2²⁷ − c, 2²⁷ + c) for odd c ≤ 94,906,265, (3·(3·2²⁵ ∓ c))
+  and (3·(2²⁶ ∓ c)), at scales across the range and moved onto the subnormal grid.
+- **The new rows** (13,706): every exact level; n₁ = n₂ − 1 at 2^k − 1, 2^k, 2^k + 1 for k = 13 … 31 and next to
+  u32::MAX; the fast path's n₂ = 2¹³ edge; the 13 ties and each of the 221 exact-value families' smallest, middle and
+  largest member; the series at lines 2⁵ … 2³⁰ and u32::MAX − 24 … − 9, and at n₂ = 2¹³; for the reduced mass, m = m at
+  every power of two 2⁻¹⁰⁷⁴ … 2¹⁰²³ and at k·2⁻¹⁰⁷⁴, the tie families, exponent gaps 45 … 64 at eight base exponents
+  around the proven 55, the 2⁻¹⁰²¹ edge, DBL_MAX pairs and 1e±300 pairs, 600 seeded pairs over every binade (their own
+  seed, so every other row keeps its inputs).
+- **The proofs.** `validate.py` evaluates every Ok row's exact rational with `Fraction` and checks that a row is noted
+  exactly where the rounded value differs from the oracle's and that the note names it bit for bit, so every unnoted row
+  is the correctly rounded value too; Rust's own replica still recomputes every row's oracle value.
+
+**Verification** (`scripts/oracle/cr_verify.py`, against `Fraction`; the fast path's declines in brackets):
+
+| Family | Arguments | Exact path forced | Mismatches (ELF · PE · aarch64) |
+|---|---|---|---|
+| `ratio` (`_km_cr_ratio`) | 320,000 (random sizes to 250 bits and exponents to ±1300; results at the subnormal and overflow ends; exact quotients and midpoints) | (no fast path) | 0 · 0 · 0 |
+| `bohr` | 260,429 (every n = 2^k·Z, Z × n ≤ 200, n at 2¹³, 2²⁶ and 2³², random n of every bit length) [0] | 106,869 | 0 · 0 · 0 |
+| `trans`, `ryd` | 555,944 each (the ties, the exact values with n₂ ≤ 120 and their 4^k multiples, random pairs at every scale, n₂ = n₁ + 1 at every scale, the 2¹³ edge, next to 2³²) [13: the ties; 0] | 100,013 each | 0 · 0 · 0 |
+| `series` | 55,345 (every series × lines 1 … 2,000, the powers of two, the largest lines, 9,000 random) [0] | 110,690 | 0 · 0 · 0 |
+| `rmass` | 502,000 (binade-uniform pairs, equal masses, subnormal pairs and ties, the tie families, gaps 45 … 64, the 2⁻¹⁰²¹ edge, the overflow end) [84,878: subnormal results by design, and the ties] | 350,000 | 0 · 0 · 0 |
+
+`tests/spectroscopy.tcyr` checks −R at every Z = n and −R/4^k at n = 2^k·Z, the 13 ties, the exact 16R and 32R, m/2 on 10,000
+seeded masses, the reduced mass's ties and range ends, and the fast paths against the exact ones on 6,000 seeded (Z, n₁, n₂)
+and 20,000 seeded mass pairs; `tests/mathx.tcyr` checks the multi-word operations, `_km_cr_ratio` on ties, subnormal results
+and the overflow threshold, and it against `_km_dd_div_cr` on 10,000 seeded quotients.
+
+**Cost** (`tests/kimiya.bcyr`, before → after, back to back): `spectroscopy/bohr_energy_level` 9 → 49 ns (Rust 1.21),
+`bohr_transition_energy` 27 → 73, `rydberg_wavelength` 24 → 73, `series_wavelength_balmer_alpha` 28 → 78,
+`reduced_mass_hcl` 14 → 73; the exact path on a tie: `bohr_transition_energy_tie` 2.42 µs, `reduced_mass_tie` 2.20 µs.
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **17 modules, 0 failing; 301,484 ok, 0 failed, 0 measured,
+0 pending, 19,477 accepted (809 under ADR 6; under ADR 2, 440 #4 Antoine, 13 #12 CFSE, 23 #3 SEMF, 1,810 #13, 208 #14,
+59 #15, 1,041 #16, 180 #17, 181 #18, 1,654 #19, 3,605 #20, 6,617 #21 and 2,837 #22 rows), 0 glibc-matching.**
+
+```text
+=== parity summary: 17 modules, 0 failing | rows: 301484 ok, 0 failed, 0 measured, 0 pending, 19477 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
 ```
 
 ## How to reproduce

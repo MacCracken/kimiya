@@ -8,7 +8,9 @@
 > cos removed) and added x·2^y rounded once (ADR 0002 #13) and x·2^(1/6) (ADR 0002 #16). Every class-C golden row,
 > the `math` primitives included, is gated at 0 ulp; none uses a stdlib transcendental (port-parity.md §13–§14). M4e added
 > 1/(100·x) rounded once (ADR 0002 #19) and put spectroscopy's FFT twiddles on `_km_cr_sincos` (hisab 1.4.0's FFT
-> transcribed, ADR 0003's M4e amendment, port-parity.md §15).
+> transcribed, ADR 0003's M4e amendment, port-parity.md §15). M4e-3 added exact rationals rounded once in the same
+> two-phase style (ADR 0002 #21, #22: a double-double quotient with a rounding test, `_km_dd_div_cr`, and the exact
+> multi-word `_km_cr_ratio` = RN(p/q·2^e) behind it; port-parity.md §17).
 
 ## Context
 

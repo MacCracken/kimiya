@@ -47,12 +47,17 @@
 #   correctly rounded; hisab 3.4.1's num_fft is not used (its twiddles are the stdlib's f64_cos / f64_sin, not
 #   correctly rounded, reseeded every 64 steps: other bits from n = 256 on). The n complex values live in `out` when
 #   cap ≥ 2n (no allocation; `signal` may then be `out` itself), else in 16·n heap bytes.
+# - ADR 0002 #21 and #22 (M4e-3, the user's decisions of 2026-11-10): bohr_energy_level, bohr_transition_energy,
+#   rydberg_wavelength and spectral_series_wavelength return their exact rationals (the constant as its double) rounded
+#   once, and reduced_mass the correctly rounded m₁·m₂/(m₁ + m₂) for every pair of positive finite masses (no
+#   intermediate over- or underflows): so −R exactly at n = Z, m/2 for a homonuclear diatomic, and no cancellation for
+#   close large n (the Bohr model's section below; src/mathx.cyr's _km_cr_ratio, _km_dd_mul and _km_dd_div_cr). The
+#   golden rows keep the oracle's values; where the port's differ, the note names them (accepted under ADR 2, counted).
 # - Kept as Rust's (reviewed in M4e, reported to the user): the over- and underflow of products and quotients of
-#   inputs (ε·l·c, ε·l, m₁·m₂ and m₁ + m₂, k/μ, h·B, 8π²·I, μ·r·r, the FFT's sums and re² + im²), the cancellation in
-#   1/n₁² − 1/n₂² and E_upper − E_lower for close large n, the Bohr levels' ((−R·Z)·Z)/(n·n), one ulp from −R/k² on
-#   some Z/n = 1/k (Z = n included), reduced_mass(m, m) one ulp from m/2 on some m, find_peaks' interpolated threshold,
-#   and the thresholds 0.001 and 10⁻¹² (heuristic and numerical cutoffs, compared as Rust does): each is a chain of
-#   rounded operations on inputs and physical constants, which ADR 0002's policy leaves as Rust's sequence.
+#   inputs (ε·l·c, ε·l, k/μ, h·B, 8π²·I, μ·r·r, the FFT's sums and re² + im²), find_peaks' interpolated threshold, and
+#   the thresholds 0.001 and 10⁻¹² (heuristic and numerical cutoffs, compared as Rust does): each is a chain of rounded
+#   operations on inputs and physical constants, which ADR 0002's policy leaves as Rust's sequence (the products and
+#   quotients go to the library-wide overflow audit after M4).
 
 include "lib/alloc.cyr"
 
@@ -160,50 +165,238 @@ fn ev_to_joules(energy_ev: f64): f64 {
 }
 
 # ── Bohr model ──────────────────────────────────────────────────────────────────────
+#
+# ADR 0002 #21 (M4e-3, the user's decision of 2026-11-10): the Bohr levels, the transition energy and the Rydberg
+# formula return their exact rational values, with the constant taken as its double (R = KM_RYDBERG_EV, R∞ = KM_RYDBERG,
+# R_H = _KM_RYDBERG_HYDROGEN), rounded ONCE to binary64 (nearest, ties to even):
+# - bohr_energy_level: −R·Z²/n²; bohr_transition_energy: R·Z²·(n₂² − n₁²)/(n₁²·n₂²);
+# - rydberg_wavelength and spectral_series_wavelength: n₁²·n₂²/(R·Z²·(n₂² − n₁²)).
+# Rust's ((−R·Z)·Z)/(n·n), E(n₂) − E(n₁) and 1/(((R·Z)·Z)·(1/n₁² − 1/n₂²)) round three to eight times, and the factor
+# 1/n₁² − 1/n₂² and the difference of levels cancel for close large n (39 ulp at n = 100, 939 at 10⁴; on the corpus up
+# to 9.0·10⁷ ulp for the wavelength and 1.8·10⁹ for the transition energy at n near 2³²). Every value here is normal
+# (|E| ≥ R·2⁻⁶⁴, λ ≤ 2⁷²), so no exponent bound intervenes. Each has a fast path and an exact slow path:
+# - the fast path evaluates the exact numerator and denominator as double-doubles — exact for n₂ < 2¹³ (R·Z² by
+#   _km_rz2, R·Z²·(n₂² − n₁²) a TwoProduct of R and an integer below 2⁴², n² and (n₁·n₂)² integers below 2⁵²), each
+#   within 2^-102.99 above (n², n₁·n₂ and (n₂ − n₁)(n₂ + n₁) exact TwoProducts, one src/mathx.cyr _km_dd_mul each) — and
+#   rounds their quotient by _km_dd_div_cr (its budget: 13.12u² for the quotient, 32u² for the operands, u = 2^-53; the
+#   level's quotient by a 26-bit n² inline, to 5.04u²);
+# - the slow path forms the integers p and q in src/mathx.cyr's multi-word arithmetic (R = M·2^E, M < 2^53; p, q below
+#   2^134) and rounds p/q·2^E once with _km_cr_ratio, ties exactly.
+# The rounding test fails with probability about 2^-46, and on every midpoint: the levels have none (R's odd
+# significand is 683·11214237642539, squarefree with a prime above 2³², so −R·Z²/n² is a double exactly when n/Z is a
+# power of two, and otherwise has at least 56 significant bits), the Rydberg wavelengths none (R∞'s and R_H's odd
+# significands have the primes 1963825758347083 and 3319205424319, above 2³², which no n₁, n₂ < 2³² cancel: λ is never
+# dyadic), the transition energies 13 (Z = 255, (n₁, n₂) = 2^k·(58,055, 524,544), k = 0 … 12: scripts/oracle's
+# exhaustive search of the domain, which also finds its 5,657 exact values, 16R at (15; 3, 5) among them). The checks
+# and their order are Rust's.
 
 # The Bohr energy level of a hydrogen-like atom, E_n = −R∞hc·Z²/n² in eV, with RYDBERG_EV (13.6057 eV: an infinitely
 # heavy nucleus), from the nuclear charge Z (Rust's u8, 1 for hydrogen) and the principal quantum number n (Rust's
-# u32, ≥ 1), as Rust's ((−R·Z)·Z)/(n·n). Ok(E), or Err(KM_ERR_INVALID_INPUT) if Z is 0 (or outside 0 ..= 255), then
-# if n is 0 (or outside 0 ..= u32::MAX). Mirrors `spectroscopy::bohr_energy_level`.
+# u32, ≥ 1). ADR 0002 #21: the correctly rounded −R·Z²/n² (rounded once), so −R exactly whenever n = Z (and −R/4^k for
+# n = 2^k·Z), where Rust's ((−R·Z)·Z)/(n·n) rounds three times. Ok(E), or Err(KM_ERR_INVALID_INPUT) if Z is 0 (or
+# outside 0 ..= 255), then if n is 0 (or outside 0 ..= u32::MAX). Mirrors `spectroscopy::bohr_energy_level`, with ADR
+# 0002 #21.
 #must_use
 fn bohr_energy_level(z, n): Result {
     if (z < 1 || z > 255) { return Err(KM_ERR_INVALID_INPUT); }
     if (n < 1 || n > 0xFFFFFFFF) { return Err(KM_ERR_INVALID_INPUT); }
-    var zf: f64 = f64_from(z);
+    var e, ok = _km_bohr_level_fast(z, n);
+    if (ok == 1) {
+        var ne: f64 = -e;
+        return Ok(ne);
+    }
+    var a: f64 = _km_bohr_level_acc(z, n);
+    var na: f64 = -a;
+    return Ok(na);
+}
+
+# R·Z²/n² (the level's magnitude) by the fast path: (RN, 1), or (0, 0) when the rounding test fails. The operands carry
+# no error: R·Z² = p_h + p_l exactly (_km_rz2), and n² is an exact double. For n < 2¹³ (n² < 2²⁶, at most 26 bits) the
+# quotient is inline, with y0·n² = y_h·n² + y_l·n² exact (Veltkamp's split of y0: 26 and 27 bits): n² is exact, so
+# p_h − y_h·n² is exact (Sterbenz), (p_h − y_h·n²) − y_l·n² = p_h − y0·n² to u²·p_h, + p_l to 2.01u², so r = N − y0·n²
+# to 3.01u²·N; |r| ≤ 2.02u·N, d = RN(r/n²) is r/n² to 2.02u²·v, and y0 + d is v to 5.04u² (u = 2^-53), well inside
+# _km_dd_div_cr's test budget, whose test is the same (ε = 2^-100·y0). Above, _km_dd_div_cr with n² as an exact
+# TwoProduct (n < 2³²).
+#must_use
+fn _km_bohr_level_fast(z, n): (f64, i64) {
+    var r: f64 = KM_RYDBERG_EV;
+    if (n < 0x2000) {
+        var z2: f64 = f64_from(z * z);              # _km_rz2, inline
+        var sp: f64 = 134217729.0;
+        var cr: f64 = sp * r;
+        var rh: f64 = cr - (cr - r);
+        var rl: f64 = r - rh;
+        var a1: f64 = rh * z2;
+        var a2: f64 = rl * z2;
+        var ph: f64 = a1 + a2;
+        var pl: f64 = a2 - (ph - a1);
+        var q: f64 = f64_from(n * n);
+        var y0: f64 = ph / q;
+        var cy: f64 = sp * y0;
+        var yh: f64 = cy - (cy - y0);
+        var yl: f64 = y0 - yh;
+        var s: f64 = ph - (yh * q);
+        var s1: f64 = s - (yl * q);
+        var rr: f64 = s1 + pl;
+        var d: f64 = rr / q;
+        var k100: f64 = 0x39B0000000000000;         # 2^-100
+        var eps: f64 = y0 * k100;
+        var lo: f64 = d - eps;
+        var hi: f64 = d + eps;
+        var w1: f64 = y0 + lo;
+        var w2: f64 = y0 + hi;
+        if (w1 != w2) { return (0.0, 0); }
+        return (w1, 1);
+    }
+    var ph2, pl2 = _km_rz2(r, z);
     var nf: f64 = f64_from(n);
-    var r: f64 = -KM_RYDBERG_EV;
-    var nn: f64 = nf * nf;
-    var e: f64 = ((r * zf) * zf) / nn;
-    return Ok(e);
+    var qh, ql = _km_two_prod(nf, nf);
+    var y, ok = _km_dd_div_cr(ph2, pl2, qh, ql);
+    return (y, ok);
+}
+
+# r·Z² as an exact double-double (h, l), for 1 ≤ Z ≤ 255 and a positive normal r below 2⁹⁰⁰: Veltkamp's split
+# r = r_h + r_l (26 and 27 significant bits), r_h·Z² and r_l·Z² exact (Z² < 2¹⁶), their FastTwoSum (|r_h·Z²| ≥
+# |r_l·Z²|).
+#must_use
+fn _km_rz2(r: f64, z): (f64, f64) {
+    var z2: f64 = f64_from(z * z);
+    var sp: f64 = 134217729.0;
+    var cr: f64 = sp * r;
+    var rh: f64 = cr - (cr - r);
+    var rl: f64 = r - rh;
+    var a1: f64 = rh * z2;
+    var a2: f64 = rl * z2;
+    var h: f64 = a1 + a2;
+    var l: f64 = a2 - (h - a1);
+    return (h, l);
+}
+
+# RN(R·Z²/n²) by the exact path alone: _km_cr_ratio(M·Z², n², E) for R = M·2^E.
+#must_use
+fn _km_bohr_level_acc(z, n): f64 {
+    var rr: f64 = KM_RYDBERG_EV;
+    var rm, re = _km_f64_int(_km_bits(rr));
+    var p[64];
+    var q[64];
+    _km_bn_set(&p, rm);
+    _km_bn_mul_small(&p, z * z);
+    _km_bn_set(&q, n);
+    _km_bn_mul_small(&q, n);
+    var v: f64 = _km_cr_ratio(&p, &q, re);
+    return v;
 }
 
 # The energy in eV of the photon emitted in the transition n_upper → n_lower of a hydrogen-like atom (Bohr model, an
-# infinitely heavy nucleus): E(n_upper) − E(n_lower), positive. Ok(E), or Err(KM_ERR_INVALID_INPUT) from
-# bohr_energy_level(Z, n_lower), then bohr_energy_level(Z, n_upper), then if n_upper ≤ n_lower (Rust's order). Mirrors
-# `spectroscopy::bohr_transition_energy`.
+# infinitely heavy nucleus): E(n_upper) − E(n_lower), positive. ADR 0002 #21: the correctly rounded
+# R·Z²·(n₂² − n₁²)/(n₁²·n₂²) (rounded once), where Rust subtracts two rounded levels (which cancel for close large n).
+# Ok(E), or Err(KM_ERR_INVALID_INPUT) from bohr_energy_level(Z, n_lower)'s checks (Z, then n_lower), then
+# bohr_energy_level(Z, n_upper)'s (n_upper), then if n_upper ≤ n_lower (Rust's order). Mirrors
+# `spectroscopy::bohr_transition_energy`, with ADR 0002 #21.
 #must_use
 fn bohr_transition_energy(z, n_lower, n_upper): Result {
-    var tl, vl = bohr_energy_level(z, n_lower);
-    if (is_err_result(tl) == 1) { return Err(vl); }
-    var tu, vu = bohr_energy_level(z, n_upper);
-    if (is_err_result(tu) == 1) { return Err(vu); }
+    if (z < 1 || z > 255) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_lower < 1 || n_lower > 0xFFFFFFFF) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_upper < 1 || n_upper > 0xFFFFFFFF) { return Err(KM_ERR_INVALID_INPUT); }
     if (n_upper <= n_lower) { return Err(KM_ERR_INVALID_INPUT); }
-    var el: f64 = vl;
-    var eu: f64 = vu;
-    var e: f64 = eu - el;
-    return Ok(e);
+    var e, ok = _km_bohr_transition_fast(z, n_lower, n_upper);
+    if (ok == 1) { return Ok(e); }
+    var a: f64 = _km_bohr_transition_acc(z, n_lower, n_upper);
+    return Ok(a);
+}
+
+# The Rydberg operands as double-doubles, for 1 ≤ n₁ < n₂ < 2³² and the constant r, into `out` (four f64, 32 bytes:
+# N_h, N_l, M_h, M_l) with N = r·Z²·(n₂² − n₁²) and M = (n₁·n₂)². For n₂ < 2¹³ both are exact: K = Z²·(n₂ − n₁)(n₂ + n₁)
+# < 2⁴² and M < 2⁵² are integers, exact doubles, and N = r·K an exact TwoProduct (M_l = 0). Above, each is within
+# 2^-102.99: r·Z² (_km_rz2), n₂² − n₁² = (n₂ − n₁)(n₂ + n₁) and n₁·n₂ exact (TwoProducts of exact doubles), then one
+# _km_dd_mul each.
+fn _km_rydberg_dd(r: f64, z, n_lower, n_upper, out) {
+    if (n_upper < 0x2000) {
+        var kf: f64 = f64_from(z * z * (n_upper - n_lower) * (n_upper + n_lower));
+        var w = n_lower * n_upper;
+        var mf: f64 = f64_from(w * w);
+        var kh, kl = _km_two_prod(r, kf);
+        var zero: f64 = 0.0;
+        store64(out, kh);
+        store64(out + 8, kl);
+        store64(out + 16, mf);
+        store64(out + 24, zero);
+        return 0;
+    }
+    var ph, pl = _km_rz2(r, z);
+    var df: f64 = f64_from(n_upper - n_lower);
+    var sf: f64 = f64_from(n_upper + n_lower);
+    var dh, dl = _km_two_prod(df, sf);
+    var lf: f64 = f64_from(n_lower);
+    var uf: f64 = f64_from(n_upper);
+    var wh, wl = _km_two_prod(lf, uf);
+    var nh, nl = _km_dd_mul(ph, pl, dh, dl);
+    var mh, ml = _km_dd_mul(wh, wl, wh, wl);
+    store64(out, nh);
+    store64(out + 8, nl);
+    store64(out + 16, mh);
+    store64(out + 24, ml);
+    return 0;
+}
+
+# The exact Rydberg integers for 1 ≤ n₁ < n₂ < 2³²: p = M·Z²·(n₂ − n₁)·(n₂ + n₁) (below 2^134) and q = (n₁·n₂)² (below
+# 2^128), with the constant's significand M (r = M·2^E), into the 64-byte buffers p and q; returns E.
+#must_use
+fn _km_rydberg_ints(r: f64, z, n_lower, n_upper, p, q): i64 {
+    var rm, re = _km_f64_int(_km_bits(r));
+    var a[64];
+    var b[64];
+    var w[64];
+    _km_bn_set(&a, rm);
+    _km_bn_mul_small(&a, z * z);
+    _km_bn_set(&b, n_upper - n_lower);
+    _km_bn_set(&w, n_upper + n_lower);
+    var d[64];
+    _km_bn_mul(&d, &b, &w);
+    _km_bn_mul(p, &a, &d);
+    _km_bn_set(&w, n_lower);
+    _km_bn_mul_small(&w, n_upper);
+    _km_bn_mul(q, &w, &w);
+    return re;
+}
+
+# R·Z²·(n₂² − n₁²)/(n₁²·n₂²) by the fast path: (RN, 1), or (0, 0) when the rounding test fails.
+#must_use
+fn _km_bohr_transition_fast(z, n_lower, n_upper): (f64, i64) {
+    var r: f64 = KM_RYDBERG_EV;
+    var o[32];
+    _km_rydberg_dd(r, z, n_lower, n_upper, &o);
+    var nh: f64 = load64(&o);
+    var nl: f64 = load64(&o + 8);
+    var mh: f64 = load64(&o + 16);
+    var ml: f64 = load64(&o + 24);
+    var y, ok = _km_dd_div_cr(nh, nl, mh, ml);
+    return (y, ok);
+}
+
+# RN(R·Z²·(n₂² − n₁²)/(n₁²·n₂²)) by the exact path alone.
+#must_use
+fn _km_bohr_transition_acc(z, n_lower, n_upper): f64 {
+    var p[64];
+    var q[64];
+    var r: f64 = KM_RYDBERG_EV;
+    var re = _km_rydberg_ints(r, z, n_lower, n_upper, &p, &q);
+    var v: f64 = _km_cr_ratio(&p, &q, re);
+    return v;
 }
 
 # The vacuum wavelength in m of a hydrogen-like transition by the Rydberg formula 1/λ = R∞·Z²·(1/n₁² − 1/n₂²), with
-# RYDBERG (R∞: an infinitely heavy nucleus; for ¹H about 0.05 % short, spectral_series_wavelength applies R_H).
-# Ok(λ), or Err(KM_ERR_INVALID_INPUT) as _km_rydberg_formula. Mirrors `spectroscopy::rydberg_wavelength`.
+# RYDBERG (R∞: an infinitely heavy nucleus; for ¹H about 0.05 % short, spectral_series_wavelength applies R_H). ADR 0002
+# #21: the correctly rounded n₁²·n₂²/(R∞·Z²·(n₂² − n₁²)) (rounded once). Ok(λ), or Err(KM_ERR_INVALID_INPUT) as
+# _km_rydberg_formula. Mirrors `spectroscopy::rydberg_wavelength`, with ADR 0002 #21.
 #must_use
 fn rydberg_wavelength(z, n_lower, n_upper): Result {
     return _km_rydberg_formula(KM_RYDBERG, z, n_lower, n_upper);
 }
 
-# Rust's private rydberg_formula: 1/λ = ((R·Z)·Z)·(1/(n₁·n₁) − 1/(n₂·n₂)), then Ok(1/that), with the Rydberg constant
-# `rydberg` (m⁻¹). Err(KM_ERR_INVALID_INPUT) if Z is 0 (or outside u8), then if either n is 0 (or outside u32), then if
+# Rust's private rydberg_formula with the Rydberg constant `rydberg` (m⁻¹), under ADR 0002 #21: Ok(λ), the correctly
+# rounded n₁²·n₂²/(rydberg·Z²·(n₂² − n₁²)), where Rust computes 1/(((R·Z)·Z)·(1/(n₁·n₁) − 1/(n₂·n₂))).
+# Err(KM_ERR_INVALID_INPUT) if Z is 0 (or outside u8), then if either n is 0 (or outside u32), then if
 # n_upper ≤ n_lower.
 #must_use
 fn _km_rydberg_formula(rydberg: f64, z, n_lower, n_upper): Result {
@@ -212,17 +405,33 @@ fn _km_rydberg_formula(rydberg: f64, z, n_lower, n_upper): Result {
         return Err(KM_ERR_INVALID_INPUT);
     }
     if (n_upper <= n_lower) { return Err(KM_ERR_INVALID_INPUT); }
-    var zf: f64 = f64_from(z);
-    var nl: f64 = f64_from(n_lower);
-    var nu: f64 = f64_from(n_upper);
-    var ll: f64 = nl * nl;
-    var uu: f64 = nu * nu;
-    var il: f64 = 1.0 / ll;
-    var iu: f64 = 1.0 / uu;
-    var d: f64 = il - iu;
-    var inv: f64 = ((rydberg * zf) * zf) * d;
-    var lam: f64 = 1.0 / inv;
-    return Ok(lam);
+    var lam, ok = _km_rydberg_fast(rydberg, z, n_lower, n_upper);
+    if (ok == 1) { return Ok(lam); }
+    var a: f64 = _km_rydberg_acc(rydberg, z, n_lower, n_upper);
+    return Ok(a);
+}
+
+# n₁²·n₂²/(r·Z²·(n₂² − n₁²)) by the fast path: (RN, 1), or (0, 0) when the rounding test fails.
+#must_use
+fn _km_rydberg_fast(r: f64, z, n_lower, n_upper): (f64, i64) {
+    var o[32];
+    _km_rydberg_dd(r, z, n_lower, n_upper, &o);
+    var nh: f64 = load64(&o);
+    var nl: f64 = load64(&o + 8);
+    var mh: f64 = load64(&o + 16);
+    var ml: f64 = load64(&o + 24);
+    var y, ok = _km_dd_div_cr(mh, ml, nh, nl);
+    return (y, ok);
+}
+
+# RN(n₁²·n₂²/(r·Z²·(n₂² − n₁²))) by the exact path alone.
+#must_use
+fn _km_rydberg_acc(r: f64, z, n_lower, n_upper): f64 {
+    var p[64];
+    var q[64];
+    var re = _km_rydberg_ints(r, z, n_lower, n_upper, &p, &q);
+    var v: f64 = _km_cr_ratio(&q, &p, 0 - re);
+    return v;
 }
 
 # The lower quantum number of series s (a KmSpectralSeries value): 1 (Lyman) … 5 (Pfund); 0 for a word that is no
@@ -272,15 +481,95 @@ fn wavelength_from_wavenumber(wavenumber_cm_inv: f64): Result {
 
 # ── harmonic oscillator ─────────────────────────────────────────────────────────────
 
-# The reduced mass of a diatomic μ = m₁·m₂/(m₁ + m₂), in the masses' unit, as Rust's (m₁·m₂)/(m₁ + m₂). Ok(μ), or
-# Err(KM_ERR_INVALID_INPUT) if either mass is not positive and finite. Mirrors `spectroscopy::reduced_mass`.
+# The reduced mass of a diatomic μ = m₁·m₂/(m₁ + m₂), in the masses' unit. ADR 0002 #22 (M4e-3, the user's decision of
+# 2026-11-10): the correctly rounded m₁·m₂/(m₁ + m₂) (rounded once, ties to even, subnormal results on the 2⁻¹⁰⁷⁴ grid)
+# for every pair of positive finite doubles, so m/2 exactly for a homonuclear diatomic, where Rust's (m₁·m₂)/(m₁ + m₂)
+# rounds three times (one ulp from m/2 on 8.6 % of masses) and overflows or underflows at the range ends (NaN for
+# (DBL_MAX, DBL_MAX), 0 or ∞ where μ is representable). No intermediate leaves the range: with m₁ ≥ m₂, m = s·2^e
+# (s in [1, 2)) and g = e₁ − e₂, μ = 2^e₂·s₁s₂/(s₁ + s₂·2⁻ᵍ); for g ≥ 55 it is the smaller mass (below). Ok(μ), or
+# Err(KM_ERR_INVALID_INPUT) if either mass is not positive and finite. Mirrors `spectroscopy::reduced_mass`, with ADR
+# 0002 #22.
 #must_use
 fn reduced_mass(m1: f64, m2: f64): Result {
     if (_km_is_positive(m1) != 1 || _km_is_positive(m2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var p: f64 = m1 * m2;
-    var s: f64 = m1 + m2;
-    var mu: f64 = p / s;
-    return Ok(mu);
+    var mu, ok = _km_reduced_mass_fast(m1, m2);
+    if (ok == 1) { return Ok(mu); }
+    var a: f64 = _km_reduced_mass_acc(m1, m2);
+    return Ok(a);
+}
+
+# The reduced mass of two positive finite doubles by the fast path: (RN(μ), 1), or (0, 0) when the rounding test fails
+# or μ may be subnormal (e₂ < −1021). With m₁ ≥ m₂ (as bit patterns), m₁ = s₁·2^e₁, m₂ = s₂·2^e₂ and g = e₁ − e₂ ≥ 0
+# (from the exponent fields: for a subnormal m₂ a lower bound of the gap, which only makes the first case rarer):
+# - g ≥ 55: RN(μ) = m₂. x = m₂/m₁ < 2^(1 − g) ≤ 2⁻⁵⁴, and m₂ − μ = m₂·x/(1 + x) < 2⁻⁵⁴·m₂, below half the gap from m₂
+#   to the double under it (at least 2⁻⁵³·m₂ for a normal m₂, the gap below a power of two included; 2⁻¹⁰⁷⁴ for a
+#   subnormal one, against m₂·x < 2⁻¹⁰⁷⁶), and μ < m₂: strictly inside m₂'s rounding interval, so never a tie.
+# - otherwise F = s₁s₂/(s₁ + s₂·2⁻ᵍ) in [½, 2): the numerator an exact TwoProduct in [1, 4), s₂·2⁻ᵍ exact (at least
+#   2⁻⁵⁴) and the denominator an exact FastTwoSum in [1, 4) (s₁ ≥ s₂·2⁻ᵍ), so _km_dd_div_cr's operands carry no error;
+#   RN(μ) = RN(F)·2^e₂, exact for e₂ ≥ −1021 (μ ≥ 2⁻¹⁰²², and RN(μ) ≤ m₂ ≤ DBL_MAX).
+#must_use
+fn _km_reduced_mass_fast(m1: f64, m2: f64): (f64, i64) {
+    var b1 = load64(&m1);
+    var b2 = load64(&m2);
+    if (b1 < b2) {
+        var sw = b1;
+        b1 = b2;
+        b2 = sw;
+    }
+    var g = (b1 >> 52) - (b2 >> 52);                # e₁ − e₂ (a lower bound when m₂ is subnormal)
+    if (g >= 55) {
+        var small: f64 = b2;
+        return (small, 1);
+    }
+    if (b2 < 0x0020000000000000) { return (0.0, 0); }  # e₂ < −1021: μ may be subnormal
+    var sb1 = (b1 & 0x000FFFFFFFFFFFFF) | 0x3FF0000000000000;
+    var sb2 = (b2 & 0x000FFFFFFFFFFFFF) | 0x3FF0000000000000;
+    var s1: f64 = sb1;
+    var s2: f64 = sb2;
+    var scb = (1023 - g) << 52;
+    var sc: f64 = scb;
+    var t: f64 = s2 * sc;                           # s₂·2⁻ᵍ, exact
+    var ph, pl = _km_two_prod(s1, s2);
+    var dh: f64 = s1 + t;                           # FastTwoSum: s₁ ≥ t (s₁ ≥ s₂ when g = 0, t < 1 otherwise)
+    var dl: f64 = t - (dh - s1);
+    var f, ok = _km_dd_div_cr(ph, pl, dh, dl);
+    if (ok != 1) { return (0.0, 0); }
+    var eb = b2 & 0x7FF0000000000000;               # 2^e₂
+    var s3: f64 = eb;
+    var mu: f64 = f * s3;
+    return (mu, 1);
+}
+
+# RN(m₁·m₂/(m₁ + m₂)) by the exact path alone, every pair of positive finite doubles: with m₁ ≥ m₂, m = M·2^E
+# (2⁵² ≤ M < 2⁵³, a subnormal's E below −1074) and G = E₁ − E₂ (the g above), μ = M₁M₂·2^E₁/(M₁·2^G + M₂), rounded once
+# by _km_cr_ratio (the numerator below 2¹⁰⁶, the denominator below 2¹⁰⁸); m₂ for G ≥ 55 (the fast path's proof).
+#must_use
+fn _km_reduced_mass_acc(m1: f64, m2: f64): f64 {
+    var b1 = _km_bits(m1);
+    var b2 = _km_bits(m2);
+    if (b1 < b2) {
+        var sw = b1;
+        b1 = b2;
+        b2 = sw;
+    }
+    var mm1, ee1 = _km_f64_int(b1);
+    var mm2, ee2 = _km_f64_int(b2);
+    var gg = ee1 - ee2;
+    if (gg >= 55) {
+        var small: f64 = b2;
+        return small;
+    }
+    var a[64];
+    var b[64];
+    var p[64];
+    var q[64];
+    _km_bn_set(&a, mm1);
+    _km_bn_set(&b, mm2);
+    _km_bn_mul(&p, &a, &b);
+    _km_bn_shl(&a, gg);
+    _km_bn_add(&q, &a, &b);
+    var v: f64 = _km_cr_ratio(&p, &q, ee1);
+    return v;
 }
 
 # The quantum harmonic oscillator energy E_n = (n + ½)·ħω in J, from the vibrational quantum number n (Rust's u32) and

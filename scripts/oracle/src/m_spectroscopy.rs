@@ -12,18 +12,22 @@
 //!   and ±∞; plateaus, flat and monotone data, NaN and ±∞ in the data, all non-finite, ±0, DBL_MAX ranges where the
 //!   interpolated threshold over- or underflows, seeded data).
 //! - Class B (+ − × ÷ and √, expected 0 ulp): `absorbance`, `concentration_from_absorbance`, the photon conversions,
-//!   `joules_to_ev` / `ev_to_joules`, `reduced_mass` (equal masses included), `harmonic_oscillator_energy`,
-//!   `vibrational_frequency`, `rigid_rotor_energy`, `rotational_constant`, `diatomic_moment_of_inertia` (each argument
-//!   over the edges, the Rust tests' values, decades, the intermediates' over- and underflow, seeded);
-//!   `bohr_energy_level` (every u8 Z × 20 n), `bohr_transition_energy` and `rydberg_wavelength` (Z × (n₁, n₂) grids,
-//!   every Err path in Rust's order, adjacent large n), `SpectralSeries::wavelength` (every series × lines to u32::MAX,
-//!   Rust's `checked_add` overflow); `isotope_pattern` (the Rust tests' molecules, the empty molecule, every u8 Z alone,
-//!   every element with data × counts to 5000 (the pruning keeps the peak count bounded), elements without data with
-//!   counts to u32::MAX, H₂… (equal scratch masses: the stable sort's order decides the binned mean), mixtures, the Err
-//!   position in a list, seeded molecules); and **ADR 0002 #19**: `wavenumber_from_wavelength` and
-//!   `wavelength_from_wavenumber` (the edges, every decade, every power of two, the subnormal-result and overflow ends,
-//!   seeded over every binade), the rows where the port's correctly rounded 1/(100·x) differs from Rust's `0.01 / x`
-//!   noted with it.
+//!   `joules_to_ev` / `ev_to_joules`, `harmonic_oscillator_energy`, `vibrational_frequency`, `rigid_rotor_energy`,
+//!   `rotational_constant`, `diatomic_moment_of_inertia` (each argument over the edges, the Rust tests' values, decades,
+//!   the intermediates' over- and underflow, seeded); **ADR 0002 #21** (M4e-3): `bohr_energy_level` (every u8 Z × 20 n,
+//!   and every exact level, n = 2^k·Z), `bohr_transition_energy` and `rydberg_wavelength` (Z × (n₁, n₂) grids, every Err
+//!   path in Rust's order, adjacent large n, n₁ = n₂ − 1 at every binary scale and next to u32::MAX, the fast path's
+//!   2¹³ edge, the exhaustive search's 13 ties and its exact values), `SpectralSeries::wavelength` (every series × lines
+//!   to u32::MAX, Rust's `checked_add` overflow, large lines), each row noted with the port's correctly rounded exact
+//!   rational where it differs from Rust's; **ADR 0002 #22**: `reduced_mass` (equal masses at every power of two and
+//!   subnormal multiple, three families of normal ties and two of subnormal ones, exponent gaps around the proven 55,
+//!   the overflow and underflow ends, seeded over every binade), noted likewise; `isotope_pattern` (the Rust tests'
+//!   molecules, the empty molecule, every u8 Z alone, every element with data × counts to 5000 (the pruning keeps the
+//!   peak count bounded), elements without data with counts to u32::MAX, H₂… (equal scratch masses: the stable sort's
+//!   order decides the binned mean), mixtures, the Err position in a list, seeded molecules); and **ADR 0002 #19**:
+//!   `wavenumber_from_wavelength` and `wavelength_from_wavenumber` (the edges, every decade, every power of two, the
+//!   subnormal-result and overflow ends, seeded over every binade), the rows where the port's correctly rounded
+//!   1/(100·x) differs from Rust's `0.01 / x` noted with it.
 //! - Class C (bound 0 against the corrected oracle): `transmittance` (`10.0.powf(−A)`: A over exp10's whole range, the
 //!   integers, subnormal results, seeded), `absorbance_from_transmittance` (log10: every decade of T, T near 1, the
 //!   round trips, seeded), `fft_spectrum` (cos and sin twiddles: every length 0 … 16 and every power of two to 2¹³,
@@ -35,7 +39,7 @@
 
 use std::hint::black_box as bb;
 
-use crate::exact::cr_hundredth_div;
+use crate::exact::{cr_bohr_level, cr_hundredth_div, cr_reduced_mass, cr_rydberg, cr_transition};
 use crate::grids::{Rng, decades, pow2};
 use crate::m_reaction::{edges, res};
 use crate::tsv::{Class, Module, Tok, e, err, f, i};
@@ -45,7 +49,7 @@ use kimiya::spectroscopy::{
     frequency_from_wavelength, harmonic_oscillator_energy, isotope_abundances, isotope_pattern, joules_to_ev,
     photon_energy_from_frequency, photon_energy_from_wavelength, reduced_mass, rigid_rotor_energy,
     rotational_constant, rydberg_wavelength, transmittance, vibrational_frequency, wavelength_from_energy,
-    wavelength_from_wavenumber, wavenumber_from_wavelength,
+    wavelength_from_wavenumber, wavenumber_from_wavelength, RYDBERG, RYDBERG_EV,
 };
 
 /// Every `SpectralSeries`, in Rust declaration order. `t_spectroscopy` proves the list against the enum in
@@ -107,21 +111,244 @@ fn photon(m: &mut Module, x: f64) {
     ff(m, "spectroscopy::ev_to_joules", Class::B, &[x], ev_to_joules(bb(x)));
 }
 
+/// ADR 0002 #21 / #22: a Result row, noted with the port's correctly rounded value where it differs from the oracle's
+/// (`what` names the exact value: "−R·Z²/n²", …).
+fn noted(m: &mut Module, name: &str, ins: &[Tok], out: Result<f64, kimiya::error::KimiyaError>, exact: Option<f64>,
+         adr: u32, what: &str) {
+    if let (Ok(v), Some(c)) = (&out, exact)
+        && c.to_bits() != v.to_bits()
+    {
+        let note = format!("ADR 0002 #{adr}: the port returns the correctly rounded {what} = {c:?} (f:{:016x})", c.to_bits());
+        m.row_noted(name, Class::B, ins, &[f(*v)], &note);
+        return;
+    }
+    m.row(name, Class::B, ins, &[res(out)]);
+}
+
 fn bohr(m: &mut Module, z: u8, n: u32) {
-    let out = res(bohr_energy_level(bb(z), bb(n)));
-    m.row("spectroscopy::bohr_energy_level", Class::B, &[i(z), i(n)], &[out]);
+    let out = bohr_energy_level(bb(z), bb(n));
+    let exact = (z > 0 && n > 0).then(|| -cr_bohr_level(RYDBERG_EV, z, n));
+    noted(m, "spectroscopy::bohr_energy_level", &[i(z), i(n)], out, exact, 21, "−R·Z²/n²");
 }
 
 fn transition(m: &mut Module, z: u8, lo: u32, hi: u32) {
-    let t = res(bohr_transition_energy(bb(z), bb(lo), bb(hi)));
-    m.row("spectroscopy::bohr_transition_energy", Class::B, &[i(z), i(lo), i(hi)], &[t]);
-    let w = res(rydberg_wavelength(bb(z), bb(lo), bb(hi)));
-    m.row("spectroscopy::rydberg_wavelength", Class::B, &[i(z), i(lo), i(hi)], &[w]);
+    let valid = z > 0 && lo > 0 && hi > lo;
+    let t = bohr_transition_energy(bb(z), bb(lo), bb(hi));
+    let et = valid.then(|| cr_transition(RYDBERG_EV, z, lo, hi));
+    noted(m, "spectroscopy::bohr_transition_energy", &[i(z), i(lo), i(hi)], t, et, 21, "R·Z²·(n₂² − n₁²)/(n₁²·n₂²)");
+    let w = rydberg_wavelength(bb(z), bb(lo), bb(hi));
+    let ew = valid.then(|| cr_rydberg(RYDBERG, z, lo, hi));
+    noted(m, "spectroscopy::rydberg_wavelength", &[i(z), i(lo), i(hi)], w, ew, 21, "n₁²·n₂²/(R∞·Z²·(n₂² − n₁²))");
 }
 
-fn series_line(m: &mut Module, s: SpectralSeries, line: u32) {
-    let out = res(bb(s).wavelength(bb(line)));
-    m.row("SpectralSeries::wavelength", Class::B, &[e("SpectralSeries", s), i(line)], &[out]);
+fn series_line(m: &mut Module, s: SpectralSeries, line: u32, rh: f64) {
+    let out = bb(s).wavelength(bb(line));
+    let exact = s.n_lower().checked_add(line).filter(|_| line > 0).map(|hi| cr_rydberg(rh, 1, s.n_lower(), hi));
+    noted(m, "SpectralSeries::wavelength", &[e("SpectralSeries", s), i(line)], out, exact, 21, "n₁²·n₂²/(R_H·(n₂² − n₁²))");
+}
+
+/// Rust's private RYDBERG_HYDROGEN through the API, as `t_spectroscopy` derives it: `Lyman.wavelength(u32::MAX − 1)` is
+/// 1/R_H (1/1 − 1/u32::MAX² is 1.0 exactly), and R_H is the one double near 1/λ whose reciprocal rounds to λ.
+fn rydberg_hydrogen() -> f64 {
+    let lam = SpectralSeries::Lyman.wavelength(u32::MAX - 1).unwrap_or(f64::NAN);
+    let mut x = 1.0 / lam;
+    for _ in 0..4 {
+        x = x.next_down();
+    }
+    let mut hits = Vec::new();
+    for _ in 0..9 {
+        if (1.0 / x).to_bits() == lam.to_bits() {
+            hits.push(x);
+        }
+        x = x.next_up();
+    }
+    assert!(hits.len() == 1, "RYDBERG_HYDROGEN: {} doubles have 1/x = {lam:?}", hits.len());
+    hits[0]
+}
+
+/// The prime factorisation of n (trial division by every prime below 2¹⁷, then a Miller–Rabin prime cofactor, which
+/// must be below 2⁶⁴): (prime, exponent) pairs. For the tie search's odd significands and n₂ ∓ n₁ < 2³³.
+fn factor(mut n: u64, primes: &[u64]) -> Vec<(u64, u32)> {
+    let mut out = Vec::new();
+    for &p in primes {
+        if p * p > n {
+            break;
+        }
+        let mut k = 0;
+        while n.is_multiple_of(p) {
+            n /= p;
+            k += 1;
+        }
+        if k > 0 {
+            out.push((p, k));
+        }
+    }
+    if n > 1 {
+        assert!(n < 1 << 34 || is_prime(n), "factor: composite cofactor {n} past the trial division");
+        out.push((n, 1));
+    }
+    out
+}
+
+/// Deterministic Miller–Rabin for n < 2⁶⁴ (the first twelve primes as bases).
+fn is_prime(n: u64) -> bool {
+    if n < 2 {
+        return false;
+    }
+    for p in [2_u64, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37] {
+        if n.is_multiple_of(p) {
+            return n == p;
+        }
+    }
+    let mulmod = |a: u64, b: u64| u64::try_from(u128::from(a) * u128::from(b) % u128::from(n)).unwrap_or(0);
+    let powmod = |mut b: u64, mut e: u64| {
+        let mut r = 1_u64;
+        while e > 0 {
+            if e & 1 == 1 {
+                r = mulmod(r, b);
+            }
+            b = mulmod(b, b);
+            e >>= 1;
+        }
+        r
+    };
+    let (mut d, mut s) = (n - 1, 0);
+    while d % 2 == 0 {
+        d /= 2;
+        s += 1;
+    }
+    'base: for a in [2_u64, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37] {
+        let mut x = powmod(a, d);
+        if x == 1 || x == n - 1 {
+            continue;
+        }
+        for _ in 1..s {
+            x = mulmod(x, x);
+            if x == n - 1 {
+                continue 'base;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+/// The odd part of a binary64's significand (a positive finite x).
+fn odd_significand(x: f64) -> u64 {
+    let (m, _) = crate::exact::decompose(x);
+    m >> m.trailing_zeros()
+}
+
+/// A (Z, n₁, n₂) argument triple of the transition functions.
+type Transition = (u8, u32, u32);
+
+/// ADR 0002 #21's exhaustive search of `bohr_transition_energy`'s domain for exact values: R·Z²·(n₂² − n₁²)/(n₁²·n₂²)
+/// with n₁ = g·x, n₂ = g·y, gcd(x, y) = 1, is dyadic iff the odd part of g²x²y² divides K·w, K = odd(R)·odd(Z)² and
+/// w = odd(y² − x²); w is coprime to x and y, so odd(x)·odd(y) | odd(Z) (R's odd part, 683·11214237642539, is squarefree),
+/// and with j = odd(Z)/(odd(x)·odd(y)) the odd significand is T/og², T = 683·11214237642539·j²·w, og = odd(g), og² | T.
+/// So: every coprime odd (ox, oy) with ox·oy ≤ 255, every x = ox·2^a, y = oy·2^b (min(a, b) = 0, x < y < 2³²), every
+/// Z with ox·oy | odd(Z), every og with og² | T and og·y < 2³², every g = og·2^c with g·y < 2³². Returns (ties, exact
+/// values): (Z, n₁, n₂) whose odd significand has 54 bits (a midpoint) or at most 53 (a double).
+fn transition_exact_values() -> (Vec<Transition>, Vec<Transition>) {
+    let mut sieve = vec![true; 1 << 17];
+    let mut primes = Vec::new();
+    for k in 2..sieve.len() {
+        if sieve[k] {
+            primes.push(u64::try_from(k).unwrap_or(0));
+            let mut j = k * k;
+            while j < sieve.len() {
+                sieve[j] = false;
+                j += k;
+            }
+        }
+    }
+    let kr = odd_significand(RYDBERG_EV);
+    let fr = factor(kr, &primes);
+    assert!(fr.iter().all(|&(_, e)| e == 1), "RYDBERG_EV's odd significand {kr} is not squarefree: {fr:?}");
+    let gcd = |mut a: u64, mut b: u64| {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    let odd = |n: u64| n >> n.trailing_zeros();
+    let (mut ties, mut exact) = (Vec::new(), Vec::new());
+    let max = u64::from(u32::MAX);
+    for ox in (1..=255_u64).step_by(2) {
+        for oy in (1..=255_u64).step_by(2) {
+            if ox * oy > 255 || gcd(ox, oy) != 1 {
+                continue;
+            }
+            for a in 0..33_u32 {
+                for b in 0..33_u32 {
+                    if a > 0 && b > 0 {
+                        continue;
+                    }
+                    let (x, y) = (ox << a, oy << b);
+                    if x >= y || y > max {
+                        continue;
+                    }
+                    let mut fw: Vec<(u64, u32)> = Vec::new();
+                    for (p, e) in factor(y - x, &primes).into_iter().chain(factor(y + x, &primes)) {
+                        if p == 2 {
+                            continue;
+                        }
+                        if let Some(t) = fw.iter_mut().find(|t| t.0 == p) { t.1 += e } else { fw.push((p, e)) }
+                    }
+                    for z in 1..=255_u8 {
+                        let zo = odd(u64::from(z));
+                        if zo % (ox * oy) != 0 {
+                            continue;
+                        }
+                        let j = zo / (ox * oy);
+                        let mut ft = fr.clone();
+                        for (p, e) in fw.iter().copied().chain(factor(j, &primes).into_iter().map(|(p, e)| (p, 2 * e))) {
+                            if let Some(t) = ft.iter_mut().find(|t| t.0 == p) { t.1 += e } else { ft.push((p, e)) }
+                        }
+                        // og over the square divisors of T (exponent k ≤ e/2 per prime), with T/og² by exponents
+                        let mut cands: Vec<(u64, Vec<u32>)> = vec![(1, vec![0; ft.len()])];
+                        for (idx, &(p, e)) in ft.iter().enumerate() {
+                            let mut more = Vec::new();
+                            for (d, ks) in &cands {
+                                let mut v = *d;
+                                for k in 1..=e / 2 {
+                                    v = v.saturating_mul(p);
+                                    let mut ks2 = ks.clone();
+                                    ks2[idx] = k;
+                                    more.push((v, ks2));
+                                }
+                            }
+                            cands.extend(more);
+                        }
+                        for (og, ks) in cands {
+                            if og.saturating_mul(y) > max {
+                                continue;
+                            }
+                            let mut sig: Option<u128> = Some(1);
+                            for (idx, &(p, e)) in ft.iter().enumerate() {
+                                let pe = u128::from(p).checked_pow(e - 2 * ks[idx]);
+                                sig = sig.and_then(|v| pe.and_then(|q| v.checked_mul(q)));
+                            }
+                            let Some(sig) = sig else { continue };
+                            let bits = 128 - sig.leading_zeros();
+                            if bits > 54 {
+                                continue;
+                            }
+                            let mut g = og;
+                            while g * y <= max {
+                                let row = (z, u32::try_from(g * x).unwrap_or(0), u32::try_from(g * y).unwrap_or(0));
+                                if bits == 54 { ties.push(row) } else { exact.push(row) }
+                                g <<= 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ties.sort_unstable();
+    exact.sort_unstable();
+    (ties, exact)
 }
 
 fn oscillator(m: &mut Module, n: u32, w: f64) {
@@ -344,10 +571,28 @@ pub fn emit() -> Module {
         photon(&mut m, rng.signed_log_uniform(-323.0, 308.0));
     }
 
-    // ── Bohr levels and transitions (B) ──
+    // ── Bohr levels and transitions (B; ADR 0002 #21) ──
     for z in 0..=255u8 {
         for n in U32S {
             bohr(&mut m, z, n);
+        }
+    }
+    // every exact level: −R·Z²/n² is a double exactly when n/Z is a power of two (R's odd significand, 683 times a prime
+    // above 2³², is squarefree, so odd(n)² must divide odd(Z)², and a square factor j² ≥ 9 left over puts the significand
+    // at 56 bits or more: never a midpoint either)
+    for z in 1..=255u8 {
+        let mut n = u32::from(z);
+        while n % 2 == 0 {
+            n /= 2;
+        }
+        loop {
+            if !U32S.contains(&n) {
+                bohr(&mut m, z, n);
+            }
+            match n.checked_mul(2) {
+                Some(v) => n = v,
+                None => break,
+            }
         }
     }
     let pairs: Vec<u32> = vec![0, 1, 2, 3, 4, 5, 6, 10, 100, 1000, 1_000_000, u32::MAX - 1, u32::MAX];
@@ -375,17 +620,79 @@ pub fn emit() -> Module {
         let hi = lo + u32::try_from(rng.int(1, 10_000)).unwrap_or(1);
         transition(&mut m, z, lo, hi);
     }
+    // ADR 0002 #21's hard rows: n₁ = n₂ − 1 at every binary scale and next to u32::MAX, the fast path's n₂ = 2¹³ edge,
+    // and the exhaustive search's exact values (each family's smallest, middle and largest g) and every tie
+    for k in 13..=31_u32 {
+        for n in [(1_u32 << k) - 1, 1 << k, (1 << k) + 1] {
+            for z in [1_u8, 2, 3, 92, 255] {
+                transition(&mut m, z, n, n + 1);
+            }
+        }
+    }
+    for k in 0..=9_u32 {
+        for d in [1_u32, 2, 3, 7, 1000] {
+            for z in [1_u8, 26, 255] {
+                transition(&mut m, z, u32::MAX - k - d, u32::MAX - k);
+            }
+        }
+    }
+    for hi in [8190_u32, 8191, 8192, 8193] {
+        for lo in [1_u32, hi / 2, hi - 2, hi - 1] {
+            for z in [1_u8, 255] {
+                transition(&mut m, z, lo, hi);
+            }
+        }
+    }
+    let (ties, exact) = transition_exact_values();
+    assert!(ties.len() == 13 && exact.len() == 5657, "the #21 search found {} ties and {} exact values", ties.len(), exact.len());
+    for &(z, lo, hi) in &ties {
+        transition(&mut m, z, lo, hi);
+    }
+    let mut fams: Vec<(Transition, Vec<(u32, u32)>)> = Vec::new();
+    for &(z, lo, hi) in &exact {
+        let g = {
+            let (mut a, mut b) = (lo, hi);
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            a
+        };
+        match fams.iter_mut().find(|f| f.0 == (z, lo / g, hi / g)) {
+            Some(f) => f.1.push((lo, hi)),
+            None => fams.push(((z, lo / g, hi / g), vec![(lo, hi)])),
+        }
+    }
+    for ((z, _, _), mut members) in fams {
+        members.sort_unstable();
+        let last = members.len() - 1;
+        let mut picks = vec![members[0], members[last / 2], members[last]];
+        picks.dedup();
+        for (lo, hi) in picks {
+            transition(&mut m, z, lo, hi);
+        }
+    }
 
-    // ── SpectralSeries (A n_lower, B wavelength) ──
+    // ── SpectralSeries (A n_lower, B wavelength; ADR 0002 #21) ──
+    let rh = rydberg_hydrogen();
     for s in SERIES {
         m.row("SpectralSeries::n_lower", Class::A, &[e("SpectralSeries", s)], &[i(s.n_lower())]);
     }
     for s in SERIES {
         for line in (0..=24).chain([50, 100, 1000, 1_000_000, 1 << 31]) {
-            series_line(&mut m, s, line);
+            series_line(&mut m, s, line, rh);
         }
         for d in 0..=8 {
-            series_line(&mut m, s, u32::MAX - d); // the checked_add overflow: n_lower + line past u32::MAX
+            series_line(&mut m, s, u32::MAX - d, rh); // the checked_add overflow: n_lower + line past u32::MAX
+        }
+        // large lines (n₂ = n₁ + line: 1/n₁² − 1/n₂² near 1/n₁²), the largest, and the fast path's n₂ = 2¹³ edge
+        for k in 5..=30_u32 {
+            series_line(&mut m, s, 1 << k, rh);
+        }
+        for d in 9..=24 {
+            series_line(&mut m, s, u32::MAX - d, rh);
+        }
+        for n2 in [8191_u32, 8192, 8193] {
+            series_line(&mut m, s, n2 - s.n_lower(), rh);
         }
     }
 
@@ -415,8 +722,12 @@ pub fn emit() -> Module {
         wavenumbers(&mut m, rng.log_uniform(-8.0, 5.0)); // IR to radio wavelengths, and wavenumbers
     }
 
-    // ── reduced_mass (B) ──
-    let rm = |m: &mut Module, a: f64, b_: f64| fr(m, "spectroscopy::reduced_mass", Class::B, &[a, b_], reduced_mass(bb(a), bb(b_)));
+    // ── reduced_mass (B; ADR 0002 #22) ──
+    let rm = |m: &mut Module, a: f64, b_: f64| {
+        let ok = a > 0.0 && a.is_finite() && b_ > 0.0 && b_.is_finite();
+        let exact = ok.then(|| cr_reduced_mass(a, b_));
+        noted(m, "spectroscopy::reduced_mass", &[f(a), f(b_)], reduced_mass(bb(a), bb(b_)), exact, 22, "m₁·m₂/(m₁ + m₂)");
+    };
     for x in edges() {
         rm(&mut m, x, 1.0);
         rm(&mut m, 1.0, x);
@@ -447,6 +758,96 @@ pub fn emit() -> Module {
     }
     for _ in 0..200 {
         rm(&mut m, rng.log_uniform(-320.0, 308.0), rng.log_uniform(-320.0, 308.0));
+    }
+    // ADR 0002 #22's hard rows (their own seed, so the rows after them keep theirs): m = m at every power of two (m/2,
+    // and at 2⁻¹⁰⁷⁴ the tie 2⁻¹⁰⁷⁵, to 0) and at subnormal odd multiples of 2⁻¹⁰⁷⁴ (k·2⁻¹⁰⁷⁵: ties); (6c, 2c)·2⁻¹⁰⁷⁴
+    // (3c/2·2⁻¹⁰⁷⁴: ties); three families of normal ties — (2²⁷ ∓ c) (μ = (2⁵⁴ − c²)·2⁻²⁸), 3·(3·2²⁵ ∓ c) ((9·2⁵⁰ − c²)·2⁻²⁶)
+    // and 3·(2²⁶ ∓ c) (3·(2⁵² − c²)·2⁻²⁷), each a 54-bit odd significand — at scales across the range, and the first
+    // two moved to the subnormal grid (2⁻¹⁰⁷⁵ times an odd significand below 2⁵³); exponent gaps 45 … 64 around the proven
+    // 55 (m₂ − μ < 2⁻⁵⁴·m₂ there), with the largest and smallest significands; the fast path's subnormal edge (m₂ near
+    // 2⁻¹⁰²¹); m₁ + m₂ and m₁·m₂ overflowing and underflowing; binade-uniform pairs over the whole range.
+    let mut r22 = Rng::new(0x5e22);
+    for k in -1074..=1023 {
+        rm(&mut m, pow2(k), pow2(k));
+    }
+    for k in (1_u64..=64).chain([(1 << 52) - 3, (1 << 52) - 1, (1 << 52) + 1, (1 << 53) - 1]) {
+        let x = f64::from_bits(k);
+        rm(&mut m, x, x);
+    }
+    for c in (1_u64..=31).step_by(2).chain([(1 << 48) + 1, (1 << 49) - 1]) {
+        rm(&mut m, f64::from_bits(6 * c), f64::from_bits(2 * c));
+    }
+    let fam = |h: f64, base: f64, c: f64| (h * (base - c), h * (base + c));
+    let fams = [
+        (1.0, pow2(27), vec![1.0, 3.0, 5.0, 7.0, 99.0, 12_345.0, 1_048_577.0, 94_906_265.0]),
+        (3.0, 3.0 * pow2(25), vec![1.0, 3.0, 1001.0, 33_554_431.0]),
+        (3.0, pow2(26), vec![1.0, 3.0, 7.0, 12_345.0]),
+    ];
+    for (h, base, cs) in &fams {
+        for &c in cs {
+            let (a, b_) = fam(*h, *base, c);
+            for t in [-1000, -500, -60, 0, 60, 500, 900, 994] {
+                rm(&mut m, a * pow2(t), b_ * pow2(t));
+            }
+        }
+    }
+    for c in [94_906_267.0, pow2(26) + 1.0, pow2(27) - 1.0] {
+        let (a, b_) = fam(1.0, pow2(27), c);
+        rm(&mut m, a * pow2(-1047), b_ * pow2(-1047)); // (2⁵⁴ − c²)·2⁻¹⁰⁷⁵ with 2⁵⁴ − c² < 2⁵³: a subnormal tie
+    }
+    for c in [pow2(25) + 1.0, 3.0 * pow2(25) - 1.0] {
+        let (a, b_) = fam(3.0, 3.0 * pow2(25), c);
+        rm(&mut m, a * pow2(-1049), b_ * pow2(-1049));
+    }
+    for g in 45..=64_i32 {
+        for e2 in [-1074, -1060, -1022, -1021, -1, 0, 400, 1023 - 64] {
+            for (s1, s2) in [(1.0, 1.0), (1.0, 2.0 - pow2(-52)), (2.0 - pow2(-52), 1.0), (1.5, 1.25)] {
+                let m2 = if e2 == -1074 { pow2(-1074) } else { s2 * pow2(e2) };
+                let m1 = s1 * pow2(e2.max(-1022) + g);
+                rm(&mut m, m1, m2);
+                rm(&mut m, m2, m1);
+            }
+            let s1 = r22.uniform(1.0, 2.0);
+            let s2 = r22.uniform(1.0, 2.0);
+            rm(&mut m, s1 * pow2(e2.max(-1022) + g), s2 * pow2(e2.max(-1022)));
+        }
+    }
+    for m2 in [pow2(-1021), pow2(-1021).next_down(), pow2(-1021).next_up(), pow2(-1022), pow2(-1022).next_up(),
+               pow2(-1022).next_down(), pow2(-1020)] {
+        for m1 in [m2, 2.0 * m2, 3.0 * m2, 1.0, pow2(-1000), pow2(-970)] {
+            rm(&mut m, m1, m2);
+        }
+    }
+    for (a, b_) in [
+        (big, big),
+        (big, pow2(1023)),
+        (1.5 * pow2(1023), 1.5 * pow2(1023)),
+        (big, 1e300),
+        (1e308, 1e308),
+        (big, big.next_down()),
+        (big, pow2(1023 - 55)),
+        (big, pow2(1023 - 54)),
+        (1e300, 1e300),
+        (pow2(1000), pow2(1000)),
+        (pow2(-1074), pow2(-1073)),
+        (pow2(-1074), 3.0 * pow2(-1074)),
+        (pow2(-1074), pow2(-1022)),
+        (1e-320, 1e-320),
+        (1e-320, 3e-320),
+        (1e-160, 1e-160),
+        (pow2(-1022), pow2(-1022)),
+    ] {
+        rm(&mut m, a, b_);
+    }
+    for _ in 0..400 {
+        let a = f64::from_bits(r22.int(1, 0x7FEF_FFFF_FFFF_FFFF).cast_unsigned());
+        let b_ = if r22.unit() < 0.25 { a } else { f64::from_bits(r22.int(1, 0x7FEF_FFFF_FFFF_FFFF).cast_unsigned()) };
+        rm(&mut m, a, b_);
+    }
+    for _ in 0..200 {
+        let a = f64::from_bits(r22.int(1, 1 << 54).cast_unsigned());
+        let b_ = f64::from_bits(r22.int(1, 1 << 54).cast_unsigned());
+        rm(&mut m, a, b_); // subnormal and low-binade masses: subnormal results
     }
 
     // ── harmonic_oscillator_energy (B) ──

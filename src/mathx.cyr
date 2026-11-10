@@ -24,9 +24,11 @@
 # trigonometry onto them (and potential.cyr's angles, on _km_cr_atan2), and removed ADR 0005's double-double
 # _km_acos and _km_cos (M2a) and their helpers, so no stdlib transcendental is called here any more and
 # lib/math.cyr is no longer included; and added _km_cr_exp2_scaled, the correctly rounded s·2^y·2^e of ADR
-# 0002 #13 (nuclear.cyr's N₀/2ⁿ past the normal range). M4e added _km_cr_hundredth_div (ADR 0002 #19), and M4e-2
-# binary64 with an unbounded exponent (_km_ux_*, at the end of this file: potential.cyr's geometry under ADR 0002 #20,
-# and the machinery of the library-wide audit of intermediate over- and underflow after M4).
+# 0002 #13 (nuclear.cyr's N₀/2ⁿ past the normal range). M4e added _km_cr_hundredth_div (ADR 0002 #19), M4e-2
+# binary64 with an unbounded exponent (_km_ux_*: potential.cyr's geometry under ADR 0002 #20, and the machinery of the
+# library-wide audit of intermediate over- and underflow after M4), and M4e-3, at the end of this file, multi-word
+# unsigned integers (_km_bn_*), the exact RN(p/q·2^e) _km_cr_ratio and the double-double _km_dd_mul / _km_dd_div_cr
+# (spectroscopy.cyr's Bohr model, Rydberg formula and reduced mass rounded once, ADR 0002 #21 and #22).
 # The coefficients and constants are bit patterns in typed f64 locals (never a hex `const`).
 
 # +∞ (0x7FF0000000000000), a compile-time constant.
@@ -3782,4 +3784,309 @@ fn _km_ux_atan2_fast(ys: f64, ye, xs: f64, xe): (f64, i64) {
 fn _km_ux_atan2_acc(ys: f64, ye, xs: f64, xe): f64 {
     var a, ok = _km_ux_atan2_any(ys, ye, xs, xe, 1);
     return a;
+}
+
+# ── exact rationals rounded once (M4e-3): ADR 0002 #21, #22 ──────────────────────────────────────────────────
+#
+# RN(p/q·2^e) for exact nonnegative integers p and q (q ≥ 1): spectroscopy.cyr's Bohr levels, Rydberg formula and
+# reduced mass, whose exact values are such ratios of products of small integers and the binary64 constants and inputs
+# (ADR 0002 #21, #22); written for reuse (M4f's stoichiometry, the library-wide audit). Two parts:
+# - Multi-word unsigned integers (_km_bn_*): _KM_BN_LIMBS = 8 limbs of 32 bits, little-endian, each in an i64 word
+#   (0 ≤ limb < 2^32), 64 bytes (`var a[64];`): values below 2^256. Products of two limbs and a carry are below 2^64
+#   and are formed in wrapping 64-bit arithmetic, their halves taken with `&` and the logical `>>`, so every limb
+#   operation is exact. The caller keeps every result below the capacity (each function says what it needs).
+# - _km_cr_ratio(p, q, e): restoring long division, one quotient bit per step. With bp, bq the bit lengths and
+#   t = bp − bq, N = p and D = q are aligned (D·2^t, or N·2^-t) to the same bit length L = max(bp, bq), and N doubled
+#   once more (t − 1) if N < D, so D ≤ N < 2D and p/q = (N/D)·2^t. 55 steps give Q = ⌊N·2^54/D⌋ in [2^54, 2^55) and
+#   the remainder (N stays below 2D: at most L + 1 bits); p/q·2^e = (Q + f)·2^(e + t − 54), 0 ≤ f < 1. The value
+#   lies in [2Q, 2Q + 2)·2^(e + t − 55), strictly inside when f > 0, and 2Q + sticky (sticky = 1 iff the remainder is
+#   not 0) lies in the same half-open interval; every binary64 rounding boundary there (53 bits kept of the 56, or
+#   fewer at the subnormal grid, so a multiple of 4 units) is an end point of it, so the two round alike, exact values
+#   and midpoints (f = 0) included: _km_cr_from_int(2Q + sticky, e + t − 55) rounds once, ties to even, subnormal
+#   results on the 2^-1074 grid, +∞ past DBL_MAX, +0 below half of 2^-1074. p = 0 gives +0. About 55·(3·n) limb
+#   operations for n = ⌈(L + 1)/32⌉ limbs: a microsecond, the slow path of the functions that call it.
+# The double-double helpers below serve their fast paths: _km_dd_mul (a product of normalised double-doubles to
+# 2^-102.99) and _km_dd_div_cr (the quotient with a rounding test), whose error budget is stated there.
+
+# The capacity of a multi-word integer, in 32-bit limbs (8: below 2^256, 64 bytes).
+const _KM_BN_LIMBS = 8;
+
+# a = v, for v a 64-bit word read as unsigned (the other limbs cleared).
+fn _km_bn_set(a, v) {
+    store64(a, v & 0xFFFFFFFF);
+    store64(a + 8, v >> 32);
+    var k = 2;
+    while (k < _KM_BN_LIMBS) {
+        store64(a + 8 * k, 0);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# a = b.
+fn _km_bn_copy(a, b) {
+    var k = 0;
+    while (k < _KM_BN_LIMBS) {
+        store64(a + 8 * k, load64(b + 8 * k));
+        k = k + 1;
+    }
+    return 0;
+}
+
+# The bit length of a (0 for zero).
+#must_use
+fn _km_bn_bitlen(a): i64 {
+    var k = _KM_BN_LIMBS - 1;
+    while (k >= 0) {
+        var w = load64(a + 8 * k);
+        if (w != 0) {
+            var b = 0;
+            while (w != 0) {
+                w = w >> 1;
+                b = b + 1;
+            }
+            return 32 * k + b;
+        }
+        k = k - 1;
+    }
+    return 0;
+}
+
+# −1, 0 or 1 as a <, =, > b.
+#must_use
+fn _km_bn_cmp(a, b): i64 {
+    var k = _KM_BN_LIMBS - 1;
+    while (k >= 0) {
+        var x = load64(a + 8 * k);
+        var y = load64(b + 8 * k);
+        if (x < y) { return 0 - 1; }
+        if (x > y) { return 1; }
+        k = k - 1;
+    }
+    return 0;
+}
+
+# r = a + b (r may be a or b); the sum must be below 2^256.
+fn _km_bn_add(r, a, b) {
+    var c = 0;
+    var k = 0;
+    while (k < _KM_BN_LIMBS) {
+        var s = load64(a + 8 * k) + load64(b + 8 * k) + c;
+        store64(r + 8 * k, s & 0xFFFFFFFF);
+        c = s >> 32;
+        k = k + 1;
+    }
+    return 0;
+}
+
+# r = a − b, for a ≥ b (r may be a or b).
+fn _km_bn_sub(r, a, b) {
+    var borrow = 0;
+    var k = 0;
+    while (k < _KM_BN_LIMBS) {
+        var d = load64(a + 8 * k) - load64(b + 8 * k) - borrow;
+        borrow = 0;
+        if (d < 0) {
+            d = d + 0x100000000;
+            borrow = 1;
+        }
+        store64(r + 8 * k, d);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# a = a·m in place, for 0 ≤ m < 2^32; the product must be below 2^256. Each limb·m + carry is below 2^64.
+fn _km_bn_mul_small(a, m) {
+    var c = 0;
+    var k = 0;
+    while (k < _KM_BN_LIMBS) {
+        var t = load64(a + 8 * k) * m + c;
+        store64(a + 8 * k, t & 0xFFFFFFFF);
+        c = t >> 32;
+        k = k + 1;
+    }
+    return 0;
+}
+
+# r = a·b, schoolbook on the limbs, r distinct from a and b; the product must be below 2^256. Each limb product plus
+# the partial limb and the carry is below 2^64.
+fn _km_bn_mul(r, a, b) {
+    var k = 0;
+    while (k < _KM_BN_LIMBS) {
+        store64(r + 8 * k, 0);
+        k = k + 1;
+    }
+    var la = (_km_bn_bitlen(a) + 31) / 32;
+    var lb = (_km_bn_bitlen(b) + 31) / 32;
+    var i = 0;
+    while (i < la) {
+        var ai = load64(a + 8 * i);
+        var c = 0;
+        var j = 0;
+        while (j < lb && i + j < _KM_BN_LIMBS) {
+            var t = ai * load64(b + 8 * j) + load64(r + 8 * (i + j)) + c;
+            store64(r + 8 * (i + j), t & 0xFFFFFFFF);
+            c = t >> 32;
+            j = j + 1;
+        }
+        if (i + lb < _KM_BN_LIMBS) { store64(r + 8 * (i + lb), c); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# a = a·2^s in place, for s ≥ 0; the result must be below 2^256.
+fn _km_bn_shl(a, s) {
+    var w = s / 32;
+    var b = s - 32 * w;
+    var k = _KM_BN_LIMBS - 1;
+    while (k >= 0) {
+        var v = 0;
+        if (k - w >= 0) {
+            v = (load64(a + 8 * (k - w)) << b) & 0xFFFFFFFF;
+            if (b > 0 && k - w - 1 >= 0) { v = v | (load64(a + 8 * (k - w - 1)) >> (32 - b)); }
+        }
+        store64(a + 8 * k, v);
+        k = k - 1;
+    }
+    return 0;
+}
+
+# (M, E) with x = M·2^E and 2^52 ≤ M < 2^53 for the bits b of a positive finite nonzero double (a subnormal's
+# significand shifted up, E below −1074).
+#must_use
+fn _km_f64_int(b): (i64, i64) {
+    var be = b >> 52;
+    var m = b & 0x000FFFFFFFFFFFFF;
+    if (be != 0) { return (m | 0x0010000000000000, be - 1075); }
+    var e = 0 - 1074;
+    while (m < 0x0010000000000000) {
+        m = m << 1;
+        e = e - 1;
+    }
+    return (m, e);
+}
+
+# RN(p/q·2^e) in binary64, rounded once, for multi-word integers 0 ≤ p < 2^254 and 1 ≤ q < 2^254 and |e| < 2^39 (the
+# section comment): exact, ties to even, subnormal results on the 2^-1074 grid, +∞ past DBL_MAX, +0 for p = 0 and below
+# half of 2^-1074. p and q are not changed.
+#must_use
+fn _km_cr_ratio(p, q, e): f64 {
+    var bp = _km_bn_bitlen(p);
+    if (bp == 0) { return 0.0; }
+    var bq = _km_bn_bitlen(q);
+    var nb[64];
+    var db[64];
+    var tb[64];
+    _km_bn_copy(&nb, p);
+    _km_bn_copy(&db, q);
+    var t = bp - bq;
+    var ll = bp;
+    if (t >= 0) {
+        _km_bn_shl(&db, t);
+    } else {
+        _km_bn_shl(&nb, 0 - t);
+        ll = bq;
+    }
+    if (_km_bn_cmp(&nb, &db) < 0) {
+        _km_bn_shl(&nb, 1);
+        t = t - 1;
+    }
+    var n = (ll + 32) / 32;                         # the limbs of L + 1 bits: N < 2D throughout
+    var np = &nb;
+    var tp = &tb;
+    var qq = 0;
+    var i = 0;
+    while (i < 55) {
+        var borrow = 0;                             # T = N − D, kept when it does not borrow
+        var k = 0;
+        while (k < n) {
+            var d = load64(np + 8 * k) - load64(&db + 8 * k) - borrow;
+            borrow = 0;
+            if (d < 0) {
+                d = d + 0x100000000;
+                borrow = 1;
+            }
+            store64(tp + 8 * k, d);
+            k = k + 1;
+        }
+        qq = qq << 1;
+        if (borrow == 0) {
+            var sw = np;
+            np = tp;
+            tp = sw;
+            qq = qq + 1;
+        }
+        var c = 0;                                  # N = 2N
+        k = 0;
+        while (k < n) {
+            var w = load64(np + 8 * k);
+            store64(np + 8 * k, ((w << 1) | c) & 0xFFFFFFFF);
+            c = w >> 31;
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    var sticky = 0;
+    var j = 0;
+    while (j < n) {
+        if (load64(np + 8 * j) != 0) { sticky = 1; }
+        j = j + 1;
+    }
+    var r: f64 = _km_cr_from_int(2 * qq + sticky, e + t - 55);
+    return r;
+}
+
+# (a_h + a_l)·(b_h + b_l) as a normalised double-double (h, l): TwoProduct of the heads (p + e exactly), the cross terms
+# a_h·b_l + a_l·b_h rounded, a_l·b_l dropped, e + c rounded, FastTwoSum (exact, |p| ≥ |e + c|). For normalised inputs
+# (|a_l| ≤ 2^-53·|a_h|, likewise b) with |a_h|, |b_h| < 2^996 and |a_h·b_h| ≥ 2^-900 (TwoProduct's conditions, every
+# term normal): h + l = (a_h + a_l)(b_h + b_l)(1 + δ) with |δ| ≤ 8.01·2^-106 < 2^-102.99 (with u = 2^-53 and
+# P = |a_h·b_h|: the two cross products' roundings u²·P each, their sum's 2u²·P, e + c's 3u²·P, the dropped term u²·P,
+# so 8u²(1 + u)·P, and P ≤ |product|/(1 − u)²), |l| ≤ 2^-53·|h|.
+#must_use
+fn _km_dd_mul(ah: f64, al: f64, bh: f64, bl: f64): (f64, f64) {
+    var p, e = _km_two_prod(ah, bh);
+    var c: f64 = (ah * bl) + (al * bh);
+    var t: f64 = e + c;
+    var h, l = _km_fast_two_sum(p, t);
+    return (h, l);
+}
+
+# (RN(n/d), 1) for the double-double quotient n/d = (n_h + n_l)/(d_h + d_l) of an exact positive value v, or (0, 0) when
+# the rounding test fails. n and d are normalised (|n_l| ≤ 2^-53·n_h, likewise d), n_h, d_h and n_h/d_h in
+# [2^-900, 2^900], and they may carry relative errors δn, δd (n = N(1 + δn), d = D(1 + δd), v = N/D) with
+# |δn| + |δd| ≤ 32u², u = 2^-53. y0 = RN(n_h/d_h); y0·d_h = a + b (TwoProduct); n_h − a is exact (Sterbenz: a is within
+# 2u of n_h); r = (((n_h − a) − b) + n_l) − y0·d_l is n − y0·d to 7.04u²·n (four roundings: u²·n_h, 2.01u², 1.01u² and
+# 3.01u² of n_h); d = RN(r/d_h) (|r| ≤ 3.02u·n, and r/d_h is r/d to 2.01u, so d is r/d to 6.08u²·v); so y0 + d is n/d to
+# 13.12u², and v to 13.12u² + 32.01u² = 45.13u². The test: ε = 2^-100·y0 = 64u²·y0 ≥ 63.9u²·v; RN(d ∓ ε) are d ∓ ε to
+# 3.04u²·v, so y0 + RN(d − ε) < v < y0 + RN(d + ε), and when the two sums round to the same double, RN being monotone,
+# v rounds to it: exact values (half an ulp from every boundary) pass, a midpoint never does. It fails with probability
+# about 2^-46 (v within 2^-99 of a midpoint, relative).
+#must_use
+fn _km_dd_div_cr(nh: f64, nl: f64, dh: f64, dl: f64): (f64, i64) {
+    var y0: f64 = nh / dh;
+    var a: f64 = y0 * dh;                           # y0·d_h = a + b: TwoProduct, inline (Veltkamp's 2^27 + 1 split)
+    var sp: f64 = 134217729.0;
+    var cy: f64 = sp * y0;
+    var yh: f64 = cy - (cy - y0);
+    var yl: f64 = y0 - yh;
+    var cd: f64 = sp * dh;
+    var dhh: f64 = cd - (cd - dh);
+    var dhl: f64 = dh - dhh;
+    var b: f64 = (yl * dhl) - (((a - (yh * dhh)) - (yl * dhh)) - (yh * dhl));
+    var s: f64 = nh - a;
+    var s1: f64 = s - b;
+    var s2: f64 = s1 + nl;
+    var s3: f64 = y0 * dl;
+    var r: f64 = s2 - s3;
+    var d: f64 = r / dh;
+    var k100: f64 = 0x39B0000000000000;             # 2^-100
+    var eps: f64 = y0 * k100;
+    var lo: f64 = d - eps;
+    var hi: f64 = d + eps;
+    var z1: f64 = y0 + lo;
+    var z2: f64 = y0 + hi;
+    if (z1 != z2) { return (0.0, 0); }
+    return (z1, 1);
 }

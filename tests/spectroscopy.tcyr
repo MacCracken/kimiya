@@ -2,13 +2,15 @@
 # name; all 62), the two spectroscopy tests of rust-old/tests/integration.rs, plus Cyrius-only tests of Rust's integers
 # as words (u8 Z, u32 n / line / count outside their types), the caller buffers (too small, null, the FFT's in-place
 # work table), the private helpers (the isotope pattern's stable sort, its typed thresholds on the ulp, the FFT
-# transcription), ADR 0002 #19's correctly rounded 1/(100·x) and the generated R_H. The golden corpus separately checks
-# every function over its grid (tests/parity.tcyr).
+# transcription), ADR 0002 #19's correctly rounded 1/(100·x), #21's exact Rydberg rationals and #22's exact reduced
+# mass (ties, exact values, the fast paths against the exact ones) and the generated R_H. The golden corpus separately
+# checks every function over its grid (tests/parity.tcyr).
 #
 # Adapted beyond the port's form (port plan §6.4: `Result::unwrap` is `is_ok` + the payload, a Vec the caller's buffer
 # and its count, a slice a pointer and a count, `SpectralSeries::X.wavelength(l)` spectral_series_wavelength(KM_…, l),
 # `x.sin()` the correctly rounded _km_cr_sin, `RYDBERG_HYDROGEN` the generated _KM_RYDBERG_HYDROGEN); no test needed
-# more. ADR 0002 #19 changes none of the Rust tests' cases (500 nm, 10 µm and their round trips are equal in both).
+# more. ADR 0002 #19 changes none of the Rust tests' cases (500 nm, 10 µm and their round trips are equal in both),
+# nor do #21 and #22 (the Rust tests check their values to 10⁻⁶ or better and exact zeros only).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -1196,6 +1198,187 @@ fn _t_cyrius_adr19() {
     assert(agree == 1 && passed > 10000, "fast = accurate on 20,000 seeded doubles");
 }
 
+# ADR 0002 #21: the Bohr levels, the transition energy and the Rydberg formula, correctly rounded (rounded once).
+fn _t_cyrius_adr21() {
+    test_group("cyrius: ADR 0002 #21 (exact Rydberg rationals)");
+    var rr: f64 = KM_RYDBERG_EV;
+    var nr: f64 = -rr;
+    # −R exactly at n = Z (Rust's ((−R·Z)·Z)/(n·n) misses it at 86 of the 255 Z: 5 first), and −R/4^k at n = 2^k·Z
+    var exact_all = 1;
+    var z = 1;
+    while (z <= 255) {
+        var t0, v0 = bohr_energy_level(z, z);
+        if (is_ok(t0) != 1 || v0 != bits(nr)) { exact_all = 0; }
+        var k = 1;
+        var sc: f64 = 0.25;
+        while ((z << k) <= 0xFFFFFFFF) {
+            var t1, v1 = bohr_energy_level(z, z << k);
+            var want: f64 = nr * sc;
+            if (is_ok(t1) != 1 || v1 != bits(want)) { exact_all = 0; }
+            sc = sc * 0.25;
+            k = k + 1;
+        }
+        z = z + 1;
+    }
+    assert(exact_all == 1, "bohr_energy_level(Z, 2^k·Z) = −R/4^k exactly, every Z");
+    var five: f64 = 5.0;
+    var rust5: f64 = ((nr * five) * five) / (five * five);
+    assert(bits(rust5) != bits(nr), "Rust's chain misses −R at Z = n = 5");
+    var t2, v2 = bohr_energy_level(1, 1);
+    assert(is_ok(t2) == 1 && v2 == bits(nr), "hydrogen's ground state: −R");
+    # exact transition energies (the search's families) and the 13 ties, which the fast path must decline
+    var t3, v3 = bohr_transition_energy(15, 3, 5);
+    var w3: f64 = rr * 16.0;
+    assert(is_ok(t3) == 1 && v3 == bits(w3), "E(15; 3 → 5) = R·225·(25 − 9)/225 = 16R exactly");
+    var t4, v4 = bohr_transition_energy(17, 3, 51);
+    var w4: f64 = rr * 32.0;
+    assert(is_ok(t4) == 1 && v4 == bits(w4), "E(17; 3 → 51) = 32R exactly");
+    var ties_ok = 1;
+    var k2 = 0;
+    var sc2: f64 = 1.0;
+    while (k2 <= 12) {
+        var lo = 58055 << k2;
+        var hi = 524544 << k2;
+        var t5, v5 = bohr_transition_energy(255, lo, hi);
+        var w5: f64 = from_bits(0x3F30FDFF3FB2D524);
+        var w5k: f64 = w5 * sc2;
+        if (is_ok(t5) != 1 || v5 != bits(w5k)) { ties_ok = 0; }
+        var f5, o5 = _km_bohr_transition_fast(255, lo, hi);
+        if (o5 != 0) { ties_ok = 0; }
+        var a5: f64 = _km_bohr_transition_acc(255, lo, hi);
+        if (bits(a5) != bits(w5k)) { ties_ok = 0; }
+        sc2 = sc2 * 0.25;
+        k2 = k2 + 1;
+    }
+    assert(ties_ok == 1, "the 13 ties (255; 2^k·(58055 → 524544)): the fast path declines, the exact path: to even");
+    var t6, v6 = bohr_transition_energy(1, 1, 2);
+    assert(is_ok(t6) == 1 && v6 == 0x402468960E8801CB, "Lyman α: RN(3R/4)");
+    var t7, v7 = rydberg_wavelength(1, 2, 3);
+    assert(is_ok(t7) == 1 && v7 == 0x3EA603F627730C4F, "Hα (R∞): RN(36/(5R∞))");
+    var t8, v8 = rydberg_wavelength(255, 0x80000000, 0x80000007);
+    assert(is_ok(t8) == 1 && v8 == 0x430C2D04AB1E7CE8, "(255, 2³¹, 2³¹ + 7): Rust's cancellation is 3.9·10⁷ ulp off");
+    # the fast paths agree with the exact paths wherever their tests pass (seeded Z, n₁, n₂ at every scale)
+    var seed = 0x2545F4914F6CDD1D;
+    var agree = 1;
+    var passed = 0;
+    var k = 0;
+    while (k < 6000) {
+        seed = seed ^ (seed << 13);
+        seed = seed ^ (seed >> 7);
+        seed = seed ^ (seed << 17);
+        var zz = 1 + (seed & 0xFF) % 255;
+        var sh = (seed >> 8) % 33;
+        var nl = 1 + ((seed >> 16) & 0xFFFFFFFF) % (1 << sh);
+        if (nl > 0xFFFFFFFE) { nl = 0xFFFFFFFE; }
+        var dd = 1 + (seed >> 48) % 64;
+        if ((seed & 0x100) != 0) { dd = 1 + (seed >> 40) % 0xFFFFFF; }
+        var nu = nl + dd;
+        if (nu > 0xFFFFFFFF) { nu = 0xFFFFFFFF; }
+        var nn = nl;
+        if (nn > 0xFFFFFFFF) { nn = 0xFFFFFFFF; }
+        var fl, ol = _km_bohr_level_fast(zz, nn);
+        var al: f64 = _km_bohr_level_acc(zz, nn);
+        if (ol == 1) {
+            passed = passed + 1;
+            if (bits(fl) != bits(al)) { agree = 0; }
+        }
+        if (nu > nl) {
+            var ft, ot = _km_bohr_transition_fast(zz, nl, nu);
+            var at: f64 = _km_bohr_transition_acc(zz, nl, nu);
+            if (ot == 1) {
+                passed = passed + 1;
+                if (bits(ft) != bits(at)) { agree = 0; }
+            }
+            var ri: f64 = KM_RYDBERG;
+            var fw, ow = _km_rydberg_fast(ri, zz, nl, nu);
+            var aw: f64 = _km_rydberg_acc(ri, zz, nl, nu);
+            if (ow == 1) {
+                passed = passed + 1;
+                if (bits(fw) != bits(aw)) { agree = 0; }
+            }
+        }
+        k = k + 1;
+    }
+    assert(agree == 1 && passed > 15000, "fast = exact on 6,000 seeded (Z, n₁, n₂) × 3 functions");
+}
+
+# ADR 0002 #22: the reduced mass, correctly rounded (rounded once, subnormal results included).
+fn _t_cyrius_adr22() {
+    test_group("cyrius: ADR 0002 #22 (exact reduced mass)");
+    # m/2 for a homonuclear diatomic, every seeded normal mass (Rust's m·m/(m + m) misses it on 8.6 %)
+    var seed = 0x9E3779B97F4A7C15;
+    var half_ok = 1;
+    var rust_miss = 0;
+    var k = 0;
+    while (k < 10000) {
+        seed = seed ^ (seed << 13);
+        seed = seed ^ (seed >> 7);
+        seed = seed ^ (seed << 17);
+        var b = 0x0020000000000000 + (seed & 0x7FFFFFFFFFFFFFFF) % (0x7FE0000000000000 - 0x0020000000000000);
+        var m: f64 = from_bits(b);
+        var t, v = reduced_mass(m, m);
+        var h: f64 = m * 0.5;
+        if (is_ok(t) != 1 || v != bits(h)) { half_ok = 0; }
+        var rust: f64 = (m * m) / (m + m);
+        if (bits(rust) != bits(h)) { rust_miss = rust_miss + 1; }
+        k = k + 1;
+    }
+    assert(half_ok == 1, "reduced_mass(m, m) = m/2 exactly, 10,000 seeded normal masses");
+    assert(rust_miss > 0, "Rust's chain misses m/2 on some of them (and over- or underflows at the ends)");
+    var t1, v1 = reduced_mass(134217727.0, 134217729.0);
+    assert(is_ok(t1) == 1 && v1 == 0x4190000000000000, "(2²⁷ − 1, 2²⁷ + 1): the tie 2²⁶ − 2⁻²⁸ to even, 2²⁶");
+    var f1, o1 = _km_reduced_mass_fast(134217727.0, 134217729.0);
+    assert(o1 == 0, "the fast path declines the tie");
+    var s3: f64 = from_bits(3);
+    var t2, v2 = reduced_mass(s3, s3);
+    assert(is_ok(t2) == 1 && v2 == 2, "(3·2⁻¹⁰⁷⁴, 3·2⁻¹⁰⁷⁴): the subnormal tie 1.5·2⁻¹⁰⁷⁴ to even");
+    var s6: f64 = from_bits(6);
+    var s2: f64 = from_bits(2);
+    var t3, v3 = reduced_mass(s6, s2);
+    assert(is_ok(t3) == 1 && v3 == 2, "(6·2⁻¹⁰⁷⁴, 2·2⁻¹⁰⁷⁴): 1.5·2⁻¹⁰⁷⁴ to even");
+    var s1: f64 = from_bits(1);
+    var t4, v4 = reduced_mass(s1, s1);
+    assert(is_ok(t4) == 1 && v4 == 0, "(2⁻¹⁰⁷⁴, 2⁻¹⁰⁷⁴): the tie 2⁻¹⁰⁷⁵ to +0");
+    var big: f64 = 0x7FEFFFFFFFFFFFFF;
+    var t5, v5 = reduced_mass(big, big);
+    var hb: f64 = big * 0.5;
+    assert(is_ok(t5) == 1 && v5 == bits(hb), "(DBL_MAX, DBL_MAX) = DBL_MAX/2 (Rust: ∞/∞ = NaN)");
+    var t6, v6 = reduced_mass(1.0, 0x3C80000000000000);
+    assert(is_ok(t6) == 1 && v6 == 0x3C80000000000000, "(1, 2⁻⁵⁵): the gap of 55, the smaller mass");
+    var t7, v7 = reduced_mass(1.007825, 34.968853);
+    assert(is_ok(t7) == 1 && v7 == 0x3FEF58D263CD8D68, "H³⁵Cl in u");
+    var e300: f64 = from_bits(0x7E37E43C8800759C);
+    var t8, v8 = reduced_mass(e300, e300);
+    var w8: f64 = e300 * 0.5;
+    assert(is_ok(t8) == 1 && v8 == bits(w8), "(10³⁰⁰, 10³⁰⁰) = 10³⁰⁰/2 (Rust: ∞/(2·10³⁰⁰) = ∞)");
+    # the fast path agrees with the exact path wherever its test passes (binade-uniform pairs, subnormals included)
+    var agree = 1;
+    var passed = 0;
+    k = 0;
+    while (k < 20000) {
+        seed = seed ^ (seed << 13);
+        seed = seed ^ (seed >> 7);
+        seed = seed ^ (seed << 17);
+        var b1 = 1 + (seed & 0x7FFFFFFFFFFFFFFF) % 0x7FEFFFFFFFFFFFFF;
+        seed = seed ^ (seed << 13);
+        seed = seed ^ (seed >> 7);
+        seed = seed ^ (seed << 17);
+        var b2 = 1 + (seed & 0x7FFFFFFFFFFFFFFF) % 0x7FEFFFFFFFFFFFFF;
+        if ((seed & 3) == 0) { b2 = b1 + (seed >> 40) % 0x40000000000000; }
+        if (b2 > 0x7FEFFFFFFFFFFFFF) { b2 = 0x7FEFFFFFFFFFFFFF; }
+        var x: f64 = from_bits(b1);
+        var y: f64 = from_bits(b2);
+        var f, ok = _km_reduced_mass_fast(x, y);
+        var a: f64 = _km_reduced_mass_acc(x, y);
+        if (ok == 1) {
+            passed = passed + 1;
+            if (bits(f) != bits(a)) { agree = 0; }
+        }
+        k = k + 1;
+    }
+    assert(agree == 1 && passed > 15000, "fast = exact on 20,000 seeded pairs");
+}
+
 # The generated constants: R_H is Rust's const evaluation; the thresholds are pinned above.
 fn _t_cyrius_constants() {
     test_group("cyrius: R_H and the generated data");
@@ -1290,6 +1473,8 @@ fn main(): i64 {
     _t_cyrius_isotope_helpers();
     _t_cyrius_fft();
     _t_cyrius_adr19();
+    _t_cyrius_adr21();
+    _t_cyrius_adr22();
     _t_cyrius_constants();
     return assert_summary();
 }

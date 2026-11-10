@@ -286,3 +286,27 @@ and a renormalisation, about 25 ns. The other benches were within noise of the
 before run (nothing else changed). A first version tested every coordinate's bit pattern against a window through calls
 (+19–21 ns on the two angles); the terminal sums for `distance_3d` and `bond_angle` and the inline squares for the
 dihedral brought it to the figures above.
+
+## M4e-3 the exact Rydberg rationals and the exact reduced mass (2026-11-10)
+
+ADR 0002 #21 and #22 round the Bohr levels, the transition energy, the Rydberg formula, the series and the reduced mass
+once: a double-double fast path with a rounding test, and the exact multi-word slow path (`_km_cr_ratio`) where the test
+fails (the ties, and about 2⁻⁴⁶ of other arguments). Before → after, the same host, back to back (a trimmed copy of
+`tests/kimiya.bcyr` with the HEAD `src/spectroscopy.cyr` for "before"):
+
+| Bench | Body | Rust | Before | After |
+|---|---|---|---|---|
+| `spectroscopy/bohr_energy_level` | `bohr_energy_level(1, 3)`: R·Z² split exactly (Veltkamp), the quotient by n² < 2²⁶ inline with an exact residual and the rounding test, a `Result` | 1.21 ns | 9 ns | 49 ns |
+| `spectroscopy/bohr_transition_energy` | `bohr_transition_energy(1, 2, 3)`: R·Z²·(n₂² − n₁²) a TwoProduct, (n₁n₂)² an exact integer (n₂ < 2¹³), `_km_dd_div_cr` | — | 27 ns | 73 ns |
+| `spectroscopy/rydberg_wavelength` | `rydberg_wavelength(1, 2, 3)` (Hα with R∞): the same operands, the reciprocal quotient | — | 24 ns | 73 ns |
+| `spectroscopy/series_wavelength_balmer_alpha` | `spectral_series_wavelength(Balmer, 1)` (R_H) | — | 28 ns | 78 ns |
+| `spectroscopy/reduced_mass_hcl` | `reduced_mass(1.007825, 34.968853)` (¹H³⁵Cl in u): the exponent gap, s₁s₂ a TwoProduct, s₁ + s₂·2⁻ᵍ a FastTwoSum, `_km_dd_div_cr` | — | 14 ns | 73 ns |
+| `spectroscopy/bohr_transition_energy_tie` | `bohr_transition_energy(255, 58055, 524544)`, an exact midpoint: the fast path declines, `_km_cr_ratio` on 134- and 128-bit integers | — | 28 ns | 2.42 µs |
+| `spectroscopy/reduced_mass_tie` | `reduced_mass(2²⁷ − 1, 2²⁷ + 1)`, an exact midpoint: `_km_cr_ratio` on 106- and 108-bit integers | — | 14 ns | 2.20 µs |
+
+Each f64 operation costs about a nanosecond in this compiler's code and a call about 4 ns (`_km_two_prod` alone 14 ns), so
+the fast paths' 25–45 operations set the floor; the first version (TwoProducts through calls everywhere) took 75, 148, 151,
+155 and 91 ns, and the exact splits (R·Z² by Veltkamp, n² and (n₁n₂)² as integers below 2⁵², an inline TwoProduct in
+`_km_dd_div_cr`) brought it to the figures above. The slow path is 55 steps of bit-wise long division over four or five
+32-bit limbs; it runs on the ties and, for the reduced mass, on every result that may be subnormal (masses below 2⁻¹⁰²¹).
+The other benches were within noise of the before run.

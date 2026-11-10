@@ -48,6 +48,16 @@ scales 2^-1074 ... 2^1018, mixed magnitudes, subnormal coordinates, near coincid
 overflowing differences), the public function and the forced slow path (_km_*_ux) both. The references are mpfr_ref's
 UX (53 bits at MPFR's widest exponent range; the final operation by mpfr_check_range and mpfr_subnormalize) and
 mpfr_ref.potential_* (Rust's sequence on UX).
+M4e-3 (ADR 0002 #21, #22) adds the exact rationals rounded once: ratio, _km_cr_ratio(p, q, e) = RN(p/q·2^e) for multi-word
+integers p, q < 2^250 (random sizes, every exponent of the result, subnormal results and their ties, exact quotients and
+midpoints, the overflow end); bohr (bohr_energy_level: every Z with n = 2^k·Z, small n exhaustively, n at the 2^13 and
+2^32 ends, random n of every bit length), trans and ryd (bohr_transition_energy, rydberg_wavelength: random (Z, n1, n2)
+at every scale, n2 = n1 + 1 … up to 2^32 − 1, the fast path's 2^13 edge, every transition tie and the exact values with
+n2 <= 120), series (spectral_series_wavelength: every series, lines 1 … 2^32 − 6) and rmass (reduced_mass: binade-uniform
+pairs, equal masses, subnormal masses and their ties, three families of normal ties at random scales, exponent gaps
+45 … 64 around the proven 55, the fast path's 2^-1021 edge, the overflow end): the public function, its fast path and its
+exact path forced. Their reference is exact rational arithmetic (Fraction, rounded by CPython's correctly rounded int
+division).
 Through each function's _km_cr_<f>_fast entry it reports the fast path's fallback rate per region, and
 checks the fast path's result equals the function's wherever its test passes. It checks that the three
 targets give identical bits and flags.
@@ -58,7 +68,8 @@ Usage, from the repo root:
     python3 -I scripts/oracle/cr_verify.py --big           # also 10,000,000 more per primitive on ELF
     python3 -I scripts/oracle/cr_verify.py --only pow,exp  # some functions (exp exp10 expm1 ln log10 pow sin cos
                                                            # atan2 acos exp2s h100 uxsqrt uxmul uxdiv uxadd
-                                                           # uxatan2 dist bond dih)
+                                                           # uxatan2 dist bond dih ratio bohr trans ryd series
+                                                           # rmass)
     python3 -I scripts/oracle/cr_verify.py --work DIR      # probe sources and binaries in DIR
                                                            # (default build/cr-verify, gitignored)
 Exit status 1 on any mismatch or cross-target difference, 2 on a build or run failure.
@@ -98,9 +109,18 @@ FUNCS = [  # (id, name, fast entry, accurate entry, MPFR reference)
     (18, "dist", "distance_3d", "_km_distance_3d_ux", None),
     (19, "bond", "bond_angle", "_km_bond_angle_ux", None),
     (20, "dih", "dihedral_angle", "_km_dihedral_angle_ux", None),
+    # ADR 0002 #21, #22 (M4e-3): the exact rationals rounded once, against Fraction (ref_spec, below)
+    (26, "ratio", "_km_cr_ratio", "_km_cr_ratio", None),
+    (21, "bohr", "bohr_energy_level", "_km_bohr_level_acc", None),
+    (22, "trans", "bohr_transition_energy", "_km_bohr_transition_acc", None),
+    (23, "ryd", "rydberg_wavelength", "_km_rydberg_acc", None),
+    (24, "series", "spectral_series_wavelength", "_km_rydberg_acc", None),
+    (25, "rmass", "reduced_mass", "_km_reduced_mass_acc", None),
 ]
-ARITY = {5: 2, 8: 2, 11: 2, 13: 2, 14: 4, 15: 4, 16: 4, 17: 4, 18: 6, 19: 9, 20: 12}   # argument words; 1 elsewhere
+ARITY = {5: 2, 8: 2, 11: 2, 13: 2, 14: 4, 15: 4, 16: 4, 17: 4, 18: 6, 19: 9, 20: 12,
+         21: 2, 22: 3, 23: 3, 24: 2, 25: 2, 26: 9}   # argument words; 1 elsewhere
 UX_NAMES = ("uxsqrt", "uxmul", "uxdiv", "uxadd", "uxatan2", "dist", "bond", "dih")
+SPEC_NAMES = ("ratio", "bohr", "trans", "ryd", "series", "rmass")
 FID_SINCOS = 10      # probe-only id: _km_cr_sincos
 N_UNIFORM = 700_000
 N_ACC = 100_000
@@ -855,11 +875,217 @@ def ref_ux(name, a):
     return INF if r is None else r
 
 
+# ── ADR 0002 #21, #22 (M4e-3): exact rationals rounded once ─────────────────────────────────────────────────────────
+import functools  # noqa: E402
+from fractions import Fraction  # noqa: E402
+
+_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _const(path, name):
+    """A generated decimal constant (`const NAME = 1.5;`) of a src file, as its double."""
+    import re
+    m = re.search(rf"^const {name} = ([0-9.]+);$", (_ROOT / path).read_text(), re.M)
+    return float(m.group(1))
+
+
+R_EV = _const("src/constants.cyr", "KM_RYDBERG_EV")
+R_INF = _const("src/constants.cyr", "KM_RYDBERG")
+R_H = _const("src/spectroscopy_data.cyr", "_KM_RYDBERG_HYDROGEN")
+SERIES_NL = (1, 2, 3, 4, 5)        # KmSpectralSeries 0 … 4: Lyman … Pfund (src/spectroscopy_data.cyr)
+U32 = (1 << 32) - 1
+
+
+def rn(q):
+    """A Fraction rounded once to binary64 (CPython's int true division is correctly rounded, subnormals and ties
+    included); +inf past DBL_MAX."""
+    try:
+        return float(q)
+    except OverflowError:
+        return INF
+
+
+def ref_spec(name, a):
+    """The exact reference of the M4e-3 functions (an Err is encoded as +inf, as the probe does)."""
+    if name == "ratio":
+        p = sum(a[k] << (64 * k) for k in range(4))
+        q = sum(a[4 + k] << (64 * k) for k in range(4))
+        e = a[8] - (1 << 64) if a[8] >> 63 else a[8]
+        return rn(Fraction(p, q) * Fraction(2) ** e)
+    if name == "bohr":
+        z, n = a
+        return -rn(Fraction(R_EV) * z * z / (n * n))
+    if name == "trans":
+        z, lo, hi = a
+        return rn(Fraction(R_EV) * z * z * (hi * hi - lo * lo) / (lo * lo * hi * hi))
+    if name in ("ryd", "series"):
+        if name == "ryd":
+            z, lo, hi, r = a[0], a[1], a[2], R_INF
+        else:
+            z, lo, r = 1, SERIES_NL[a[0]], R_H
+            hi = lo + a[1]
+            if hi > U32:
+                return INF
+        return rn(Fraction(lo * lo * hi * hi) / (Fraction(r) * z * z * (hi * hi - lo * lo)))
+    m1, m2 = a
+    return rn(Fraction(m1) * Fraction(m2) / (Fraction(m1) + Fraction(m2)))
+
+
+def _bits_n(rng, lo=1, hi=32):
+    """A random integer of a random bit length in lo ... hi (at least 1)."""
+    b = rng.randint(lo, hi)
+    return rng.randrange(1 << (b - 1), 1 << b)
+
+
+def args_ratio(rng):
+    """(p as 4 words, q as 4 words, e) for RN(p/q·2^e)."""
+    def words(v):
+        return tuple((v >> (64 * k)) & 0xFFFFFFFFFFFFFFFF for k in range(4))
+
+    def pack(p, q, e):
+        return words(p) + words(q) + (e & 0xFFFFFFFFFFFFFFFF,)
+
+    rand = []
+    for _ in range(200_000):
+        p = _bits_n(rng, 1, 250) if rng.random() < 0.97 else 0
+        q = _bits_n(rng, 1, 250)
+        e = rng.randint(-1300, 1300)
+        rand.append(pack(p, q, e))
+    # results at the subnormal grid and near the overflow threshold: e placed so p/q·2^e lands there
+    edge = []
+    for _ in range(60_000):
+        p, q = _bits_n(rng, 1, 250), _bits_n(rng, 1, 250)
+        t = rng.choice([rng.randint(-1080, -1018), rng.randint(1018, 1025)])
+        e = t - (p.bit_length() - q.bit_length())
+        edge.append(pack(p, q, e))
+    # exact quotients and midpoints (q | p·2^k), at the 53/54-bit and subnormal boundaries
+    ties = []
+    for _ in range(60_000):
+        q = _bits_n(rng, 1, 120)
+        m = rng.randrange(1 << 52, 1 << 54) | rng.choice([0, 1])
+        p = m * q
+        t = rng.choice([rng.randint(-1130, -1022), rng.randint(-200, 200), rng.randint(970, 1024)])
+        ties.append(pack(p, q, t - m.bit_length()))
+    return [("random sizes and exponents", rand), ("subnormal and overflow ends", edge),
+            ("exact quotients and midpoints", ties)]
+
+
+def args_bohr(rng):
+    """(Z, n) for bohr_energy_level."""
+    exact = []
+    for z in range(1, 256):
+        o = z >> ((z & -z).bit_length() - 1)
+        n = o
+        while n <= U32:
+            exact.append((z, n))
+            n *= 2
+    small = [(z, n) for z in range(1, 256) for n in range(1, 201)]
+    edges = [(rng.randint(1, 255), n) for n in list(range(8180, 8200)) + list(range(U32 - 100, U32 + 1))
+             + [(1 << 26) + d for d in range(-3, 4)] for _ in range(20)]
+    rand = [(rng.randint(1, 255), _bits_n(rng)) for _ in range(200_000)]
+    return [("exact: n = 2^k·Z", exact), ("Z × n <= 200", small), ("n at 2^13, 2^26 and 2^32", edges),
+            ("random n of every bit length", rand)]
+
+
+def _pair(rng):
+    lo = _bits_n(rng)
+    lo = min(lo, U32 - 1)
+    r = rng.random()
+    if r < 0.4:
+        d = rng.randint(1, 8)
+    elif r < 0.7:
+        d = _bits_n(rng, 1, 20)
+    else:
+        d = rng.randint(1, U32 - lo)
+    return lo, min(U32, lo + d)
+
+
+@functools.lru_cache(maxsize=1)
+def _exact_transitions():
+    """(Z, n1, n2) with n2 <= 120 whose transition energy is exact or a midpoint (by Fraction), and their multiples."""
+    out = []
+    kr = Fraction(R_EV)
+    for z in range(1, 256):
+        for lo in range(1, 120):
+            for hi in range(lo + 1, 121):
+                q = kr * z * z * (hi * hi - lo * lo) / (lo * lo * hi * hi)
+                d = q.denominator
+                if d & (d - 1) == 0:
+                    g = 1
+                    while g * hi <= U32 and g <= 1 << 20:
+                        out.append((z, g * lo, g * hi))
+                        g *= 4
+    return out
+
+
+def args_trans(rng):
+    """(Z, n1, n2) for bohr_transition_energy and rydberg_wavelength."""
+    ties = [(255, 58055 << k, 524544 << k) for k in range(13)]
+    rand = [(rng.randint(1, 255),) + _pair(rng) for _ in range(220_000)]
+    adj = []
+    for k in range(1, 33):
+        for _ in range(400):
+            n = min(U32 - 1, rng.randrange(1 << (k - 1), 1 << k))
+            adj.append((rng.randint(1, 255), n, n + 1))
+    edge = [(rng.randint(1, 255), lo, hi) for hi in range(8186, 8200) for lo in (1, 2, hi // 2, hi - 2, hi - 1)
+            for _ in range(10)]
+    top = [(rng.randint(1, 255), U32 - k - d, U32 - k) for k in range(200) for d in (1, 2, 3, 1000, 1 << 20)]
+    return [("ties", ties), ("exact values (n2 <= 120, and ×4^k)", _exact_transitions()), ("random", rand),
+            ("n2 = n1 + 1 at every scale", adj), ("the 2^13 edge", edge), ("next to 2^32 - 1", top)]
+
+
+def args_series(rng):
+    """(series, line) for spectral_series_wavelength."""
+    lines = list(range(1, 2001)) + [1 << k for k in range(32)] + [U32 - d for d in range(1, 40)]
+    lines += [_bits_n(rng) for _ in range(9000)]
+    return [("every series × lines", [(s, ln) for s in range(5) for ln in lines if 1 <= ln <= U32 - SERIES_NL[s]])]
+
+
+def args_rmass(rng):
+    """(m1, m2) for reduced_mass."""
+    pos = lambda n, lo=-1074, hi=1023: binade_uniform(rng, n, lo, hi, signs=(1,))
+    rand = list(zip(pos(250_000), pos(250_000)))
+    eq = [(x, x) for x in pos(80_000)]
+    sub = list(zip(pos(40_000, -1074, -1015), pos(40_000, -1074, -1015)))
+    sub_eq = [(fb(k), fb(k)) for k in range(1, 2001)] + [(fb(6 * c), fb(2 * c)) for c in range(1, 4001, 2)]
+    ties = []
+    for _ in range(40_000):
+        fam = rng.randint(0, 2)
+        if fam == 0:
+            c = rng.randrange(1, 94906266, 2)
+            a, b = 2.0 ** 27 - c, 2.0 ** 27 + c
+        elif fam == 1:
+            c = rng.randrange(1, 1 << 25, 2)
+            a, b = 3.0 * (3 * 2 ** 25 - c), 3.0 * (3 * 2 ** 25 + c)
+        else:
+            c = rng.randrange(1, 1 << 26, 2)
+            a, b = 3.0 * (2 ** 26 - c), 3.0 * (2 ** 26 + c)
+        t = rng.randint(-1049, 994)
+        ties.append((a * 2.0 ** t, b * 2.0 ** t) if rng.random() < 0.5 else (b * 2.0 ** t, a * 2.0 ** t))
+    gaps = []
+    for _ in range(60_000):
+        g = rng.randint(45, 64)
+        e2 = rng.randint(-1074, 1023 - g)
+        m2 = pos(1, e2, e2)[0]
+        m1 = pos(1, max(e2, -1022) + g, max(e2, -1022) + g)[0]
+        gaps.append((m1, m2) if rng.random() < 0.5 else (m2, m1))
+    edge = []
+    for m2 in (2.0 ** -1021, 2.0 ** -1022, fb(0x0020000000000000 - 1), fb(0x0020000000000000 + 1)):
+        for _ in range(2000):
+            edge.append((m2 * rng.uniform(1.0, 2.0 ** rng.randint(0, 60)), m2))
+    top = [(fb(0x7FEFFFFFFFFFFFFF - rng.randrange(0, 1 << 52)), fb(0x7FEFFFFFFFFFFFFF - rng.randrange(0, 1 << 54)))
+           for _ in range(20_000)]
+    return [("binade-uniform pairs", rand), ("equal masses", eq), ("subnormal pairs", sub),
+            ("subnormal equal and (6c, 2c) ties", sub_eq), ("normal and subnormal tie families", ties),
+            ("exponent gaps 45 ... 64", gaps), ("the 2^-1021 edge", edge), ("the overflow end", top)]
+
+
 def gen_args(name, lim):
     rng = random.Random({"exp": 1001, "exp10": 1002, "expm1": 1003, "ln": 1004, "log10": 1005, "pow": 1006,
                          "sin": 1007, "cos": 1008, "atan2": 1009, "acos": 1010, "exp2s": 1011, "h100": 1012,
                          "uxsqrt": 1013, "uxmul": 1014, "uxdiv": 1015, "uxadd": 1016, "uxatan2": 1017, "dist": 1018,
-                         "bond": 1019, "dih": 1020}[name])
+                         "bond": 1019, "dih": 1020, "bohr": 1021, "trans": 1022, "ryd": 1022, "series": 1024,
+                         "rmass": 1025, "ratio": 1026}[name])
     if name == "exp":
         sections = args_exp(rng, lim)
     elif name == "exp10":
@@ -883,6 +1109,9 @@ def gen_args(name, lim):
                     "uxatan2": args_uxatan2}[name](rng)
     elif name in ("dist", "bond", "dih"):
         sections = args_geom(rng, {"dist": 2, "bond": 3, "dih": 4}[name])
+    elif name in SPEC_NAMES:
+        sections = {"ratio": args_ratio, "bohr": args_bohr, "trans": args_trans, "ryd": args_trans,
+                    "series": args_series, "rmass": args_rmass}[name](rng)
     else:
         sections = args_log(rng, lim, name == "log10")
     xs = [x for _, sec in sections for x in sec]
@@ -907,7 +1136,18 @@ include "src/constants.cyr"
 include "src/mathx_data.cyr"
 include "src/mathx.cyr"
 include "src/validate.cyr"
+include "src/element_data.cyr"
+include "src/element.cyr"
+include "src/thermo.cyr"
+include "src/organic_data.cyr"
+include "src/organic.cyr"
+include "src/inorganic_data.cyr"
+include "src/inorganic.cyr"
 include "src/potential.cyr"
+include "src/nuclear_data.cyr"
+include "src/nuclear.cyr"
+include "src/spectroscopy_data.cyr"
+include "src/spectroscopy.cyr"
 
 # The argument words of function fid.
 #must_use
@@ -917,7 +1157,91 @@ fn arity(fid): i64 {
     if (fid == 18) { return 6; }
     if (fid == 19) { return 9; }
     if (fid == 20) { return 12; }
+    if (fid == 21 || fid == 24 || fid == 25) { return 2; }
+    if (fid == 22 || fid == 23) { return 3; }
+    if (fid == 26) { return 9; }
     return 1;
+}
+
+# ADR 0002 #21, #22 (M4e-3): ids 21 … 25 are bohr_energy_level (Z, n), bohr_transition_energy and rydberg_wavelength
+# (Z, n1, n2), spectral_series_wavelength (series, line) and reduced_mass (m1, m2): mode 0 the public function (an Err as
+# +inf), its fast path in the second slot and the flag; mode 1 the exact path alone. Id 26 is _km_cr_ratio(p, q, e): p and
+# q four little-endian 64-bit words each, then e.
+#must_use
+fn run_spec(fid, mode, a): (f64, f64, i64) {
+    var inf: f64 = 0x7FF0000000000000;
+    var w0 = load64(a);
+    var w1 = load64(a + 8);
+    var w2 = load64(a + 16);
+    var ri: f64 = KM_RYDBERG;
+    var rh: f64 = _KM_RYDBERG_HYDROGEN;
+    if (fid == 26) {
+        var p[64];
+        var q[64];
+        var t[64];
+        var k = 3;
+        _km_bn_set(&p, 0);
+        _km_bn_set(&q, 0);
+        while (k >= 0) {
+            _km_bn_shl(&p, 64);
+            _km_bn_set(&t, load64(a + 8 * k));
+            _km_bn_add(&p, &p, &t);
+            _km_bn_shl(&q, 64);
+            _km_bn_set(&t, load64(a + 32 + 8 * k));
+            _km_bn_add(&q, &q, &t);
+            k = k - 1;
+        }
+        var rr: f64 = _km_cr_ratio(&p, &q, load64(a + 64));
+        return (rr, rr, 1);
+    }
+    if (fid == 21) {
+        if (mode == 1) { var la: f64 = _km_bohr_level_acc(w0, w1); var nla: f64 = -la; return (nla, nla, 0); }
+        var tl, vl = bohr_energy_level(w0, w1);
+        var gl: f64 = inf;
+        if (is_ok(tl) == 1) { gl = vl; }
+        var fl, ol = _km_bohr_level_fast(w0, w1);
+        var nfl: f64 = -fl;
+        return (gl, nfl, ol);
+    }
+    if (fid == 22) {
+        if (mode == 1) { var ta: f64 = _km_bohr_transition_acc(w0, w1, w2); return (ta, ta, 0); }
+        var tt, vt = bohr_transition_energy(w0, w1, w2);
+        var gt: f64 = inf;
+        if (is_ok(tt) == 1) { gt = vt; }
+        var ft, ot = _km_bohr_transition_fast(w0, w1, w2);
+        return (gt, ft, ot);
+    }
+    if (fid == 23) {
+        if (mode == 1) { var ya: f64 = _km_rydberg_acc(ri, w0, w1, w2); return (ya, ya, 0); }
+        var ty, vy = rydberg_wavelength(w0, w1, w2);
+        var gy: f64 = inf;
+        if (is_ok(ty) == 1) { gy = vy; }
+        var fy, oy = _km_rydberg_fast(ri, w0, w1, w2);
+        return (gy, fy, oy);
+    }
+    if (fid == 24) {
+        var nl = spectral_series_n_lower(w0);
+        var nu = nl + w1;
+        if (mode == 1) {
+            if (nu > 0xFFFFFFFF) { return (inf, inf, 0); }
+            var sa: f64 = _km_rydberg_acc(rh, 1, nl, nu);
+            return (sa, sa, 0);
+        }
+        var ts, vs = spectral_series_wavelength(w0, w1);
+        var gs: f64 = inf;
+        if (is_ok(ts) == 1) { gs = vs; }
+        if (nu > 0xFFFFFFFF) { return (gs, gs, 1); }
+        var fs, os = _km_rydberg_fast(rh, 1, nl, nu);
+        return (gs, fs, os);
+    }
+    var m1: f64 = load64(a);
+    var m2: f64 = load64(a + 8);
+    if (mode == 1) { var ma: f64 = _km_reduced_mass_acc(m1, m2); return (ma, ma, 0); }
+    var tm, vm = reduced_mass(m1, m2);
+    var gm: f64 = inf;
+    if (is_ok(tm) == 1) { gm = vm; }
+    var fm, om = _km_reduced_mass_fast(m1, m2);
+    return (gm, fm, om);
 }
 
 # ADR 0002 #20 (M4e-2): ids 13 … 17 take (significand, exponent) words: _km_ux_sqrt_f64(s, e), _km_ux_mul_f64,
@@ -1040,7 +1364,12 @@ fn main(): i64 {
         var r: f64 = 0.0;
         var rf: f64 = 0.0;
         var ok = 0;
-        if (fid >= 13) {
+        if (fid >= 21) {
+            var r3, rf3, ok3 = run_spec(fid, mode, at);
+            r = r3;
+            rf = rf3;
+            ok = ok3;
+        } elif (fid >= 13) {
             var r1, rf1, ok1 = run_ux(fid, mode, at);
             r = r1;
             rf = rf1;
@@ -1123,6 +1452,8 @@ def ref_of(name, ref, a):
         return ref_exp2s(*a)
     if name in UX_NAMES:
         return ref_ux(name, a)
+    if name in SPEC_NAMES:
+        return ref_spec(name, a)
     return ref(*a) if isinstance(a, tuple) else ref(a)
 
 
@@ -1251,7 +1582,7 @@ def main():
             if t == targets[0]:
                 rates = [f"{tag} {(b - a) - sum(flags[a:b])}/{b - a}" for tag, a, b in spans]
                 print("         fallbacks by region: " + "; ".join(rates))
-        if big and "elf" in targets and name not in ("pow", "atan2", "exp2s") + UX_NAMES:
+        if big and "elf" in targets and name not in ("pow", "atan2", "exp2s") + UX_NAMES + SPEC_NAMES:
             rng = random.Random(9000 + fid)
             if name in ("ln", "log10"):
                 ys = binade_uniform(rng, 10_000_000, -1074, 1023, signs=(1,))

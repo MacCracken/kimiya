@@ -36,6 +36,8 @@ are compared through the stated mapping:
 | 18 *(2026-11-09, M4d)* | `potential::morse_width_parameter` computes `omega_e * (reduced_mass / (2.0 * d_e)).sqrt()`: for D_e ≥ 2¹⁰²³ the exact 2·D_e overflows, μ/∞ = 0 and a = 0 where ω·√(μ/(2·D_e)) is representable | there, (μ·½)/D_e: RN(μ/(2·D_e)) (μ·½ is exact, or μ < 2⁻¹⁰²¹ and the quotient rounds to 0 either way), the value Rust's μ/(2·D_e) has wherever 2·D_e is finite; then Rust's √ and ×ω. Rust's form elsewhere | class B; noted `(f:…)`, mapped and counted (181 rows) |
 | 19 *(2026-11-09, M4e)* | `spectroscopy::wavenumber_from_wavelength` and `wavelength_from_wavenumber` compute `0.01 / x` for the exact 1/(100·x) (the cm ↔ m factor 1/100): 0.01 is 1/100 + 2.08·10⁻¹⁹ (relative 2⁻⁵⁵·⁴), and the quotient rounds again, so the result is one ulp from RN(1/(100·x)) on about 14 % of all doubles (2,748 of 20,000 seeded) | RN(1/(100·x)), rounded once: `src/mathx.cyr`'s `_km_cr_hundredth_div` (a double-double residual with 1/100 = H + L and a rounding test, an exact 64-bit long division as its fallback and past 2^±900); the special values Rust's | class B; noted `(f:…)`, mapped and counted (827 rows each) |
 | 20 *(2026-11-09, M4e-2)* | `potential::distance_3d`, `bond_angle` and `dihedral_angle` square raw coordinates: above about 10¹⁵⁴ (10⁷⁷ for the dihedral's fourth powers) or below their reciprocals a square, cross product or dot product overflows or underflows, and the result is an Err, 0, ±∞ or a degraded value where the true distance or angle is representable (`distance_3d` of (DBL_MAX, 0, 0) and the origin is +∞, the gauche dihedral at 2⁷⁰⁰·Å an Err, the angle of (1, 2⁻¹⁰⁶⁰) 0), so the angles, which Rust documents as scale-invariant, are not | Rust's own operation sequence (every subtraction, product, sum, comparison, `max` and the Err checks, in Rust's order) evaluated in IEEE binary64 round-to-nearest-even with an **unbounded exponent range**: every + − × ÷ √ rounds to 53 bits and nothing overflows or underflows. The exception is the **final** operation (`sqrt` for `distance_3d`, `atan2` for the angles), which is correctly rounded to binary64 itself: its subnormal grid, or ±∞. Comparisons and Err branches use the unbounded values; non-finite inputs keep Rust's behaviour. So every row where Rust's chain stays in the normal range is bit-identical to Rust; the angles are exactly scale-invariant (for every k with all scaled coordinates exact, the same bits at 2^k times the coordinates: every check is homogeneous, and `atan2`'s two arguments have the same degree), and `distance_3d` scales by exactly 2^k wherever the result is normal. Rust's chain with a cheap range test, and `src/mathx.cyr`'s `_km_ux_*` helpers where it fails | class B (`distance_3d`) and C (the angles); noted `(f:…)` or `(E:InvalidInput)`, mapped and counted (854, 1,205 and 1,546 rows; 91 of the dihedral's are the port's Err where Rust's rounded threshold says Ok) |
+| 21 *(2026-11-10, M4e-3)* | `spectroscopy::bohr_energy_level` computes ((−R·Z)·Z)/(n·n), `bohr_transition_energy` the difference of two such levels, `rydberg_wavelength` and `SpectralSeries::wavelength` 1/(((R·Z)·Z)·(1/(n₁·n₁) − 1/(n₂·n₂))): three to eight roundings of exact rationals, so −R at Z = n is one ulp off for 86 of the 255 Z, and the levels' difference and 1/n₁² − 1/n₂² cancel for close large n (39 ulp at n = 100, 939 at 10⁴, up to 9.0·10⁷ for the wavelength and 1.8·10⁹ for the transition energy on the corpus, near n = 2³²) | the exact rational with the constant as its double, **rounded once**: −R·Z²/n², R·Z²·(n₂² − n₁²)/(n₁²·n₂²) and n₁²·n₂²/(R·Z²·(n₂² − n₁²)) (R = `KM_RYDBERG_EV`, `KM_RYDBERG`, or Rust's const-evaluated R_H, Z = 1): a double-double fast path with a proven bound and a rounding test (exact operands for n₂ < 2¹³), and the exact slow path `_km_cr_ratio` on multi-word integers, which rounds the 13 exact ties (Z = 255, 2^k·(58,055, 524,544)) to even. Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (3,823 levels, 1,351 transition energies, 1,376 wavelengths, 67 series lines) |
+| 22 *(2026-11-10, M4e-3)* | `spectroscopy::reduced_mass` computes (m₁·m₂)/(m₁ + m₂): three roundings, so a homonuclear m/2 is one ulp off on 8.6 % of masses, and m₁·m₂ or m₁ + m₂ overflows or underflows at the range ends (NaN at (DBL_MAX, DBL_MAX), 0 or ∞ where μ is representable) | the correctly rounded m₁·m₂/(m₁ + m₂) for every pair of positive finite doubles, subnormal results and their ties included: with m₁ ≥ m₂ and the exponent gap g, the smaller mass for g ≥ 55 (proven), otherwise s₁s₂/(s₁ + s₂·2⁻ᵍ) scaled by 2^e₂ (no intermediate leaves the range), a double-double fast path and the exact `_km_cr_ratio` | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (2,837 rows) |
 
 Deferred with their modules (port plan §2.2), and decided when they port: #5 `bridge::*` →
 `Result` and removal of `ionization_to_bond_energy_estimate`; #10 soorat `from_molecule` →
@@ -176,7 +178,8 @@ ulp, inside class B's tolerance, so the harness marks a noted row as mapped what
 (`parity_core.cyr`'s `_par_force_map`) and counts it as accepted under ADR 2: 827 `wavenumber_from_wavelength` and 827
 `wavelength_from_wavenumber` rows.
 
-**Reviewed and kept as Rust's** (reported to the user, the policy's borderline): `reduced_mass(m, m)` — Rust's
+**Reviewed and kept as Rust's** (reported to the user, the policy's borderline; the first four, and `reduced_mass`'s
+m₁·m₂ and m₁ + m₂, decided otherwise in M4e-3 as #21 and #22): `reduced_mass(m, m)` — Rust's
 m·m/(m + m) misses the homonuclear m/2 by one ulp on 33 of 315 golden equal-mass rows (8.6 % of seeded masses);
 `bohr_energy_level(Z, n)`'s ((−R·Z)·Z)/(n·n) misses −R exactly for Z = n on 3 of 12 golden rows (and −R/k² for Z/n = 1/k
 on 30 %); the Rydberg factor 1/n₁² − 1/n₂², which cancels for close large n (computing it exactly would move
@@ -264,8 +267,100 @@ path against the fast one on 5,000 in-range geometries.
 overflow or underflow of products and quotients of inputs, and each such edge fixed the same way: Rust's sequence with an
 unbounded exponent, the final operation rounded once, in-range rows keeping Rust's bits. M4d's and M4e's "kept as Rust's"
 lists (`lennard_jones`' (σ/r)⁶ and (σ/r)¹², Coulomb's k·q₁·q₂ and r·r, `morse`'s subnormal D_e·x, Beer–Lambert's ε·l·c,
-`reduced_mass`'s m₁·m₂ and m₁ + m₂, k/μ, h·B, 8π²·I, μ·r·r, the FFT's sums and re² + im², and the like) are its first
-candidates; the helpers above are its machinery. The audit is not part of #20.
+k/μ, h·B, 8π²·I, μ·r·r, the FFT's sums and re² + im², and the like) are its first candidates; the helpers above are its
+machinery. The audit is not part of #20. (`reduced_mass`'s m₁·m₂ and m₁ + m₂ left the list in M4e-3: #22 covers them.)
+
+## Addition, 2026-11-10 (M4e-3): #21 and #22
+
+**The user's decisions (2026-11-10), verbatim.** The questions were the main session's; the answers are the user's.
+1. Q: "M4e found that Rust's Rydberg factor 1/n₁² − 1/n₂² cancels badly when n₁ and n₂ are close and large:
+   rydberg_wavelength is off by 39 ulp at n = 100, 939 at n = 10⁴ and ~4·10⁷ at n ≈ 2³¹, and bohr_transition_energy's
+   E₂ − E₁ behaves the same. Compute the factor exactly ((n₂² − n₁²)/(n₁²·n₂²) in integers, rounded once) as a new ADR 0002
+   row?" A: **"Compute exactly (Recommended)"** — the option's text: "Exact integer factor, one rounding; both functions
+   become correctly rounded in n. Results move by up to ~4·10⁷ ulp at extreme n, by 0–1 ulp for ordinary lines."
+2. Q: "M4e found that two exact values come out 1 ulp wrong: reduced_mass(m, m) misses m/2 on 8.6% of masses (Rust:
+   m₁·m₂/(m₁+m₂), three roundings), and bohr_energy_level(Z, n) misses −R·Z²/n² (Z = n misses −R on 3 of 12 rows). Make
+   both correctly rounded (rounded once)?" A: **"Round once (Recommended)"** — "reduced_mass and bohr_energy_level return
+   the correctly rounded value for every input, so the homonuclear m/2 and Z = n cases come out exact."
+3. The main session then told the user: "For the Rydberg wavelength and Bohr transition energy, I plan to round the whole
+   expression once, not just the exact factor, to match your 'round once' choice for the Bohr levels. Say so if you'd
+   rather keep Rust's remaining steps." The user did not object and replied "Committed, continue". So the whole
+   expression is rounded once.
+
+**#21, the target.** Each function returns its exact rational value, the constant taken as its binary64 value, rounded
+once to binary64 (nearest, ties to even): `bohr_energy_level` RN(−R·Z²/n²) with R = `KM_RYDBERG_EV`;
+`bohr_transition_energy` RN(R·Z²·(n₂² − n₁²)/(n₁²·n₂²)); `rydberg_wavelength` RN(n₁²·n₂²/(R∞·Z²·(n₂² − n₁²))) with
+R∞ = `KM_RYDBERG`; `SpectralSeries::wavelength` the same with Rust's const-evaluated R_H and Z = 1. Rust's validation, Err
+codes and check order are unchanged (the transition energy: the level checks of n₁, then of n₂, then n₂ ≤ n₁). Every value
+is a normal double (|E| ≥ R·2⁻⁶⁴, λ ≤ 2⁷²). On the corpus Rust's levels are at most 2 ulp from the exact value, its series
+lines 2 ulp, its wavelengths up to 9.0·10⁷ ulp and its transition energies up to 1.8·10⁹ ulp (the cancellation of two
+levels near n = 2³²; the decision's "~4·10⁷" was the wavelength measured in M4e on a smaller grid).
+
+**#22, the target.** `reduced_mass(m₁, m₂)` returns RN(m₁·m₂/(m₁ + m₂)) for every pair of positive finite doubles, subnormal
+results and ties included (μ lies in [min/2, min), so it never overflows); no intermediate overflows or underflows. Rust's
+NaN at (DBL_MAX, DBL_MAX) and its 0 or ∞ at the range edges are fixed by this; Err for a mass that is not positive and
+finite, as Rust's. The library-wide overflow audit's candidate list (#20's addition) loses `reduced_mass`, which this row
+covers.
+
+**The implementation** (ADR 0006's two-phase style).
+- *The general helper* (`src/mathx.cyr`, for reuse by M4f's stoichiometry and the audit): multi-word unsigned integers,
+  8 limbs of 32 bits in i64 words (below 2²⁵⁶; `_km_bn_set`, `_copy`, `_bitlen`, `_cmp`, `_add`, `_sub`, `_mul_small`,
+  `_mul`, `_shl`; every limb product plus carry below 2⁶⁴, formed in wrapping 64-bit arithmetic and split with `&` and the
+  logical shift), and `_km_cr_ratio(p, q, e)` = RN(p/q·2^e) for p, q < 2²⁵⁴: N = p and D = q aligned to one bit length (and
+  N doubled once more if N < D), so p/q = (N/D)·2^t with 1 ≤ N/D < 2; 55 steps of restoring division give Q = ⌊N·2⁵⁴/D⌋
+  in [2⁵⁴, 2⁵⁵) and the remainder; then `_km_cr_from_int(2Q + sticky, e + t − 55)` rounds once, ties to even, at the
+  binade's or the 2⁻¹⁰⁷⁴ grid, ±∞ past DBL_MAX. That is exact: the value lies in [2Q, 2Q + 2) units, strictly inside when
+  the remainder is not 0, and so does 2Q + sticky, while every rounding boundary there (at least 3 of the 56 bits are
+  dropped) is a multiple of 4 units, an end point at most.
+- *The fast paths* evaluate the exact numerator and denominator as double-doubles and round their quotient with
+  `_km_dd_div_cr`: y0 = RN(n_h/d_h), the residual n − y0·d from an exact TwoProduct (n_h − a exact by Sterbenz) to
+  7.04u²·n (u = 2⁻⁵³), d = RN(r/d_h), so y0 + d is n/d to 13.12u²; with operands carrying relative errors up to 32u² in
+  all, y0 + d is the exact value to 45.13u², and the test RN(y0 + RN(d − ε)) = RN(y0 + RN(d + ε)) with ε = 2⁻¹⁰⁰·y0 =
+  64u²·y0 (≥ 63.9u² of the value, the inner roundings 3.04u²) brackets the value: equal ends prove the rounding; exact
+  values pass, midpoints never do; it fails with probability about 2⁻⁴⁶. The operands: R·Z² exact (`_km_rz2`: Veltkamp's
+  split of R, both halves times Z² < 2¹⁶ exact, FastTwoSum); n² an exact TwoProduct, or for n < 2¹³ an exact double below
+  2²⁶, by which the level's quotient is inline (y0·n² split exactly, to 5.04u²); for the Rydberg pair, exact when n₂ < 2¹³
+  (Z²·(n₂² − n₁²) < 2⁴² and (n₁n₂)² < 2⁵² are integers, R times the first a TwoProduct), otherwise (n₂ − n₁)(n₂ + n₁),
+  n₁·n₂ exact TwoProducts and one `_km_dd_mul` each (within 8.01u², 2⁻¹⁰²·⁹⁹: the two cross products' and their sum's
+  roundings, e + c's, the dropped a_l·b_l).
+- *The reduced mass*: with m₁ ≥ m₂, m = s·2^e and g = e₁ − e₂ (from the exponent fields, a lower bound for a subnormal
+  m₂): for g ≥ 55 the result is m₂, since x = m₂/m₁ < 2⁻⁵⁴ makes m₂ − μ = m₂x/(1 + x) < 2⁻⁵⁴·m₂, under half the gap below
+  m₂ (at least 2⁻⁵³·m₂, or 2⁻¹⁰⁷⁴ for a subnormal m₂), with μ < m₂: strictly inside m₂'s rounding interval, never a tie.
+  Otherwise μ = 2^e₂·s₁s₂/(s₁ + s₂·2⁻ᵍ): the numerator an exact TwoProduct in [1, 4), the denominator an exact FastTwoSum
+  in [1, 4) (s₂·2⁻ᵍ ≥ 2⁻⁵⁴ exact), the quotient F in [½, 2) by `_km_dd_div_cr`, and RN(μ) = RN(F)·2^e₂ exactly for
+  e₂ ≥ −1021; below (μ possibly subnormal) and where the test fails, the exact path: m = M·2^E with 2⁵² ≤ M < 2⁵³ (a
+  subnormal's significand shifted up), μ = M₁M₂·2^E₁/(M₁·2^G + M₂) by `_km_cr_ratio` (below 2¹⁰⁶ and 2¹⁰⁸).
+- *Where ties exist* (the slow path's job). R's odd significands decide: `KM_RYDBERG_EV`'s is 683·11214237642539, squarefree
+  with a prime above 2³², so a level is a double exactly when n/Z is a power of two (then −R/4^k) and otherwise has at least
+  56 significant bits — no level is a midpoint; `KM_RYDBERG`'s (3·1963825758347083) and R_H's (887·3319205424319) have a
+  prime above 2³², which no n₁, n₂ < 2³² cancel, so no wavelength is even dyadic. The transition energy with n₁ = g·x,
+  n₂ = g·y (x, y coprime) is dyadic iff odd(x)·odd(y) | odd(Z) and odd(g)² | 683·P·j²·w (w = odd(y² − x²),
+  j = odd(Z)/(odd(x)·odd(y))): an exhaustive search over that structure finds 5,657 exact values (16R at (15; 3, 5), 32R at
+  (17; 3, 51), …) and 13 ties, (255; 2^k·58,055, 2^k·524,544) = (255; 2^k·683·85, 2^k·683·768) for k = 0 … 12 (x = 85,
+  y = 768, w = 683·853, odd(g) = 683: the significand 853·P has 54 bits). The reduced mass has ties in families:
+  subnormal ones (m = m at odd multiples of 2⁻¹⁰⁷⁴, (6c, 2c)·2⁻¹⁰⁷⁴) and normal ones (μ = Δαβ·2^(p+q−v) for coprime odd
+  α, β with α·2^p + β·2^q = H·2^v, masses HΔα·2^p and HΔβ·2^q; e.g. (2²⁷ − c, 2²⁷ + c) for odd c ≤ 94,906,265).
+
+**Golden comparison** (as #16–#20): the corpus keeps the oracle's values. Where the port's differs the note names it,
+`[ADR 0002 #21: the port returns the correctly rounded −R·Z²/n² = <x> (f:…)]` (likewise `R·Z²·(n₂² − n₁²)/(n₁²·n₂²)`,
+`n₁²·n₂²/(R∞·Z²·(n₂² − n₁²))`, `n₁²·n₂²/(R_H·(n₂² − n₁²))`) and `[ADR 0002 #22: the port returns the correctly rounded
+m₁·m₂/(m₁ + m₂) = <x> (f:…)]`, computed by the generator in exact integer arithmetic (`exact::cr_ratio`, ⌊p·2^k/q⌋ to 60
+bits with a sticky remainder; the reduced mass at any exponent gap, without the port's cutoff). `validate.py` proves
+every Ok row with `Fraction`: noted exactly where the exact value differs from the oracle's, the note naming it bit for
+bit, so every unnoted row is correctly rounded too; it re-derives the structure (R's odd significands factored, the
+transition energy's search with its own factorisation) and checks that every exact level (6,869 rows, n = 2^k·Z) and
+every transition tie is in the corpus. The harness maps the noted rows (accepted under ADR 2, counted per function):
+3,823 `bohr_energy_level`, 1,351 `bohr_transition_energy`, 1,376 `rydberg_wavelength`, 67 `SpectralSeries::wavelength`
+(#21: 6,617) and 2,837 `reduced_mass` (#22). The grids gain every exact level, n₁ = n₂ − 1 at every binary scale and next
+to u32::MAX, the 2¹³ edge, the 13 ties and each exact-value family's smallest, middle and largest member, the series'
+large lines, and for the reduced mass m = m at every power of two and subnormal multiple, the tie families at scales
+across the range, exponent gaps 45 … 64 around the proven 55, the 2⁻¹⁰²¹ edge and both range ends (195 tie rows).
+`cr_verify.py` checks `_km_cr_ratio` (`ratio`) and the five functions (`bohr`, `trans`, `ryd`, `series`, `rmass`: the public
+function, the fast path and the exact path forced) against `Fraction` on x86_64 ELF, x86_64 PE and aarch64.
+
+**Cost** (`tests/kimiya.bcyr`, before → after, the same host): `spectroscopy/bohr_energy_level` 9 → 49 ns (Rust 1.21),
+`bohr_transition_energy` 27 → 73, `rydberg_wavelength` 24 → 73, `series_wavelength_balmer_alpha` 28 → 78,
+`reduced_mass_hcl` 14 → 73; the exact path on a tie: `bohr_transition_energy_tie` 2.42 µs, `reduced_mass_tie` 2.20 µs.
 
 ## Consequences
 

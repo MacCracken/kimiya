@@ -456,6 +456,46 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     159 assertions; 20 test files, 0 warnings; surface parity 394/394;
     benches `potential/distance_3d` and the slow path's `potential/distance_3d_2p600`, `bond_angle_2p600`,
     `dihedral_angle_2p600`
+- **M4e-3 exact Rydberg rationals and the exact reduced mass** (ADR 0002 #21 and #22, the user's decisions of 2026-11-10,
+  "Compute exactly" and "Round once"; port plan §6.4 "Decided in M4e-3"):
+  - **spectroscopy** — `bohr_energy_level`, `bohr_transition_energy`, `rydberg_wavelength` and
+    `spectral_series_wavelength` return their exact rationals, the constant as its double, rounded once; `reduced_mass`
+    the correctly rounded m₁·m₂/(m₁ + m₂) for every pair of positive finite masses (Breaking, below). Each has a
+    double-double fast path with a proven error bound and a rounding test (`_km_bohr_level_fast`,
+    `_km_bohr_transition_fast`, `_km_rydberg_fast`, `_km_reduced_mass_fast`; the operands exact for n₂ < 2¹³ and for the
+    reduced mass) and an exact slow path (`_km_bohr_level_acc`, `_km_bohr_transition_acc`, `_km_rydberg_acc`,
+    `_km_reduced_mass_acc`), which decides the ties; the checks, Err codes and their order are Rust's
+  - **mathx** — multi-word unsigned integers (8 limbs of 32 bits: `_km_bn_set`, `_copy`, `_bitlen`, `_cmp`, `_add`, `_sub`,
+    `_mul_small`, `_mul`, `_shl`), `_km_f64_int` and the general `_km_cr_ratio(p, q, e)` = RN(p/q·2^e) (restoring long
+    division to a 55-bit quotient and a sticky remainder, rounded once by `_km_cr_from_int`: exact, subnormal results and
+    ties included), for reuse by M4f and the overflow audit; the double-double product `_km_dd_mul` (to 2⁻¹⁰²·⁹⁹) and
+    quotient with a rounding test `_km_dd_div_cr` (its error budget in the source)
+  - golden module `spectroscopy`: 66,691 rows (13,706 new: every exact Bohr level, n = 2^k·Z; n₁ = n₂ − 1 at every binary
+    scale and next to u32::MAX; the fast path's 2¹³ edge; the 13 transition ties and each exact-value family's smallest,
+    middle and largest member from an exhaustive search of the domain; the series' large lines; for the reduced mass, m = m
+    at every power of two and subnormal multiple, three families of normal ties and two of subnormal ones at scales across
+    the range, exponent gaps 45 … 64 around the proven 55, the 2⁻¹⁰²¹ edge, both range ends, binade-uniform pairs);
+    9,454 rows noted with the port's correctly rounded value (#21: 3,823 `bohr_energy_level`, 1,351
+    `bohr_transition_energy`, 1,376 `rydberg_wavelength`, 67 `SpectralSeries::wavelength`; #22: 2,837 `reduced_mass`)
+  - generator: `exact::cr_ratio` and `cr_bohr_level`, `cr_transition`, `cr_rydberg`, `cr_reduced_mass` (Big integers, no
+    cutoff); the exhaustive search of `bohr_transition_energy`'s exact values (`m_spectroscopy::transition_exact_values`,
+    trial division and Miller–Rabin); `validate.py` proves every Ok row of the five functions with `Fraction`, re-derives
+    the structure (R's odd significands factored, the search with its own factorisation) and checks every exact level
+    and tie is in the corpus; `cr_verify.py` gains `ratio`, `bohr`, `trans`, `ryd`, `series` and `rmass` (2.25 million
+    arguments; the public function, the fast path and the exact path forced) against `Fraction`
+  - the harness maps a #21 or #22 row's `(f:…)` note and counts #21 per function
+  - **result**, x86_64 ELF, x86_64 PE and aarch64: `301484 ok, 0 failed, 0 measured, 0 pending, 19477 accepted (ADR 6:
+    809), 0 glibc-matching (failed)` on 17 modules — under ADR 2, 6,617 #21 and 2,837 #22 rows besides the earlier ones
+    ([`port-parity.md`](docs/development/port-parity.md) §17)
+  - tests: `tests/spectroscopy.tcyr` gains `cyrius_adr21` (−R at every Z = n and −R/4^k at n = 2^k·Z, the exact 16R and 32R,
+    the 13 ties declined by the fast path and rounded to even, Lyman α, Hα, Rust's worst cancellation, 6,000 seeded
+    (Z, n₁, n₂) fast against exact) and `cyrius_adr22` (m/2 on 10,000 seeded masses, the normal and subnormal ties,
+    (DBL_MAX, DBL_MAX), the gap of 55, 20,000 seeded pairs fast against exact): 311 assertions; `tests/mathx.tcyr` gains
+    `cr_ratio_values` (the multi-word operations, ratios with ties, subnormal results and the overflow threshold, the
+    double-double helpers) and `cr_ratio_agrees` (10,000 seeded quotients, exact against double-double): 1,566 assertions;
+    20 test files, 0 warnings; benches `spectroscopy/bohr_transition_energy`, `rydberg_wavelength`,
+    `series_wavelength_balmer_alpha`, `reduced_mass_hcl` and the exact path's `bohr_transition_energy_tie`,
+    `reduced_mass_tie`
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -572,6 +612,26 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   *Migration:* none for physical geometries; code that relied on an Err or ±∞ for extreme coordinates gets the
   geometry's value.
 
+### Breaking (relative to Rust 1.2.0, ADR 0002 #21)
+- **spectroscopy** — `bohr_energy_level`, `bohr_transition_energy`, `rydberg_wavelength` and
+  `spectral_series_wavelength` return their exact values rounded once: −R·Z²/n², R·Z²·(n₂² − n₁²)/(n₁²·n₂²) and
+  n₁²·n₂²/(R·Z²·(n₂² − n₁²)), with R the constant's double (RYDBERG_EV, RYDBERG, or 1.2's const-evaluated R_H). 1.2 rounded
+  three to eight times and cancelled for close large n: `bohr_energy_level(5, 5)` is −R exactly (1.2: one ulp off, as for
+  86 of the 255 Z = n), ordinary lines move by 0–2 ulp, and close large n by much more (`rydberg_wavelength(255, 2²⁸ + 1,
+  2²⁸ + 2)` by 9.0·10⁷ ulp, `bohr_transition_energy(26, 2³² − 10, 2³² − 9)` by 1.8·10⁹ ulp, where 1.2's two levels cancel).
+  The errors and their order are 1.2's.
+  *Migration:* none for code that compares with a tolerance at ordinary n; at n beyond about 10³ the new values are the
+  accurate ones.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #22)
+- **spectroscopy** — `reduced_mass(m₁, m₂)` returns the correctly rounded m₁·m₂/(m₁ + m₂) for every pair of positive finite
+  masses: m/2 exactly for a homonuclear diatomic (1.2 was one ulp off on 8.6 % of masses), and no over- or underflow at the
+  range ends (`reduced_mass(DBL_MAX, DBL_MAX)` is DBL_MAX/2, 1.2's NaN; `reduced_mass(1e-160, 1e-160)` is 5e-161, where
+  1.2's product underflowed to a few subnormal bits). Subnormal results are rounded once, ties to even; the errors are
+  1.2's.
+  *Migration:* none for physical masses compared with a tolerance; code that tested 1.2's exact bits sees at most one ulp
+  in the normal range.
+
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
@@ -663,6 +723,11 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   (1.2's chain gave +∞ or an Err there in 14, 52 and 80 ns); `potential/bond_angle_linear` (CO₂ on an axis, ba × bc
   exactly 0) 1.06 µs → 135 ns, by a proven shortcut for an exactly linear or zero-angle geometry (it had taken the slow
   path)
+- M4e-3, ADR 0002 #21 and #22 (Cyrius before → after, the same host, back to back): `spectroscopy/bohr_energy_level`
+  9 → 49 ns (Rust 1.21; R·Z² split exactly, the quotient by n² inline with its rounding test), and the Cyrius-only
+  `spectroscopy/bohr_transition_energy` 27 → 73 ns, `rydberg_wavelength` 24 → 73, `series_wavelength_balmer_alpha`
+  28 → 78, `reduced_mass_hcl` 14 → 73 (double-double operands and `_km_dd_div_cr`); the exact path, on a tie:
+  `bohr_transition_energy_tie` 2.42 µs, `reduced_mass_tie` 2.20 µs (1.2's chain took 28 and 14 ns there)
 
 ## [1.2.0] - 2026-11-08
 

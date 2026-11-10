@@ -1,6 +1,7 @@
 # mathx.tcyr — the correctly rounded exp, exp10, expm1, ln, log10 (M3c-2a), pow (M3c-2b), sin, cos, sincos,
-# atan2 and acos (M4a), x·2^y (M4d) and 1/(100·x) (M4e) of src/mathx.cyr (ADR 0006), and the unbounded-exponent
-# arithmetic (M4e-2, ADR 0002 #20).
+# atan2 and acos (M4a), x·2^y (M4d) and 1/(100·x) (M4e) of src/mathx.cyr (ADR 0006), the unbounded-exponent
+# arithmetic (M4e-2, ADR 0002 #20), and the multi-word integers, RN(p/q·2^e) and the double-double quotient (M4e-3, ADR
+# 0002 #21, #22).
 #
 # Special values, the exact and tie cases, the thresholds, subnormal results (rounded once), the known
 # hardest-to-round arguments (Lefèvre–Muller's binary64 worst cases for exp, ln, sin, cos, arctan and arccos),
@@ -1413,6 +1414,179 @@ fn _t_ux_ieee() {
 }
 
 # Runs every test group; returns the failure count from assert_summary().
+# ── multi-word integers, RN(p/q·2^e) and the double-double quotient (M4e-3, ADR 0002 #21, #22) ──
+# Expected values: Python's Fraction (exact), rounded by CPython's correctly rounded int division.
+
+# a = hi·2⁶⁴ + lo (two 64-bit words, unsigned).
+fn bn_of(a, hi, lo) {
+    var t[64];
+    _km_bn_set(a, hi);
+    _km_bn_shl(a, 64);
+    _km_bn_set(&t, lo);
+    _km_bn_add(a, a, &t);
+    return 0;
+}
+
+# The limbs of a as two words: (limbs 1 and 0, limbs 3 and 2) → checked against (lo, hi).
+#must_use
+fn bn_is(a, hi, lo): i64 {
+    var l = load64(a) | (load64(a + 8) << 32);
+    var h = load64(a + 16) | (load64(a + 24) << 32);
+    var k = 4;
+    while (k < _KM_BN_LIMBS) {
+        if (load64(a + 8 * k) != 0) { return 0; }
+        k = k + 1;
+    }
+    if (l == lo && h == hi) { return 1; }
+    return 0;
+}
+
+fn _t_bn_ratio_values() {
+    test_group("cr_ratio_values");
+    var a[64];
+    var b[64];
+    var c[64];
+    _km_bn_set(&a, 0xFFFFFFFFFFFFFFFF);
+    assert_eq(_km_bn_bitlen(&a), 64, "bitlen(2⁶⁴ − 1)");
+    _km_bn_mul(&c, &a, &a);
+    assert(bn_is(&c, 0xFFFFFFFFFFFFFFFE, 1) == 1, "(2⁶⁴ − 1)² = 2¹²⁸ − 2⁶⁵ + 1");
+    _km_bn_set(&b, 0xFFFFFFFFFFFFFFFF);
+    _km_bn_mul_small(&b, 0xFFFFFFFF);
+    assert(bn_is(&b, 0xFFFFFFFE, 0xFFFFFFFF00000001) == 1, "(2⁶⁴ − 1)·(2³² − 1)");
+    _km_bn_add(&b, &c, &a);
+    assert(bn_is(&b, 0xFFFFFFFFFFFFFFFF, 0) == 1, "(2⁶⁴ − 1)² + (2⁶⁴ − 1) = 2¹²⁸ − 2⁶⁴");
+    _km_bn_sub(&b, &b, &a);
+    assert(_km_bn_cmp(&b, &c) == 0, "… − (2⁶⁴ − 1) is (2⁶⁴ − 1)² again");
+    _km_bn_set(&a, 1);
+    _km_bn_shl(&a, 200);
+    assert_eq(_km_bn_bitlen(&a), 201, "bitlen(2²⁰⁰)");
+    assert(_km_bn_cmp(&a, &c) == 1 && _km_bn_cmp(&c, &a) == 0 - 1, "2²⁰⁰ > 2¹²⁸ − 2⁶⁵ + 1");
+    _km_bn_shl(&c, 37);
+    assert(load64(&c) == 0 && load64(&c + 8) == 32 && _km_bn_bitlen(&c) == 165, "(2¹²⁸ − 2⁶⁵ + 1)·2³⁷: limbs");
+    # RN(p/q·2^e) against Fraction: ties to even, subnormal results and ties, the overflow threshold, p = 0
+    var p[64];
+    var q[64];
+    var ws: i64[9];
+    var ps: i64[9];
+    var qs: i64[9];
+    var es: i64[9];
+    ws[0] = 0x3FD5555555555555; ps[0] = 1; qs[0] = 3; es[0] = 0;
+    ws[1] = 0; ps[1] = 1; qs[1] = 1; es[1] = 0 - 1075;
+    ws[2] = 2; ps[2] = 3; qs[2] = 1; es[2] = 0 - 1075;
+    ws[3] = 0x4340000000000000; ps[3] = 0x20000000000001; qs[3] = 1; es[3] = 0;
+    ws[4] = 0x4340000000000002; ps[4] = 0x20000000000003; qs[4] = 1; es[4] = 0;
+    ws[5] = 0x7FEFFFFFFFFFFFFF; ps[5] = 0x1FFFFFFFFFFFFF; qs[5] = 0x20000000000000; es[5] = 1024;
+    ws[6] = 0x7FF0000000000000; ps[6] = 0x3FFFFFFFFFFFFF; qs[6] = 0x40000000000000; es[6] = 1024;
+    ws[7] = 0x7FF0000000000000; ps[7] = 1; qs[7] = 1; es[7] = 1024;
+    ws[8] = 5; ps[8] = 1; qs[8] = 3; es[8] = 0 - 1070;
+    var bad = 0;
+    var k = 0;
+    while (k < 9) {
+        _km_bn_set(&p, ps[k]);
+        _km_bn_set(&q, qs[k]);
+        var r: f64 = _km_cr_ratio(&p, &q, es[k]);
+        if (load64(&r) != ws[k]) { bad = bad + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "nine ratios: 1/3, the ties 2⁻¹⁰⁷⁵, 1.5·2⁻¹⁰⁷⁴, 2⁵³ + 1, 2⁵³ + 3, DBL_MAX, the overflow tie");
+    _km_bn_set(&p, 0);
+    var z0: f64 = _km_cr_ratio(&p, &q, 5);
+    assert_eq(load64(&z0), 0, "p = 0: +0");
+    _km_bn_set(&a, 0xFFFFFFFFFFFFFFFF);
+    _km_bn_mul(&p, &a, &a);
+    _km_bn_set(&q, 3);
+    _km_bn_shl(&q, 100);
+    var r1: f64 = _km_cr_ratio(&p, &q, 7);
+    assert_eq(load64(&r1), 0x4205555555555555, "(2⁶⁴ − 1)²/(3·2¹⁰⁰)·2⁷");
+    _km_bn_set(&p, 1);
+    _km_bn_shl(&p, 200);
+    _km_bn_set(&a, 1);
+    _km_bn_add(&p, &p, &a);
+    _km_bn_set(&a, 0xFFFFFFFFFFFFFFFF);
+    _km_bn_set(&b, 0x1000000000000003);
+    _km_bn_mul(&q, &a, &b);
+    var r2: f64 = _km_cr_ratio(&p, &q, 0 - 300);
+    assert_eq(load64(&r2), 0x31F0000000000000, "(2²⁰⁰ + 1)/((2⁶⁴ − 1)(2⁶⁰ + 3))·2⁻³⁰⁰");
+    _km_bn_set(&p, 5);
+    _km_bn_set(&q, 1);
+    _km_bn_shl(&q, 200);
+    var r3: f64 = _km_cr_ratio(&p, &q, 0);
+    assert_eq(load64(&r3), 0x3394000000000000, "5/2²⁰⁰");
+    bn_of(&a, 0x8000000000000000, 1);
+    _km_bn_set(&b, 1);
+    _km_bn_shl(&b, 100);
+    _km_bn_set(&c, 1);
+    _km_bn_sub(&b, &b, &c);
+    _km_bn_mul(&p, &a, &b);
+    _km_bn_set(&q, 1);
+    _km_bn_shl(&q, 150);
+    _km_bn_set(&c, 7);
+    _km_bn_add(&q, &q, &c);
+    var r4: f64 = _km_cr_ratio(&p, &q, 0 - 500);
+    assert_eq(load64(&r4), 0x2580000000000000, "(2¹²⁷ + 1)(2¹⁰⁰ − 1)/(2¹⁵⁰ + 7)·2⁻⁵⁰⁰");
+    # _km_dd_mul and _km_dd_div_cr
+    var one: f64 = 1.0;
+    var u52: f64 = 0x3CB0000000000000;
+    var x1: f64 = one + u52;
+    var zero: f64 = 0.0;
+    var mh, ml = _km_dd_mul(x1, zero, x1, zero);
+    assert(load64(&mh) == 0x3FF0000000000002 && load64(&ml) == 0x3970000000000000, "(1 + 2⁻⁵²)² = 1 + 2⁻⁵¹ + 2⁻¹⁰⁴");
+    var y1, o1 = _km_dd_div_cr(6.0, zero, 3.0, zero);
+    assert(o1 == 1 && y1 == 2.0, "6/3: an exact quotient passes the test");
+    var two53: f64 = 0x4340000000000000;
+    var y2, o2 = _km_dd_div_cr(two53, one, one, zero);
+    assert(o2 == 0, "(2⁵³ + 1)/1, a midpoint: the test fails");
+    var y3, o3 = _km_dd_div_cr(one, zero, 3.0, zero);
+    assert(o3 == 1 && load64(&y3) == 0x3FD5555555555555, "1/3");
+}
+
+# RN(p/q) by _km_cr_ratio against _km_dd_div_cr's result wherever its test passes: p and q products of two seeded 53-bit
+# integers (exact double-doubles by TwoProduct).
+fn _t_bn_ratio_agrees() {
+    test_group("cr_ratio_agrees");
+    var seed = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var passed = 0;
+    var a[64];
+    var b[64];
+    var p[64];
+    var q[64];
+    var k = 0;
+    while (k < 10000) {
+        var w: i64[4];
+        var j = 0;
+        while (j < 4) {
+            seed = seed ^ (seed << 13);
+            seed = seed ^ (seed >> 7);
+            seed = seed ^ (seed << 17);
+            w[j] = 1 + (seed >> (11 + (seed & 31)));
+            j = j + 1;
+        }
+        _km_bn_set(&a, w[0]);
+        _km_bn_set(&b, w[1]);
+        _km_bn_mul(&p, &a, &b);
+        _km_bn_set(&a, w[2]);
+        _km_bn_set(&b, w[3]);
+        _km_bn_mul(&q, &a, &b);
+        var r: f64 = _km_cr_ratio(&p, &q, 0);
+        var f0: f64 = f64_from(w[0]);
+        var f1: f64 = f64_from(w[1]);
+        var f2: f64 = f64_from(w[2]);
+        var f3: f64 = f64_from(w[3]);
+        var nh, nl = _km_two_prod(f0, f1);
+        var dh, dl = _km_two_prod(f2, f3);
+        var y, ok = _km_dd_div_cr(nh, nl, dh, dl);
+        if (ok == 1) {
+            passed = passed + 1;
+            if (load64(&y) != load64(&r)) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "the exact ratio and the double-double quotient agree on 10,000 seeded p/q");
+    assert(passed > 9900, "the double-double test passes almost always");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_special_values();
     _t_exact_cases();
@@ -1438,6 +1612,8 @@ fn main() {
     _t_hundredth_agrees();
     _t_ux_values();
     _t_ux_ieee();
+    _t_bn_ratio_values();
+    _t_bn_ratio_agrees();
     return assert_summary();
 }
 

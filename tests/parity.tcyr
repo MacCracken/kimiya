@@ -1361,7 +1361,7 @@ fn _par_inorganic(fp, fl): i64 {
     return 0;
 }
 
-# ── ADR 0002 #13 … #20: an exact value named in the note ───────────────────────────────
+# ── ADR 0002 #13 … #22: an exact value named in the note ───────────────────────────────
 # Where the port's value is the exact one and the oracle's is not, and the exact value can't be derived from the
 # oracle's (unlike #12's q/5), the golden row keeps the oracle's value and its note names the port's, `[ADR 0002 #N: …
 # (f:<bits>)]` or `(i:<0|1>)]`; scripts/oracle writes it and validate.py proves it with exact rational arithmetic. A
@@ -1375,6 +1375,12 @@ var _par_adr17 = 0;
 var _par_adr18 = 0;
 var _par_adr19 = 0;
 var _par_adr20 = 0;
+var _par_adr21 = 0;
+var _par_adr22 = 0;
+var _par_adr21_level = 0;                   # #21 per function: bohr_energy_level, bohr_transition_energy,
+var _par_adr21_trans = 0;                   # rydberg_wavelength, SpectralSeries::wavelength
+var _par_adr21_ryd = 0;
+var _par_adr21_series = 0;
 
 # 1 if the current row's note contains the C string `tag`.
 #must_use
@@ -1441,6 +1447,8 @@ fn _par_map_exact(adr, v, kind) {
     if (adr == 18) { _par_adr18 = _par_adr18 + 1; }
     if (adr == 19) { _par_adr19 = _par_adr19 + 1; }
     if (adr == 20) { _par_adr20 = _par_adr20 + 1; }
+    if (adr == 21) { _par_adr21 = _par_adr21 + 1; }
+    if (adr == 22) { _par_adr22 = _par_adr22 + 1; }
     return 0;
 }
 
@@ -1756,8 +1764,9 @@ fn _par_got_f64s(t, v, buf) {
 # SpectralSeries an `e:` token; slices are `v:n` + n elements, read into the work buffer (isotope_pattern's atoms as
 # 16-byte (z, count) records), and a Vec result is the caller's buffer's count and contents (port plan §6.4).
 # fft_spectrum runs with a buffer of n/2 + 1 values up to n = 64 (the heap work table) and of 2n above (the in-place
-# transform), so both paths replay the corpus. ADR 0002 #19 (the wavenumber conversions): a noted row's port value must
-# be the note's.
+# transform), so both paths replay the corpus. ADR 0002 #19 (the wavenumber conversions), #21 (the Bohr levels, the
+# transition energy, the Rydberg formula and the series) and #22 (the reduced mass): a noted row's port value must be
+# the note's.
 fn _par_spectroscopy(fp, fl): i64 {
     if (_par_spec_alloc() != 1) { return 0 - 1; }
     if (_par_eq(fp, fl, "SpectralSeries::n_lower") == 1) {
@@ -1770,22 +1779,26 @@ fn _par_spectroscopy(fp, fl): i64 {
         var s2 = _par_in_series(0);
         if (s2 < 0) { return 0 - 1; }
         var ts, vs = spectral_series_wavelength(s2, _par_in(1));
-        _par_got_res(ts, vs);
+        _par_got_noted(21, "[ADR 0002 #21:", ts, vs);
+        if (_par_mapped == 21) { _par_adr21_series = _par_adr21_series + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "spectroscopy::bohr_energy_level") == 1) {
         var tb, vb = bohr_energy_level(_par_in(0), _par_in(1));
-        _par_got_res(tb, vb);
+        _par_got_noted(21, "[ADR 0002 #21:", tb, vb);
+        if (_par_mapped == 21) { _par_adr21_level = _par_adr21_level + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "spectroscopy::bohr_transition_energy") == 1) {
         var tt, vt = bohr_transition_energy(_par_in(0), _par_in(1), _par_in(2));
-        _par_got_res(tt, vt);
+        _par_got_noted(21, "[ADR 0002 #21:", tt, vt);
+        if (_par_mapped == 21) { _par_adr21_trans = _par_adr21_trans + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "spectroscopy::rydberg_wavelength") == 1) {
         var tr, vr = rydberg_wavelength(_par_in(0), _par_in(1), _par_in(2));
-        _par_got_res(tr, vr);
+        _par_got_noted(21, "[ADR 0002 #21:", tr, vr);
+        if (_par_mapped == 21) { _par_adr21_ryd = _par_adr21_ryd + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "spectroscopy::isotope_abundances") == 1) {
@@ -1907,7 +1920,7 @@ fn _par_spectroscopy(fp, fl): i64 {
     var y: f64 = _par_in(1);
     if (_par_eq(fp, fl, "spectroscopy::reduced_mass") == 1) {
         var t14, v14 = reduced_mass(x, y);
-        _par_got_res(t14, v14);
+        _par_got_noted(22, "[ADR 0002 #22:", t14, v14);
         return 1;
     }
     if (_par_eq(fp, fl, "spectroscopy::vibrational_frequency") == 1) {
@@ -2149,18 +2162,19 @@ fn _par_accepted(fp, fl, ip, il): i64 {
     if (_par_mapped == 12) { return 2; }
     # ADR 0002 #3: a SEMF row where the oracle's NaN (z > a or a = 0) is the port's Err(InvalidInput).
     if (_par_mapped == 3) { return 2; }
-    # ADR 0002 #13 … #20: a row whose note names the port's exact value, which the port returned.
-    if (_par_mapped >= 13 && _par_mapped <= 20) { return 2; }
+    # ADR 0002 #13 … #22: a row whose note names the port's exact value, which the port returned.
+    if (_par_mapped >= 13 && _par_mapped <= 22) { return 2; }
     return 0;
 }
 
-# 1 for an ADR whose accepted rows are counted but not printed row by row: ADR 0002 #4's Antoine mapping and #13 … #18's
-# exact-value rows (M4c, M4d; about 3,500 rows between them), each summarised by _par_module_done with its count; the
-# validate.py proofs check every one of them. ADR 0002 #12's CFSE rows (13) and #3's SEMF rows (23) are printed by name.
+# 1 for an ADR whose accepted rows are counted but not printed row by row: ADR 0002 #4's Antoine mapping and #13 … #22's
+# exact-value rows (M4c … M4e-3; about 17,000 rows between them), each summarised by _par_module_done with its count;
+# the validate.py proofs check every one of them. ADR 0002 #12's CFSE rows (13) and #3's SEMF rows (23) are printed by
+# name.
 #must_use
 fn _par_accepted_quiet(adr): i64 {
     if (adr == 2 && _par_mapped == 2) { return 1; }
-    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 20) { return 1; }
+    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 22) { return 1; }
     return 0;
 }
 
@@ -2173,13 +2187,30 @@ fn _par_accepted_bits(adr): i64 {
 }
 
 # After the phase module: the ADR 0002 #4 mapping summary; after thermochem, ADR 0002 #1's; after organic, #6's; after
-# inorganic, #12's and #15's; after nuclear, #3's, #13's and #14's; after potential, #16's, #17's and #18's.
+# inorganic, #12's and #15's; after nuclear, #3's, #13's and #14's; after potential, #16's, #17's, #18's and #20's;
+# after spectroscopy, #19's, #21's (per function) and #22's.
 fn _par_module_done(mp, ml) {
     if (_par_eq(mp, ml, "spectroscopy") == 1) {
         print("  ADR 0002 #19 exact 1/(100x): ", 31);
         fmt_int(_par_adr19);
         print(" wavenumber_from_wavelength / wavelength_from_wavenumber rows where the port's correctly rounded", 96);
         println(" 1/(100x) differs from Rust's 0.01/x (accepted, ADR 2, counted, not listed)");
+        print("  ADR 0002 #21 exact Rydberg rationals: ", 40);
+        fmt_int(_par_adr21);
+        print(" rows (bohr_energy_level ", 25);
+        fmt_int(_par_adr21_level);
+        print(", bohr_transition_energy ", 25);
+        fmt_int(_par_adr21_trans);
+        print(", rydberg_wavelength ", 21);
+        fmt_int(_par_adr21_ryd);
+        print(", SpectralSeries::wavelength ", 29);
+        fmt_int(_par_adr21_series);
+        print(") where the port's correctly rounded value differs from Rust's", 62);
+        println(" (accepted, ADR 2, counted, not listed)");
+        print("  ADR 0002 #22 exact reduced mass: ", 35);
+        fmt_int(_par_adr22);
+        print(" reduced_mass rows where the port's correctly rounded m1*m2/(m1 + m2) differs from Rust's", 89);
+        println(" (accepted, ADR 2, counted, not listed)");
         return 0;
     }
     if (_par_eq(mp, ml, "potential") == 1) {
