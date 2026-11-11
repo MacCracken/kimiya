@@ -86,6 +86,8 @@ var _bench_st_out = 0;      # the coefficients' / states' / records' out buffer 
 var _bench_st_f = 0;        # 7 f64 input slots: moles (3, 2), coefficients (2, 1), the product's 2, the yields (8, 10)
 var _bench_emp = 0;         # glucose's mass percents: [(6, 40.00), (1, 6.71), (8, 53.29)], 3 (z, f64) records
 var _bench_mol = 0;         # glucose as a KmMolecule (its atoms vec)
+var _bench_st_x = 0;        # ADR 0002 #24–#26's exact paths: 9 f64 slots (bench_stoich_exact)
+var _bench_emp2 = 0;        # [(6, 12.011), (8, 17.5989)]: r − 1 within 1/(10·9·10¹⁵) of 1/10
 
 # element/lookup_by_symbol: `lookup_by_symbol(black_box("Fe"))`, a linear scan to row 26.
 fn bench_lookup_by_symbol(per_batch, batches) {
@@ -1039,6 +1041,43 @@ fn bench_stoich_small(name, which, per_batch, batches) {
     bench_report(b);
 }
 
+# Cyrius-only, ADR 0002 #24–#26's exact paths (M4f-2): stoichiometry/theoretical_yield_moles_tie (y·3/2 with
+# 3y = 2⁵³ + 1, a midpoint: the fast path's exact midpoint resolution, _km_mul_div_tie), percent_yield_subnormal
+# (100·3·2⁻¹⁰⁷⁴/200, a subnormal tie: the exact path, _km_mul_div_acc), limiting_reagent_tie ((1, 2) over (1, 2): equal
+# rounded ratios, the exact comparison _km_ratio_lt), empirical_formula_edge (C 12.011 %, O 17.5989 %: the fast
+# tolerance test undecided at k = 1, the exact one decides: CO).
+fn bench_stoich_exact(name, which, per_batch, batches) {
+    var x = _bench_st_x;
+    var p: f64 = load64(x + 16);
+    var a: f64 = load64(x + 24);
+    var th: f64 = load64(x + 32);
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            if (which == 0) {
+                var t0, v0 = theoretical_yield_moles(x, 1, x + 8, 1, p);
+                _bench_sink = v0;
+            } elif (which == 1) {
+                var t1, v1 = percent_yield(a, th);
+                _bench_sink = v1;
+            } elif (which == 2) {
+                var t2, v2 = limiting_reagent(x + 40, 2, x + 56, 2);
+                _bench_sink = v2;
+            } else {
+                var t3, v3 = empirical_formula(_bench_emp2, 2, _bench_st_out, 4);
+                _bench_sink = v3;
+            }
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
 # Runs every bench.
 fn main(): i64 {
     alloc_init();
@@ -1336,6 +1375,31 @@ fn main(): i64 {
     bench_stoich_small("stoichiometry/percent_yield", 2, 1000000, 20);
     bench_stoich_small("stoichiometry/percent_composition_glucose", 3, 1000000, 20);
     bench_stoich_small("stoichiometry/empirical_formula_glucose", 4, 1000000, 20);
+    _bench_st_x = alloc(9 * 8);
+    var sx: f64[9];
+    sx[0] = 3002399751580331.0;             # 3·y = 2⁵³ + 1
+    sx[1] = 2.0;
+    sx[2] = 3.0;
+    sx[3] = 0.0;
+    sx[4] = 200.0;
+    sx[5] = 1.0;
+    sx[6] = 2.0;
+    sx[7] = 1.0;
+    sx[8] = 2.0;
+    memcpy(_bench_st_x, &sx, 9 * 8);
+    store64(_bench_st_x + 24, 3);           # 3·2⁻¹⁰⁷⁴ (a subnormal: through an untyped word)
+    _bench_emp2 = alloc(4 * 8);
+    var e2: f64[2];
+    e2[0] = 12.011;
+    e2[1] = 17.5989;
+    store64(_bench_emp2, 6);
+    store64(_bench_emp2 + 8, load64(&e2));
+    store64(_bench_emp2 + 16, 8);
+    store64(_bench_emp2 + 24, load64(&e2 + 8));
+    bench_stoich_exact("stoichiometry/theoretical_yield_moles_tie", 0, 1000000, 20);
+    bench_stoich_exact("stoichiometry/percent_yield_subnormal", 1, 100000, 20);
+    bench_stoich_exact("stoichiometry/limiting_reagent_tie", 2, 1000000, 20);
+    bench_stoich_exact("stoichiometry/empirical_formula_edge", 3, 100000, 20);
     return 0;
 }
 

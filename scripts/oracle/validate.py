@@ -3434,7 +3434,16 @@ print(f"spectroscopy: reduced_mass has {len(mass_ties)} tie rows (normal and sub
 #   the port is Ok, the note's tokens are the port's result (reduced, the denominator positive), so every unnoted row's
 #   port result is the oracle's;
 # - the typed constants: EMPIRICAL_TOLERANCE (0.1) × ½ and × 2, INTEGER_TOLERANCE (10⁻⁹: the generator's and the
-#   harness's conversion) ± 1 ulp and MAX_COMPOSITION_ENTRY (2⁵³) ± 1 each change some row.
+#   harness's conversion) ± 1 ulp and MAX_COMPOSITION_ENTRY (2⁵³) ± 1 each change some row;
+# - ADR 0002 #24–#26 (M4f-2): the port's results recomputed with Fraction, independently of the generator — percent_yield
+#   RN(100·a/t), theoretical_yield_moles RN(m·p/c) at the exact limiting reagent, percent_composition RN(mass·count·100/mw)
+#   with Rust's mw, limiting_reagent's exact least m/c (the first on a tie), empirical_formula with exact moles, minimum,
+#   ratios, tolerance 1/10 and counts — and every row of the five checked: noted exactly where the port's result differs
+#   from the oracle's, the note naming it (a value bit for bit, an index, or the whole result's tokens), so every unnoted
+#   row is the port's result too; the claims behind the port's algorithm checked on the corpus (a ratio of 2³² − ½ or
+#   more is always the ComputationError; the ratios the port keeps lie in [1, 2³²)), Rust's Err paths classified by what
+#   the port returns, the hard rows' coverage counted, and the exact 1/10 pinned (1/10 − 2⁻⁸⁰ and the nearest larger
+#   deviation each change some row).
 stsrc = (root / "rust-old/src/stoichiometry.rs").read_text()
 ST_MAX_ENTRY = float(re.search(r"^const MAX_COMPOSITION_ENTRY: f64 = ([0-9_.]+);", stsrc, re.M).group(1).replace("_", ""))
 ST_INT_TOL = float(re.search(r"^const INTEGER_TOLERANCE: f64 = ([0-9e.-]+);", stsrc, re.M).group(1))
@@ -3713,6 +3722,105 @@ def st_toks(fn, r):
         return [("v", len(r), None)] + [t for z, c in r for t in (("i", z, None), ("i", c, None))]
     if isinstance(r, int): return [("i", r, None)]
     return [("f", r, f2b(r))]
+# ADR 0002 #24–#26 (M4f-2): the port's results, exact (Fraction; rn_frac rounds once, correctly, ties to even).
+def st_port_limiting(mo, co):
+    if len(mo) != len(co) or not mo: return Err("InvalidInput")
+    best = None
+    for i, (m_, c_) in enumerate(zip(mo, co)):
+        if not is_non_negative(m_) or not is_positive(c_): return Err("InvalidInput")
+        q = Fraction(m_) / Fraction(c_)
+        if best is None or q < best[0]: best = (q, i)
+    return best[1]
+def st_port_yield(mo, co, p):
+    if not is_positive(p): return Err("InvalidInput")
+    k = st_port_limiting(mo, co)
+    if isinstance(k, Err): return k
+    m_, c_ = mo[k], co[k]
+    return dv(m_, c_) * p if m_ == 0 else rn_frac(Fraction(m_) * Fraction(p) / Fraction(c_))
+def st_port_percent_yield(a, t):
+    if not is_positive(t) or not is_non_negative(a): return Err("InvalidInput")
+    return dv(a, t) * 100.0 if a == 0 else rn_frac(Fraction(a) * 100 / Fraction(t))
+def st_port_composition(pairs):
+    r = st_composition(pairs)                   # Rust's checks and its mw
+    if isinstance(r, Err): return r
+    mw = 0.0
+    for z, c in pairs: mw += ELEMS[z][3] * float(c)
+    return [(z, 0.0 if c == 0 else rn_frac(Fraction(ELEMS[z][3]) * c * 100 / Fraction(mw))) for z, c in pairs]
+def st_rnd(q): return math.floor(q + Fraction(1, 2))       # Rust's round of a q ≥ 0: halves away from zero
+def st_port_ratios(els):
+    """The exact ratios rᵢ = molesᵢ / min moles (or an Err of Rust's validation)."""
+    if not els: return Err("InvalidInput")
+    moles = []
+    for z, p in els:
+        if z not in ELEMS: return Err("InvalidElement")
+        if not is_positive(p): return Err("InvalidInput")
+        moles.append(Fraction(p) / Fraction(ELEMS[z][3]))
+    mn = min(moles)
+    return [q / mn for q in moles]
+def st_port_empirical(els, tol=Fraction(1, 10)):
+    rs = st_port_ratios(els)
+    if isinstance(rs, Err): return rs
+    mult = next((k for k in range(1, 7) if all(abs(r * k - st_rnd(r * k)) <= tol for r in rs)), None)
+    if mult is None: return Err("ComputationError")
+    out = []
+    for (z, _), r in zip(els, rs):
+        c = st_rnd(r * mult)
+        if c > U32_MAX: return Err("ComputationError")
+        out.append((z, c))
+    return out
+def st_empirical_path(els):
+    """Rust's empirical_formula's outcome by path: 'Ok', 'InvalidInput', 'InvalidElement', 'non-positive min',
+    'ratio not finite', 'no multiplier', 'count past u32'."""
+    if not els: return "InvalidInput"
+    moles = []
+    for z, p in els:
+        if z not in ELEMS: return "InvalidElement"
+        if not is_positive(p): return "InvalidInput"
+        moles.append(dv(p, ELEMS[z][3]))
+    mn = math.inf
+    for v in moles: mn = v if v < mn else mn
+    if not is_positive(mn): return "non-positive min"
+    rat = [dv(v, mn) for v in moles]
+    if not all(math.isfinite(r) for r in rat): return "ratio not finite"
+    mult = next((float(k) for k in range(1, 7) if all(abs(r * k - r_round(r * k)) <= ST_EMP_TOL for r in rat)), None)
+    if mult is None: return "no multiplier"
+    if any(r_round(r * mult) > 4294967295.0 for r in rat): return "count past u32"
+    return "Ok"
+NOTE24_VAL = re.compile(r"\[ADR 0002 #24: the port returns the correctly rounded (.+) = (\S+) \(f:([0-9a-f]{16})\)\]$")
+NOTE25 = re.compile(r"\[ADR 0002 #25: the port returns the exact limiting reagent \(mᵢ·c_j < m_j·cᵢ, the first on a tie\) = "
+                    r"(\d+) \(i:(\d+)\)\]$")
+NOTE_TOKS = re.compile(r" \(([^()]*)\)\]$")
+ST_EXACT = {   # fn: (ADR, what a #24 value note names)
+    "stoichiometry::percent_yield": (24, "100·a/t"),
+    "stoichiometry::theoretical_yield_moles": (24, "m·p/c at the exact limiting reagent"),
+    "stoichiometry::percent_composition": (24, None),
+    "stoichiometry::limiting_reagent": (25, None),
+    "stoichiometry::empirical_formula": (26, None),
+}
+st_x_noted, st_x_ok = {}, {}
+def st_check_port(fn, outs, port, where, note):
+    """The ADR 0002 #24–#26 note of one row: present exactly where the port's result differs from the oracle's, naming
+    it."""
+    adr, what = ST_EXACT[fn]
+    pt = st_toks(fn, port)
+    differs = not toks_equal(outs, pt)
+    noted = f"[ADR 0002 #{adr}:" in note
+    check(noted == differs, f"{where}: {fn}: the port's {pt} vs the oracle's {outs}: the #{adr} note is "
+          f"{'missing' if differs else 'stray'}")
+    st_x_ok[fn] = st_x_ok.get(fn, 0) + 1
+    if not noted: return
+    st_x_noted[fn] = st_x_noted.get(fn, 0) + 1
+    if what is not None:
+        m = NOTE24_VAL.search(note)
+        check(m is not None and m.group(1) == what and len(pt) == 1 and pt[0][0] == "f" and int(m.group(3), 16) == pt[0][2],
+              f"{where}: the #24 note does not name {what} = {port!r}")
+    elif adr == 25:
+        m = NOTE25.search(note)
+        check(m is not None and int(m.group(1)) == port and int(m.group(2)) == port, f"{where}: the #25 note is not {port}")
+    else:
+        m = NOTE_TOKS.search(note)
+        toks = [parse_tok(t, where) for t in m.group(1).split(" ")] if m else []
+        check(toks_equal(toks, pt), f"{where}: the #{adr} note's result is not the port's {pt}")
 ST_CLASS = {"stoichiometry::balance_equation": "A", "stoichiometry::assign_oxidation_states": "A",
             "stoichiometry::limiting_reagent": "A", "stoichiometry::theoretical_yield_moles": "B",
             "stoichiometry::percent_yield": "B", "stoichiometry::percent_composition": "B",
@@ -3722,6 +3830,7 @@ NOTE7_OX = "[ADR 0002 #7: the port returns the exact average oxidation states"
 st_count, st_none, st_round, st_ox, st_bal_ok, st_bal_err = {}, {}, 0, 0, 0, {}
 st_ovf_valid, st_ovf_examples = 0, []
 st_rows = {}
+st_x_rows = {}
 for fn, cls, ins, outs, where in R.get("stoichiometry", []):
     st_count[fn] = st_count.get(fn, 0) + 1
     st_rows.setdefault(fn, []).append((ins, outs, where))
@@ -3785,15 +3894,25 @@ for fn, cls, ins, outs, where in R.get("stoichiometry", []):
         mo, co, rest = st_two_slices(ins)
         r = st_limiting(mo, co) if fn.endswith("limiting_reagent") else st_yield(mo, co, rest[0][1])
         check(toks_equal(outs, st_toks(fn, r)), f"{where}: {fn} -> {outs}, recomputed {r}")
+        port = st_port_limiting(mo, co) if fn.endswith("limiting_reagent") else st_port_yield(mo, co, rest[0][1])
+        st_check_port(fn, outs, port, where, note)
+        st_x_rows.setdefault(fn, []).append((mo, co, rest, r, port))
     elif fn == "stoichiometry::percent_yield":
         r = st_percent_yield(ins[0][1], ins[1][1])
         check(toks_equal(outs, st_toks(fn, r)), f"{where}: percent_yield -> {outs}, recomputed {r}")
+        port = st_port_percent_yield(ins[0][1], ins[1][1])
+        st_check_port(fn, outs, port, where, note)
+        st_x_rows.setdefault(fn, []).append((ins[0][1], ins[1][1], r, port))
     elif fn == "stoichiometry::percent_composition":
         r = st_composition(st_pairs(ins))
         check(toks_equal(outs, st_toks(fn, r)), f"{where}: percent_composition -> {outs}, recomputed {r}")
+        st_check_port(fn, outs, st_port_composition(st_pairs(ins)), where, note)
     elif fn == "stoichiometry::empirical_formula":
         r = st_empirical(st_pairs(ins))
         check(toks_equal(outs, st_toks(fn, r)), f"{where}: empirical_formula -> {outs}, recomputed {r}")
+        port = st_port_empirical(st_pairs(ins))
+        st_check_port(fn, outs, port, where, note)
+        st_x_rows.setdefault(fn, []).append((st_pairs(ins), r, port))
     else:
         check(False, f"{where}: stoichiometry.tsv function {fn} has no rule here")
 check(set(st_count) == set(ST_CLASS), f"stoichiometry: functions {sorted(st_count)}")
@@ -3827,9 +3946,93 @@ for label, tol in (("+ 1 ulp", nextup(0.1)), ("− 1 ulp", nextdown(0.1))):
     up_ = label[0] == "+"
     k = next((kk for kk in range(1, 33) if st_changes("stoichiometry::empirical_formula", lambda a, kk=kk:
               st_empirical(st_pairs(a), tol=(0.1 + kk * 2.0 ** -56) if up_ else (0.1 - kk * 2.0 ** -56))) > 0), None)
-    print(f"  EMPIRICAL_TOLERANCE {label}: {ch} rows change (|r·k − round(r·k)| is a multiple of the ratio's ulp, at "
-          f"least 2⁻⁵² here, so only a change across a multiple shows: the first at {k} ulps; "
-          f"tests/stoichiometry.tcyr pins 0.1 to the ulp on _km_empirical_close)")
+    print(f"  EMPIRICAL_TOLERANCE {label}: {ch} rows change in Rust's replica (|r·k − round(r·k)| is a multiple of the "
+          f"ratio's ulp, at least 2⁻⁵² here, so only a change across a multiple shows: the first at {k} ulps; the port's "
+          f"exact 1/10 is pinned below)")
+# ADR 0002 #24–#26 (M4f-2): the noted rows per function, the port's claims on the corpus, Rust's Err paths, coverage.
+print("stoichiometry: ADR 0002 #24–#26: " + ", ".join(f"{st_x_noted.get(fn, 0)} of {st_x_ok.get(fn, 0)} {fn.split('::')[1]}"
+      for fn in ST_EXACT) + " rows noted with the port's exact result (Fraction; every unnoted row is the port's result too)")
+emp_rows = st_x_rows.get("stoichiometry::empirical_formula", [])
+big_err = kept_max = 0
+for els, r, port in emp_rows:
+    rs = st_port_ratios(els)
+    if isinstance(rs, Err): continue
+    if max(rs) >= Fraction(2 ** 32) - Fraction(1, 2):
+        big_err += 1
+        check(port == Err("ComputationError"), f"empirical_formula{els}: a ratio of 2³² − ½ or more is not the ComputationError")
+    else:
+        kept_max = max(kept_max, max(rs))
+        check(min(rs) == 1 and max(rs) < 2 ** 32, f"empirical_formula{els}: a kept ratio outside [1, 2³²)")
+paths = {}
+for els, r, port in emp_rows:
+    pth = st_empirical_path(els)
+    if pth in ("InvalidInput", "InvalidElement"):
+        check(port == Err(pth), f"empirical_formula{els}: the port's validation is not Rust's")
+        continue
+    got = "Ok" if not isinstance(port, Err) else port.name
+    if pth == "Ok" and got == "Ok":
+        got = "Ok, the same" if toks_equal(st_toks("stoichiometry::empirical_formula", r),
+                                           st_toks("stoichiometry::empirical_formula", port)) else "Ok, another result"
+    key = (pth, got)
+    if key not in paths: paths[key] = [0, els]
+    paths[key][0] += 1
+print(f"stoichiometry: ADR 0002 #26: {big_err} empirical_formula rows with a ratio of 2³² − ½ or more, every one the "
+      f"ComputationError; the largest kept ratio {float(kept_max):.6g} (< 2³²); Rust's result by path → the port's:")
+for (pth, got), (n, ex) in sorted(paths.items()):
+    print(f"  Rust {pth} → port {got}: {n} rows, e.g. {ex}")
+# the exact 1/10, pinned: 1/10 − 2⁻⁸⁰ drops the rows exactly on the edge; the smallest tolerance past 1/10 that would
+# make some row pass at a smaller multiplier than now (or at all), admitted, changes that row
+def st_port_dev(els, k):
+    """The tolerance a row needs to pass at multiplier k: the largest |rᵢ·k − round(rᵢ·k)|."""
+    rs = st_port_ratios(els)
+    return None if isinstance(rs, Err) else max(abs(x * k - st_rnd(x * k)) for x in rs)
+def st_port_mult(els):
+    return next((k for k in range(1, 7) if st_port_dev(els, k) <= Fraction(1, 10)), 7)
+beyond = min((d for els, r, port in emp_rows if not isinstance(st_port_ratios(els), Err)
+              for k in range(1, st_port_mult(els)) for d in [st_port_dev(els, k)] if d > Fraction(1, 10)), default=None)
+for label, tol in (("1/10 − 2⁻⁸⁰", Fraction(1, 10) - Fraction(1, 2 ** 80)),
+                   (f"the nearest larger deviation, 1/10 + {float(beyond - Fraction(1, 10)):.3g}", beyond)):
+    ch = sum(1 for els, r, port in emp_rows if st_toks("stoichiometry::empirical_formula", st_port_empirical(els, tol))
+             != st_toks("stoichiometry::empirical_formula", port))
+    print(f"  pinning the port's tolerance: with {label}, {ch} of {len(emp_rows)} empirical_formula rows change")
+    check(ch > 0, f"stoichiometry: no golden empirical_formula row pins the exact 1/10 against {label}")
+edge_rows = sum(1 for els, r, port in emp_rows for k in range(1, 7) if st_port_dev(els, k) == Fraction(1, 10))
+check(edge_rows >= 50, f"stoichiometry: only {edge_rows} (row, k) with a deviation of exactly 1/10")
+# coverage of the hard rows
+py_rows = st_x_rows.get("stoichiometry::percent_yield", [])
+def st_q100(a, t): return Fraction(a) * 100 / Fraction(t)
+py_ties = [(a, t) for a, t, r, port in py_rows if not isinstance(port, Err) and a != 0 and is_midpoint(st_q100(a, t))]
+py_sub_ties = [x for x in py_ties if st_q100(*x) < Fraction(1, 2 ** 1022)]
+py_ovf = sum(1 for a, t, r, port in py_rows if not isinstance(port, Err) and a != 0
+             and Fraction(2 ** 1023) <= st_q100(a, t) < Fraction(2 ** 1025))
+py_unf = sum(1 for a, t, r, port in py_rows if not isinstance(r, Err) and r == 0 and a != 0)
+check(len(py_ties) >= 40 and len(py_sub_ties) >= 10 and (b2f(3), 200.0) in [(a, t) for a, t in py_sub_ties],
+      f"percent_yield: {len(py_ties)} tie rows, {len(py_sub_ties)} subnormal (3·2⁻¹⁰⁷⁴, 200 among them?)")
+check(py_ovf >= 20 and py_unf >= 10, f"percent_yield: {py_ovf} rows at the overflow end, {py_unf} where Rust underflows to 0")
+ty_rows = st_x_rows.get("stoichiometry::theoretical_yield_moles", [])
+ty_mc = {"over": 0, "under": 0, "tie": 0}
+for mo, co, rest, r, port in ty_rows:
+    if isinstance(port, Err): continue
+    k = st_port_limiting(mo, co)
+    q = Fraction(mo[k]) / Fraction(co[k])
+    if mo[k] != 0 and math.isfinite(port) and q > Fraction(b2f(0x7FEFFFFFFFFFFFFF)): ty_mc["over"] += 1
+    if mo[k] != 0 and q < Fraction(1, 2 ** 1022) and port >= 2.0 ** -1022: ty_mc["under"] += 1
+    if mo[k] != 0 and is_midpoint(q * Fraction(rest[0][1])): ty_mc["tie"] += 1
+check(min(ty_mc.values()) >= 5, f"theoretical_yield_moles: hard rows {ty_mc}")
+lim_rows = st_x_rows.get("stoichiometry::limiting_reagent", [])
+lim_cov = {"exact tie": 0, "rounded tie": 0, "both overflow": 0, "both underflow": 0}
+for mo, co, rest, r, port in lim_rows:
+    if isinstance(port, Err) or len(mo) < 2: continue
+    qs = [Fraction(m_) / Fraction(c_) for m_, c_ in zip(mo, co)]
+    rq = [dv(m_, c_) for m_, c_ in zip(mo, co)]
+    if len(set(qs)) < len(qs): lim_cov["exact tie"] += 1
+    if any(rq[a_] == rq[b_] and qs[a_] != qs[b_] for a_ in range(len(qs)) for b_ in range(a_)): lim_cov["rounded tie"] += 1
+    if sum(1 for x in rq if x == math.inf) >= 2: lim_cov["both overflow"] += 1
+    if sum(1 for x, q in zip(rq, qs) if x == 0 and q != 0) >= 2: lim_cov["both underflow"] += 1
+check(min(lim_cov.values()) >= 20, f"limiting_reagent: hard rows {lim_cov}")
+print(f"stoichiometry: ADR 0002 #24–#26 hard rows: percent_yield {len(py_ties)} ties ({len(py_sub_ties)} subnormal), "
+      f"{py_ovf} at the overflow end, {py_unf} where Rust underflows to 0; theoretical_yield_moles {ty_mc}; "
+      f"limiting_reagent {lim_cov}; empirical_formula {edge_rows} (row, k) exactly 1/10 off")
 
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
              "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy", "stoichiometry"}

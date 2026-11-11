@@ -558,6 +558,45 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     `oxidation_states_kmno4` (against Rust) and seven Cyrius-only
   - the five float functions are Rust's arithmetic unchanged; their measured misses of the exact values are listed in
     ADR 0002's M4f addition for the user's decision
+- **M4f-2 exact stoichiometry** ([ADR 0002 #24, #25 and #26](docs/adr/0002-port-api-divergences.md), the user's
+  decisions of 2026-11-10, "Round once", "Compare exactly" and "Evaluate exactly"; port plan §6.4 "Decided in M4f-2"; the
+  behaviour changes are under *Breaking*):
+  - **stoichiometry** — `percent_yield`, `theoretical_yield_moles` and `percent_composition` return their exact rationals
+    rounded once through `_km_cr_mul_div` = RN(x·y/z): a double-double fast path on the significands with
+    `_km_dd_div_cr`'s rounding test and an exact resolution of the midpoint where the test fails (`_km_mul_div_tie`: the
+    residual's sign as four 64-bit integers), and the exact `_km_mul_div_acc` (`_km_cr_ratio`) for subnormal operands and
+    results that may leave the normal range; `limiting_reagent` keeps Rust's rounded ratios where they differ (RN is
+    monotone) and compares equal ones exactly (`_km_ratio_lt`: the two cross products, exponents first, then exact
+    TwoProducts); `empirical_formula` with exact moles, minimum, ratios (double-doubles with `_km_dd_quot`), the proven
+    2³² − ½ cut, a tolerance test that is proven or defers to the exact one (`_km_emp_close_fast`, `_km_emp_close_exact`:
+    integers below 2¹⁴³, a 36-bit restoring division) and exact counts; `_km_empirical_formula(…, force)` forces the exact
+    tests (`cr_verify.py`). Rust's checks, Err codes and their order are kept
+  - generator: `exact::cr_mul_div`, `ratio_lt` and `empirical_exact` (`Big` integers, no cutoff),
+    `m_stoichiometry::port_limiting` and `port_empirical` (Rust's validation, asserted against the oracle), the notes;
+    `emit_exact` appends 6,341 hard rows with their own seed (`percent_yield`'s ties at RN, subnormal ones included, and
+    range ends; the yield's over- and underflowing m/c and its midpoints; `limiting_reagent`'s exact ties, near-ties, both
+    ratios over- or underflowing; `empirical_formula`'s knife edges at ±1/10, subnormal percentages and the 2³² edge);
+    `tsv::same_toks`
+  - golden module `stoichiometry`: 47,776 rows; the oracle's values kept, 3,154 rows noted with the port's result —
+    #24: 1,126 `percent_yield`, 240 `theoretical_yield_moles`, 598 `percent_composition`; #25: 920 `limiting_reagent`;
+    #26: 270 `empirical_formula` (of M4f's 3,383 rows, 14 flip, the decision's count); the harness maps them
+    (`_par_got_noted`, `_par_map_exact` with an index, `_par_map_toks`) and counts them per function
+  - `validate.py` §18: the port's result of every row of the five recomputed with `Fraction` and each note proven; the 2³²
+    claim and the kept ratios' range checked on the corpus; Rust's empirical Err paths tabulated against the port's results
+    (ADR 0002's M4f-2 addition); the hard rows counted; the exact 1/10 pinned
+  - `cr_verify.py`: `muldiv` (640,000 triples), `pyield`, `tyield`, `pcomp`, `limit`, `empir` — 2.23 million arguments
+    against `Fraction`, the exact paths forced, 0 mismatches and the same bits on x86_64 ELF, x86_64 PE and aarch64
+  - **result**, x86_64 ELF, x86_64 PE and aarch64: `336584 ok, 0 failed, 0 measured, 0 pending, 32153 accepted (ADR 6:
+    809), 0 glibc-matching (failed)` on 18 modules ([`port-parity.md`](docs/development/port-parity.md) §20)
+  - tests: `tests/stoichiometry.tcyr`'s `cyrius_empirical_tolerance` (Rust's 0.1 on `_km_empirical_close`) becomes
+    `cyrius_adr26_exact_tolerance` (the exact edges 11/10 and 19/10 and one ulp past them, 2.55·2, C 12.011 % with
+    O 17.5989 %, the count's 2³² edge, subnormal percentages, the fast test's three outcomes, the exact test), with
+    `cyrius_adr24_rounded_once` (the subnormal and normal ties, 100/3, the overflow end, Rust's ±0, the yield's over- and
+    underflowing m/c, water's and methane's percentages, the midpoint resolution above and below) and
+    `cyrius_adr25_exact_comparison` (both ratios over- or underflowing, 0 against an underflow, ties and near-ties,
+    `_km_ratio_lt`'s branches); no Rust test's assertion changes (`empirical_formula_nan_inf_are_errors`' subnormal case
+    is still the ComputationError, its ratio about 3.75·10³²⁰): 317 assertions; benches `stoichiometry/theoretical_yield_moles_tie`,
+    `percent_yield_subnormal`, `limiting_reagent_tie`, `empirical_formula_edge`
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -704,6 +743,32 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   *Migration:* read the denominator (1 for every state 1.2 returned); pass the composition counts as integers (1.2's
   near-integer f64 entries are their rounded integers; there is no non-integer entry to pass, and no ragged row).
 
+### Breaking (relative to Rust 1.2.0, ADR 0002 #24)
+- **stoichiometry** — `percent_yield`, `theoretical_yield_moles` and `percent_composition` return the correctly rounded
+  100·a/t, m·p/c (at #25's limiting reagent) and mass·count·100/mw (mw `molecular_weight`'s own value), rounded once,
+  subnormal results and ties included, where 1.2 rounded two to four times: about a quarter of results move by 1–2 ulp
+  (`percent_yield(1, 3)` is 33.333333333333336, 1.2's 33.33333333333333; water's O 88.80932556203165 %, 1.2's …163), and
+  the range ends are right (`percent_yield(5e-324, 10)` is 5e-323, 1.2's 0; `theoretical_yield_moles([1e300], [1e-10],
+  1e-10)` is 1e300, 1.2's +∞). A zero actual yield or limiting amount, or a count of 0, gives 1.2's ±0; the errors and
+  their order are 1.2's.
+  *Migration:* none for code that compares with a tolerance.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #25)
+- **stoichiometry** — `limiting_reagent` compares the ratios moles/coefficient exactly (mᵢ·c_j against m_j·cᵢ, the first
+  index on an exact tie), so `theoretical_yield_moles` follows: where two rounded ratios tie within an ulp, or both
+  overflow to +∞ or underflow to 0, 1.2 could name the wrong reactant (`[DBL_MAX, DBL_MAX]` over `[5e-324, 1e-300]` is 1,
+  1.2's 0). The errors and their order are 1.2's.
+  *Migration:* none for reactant amounts that differ by more than an ulp in ratio.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #26)
+- **stoichiometry** — `empirical_formula` evaluates its mole ratios and the tolerance |r·k − round(r·k)| ≤ 1/10 exactly.
+  Inputs at the ±1/10 edge change between Ok and Err or change their multiplier (C 12.011 % with O 17.5989 % is CO, 1.2's
+  Err; C 12.011 % with O 20.7987 % is Err, 1.2's C₃O₄; C 50 % with C 59 % is 5 : 6, 1.2's 6 : 7), and the Errs that came
+  from rounding are gone: percentages whose moles underflow are evaluated (He 2⁻¹⁰⁷⁴ % with He 2·2⁻¹⁰⁷⁴ % is 1 : 2, 1.2's
+  Err), an overflowing ratio is still the ComputationError (every such ratio is past 2³²). Every error is still
+  `ComputationError` or 1.2's validation error, in 1.2's order.
+  *Migration:* none for measured compositions away from the knife edge.
+
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
@@ -746,6 +811,8 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   `_km_dd_asin`, `_km_dd_add`, `_km_dd_mul`, `_km_dd_div_d` and `_km_dd_sqrt`, once `gas.cyr` moved to M4a's
   `_km_cr_cos` / `_km_cr_acos` (the same bits on every golden row); `src/mathx.cyr` no longer includes `lib/math.cyr`.
   Their tests moved to the replacements (`tests/gas.tcyr`), their benches and `cr_verify.py`'s comparison went with them
+- **stoichiometry** (private, M4f-2): `_km_empirical_close`, Rust's |scaled − round(scaled)| ≤ 0.1 on a rounded ratio,
+  replaced by ADR 0002 #26's exact tolerance test; its Cyrius-only test group became `cyrius_adr26_exact_tolerance`
 
 ### Performance
 - `molecule/molecular_weight_glucose`: 121 ns → 26.7 ns (−78%; Rust 3.63 ns) by walking the atom buffer and
@@ -820,6 +887,13 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   22.38); the Cyrius-only `balance_kmno4_hcl` 3.84 → 2.16 µs, `oxidation_states_fe3o4` 132 → 110 ns, `limiting_reagent`
   31 ns, `theoretical_yield_moles` 46, `percent_yield` 14, `percent_composition_glucose` 71, `empirical_formula_glucose`
   217 ([`docs/benchmarks-rust-v-cyrius.md`](docs/benchmarks-rust-v-cyrius.md))
+- M4f-2, ADR 0002 #24–#26 (Cyrius before → after, the same host, back to back; Cyrius-only): `stoichiometry/percent_yield`
+  14 → 81 ns, `theoretical_yield_moles` 46 → 115, `percent_composition_glucose` 72 → 276 (three entries),
+  `empirical_formula_glucose` 217 → 586, `limiting_reagent` 32 → 33 (the rounded ratios still decide unequal ones); the
+  exact paths: `theoretical_yield_moles_tie` 133 ns (a midpoint resolved in the fast path), `percent_yield_subnormal`
+  2.15 µs (`_km_cr_ratio`), `limiting_reagent_tie` 94 ns, `empirical_formula_edge` 7.46 µs (two exact tolerance tests).
+  Inlining the fast path's helpers was measured (81 → 73 ns) and not kept: the cost is its ~45 floating-point
+  operations, as for M4e-3's reduced mass
 
 ## [1.2.0] - 2026-11-08
 

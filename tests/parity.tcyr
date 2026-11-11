@@ -2022,8 +2022,17 @@ fn _par_spectroscopy(fp, fl): i64 {
 # integer-matrix counterpart` and hold the oracle's Err(InvalidInput), its only result: then it is mapped (accepted
 # under ADR 2, counted: _par_adr7_none). The oxidation states: an oracle Ok(n) row is the port's n/1 (every denominator
 # 1, compared as Rust's pairs); a row noted `[ADR 0002 #7:` (the oracle's "non-integer average" Err) must be the note's
-# whole result, (Z, numerator, denominator) per entry (_par_map_toks, _par_adr7_ox).
+# whole result, (Z, numerator, denominator) per entry (_par_map_toks, _par_adr7_ox). ADR 0002 #24–#26 (M4f-2): a
+# percent_yield or theoretical_yield_moles row noted `[ADR 0002 #24:` must be the note's value bit for bit
+# (_par_got_noted), a limiting_reagent row noted `[ADR 0002 #25:` the note's index (_par_map_exact), a
+# percent_composition row noted `[ADR 0002 #24:` or an empirical_formula row noted `[ADR 0002 #26:` the note's whole
+# result (_par_map_toks); each is mapped and counted per function.
 var _par_adr7_ox = 0;
+var _par_adr24_yield = 0;                   # ADR 0002 #24 (M4f-2) per function: percent_yield,
+var _par_adr24_moles = 0;                   # theoretical_yield_moles, percent_composition; #25 limiting_reagent,
+var _par_adr24_comp = 0;                    # #26 empirical_formula
+var _par_adr25 = 0;
+var _par_adr26 = 0;
 var _par_adr7_int = 0;
 var _par_adr7_round = 0;
 var _par_adr7_none = 0;
@@ -2154,6 +2163,12 @@ fn _par_stoichiometry(fp, fl): i64 {
         var c1 = _par_spec_in + 8 * (n1 + 1);
         var n2 = _par_in_f64s(1 + n1, c1);
         var tl, vl = limiting_reagent(_par_spec_in, n1, c1, n2);
+        if (_par_note_has("[ADR 0002 #25:") == 1) {
+            if (is_err_result(tl) == 1) { _par_got_err(0 - 1); return 1; }    # a noted row is an Ok row
+            _par_map_exact(25, vl, 105);
+            if (_par_mapped == 25) { _par_adr25 = _par_adr25 + 1; }
+            return 1;
+        }
         if (is_err_result(tl) == 1) { _par_got_err(vl); } else { _par_got_i(vl); }
         return 1;
     }
@@ -2163,28 +2178,35 @@ fn _par_stoichiometry(fp, fl): i64 {
         var n4 = _par_in_f64s(1 + n3, c3);
         var p3: f64 = _par_in(2 + n3 + n4);
         var ty, vy = theoretical_yield_moles(_par_spec_in, n3, c3, n4, p3);
-        _par_got_res(ty, vy);
+        _par_got_noted(24, "[ADR 0002 #24:", ty, vy);
+        if (_par_mapped == 24) { _par_adr24_moles = _par_adr24_moles + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "stoichiometry::percent_yield") == 1) {
         var ya: f64 = _par_in(0);
         var yt: f64 = _par_in(1);
         var tp, vp = percent_yield(ya, yt);
-        _par_got_res(tp, vp);
+        _par_got_noted(24, "[ADR 0002 #24:", tp, vp);
+        if (_par_mapped == 24) { _par_adr24_yield = _par_adr24_yield + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "stoichiometry::percent_composition") == 1) {
         if (_par_in_n < 1 || _par_in_n != 1 + 2 * _par_in(0)) { return 0 - 1; }
         var mol = _par_molecule_in(0);
         var tc, vc = percent_composition(mol, _par_spec_out, _PAR_MAX);
-        if (is_err_result(tc) == 1) { _par_got_err(vc); return 1; }
-        _par_got_seq(vc);
-        var kc = 0;
-        while (kc < vc) {
-            _par_got_i(load64(_par_spec_out + 16 * kc));
-            _par_got_f(load64(_par_spec_out + 16 * kc + 8));
-            kc = kc + 1;
+        if (is_err_result(tc) == 1) {
+            _par_got_err(vc);
+        } else {
+            _par_got_seq(vc);
+            var kc = 0;
+            while (kc < vc) {
+                _par_got_i(load64(_par_spec_out + 16 * kc));
+                _par_got_f(load64(_par_spec_out + 16 * kc + 8));
+                kc = kc + 1;
+            }
         }
+        _par_map_toks(24, "[ADR 0002 #24:");
+        if (_par_mapped == 24) { _par_adr24_comp = _par_adr24_comp + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "stoichiometry::empirical_formula") == 1) {
@@ -2196,14 +2218,19 @@ fn _par_stoichiometry(fp, fl): i64 {
             ke = ke + 1;
         }
         var te, ve = empirical_formula(_par_spec_in, ne, _par_spec_out, ne);
-        if (is_err_result(te) == 1) { _par_got_err(ve); return 1; }
-        _par_got_seq(ve);
-        ke = 0;
-        while (ke < ve) {
-            _par_got_i(load64(_par_spec_out + 16 * ke));
-            _par_got_i(load64(_par_spec_out + 16 * ke + 8));
-            ke = ke + 1;
+        if (is_err_result(te) == 1) {
+            _par_got_err(ve);
+        } else {
+            _par_got_seq(ve);
+            ke = 0;
+            while (ke < ve) {
+                _par_got_i(load64(_par_spec_out + 16 * ke));
+                _par_got_i(load64(_par_spec_out + 16 * ke + 8));
+                ke = ke + 1;
+            }
         }
+        _par_map_toks(26, "[ADR 0002 #26:");
+        if (_par_mapped == 26) { _par_adr26 = _par_adr26 + 1; }
         return 1;
     }
     return 0;
@@ -2425,8 +2452,9 @@ fn _par_accepted(fp, fl, ip, il): i64 {
     if (_par_mapped == 12) { return 2; }
     # ADR 0002 #3: a SEMF row where the oracle's NaN (z > a or a = 0) is the port's Err(InvalidInput).
     if (_par_mapped == 3) { return 2; }
-    # ADR 0002 #13 … #22: a row whose note names the port's exact value, which the port returned; #23 its whole result.
-    if (_par_mapped >= 13 && _par_mapped <= 23) { return 2; }
+    # ADR 0002 #13 … #22: a row whose note names the port's exact value, which the port returned; #23 its whole result;
+    # #24 … #26 (M4f-2) stoichiometry's exact value, index or whole result.
+    if (_par_mapped >= 13 && _par_mapped <= 26) { return 2; }
     # ADR 0002 #7 (M4f): an oxidation-state row whose note names the port's exact rational states, or a balancing row
     # whose f64 matrix has no integer counterpart (the oracle's Err(InvalidInput)).
     if (_par_mapped == 7) { return 2; }
@@ -2434,13 +2462,14 @@ fn _par_accepted(fp, fl, ip, il): i64 {
 }
 
 # 1 for an ADR whose accepted rows are counted but not printed row by row: ADR 0002 #4's Antoine mapping, #13 … #22's
-# exact-value rows (M4c … M4e-3; about 17,000 rows between them), #23's isotope rows (M4e-4) and #7's oxidation-state
-# and balancing rows (M4f), each summarised by _par_module_done with its count; the validate.py proofs check every one
-# of them. ADR 0002 #12's CFSE rows (13) and #3's SEMF rows (23) are printed by name.
+# exact-value rows (M4c … M4e-3; about 17,000 rows between them), #23's isotope rows (M4e-4), #7's oxidation-state
+# and balancing rows (M4f) and #24 … #26's stoichiometry rows (M4f-2), each summarised by _par_module_done with its
+# count; the validate.py proofs check every one of them. ADR 0002 #12's CFSE rows (13) and #3's SEMF rows (23) are
+# printed by name.
 #must_use
 fn _par_accepted_quiet(adr): i64 {
     if (adr == 2 && _par_mapped == 2) { return 1; }
-    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 23) { return 1; }
+    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 26) { return 1; }
     if (adr == 2 && _par_mapped == 7) { return 1; }
     return 0;
 }
@@ -2456,7 +2485,7 @@ fn _par_accepted_bits(adr): i64 {
 # After the phase module: the ADR 0002 #4 mapping summary; after thermochem, ADR 0002 #1's; after organic, #6's; after
 # inorganic, #12's and #15's; after nuclear, #3's, #13's and #14's; after potential, #16's, #17's, #18's and #20's;
 # after spectroscopy, #19's, #21's (per function), #22's and #23's (per function); after stoichiometry, #7's (the
-# oxidation states, the integer matrix).
+# oxidation states, the integer matrix) and #24's (per function), #25's and #26's.
 fn _par_module_done(mp, ml) {
     if (_par_eq(mp, ml, "stoichiometry") == 1) {
         print("  ADR 0002 #7 exact oxidation states: ", 38);
@@ -2472,6 +2501,24 @@ fn _par_module_done(mp, ml) {
         print(" with no integer counterpart (a non-integer or non-finite entry, an integer beyond i64,", 87);
         print(" ragged rows),", 14);
         println(" the oracle's Err(InvalidInput) (accepted, ADR 2, counted, not listed)");
+        print("  ADR 0002 #24 exact rationals rounded once: ", 45);
+        fmt_int(_par_adr24_yield + _par_adr24_moles + _par_adr24_comp);
+        print(" rows (percent_yield ", 21);
+        fmt_int(_par_adr24_yield);
+        print(", theoretical_yield_moles ", 26);
+        fmt_int(_par_adr24_moles);
+        print(", percent_composition ", 22);
+        fmt_int(_par_adr24_comp);
+        print(") where the port's correctly rounded value differs from Rust's", 62);
+        println(" (accepted, ADR 2, counted, not listed)");
+        print("  ADR 0002 #25 exact limiting reagent: ", 39);
+        fmt_int(_par_adr25);
+        print(" limiting_reagent rows where the exact m_i*c_j < m_j*c_i picks another index than Rust's rounded", 96);
+        println(" ratios (accepted, ADR 2, counted, not listed)");
+        print("  ADR 0002 #26 exact empirical formula: ", 40);
+        fmt_int(_par_adr26);
+        print(" empirical_formula rows where the exact ratios and 1/10 tolerance change Rust's result", 86);
+        println(" (accepted, ADR 2, counted, not listed)");
         return 0;
     }
     if (_par_eq(mp, ml, "spectroscopy") == 1) {

@@ -39,6 +39,9 @@ are compared through the stated mapping:
 | 21 *(2026-11-10, M4e-3)* | `spectroscopy::bohr_energy_level` computes ((−R·Z)·Z)/(n·n), `bohr_transition_energy` the difference of two such levels, `rydberg_wavelength` and `SpectralSeries::wavelength` 1/(((R·Z)·Z)·(1/(n₁·n₁) − 1/(n₂·n₂))): three to eight roundings of exact rationals, so −R at Z = n is one ulp off for 86 of the 255 Z, and the levels' difference and 1/n₁² − 1/n₂² cancel for close large n (39 ulp at n = 100, 939 at 10⁴, up to 9.0·10⁷ for the wavelength and 1.8·10⁹ for the transition energy on the corpus, near n = 2³²) | the exact rational with the constant as its double, **rounded once**: −R·Z²/n², R·Z²·(n₂² − n₁²)/(n₁²·n₂²) and n₁²·n₂²/(R·Z²·(n₂² − n₁²)) (R = `KM_RYDBERG_EV`, `KM_RYDBERG`, or Rust's const-evaluated R_H, Z = 1): a double-double fast path with a proven bound and a rounding test (exact operands for n₂ < 2¹³), and the exact slow path `_km_cr_ratio` on multi-word integers, which rounds the 13 exact ties (Z = 255, 2^k·(58,055, 524,544)) to even. Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (3,823 levels, 1,351 transition energies, 1,376 wavelengths, 67 series lines) |
 | 22 *(2026-11-10, M4e-3)* | `spectroscopy::reduced_mass` computes (m₁·m₂)/(m₁ + m₂): three roundings, so a homonuclear m/2 is one ulp off on 8.6 % of masses, and m₁·m₂ or m₁ + m₂ overflows or underflows at the range ends (NaN at (DBL_MAX, DBL_MAX), 0 or ∞ where μ is representable) | the correctly rounded m₁·m₂/(m₁ + m₂) for every pair of positive finite doubles, subnormal results and their ties included: with m₁ ≥ m₂ and the exponent gap g, the smaller mass for g ≥ 55 (proven), otherwise s₁s₂/(s₁ + s₂·2⁻ᵍ) scaled by 2^e₂ (no intermediate leaves the range), a double-double fast path and the exact `_km_cr_ratio` | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (2,837 rows) |
 | 23 *(2026-11-10, M4e-4)* | `spectroscopy::isotope_abundances`' table rounds the AME2020 masses to five decimals (¹H 1.00783 for 1.007825031898 u, ²H 2.01410 for 2.014101777844; each within 5·10⁻⁶ u) and omits ³⁶S (0.0001), so sulfur's abundances sum to 0.9999; `isotope_pattern` convolves that table | the cited table: the AME2020 masses at full published precision and the TICE 2009 representative abundances (Rust's, unchanged), ³⁶S added; each value the double nearest its published decimal, from the records in `scripts/oracle/isotopes.tsv`. `isotope_pattern`'s algorithm, Err codes and order are Rust's; only its data change | class A (`isotope_abundances`) and B (`isotope_pattern`); the rows whose result changes noted with the port's whole result `(v:n f:… …)`, mapped and counted (7 and 347 rows) |
+| 24 *(2026-11-10, M4f-2)* | `stoichiometry::percent_yield` computes (a/t)·100, `theoretical_yield_moles` (m/c)·p and `percent_composition` ((mass·count)/mw)·100: two to four roundings of exact rationals, so about a quarter of results are 1–2 ulp off, and at the range ends the result is 0 or ∞ where the value is representable (`percent_yield(5e-324, 10)` is 0, not 5e-323; the yield's m/c over- or underflows though m·p/c is finite) | each exact rational **rounded once**: RN(100·a/t), RN(m·p/c) with m and c at #25's index, RN(mass·count·100/mw) with mw `molecular_weight`'s own double — `_km_cr_mul_div`: a double-double fast path on the significands with `_km_dd_div_cr`'s rounding test and an exact resolution of the midpoint where it fails, the exact `_km_cr_ratio` for subnormal operands and results that may leave the normal range. Zero operands keep Rust's ±0; Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)` (the yields) or with the whole result (composition), mapped and counted (1,126 `percent_yield`, 240 `theoretical_yield_moles`, 598 `percent_composition`) |
+| 25 *(2026-11-10, M4f-2)* | `stoichiometry::limiting_reagent` compares the rounded ratios m/c, so it can pick the wrong reactant when two ratios are within an ulp, or when both overflow to ∞ or underflow (`[DBL_MAX, DBL_MAX]` over `[5e-324, 1e-300]` gives 0; the exact answer is 1) | the exact comparison: i replaces the current minimum i₀ when mᵢ·c_{i₀} < m_{i₀}·cᵢ exactly (the first index on an exact tie, Rust's strict `<`); the rounded ratios still decide wherever they differ (RN is monotone), and equal ones go to `_km_ratio_lt`, an exact comparison of the two products (exact TwoProducts of the significands, the exponents first). Rust's validation and its order are kept | class A; equal rows plain; the others noted `(i:…)`, mapped and counted (920 rows) |
+| 26 *(2026-11-10, M4f-2)* | `stoichiometry::empirical_formula` tests \|r·k − round(r·k)\| ≤ 0.1 on rounded mole ratios: inputs at the ±1/10 edge flip between Ok and Err (14 of M4f's 3,383 rows; C 12.011 % with O 17.5989 % is an Err, but exactly CO), and its "non-positive min" and "ratio not finite" Errs are underflow and overflow artefacts | exact evaluation: the moles pctᵢ/massᵢ and their minimum exact, the ratios rᵢ = pctᵢ·mass_j/(massᵢ·pct_j) exact, the multiplier the smallest k in 1 ..= 6 with \|rᵢ·k − round(rᵢ·k)\| ≤ 1/10 exactly for every i, the counts round(rᵢ·k) exactly (past u32::MAX Rust's Err); a ratio of 2³² − ½ or more is the ComputationError (proven), the others a double-double with a tolerance test that is proven or defers to an exact integer test. Rust's validation and its order are kept | class A; equal rows plain; the others noted with the whole result `(v:n i:z i:c …)` or `(E:ComputationError)`, mapped and counted (270 rows) |
 
 Deferred with their modules (port plan §2.2), and decided when they port: #5 `bridge::*` →
 `Result` and removal of `ionization_to_bond_energy_estimate`; #10 soorat `from_molecule` →
@@ -532,6 +535,110 @@ multiplier or a count alone); `balance_equation`'s checked i64 elimination fails
 ([[3037000500, 1, −3037000501], [1, 3037000500, −3037000501]]: x = [1, 1, 1], but the first step forms
 3037000500² − 1 > i64::MAX), a case for the library-wide overflow audit after M4. The oxidation states' checked sums can
 overflow only with 2³⁰ or more entries.
+
+## Addition, 2026-11-10 (M4f-2): #24, #25 and #26
+
+**The user's decisions (2026-11-10), verbatim.** The questions were the main session's; the answers are the user's.
+1. Q: "In M4f's stoichiometry, percent_yield (a/t·100), theoretical_yield_moles (m/c·p) and percent_composition
+   (mass·count/mw·100) round two to four times. They are 1–2 ulp off on about a quarter of inputs, and at the range edges
+   give 0 or ∞ where the answer is representable: percent_yield(5e-324, 10) gives 0, the true value is 5e-323. Return each
+   exact rational rounded once? percent_composition would keep molecular_weight's own mw." A: **"Round once
+   (Recommended)"** — the option's text: "All three become correctly rounded for every input, range edges included (like
+   reduced_mass in #22). About a quarter of results move by 1–2 ulp."
+2. Q: "limiting_reagent compares the rounded ratios moles/coefficient. So it can pick the wrong reactant when two ratios
+   are within an ulp, or when both overflow to ∞ or underflow: [DBL_MAX, DBL_MAX] over coefficients [5e-324, 1e-300] gives
+   index 0, while the exact answer is 1. Compare the ratios exactly (mᵢ·cⱼ against mⱼ·cᵢ, the first index on an exact
+   tie)?" A: **"Compare exactly (Recommended)"**.
+3. Q: "empirical_formula tests |r·k − round(r·k)| ≤ 0.1 on rounded mole ratios. Evaluated exactly, the result flips
+   between Ok and Err only for inputs sitting exactly at the ±0.1 edge: 14 of 3,351 golden rows. For example C 12.011 %
+   with O 17.5989 % is an Err in Rust but exactly CO. Evaluate the ratios and the tolerance test exactly?" A: **"Evaluate
+   exactly (Recommended)"** — "Exact rational ratios and an exact 1/10 tolerance, as with the heuristic thresholds before.
+   Only knife-edge inputs change; multipliers and counts never change otherwise."
+
+**The targets.** Every Rust validation check, Err code and check order stays as it is; only the arithmetic changes.
+- **#24**: `percent_yield` returns RN(100·a/t), `theoretical_yield_moles` RN(m·p/c) with m and c at #25's index, and
+  `percent_composition` RN(mass·count·100/mw) per atom, mw being `molecular_weight`'s own double — RN to nearest, ties to
+  even, subnormal results on the 2⁻¹⁰⁷⁴ grid, ±∞ only where the exact value rounds past DBL_MAX. A zero operand (an
+  actual yield or a limiting reagent's moles of ±0, a count of 0) gives Rust's own ±0.
+- **#25**: `limiting_reagent`'s minimum i₀ is replaced by i when mᵢ·c_{i₀} < m_{i₀}·cᵢ exactly; Rust's strict `<` keeps the
+  first index on an exact tie. An exact ratio is never ∞, so element 0 always seeds the minimum (Rust's +∞ seed is
+  unobservable: it leaves index 0 too).
+- **#26**: `empirical_formula`'s moles pctᵢ/massᵢ, their minimum (element j), the ratios rᵢ = pctᵢ·mass_j/(massᵢ·pct_j),
+  the multiplier — the smallest k in 1 ..= 6 with |rᵢ·k − round(rᵢ·k)| ≤ 1/10 for every i — and the counts round(rᵢ·k)
+  (halves away from zero) are exact; past u32::MAX a count is Rust's Err(ComputationError).
+
+**The implementation** (src/stoichiometry.cyr, on src/mathx.cyr's #21/#22 machinery; each bound proven in the source).
+- *RN(x·y/z)*, `_km_cr_mul_div`, for positive finite x, y, z (the three #24 functions with (a, 100, t), (m, p, c) and
+  (mass, 100·count, mw); 100·count < 2³⁹ is exact). The fast path takes the significands s in [1, 2) and k = eₓ + e_y − e_z:
+  N = sₓs_y is an exact TwoProduct p_h + p_l, D = s_z exact, and `_km_dd_div_cr`'s steps (inline, d_l = 0) give F = N/D
+  in (½, 4) with exact operands, so its rounding test proves RN(F) whenever it passes. Where it fails, F lies strictly
+  between two points rounding to adjacent z₁ < z₂, and the only boundary between is their midpoint μ: the sign of
+  N − D·μ = (p_h − a) + p_l − b − h (D·z₁ = a + b a TwoProduct, h = D·(z₂ − z₁)/2 exact, p_h − a exact by Sterbenz) is a
+  sum of four multiples of 2⁻¹⁰⁷ below 2⁻⁴⁸, hence of four 64-bit integers below 2⁵⁹ — `_km_mul_div_tie` decides it
+  exactly, ties to even. That matters here: midpoints are common (m·3/2 is one whenever 3m has 54 bits — 6.6 % of seeded
+  theoretical yields with integer coefficients). RN(F)·2^k is exact for −1021 ≤ k ≤ 1021 (F·2^k > 2⁻¹⁰²², RN(F)·2^k ≤
+  2¹⁰²³). A subnormal operand or a k outside that range goes to the exact path `_km_mul_div_acc`: _km_cr_ratio(MₓM_y, M_z,
+  Eₓ + E_y − E_z) with M in [2⁵², 2⁵³).
+- *The exact comparison*, `_km_ratio_lt(m₁, c₁, m₂, c₂)`: a zero m is the least (two zeros tie); otherwise the products
+  m₁·c₂ = P_L·2^E_L and m₂·c₁ = P_R·2^E_R with P in [2¹⁰⁴, 2¹⁰⁶) differ in exponent by two or more (decided), or are
+  exact TwoProducts of integer-valued doubles, the larger-exponent side doubled, compared high part first (RN is
+  monotone) and then the low parts. `limiting_reagent` keeps Rust's rounded ratio RN(m/c) as the fast path: RN is
+  monotone on the extended reals, over- and underflow included, so unequal rounded ratios order the exact ones; only
+  equal ones (ties, near-ties, both +∞, both 0) call `_km_ratio_lt`.
+- *The empirical formula.* The minimum: Rust's rounded moles, `_km_ratio_lt` on equal ones. Each ratio rᵢ = F·2^s with
+  F = (M_pᵢ·M_mⱼ)/(M_mᵢ·M_pⱼ) in (¼, 4) (exact TwoProducts, then `_km_dd_quot`, `_km_dd_div_cr` without its test: to
+  13.12u², u = 2⁻⁵³) and s ≥ −1 (rᵢ ≥ 1). **A ratio of 2³² − ½ or more is Err(ComputationError) whichever way Rust's search
+  goes**: no multiplier is that Err, and a multiplier k makes the count round(rᵢ·k) ≥ round(rᵢ) ≥ 2³² > u32::MAX, the same
+  code; every check after the validation is ComputationError and the port's buffer check comes after them. The port
+  returns it as soon as s ≥ 35 (rᵢ > 2³³) or r̃ₕ ≥ 2³² − ¼ (then rᵢ > 2³² − ½); every kept ratio is below 2³², so rᵢ·k <
+  2³⁵. The tolerance test: x = rᵢ·k, n = round(k·r̃ₕ), δ = x − n to under 2⁻⁵³; |δ| ≤ 0.1 − 2⁻⁵⁰ proves the pass (and the
+  count n), |δ| ≥ 0.1 + 2⁻⁵⁰ the failure (every other integer is ½ − 2⁻¹⁶ away), and between — the knife edge — the exact
+  test `_km_emp_close_exact` decides: x = A/B in integers (A < 2¹⁴³, B < 2¹⁰⁸), q = ⌊A/B⌋ by a 36-bit restoring division,
+  R = A − qB, the pass 10R ≤ B or 10R ≥ 9B, the count q + [2R ≥ B].
+
+**Rust's empirical Err paths under exact evaluation** (`validate.py` tabulates every corpus row by Rust's path):
+- *"mole calculation produced non-positive value"* (the moles of a subnormal percentage round to 0) is gone. Such an input
+  is Ok when its exact ratios pass (9 corpus rows: He 2⁻¹⁰⁷⁴ % with He 2·2⁻¹⁰⁷⁴ % is 1 : 2, Og 2⁻¹⁰⁷⁴ % with
+  Og 3·2⁻¹⁰⁷⁴ % 1 : 3) and the same Err(ComputationError) otherwise (3 rows: C 5·10⁻³²⁴ % with O 50 %, a ratio past
+  2³²).
+- *"mole ratio is not finite"* (a ratio overflowing) is gone, but never changes the result: a rounded ratio past DBL_MAX
+  means an exact one far past 2³², the ComputationError (5 corpus rows, all kept: C 10⁻³²⁰ % with O 50 %).
+- *"no multiplier in 1..=6"*: 188 rows become Ok at the ±1/10 edge (C 12.011 % with O 17.5989 %: r − 1 = 1/10 −
+  1/(10·9006636304787571), CO); the rest stay.
+- *Ok*: 56 rows become Err(ComputationError) at the edge (C 12.011 % with O 20.7987 %: 3r = 3.9 − 1.0·10⁻¹⁶, so 1/10 and a
+  little from 4, where Rust's rounded 3r was within 0.1: 3 : 4), and 17 change
+  their multiplier at the edge (C 50 % with C 59 %: 5r = 5.9 exactly is within, so 5 : 6 where Rust's rounded 5.9 failed
+  and k = 6 gave 6 : 7); 4,932 are unchanged.
+- *"count exceeds u32"*: unchanged (21 rows). The validation Errs are Rust's, in Rust's order.
+Of the 3,383 rows M4f generated, 14 change (8 Err → Ok, 6 Ok → Err), the decision's count; the 270 noted rows include
+M4f-2's knife-edge, subnormal and 2³²-edge rows, built to sit on the edge. No input changes but those at the ±1/10 edge,
+those whose moles or ratios Rust over- or underflows, and those whose Rust ratios are off by enough to cross it.
+
+**Golden comparison** (as #21–#23). The corpus keeps the oracle's values; where the port's result differs the note names
+it: `[ADR 0002 #24: the port returns the correctly rounded 100·a/t = <x> (f:…)]` (`m·p/c at the exact limiting reagent`),
+`[ADR 0002 #24: the port returns the correctly rounded mass·count·100/mw per entry … (v:n i:z f:… …)]`, `[ADR 0002 #25: the
+port returns the exact limiting reagent (mᵢ·c_j < m_j·cᵢ, the first on a tie) = <k> (i:<k>)]` and `[ADR 0002 #26: with
+exact ratios and an exact 1/10 tolerance the port returns … (v:n i:z i:c …)]` or `… Err(ComputationError)
+(E:ComputationError)]`, computed by the generator in `Big` integers (`exact::cr_mul_div`, `ratio_lt`, `empirical_exact`:
+no 2³² cut, the ratios at any size). The harness maps the noted rows (accepted under ADR 2) and counts them per function:
+1,126 `percent_yield`, 240 `theoretical_yield_moles`, 598 `percent_composition` (#24: 1,964), 920 `limiting_reagent` (#25),
+270 `empirical_formula` (#26). `validate.py` recomputes the port's result of every row of the five with `Fraction` and
+proves each note sits exactly where it differs from the oracle's, naming it (so every unnoted row is the port's result
+too), checks the 2³² claim and the kept ratios' range on the corpus, tabulates the Err paths above, counts the hard rows
+(65 `percent_yield` ties, 17 subnormal; 57 rows at its overflow end and 252 where Rust underflows to 0; 34 and 26 yields
+whose m/c over- or underflows, 366 midpoints; 569 exact limiting ties, 1,849 rounded ties, 407 both overflowing, 404 both
+underflowing; 504 (row, k) exactly 1/10 off) and pins the exact 1/10 (1/10 − 2⁻⁸⁰ changes 300 rows, the nearest larger
+tolerance a row needs, 1/10 + 2.8·10⁻¹⁸, changes one). The grids gain 6,341 rows (`m_stoichiometry::emit_exact`, appended
+with their own seed): the ties at RN (subnormal ones, `percent_yield(3·2⁻¹⁰⁷⁴, 200)` among them), the over- and underflow
+edges, `limiting_reagent`'s exact ties and near-ties, `empirical_formula`'s knife edges at ±1/10, its subnormal rows and the
+2³² edge. `cr_verify.py` checks `muldiv` (640,000 triples), `pyield`, `tyield`, `pcomp`, `limit` and `empir` (2.23 million
+arguments in all) against `Fraction` on x86_64 ELF, x86_64 PE and aarch64, the exact paths forced.
+
+**Cost** (`tests/kimiya.bcyr`, before → after, the same host): `stoichiometry/percent_yield` 14 → 81 ns,
+`theoretical_yield_moles` 46 → 115, `percent_composition_glucose` 72 → 276 (three entries), `empirical_formula_glucose`
+217 → 586, `limiting_reagent` 32 → 33; the new exact-path benches `theoretical_yield_moles_tie` 133 ns (a midpoint,
+resolved in the fast path), `percent_yield_subnormal` 2.15 µs (`_km_cr_ratio`), `limiting_reagent_tie` 94 ns,
+`empirical_formula_edge` 7.46 µs (two exact tolerance tests).
 
 ## Consequences
 

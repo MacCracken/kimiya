@@ -135,6 +135,12 @@ fn human_list(toks: &[Tok]) -> String {
     toks.iter().map(Tok::human).collect::<Vec<_>>().join(", ")
 }
 
+/// Whether two token lists are the same golden text (a float by its bits): how the generator tells a port result that
+/// differs from the oracle's (ADR 0002 #24, #26, M4f-2).
+pub fn same_toks(a: &[Tok], b: &[Tok]) -> bool {
+    wire_list(a) == wire_list(b)
+}
+
 /// A whole result for a note (ADR 0002 #23, M4e-4: a `Vec<(f64, f64)>` the port returns): its readable form, then its
 /// golden tokens in parentheses, `[2], 1.0, 0.5, … (v:2 f:… f:… …)`. The note then ends `(<tokens>)]`, as a one-value
 /// note ends `(f:<bits>)]`; the harness reads the token list.

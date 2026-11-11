@@ -1294,7 +1294,8 @@ are kept; the five float functions are Rust's arithmetic operation for operation
   2⁻⁵², and the first change is at + 6 / − 11 ulps; `tests/stoichiometry.tcyr` pins 0.1 to the ulp on
   `_km_empirical_close`); INTEGER_TOLERANCE + 1 / − 1 ulp change 4 / 7 balancing rows (the probes at 0, where the
   deviation is any double); MAX_COMPOSITION_ENTRY − 1 / + 2 change 3 / 2 rows (±2⁵³ accepted, 2⁵³ + 2 refused).
-- **Measured, not fixed** (ADR 0002's M4f addition has the numbers): the float functions' misses of their exact values
+- **Measured, not fixed in M4f** (ADR 0002's M4f addition has the numbers; fixed in M4f-2 by #24–#26, §20): the float
+  functions' misses of their exact values
   — `percent_yield` one ulp from RN(100a/t) on 968 of the 4,042 Ok rows (24 %; up to 50 ulp and 0 for some subnormal
   results), `theoretical_yield_moles` and `percent_composition` likewise, `limiting_reagent`'s index on near-ties and
   where both ratios over- or underflow (227 of 2,852 corpus rows), `empirical_formula`'s Ok ↔ Err on 14 rows with exact
@@ -1312,6 +1313,63 @@ glibc-matching.**
 
 ```text
 === parity summary: 18 modules, 0 failing | rows: 333397 ok, 0 failed, 0 measured, 0 pending, 28999 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
+```
+
+## 20. M4f-2: exact stoichiometry, ADR 0002 #24, #25 and #26 (2026-11-10)
+
+The user's decisions of 2026-11-10 (ADR 0002's M4f-2 addition quotes them): `percent_yield`, `theoretical_yield_moles`
+and `percent_composition` return their exact rationals rounded once (#24), `limiting_reagent` compares its ratios exactly
+(#25), and `empirical_formula` evaluates its ratios and its 1/10 tolerance exactly (#26). Rust's checks, Err codes and
+order are kept. The corpus keeps the oracle's values; the rows where the port's result differs carry it in their note,
+and the harness maps and counts them per function. `m_stoichiometry::emit_exact` appends 6,341 hard rows (41,435 →
+47,776).
+
+| Function | Class | Rows | Oracle Ok | Oracle Err | Noted (port ≠ oracle) | of M4f's rows | ulp of the rest |
+|---|---|---|---|---|---|---|---|
+| `stoichiometry::percent_yield` | B | 4,674 | 4,645 | 29 | 1,126 (#24) | 968 of 4,071 | 0 |
+| `stoichiometry::theoretical_yield_moles` | B | 3,782 | 3,709 | 73 | 240 (#24) | 53 of 2,965 | 0 |
+| `stoichiometry::percent_composition` | B | 1,292 | 1,279 | 13 | 598 (#24, the whole result) | 598 of 1,292 | 0 |
+| `stoichiometry::limiting_reagent` | A | 4,538 | 4,493 | 45 | 920 (#25) | 227 of 2,897 | — |
+| `stoichiometry::empirical_formula` | A | 6,663 | 5,005 | 1,658 | 270 (#26, the whole result) | 14 of 3,383 | — |
+
+- **The noted rows.** #24's yields `(f:…)`, read by `_par_got_noted`; #24's composition and #26's empirical formula with
+  their whole result `(v:n …)` or `(E:ComputationError)`, compared token by token by `_par_map_toks`; #25's index `(i:k)`
+  by `_par_map_exact`. Every other row of the five is the port's result and the oracle's at once (class B at 0 ulp,
+  class A equal). Of the rows M4f generated, 968 + 53 + 598 + 227 + 14 change, the measurements behind the decisions; the
+  rest of the 3,154 are M4f-2's hard rows, built to change.
+- **The proofs** (`validate.py` §18). Each row's port result recomputed with `Fraction` — RN(100·a/t), RN(m·p/c) at the
+  exact least m/c, RN(mass·count·100/mw) with Rust's mw, the exact index, the exact formula — and each note proven to sit
+  exactly where it differs from the oracle's, naming it. The port's claims checked on the corpus: the 24 rows with a ratio
+  of 2³² − ½ or more are all the ComputationError, and every kept ratio lies in [1, 2³²). Rust's empirical Err paths
+  against the port's results: "non-positive min" 9 → Ok, 3 → ComputationError; "ratio not finite" 5 → ComputationError
+  (all); "no multiplier" 188 → Ok, 1,400 unchanged; Ok 56 → ComputationError, 17 → another Ok result, 4,932 unchanged;
+  "count past u32" 21 unchanged. The hard rows counted: `percent_yield` 65 ties at RN (17 subnormal, (3·2⁻¹⁰⁷⁴, 200)
+  among them), 57 at the overflow end, 252 where Rust underflows to 0; `theoretical_yield_moles` 34 and 26 rows whose m/c
+  over- or underflows while m·p/c is normal, 366 midpoints; `limiting_reagent` 569 exact ties, 1,849 rows with equal
+  rounded but unequal exact ratios, 407 with two ratios overflowing and 404 with two underflowing; `empirical_formula` 504
+  (row, k) exactly 1/10 off. The exact 1/10 is pinned: 1/10 − 2⁻⁸⁰ changes 300 rows, and 1/10 + 2.8·10⁻¹⁸ (the nearest
+  larger tolerance a row needs) one.
+- **`cr_verify.py`**: `muldiv` (640,000 triples: binade-uniform, the fast path's 2^±1021 edges and past, exact quotients
+  and midpoints, values within 2⁻¹⁰⁰ of a midpoint on both sides, subnormal results and ties), `pyield` (397,518),
+  `tyield` (340,006), `pcomp` (223,604), `limit` (400,008), `empir` (223,899), against `Fraction`: 0 mismatches, the exact
+  paths forced too, the same bits and flags on x86_64 ELF, x86_64 PE and aarch64. The fast path of RN(x·y/z) declines only
+  for range reasons (a subnormal operand, an exponent past ±1021): midpoints, common with integer coefficients (6.6 % of
+  `tyield`'s typical triples), are resolved exactly inside it.
+
+`tests/stoichiometry.tcyr`: the 63 Rust tests (7 adapted for #7, none for #24–#26) and 8 Cyrius-only groups, 317
+assertions.
+
+**Cost** (`tests/kimiya.bcyr`, before → after): `stoichiometry/percent_yield` 14 → 81 ns, `theoretical_yield_moles`
+46 → 115, `percent_composition_glucose` 72 → 276, `empirical_formula_glucose` 217 → 586, `limiting_reagent` 32 → 33;
+`theoretical_yield_moles_tie` 133 ns, `percent_yield_subnormal` 2.15 µs, `limiting_reagent_tie` 94 ns,
+`empirical_formula_edge` 7.46 µs.
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **18 modules, 0 failing; 336,584 ok, 0 failed, 0 measured,
+0 pending, 32,153 accepted (809 under ADR 6; under ADR 2 as §19 plus 1,964 #24, 920 #25 and 270 #26 rows), 0
+glibc-matching.**
+
+```text
+=== parity summary: 18 modules, 0 failing | rows: 336584 ok, 0 failed, 0 measured, 0 pending, 32153 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
 ```
 
 ## How to reproduce

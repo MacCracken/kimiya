@@ -2,8 +2,14 @@
 # test's name; all 63, in Rust's order; rust-old/tests/integration.rs has none for this module), plus Cyrius-only tests
 # of ADR 0002 #7 (the exact rational oxidation states and their i32 range, the integer matrix and its 2⁵³ bound), the
 # checked i64 and signed 128-bit helpers at their edges, Rust's integer types as words, the caller buffers and slices,
-# the work tables' heap path, and the empirical tolerance to the ulp. The golden corpus separately checks every
-# function over its grid (tests/parity.tcyr).
+# the work tables' heap path, and since M4f-2 ADR 0002 #24–#26 (the yields and percent composition rounded once, the
+# exact limiting reagent, the exact empirical formula: cyrius_adr24_rounded_once, cyrius_adr25_exact_comparison,
+# cyrius_adr26_exact_tolerance, which replaced M4f's cyrius_empirical_tolerance on Rust's 0.1). The golden corpus
+# separately checks every function over its grid (tests/parity.tcyr).
+#
+# ADR 0002 #24–#26 adapt no Rust test: every assertion holds for the exact values (empirical_formula_nan_inf_are_errors'
+# subnormal case is still the ComputationError, its exact ratio about 3.75·10³²⁰ being past 2³²; only its comment says
+# so).
 #
 # Adapted beyond the port's form (port plan §6.4: `Result::unwrap` is `is_ok` + the payload, a slice a pointer and a
 # count, a Vec result the caller's buffer), for ADR 0002 #7, seven tests:
@@ -478,7 +484,8 @@ fn _t_empirical_formula_nan_inf_are_errors() {
     emp(&_emp_in, 0, 6, 40.0);
     emp(&_emp_in, 1, 8, -5.0);
     assert(emp_code(2) >= 0, "negative");
-    # Subnormal mass percent: ratio overflows to infinity.
+    # Subnormal mass percent: ratio overflows to infinity (ADR 0002 #26: the exact ratio, about 3.75·10³²⁰, is past 2³²,
+    # the same Err(ComputationError)).
     var subw = 0x7E8;                       # 1e-320's bits (a subnormal: below 2⁵², so through an untyped word)
     var sub: f64 = subw;
     emp(&_emp_in, 0, 6, sub);
@@ -1088,31 +1095,207 @@ fn _t_cyrius_slices_and_buffers() {
         "empirical: 70 elements");
 }
 
-# EMPIRICAL_TOLERANCE (0.1) to the ulp on _km_empirical_close: 0.1 itself is close (≤), the next double up is not; and
-# the corpus's straddle at ratio 1.1, where the deviations 450359962737049·2⁻⁵² and …050·2⁻⁵² bracket 0.1.
-fn _t_cyrius_empirical_tolerance() {
-    test_group("cyrius_empirical_tolerance");
-    var tol: f64 = 0x3FB999999999999A;      # 0.1
-    var up: f64 = 0x3FB999999999999B;       # 0.1 + 1 ulp
-    var dn: f64 = 0x3FB9999999999999;       # 0.1 − 1 ulp
-    assert(_km_empirical_close(tol) == 1, "0.1: within");
-    assert(_km_empirical_close(up) == 0, "0.1 + 1 ulp: not within");
-    assert(_km_empirical_close(dn) == 1, "0.1 − 1 ulp: within");
-    var ntol: f64 = -tol;
-    var nup: f64 = -up;
-    assert(_km_empirical_close(ntol) == 1 && _km_empirical_close(nup) == 0, "both signs");
-    var a: f64 = 0x3FF1999999999999;        # 1.0999999999999999: deviation 450359962737049·2⁻⁵² < 0.1
-    var b: f64 = 0x3FF199999999999A;        # 1.1: deviation …050·2⁻⁵² > 0.1
-    assert(_km_empirical_close(a) == 1 && _km_empirical_close(b) == 0, "the straddle at 1.1");
-    var c: f64 = 2.5;
-    assert(_km_empirical_close(c) == 0, "2.5 rounds away to 3: 0.5 off");
-    var nan: f64 = _km_nan();
-    assert(_km_empirical_close(nan) == 0, "NaN: not within");
-    # the multiplier search picks the smallest k: O/C = 1.25 → ×4
+# The bits of a percent_yield / theoretical_yield_moles Ok result, or -1 for Err.
+#must_use
+fn py_bits(a: f64, t: f64): i64 {
+    var tp, vp = percent_yield(a, t);
+    if (is_ok(tp) != 1) { return 0 - 1; }
+    return vp;
+}
+
+var _f_m3: f64[3];
+var _f_c3: f64[3];
+
+# ADR 0002 #24: percent_yield, theoretical_yield_moles and percent_composition rounded once (RN(100·a/t), RN(m·p/c),
+# RN(mass·count·100/mw)): the brief's subnormal 5·10⁻³²⁴ % (Rust 0), a subnormal tie and a normal one (ties to even),
+# the 1-ulp cases 1/3 and 2/3 (Rust 33.33333333333333), the overflow end, Rust's ±0, m/c over- and underflowing in
+# Rust's theoretical yield, and water's and methane's percentages where Rust's three roundings miss.
+fn _t_cyrius_adr24_rounded_once() {
+    test_group("cyrius_adr24_rounded_once");
+    var w1 = 1;
+    var tiny: f64 = w1;                     # 2⁻¹⁰⁷⁴ (a subnormal: through an untyped word)
+    assert(py_bits(tiny, 10.0) == 10, "100·2⁻¹⁰⁷⁴/10 = 10·2⁻¹⁰⁷⁴ (Rust: 0)");
+    var w3 = 3;
+    var tiny3: f64 = w3;
+    assert(py_bits(tiny3, 200.0) == 2, "100·3·2⁻¹⁰⁷⁴/200 = 1.5·2⁻¹⁰⁷⁴: the tie to even, 2·2⁻¹⁰⁷⁴ (Rust: 0)");
+    var mid: f64 = 1801439850948201.0;      # 5·mid is a 54-bit odd number: 100·mid/5 = 20·mid is a midpoint
+    assert(py_bits(mid, 5.0) == 0x4360000000000006, "20·1801439850948201 = 2⁵⁵ + 6.5·8: the tie to even, + 6·8");
+    assert(py_bits(1.0, 3.0) == 0x4040AAAAAAAAAAAB, "100/3 = 33.333333333333336 (Rust 33.33333333333333)");
+    assert(py_bits(2.0, 3.0) == 0x4050AAAAAAAAAAAB, "200/3 = 66.66666666666667 (Rust 66.66666666666666)");
+    assert(py_bits(8.0, 10.0) == 0x4054000000000000, "80 exactly");
+    var dmaxw = 0x7FEFFFFFFFFFFFFF;
+    var dmax: f64 = dmaxw;
+    assert(py_bits(dmax, 200.0) == 0x7FDFFFFFFFFFFFFF, "100·DBL_MAX/200 = DBL_MAX/2");
+    assert(py_bits(dmax, 2.0) == 0x7FF0000000000000, "100·DBL_MAX/2: past DBL_MAX, +∞");
+    var nz: f64 = -0.0;
+    assert(py_bits(nz, 10.0) == 0x8000000000000000, "−0 % stays −0, Rust's");
+    assert(py_bits(0.0, 10.0) == 0, "0 %");
+    # theoretical_yield_moles: (1e300 over 1e-10) × 1e-10 overflows in Rust's (m/c)·p; (1e-300 over 1e10) × 1e10
+    # underflows to a subnormal that ×1e10 does not restore. RN(m·p/c) = m for p = c.
+    var m1: f64 = 0x7E37E43C8800759C;       # 1e300
+    var c1: f64 = 0x3DDB7CDFD9D7BDBB;       # 1e-10
+    store64(&_f_m3, m1);
+    store64(&_f_c3, c1);
+    var t1, v1 = theoretical_yield_moles(&_f_m3, 1, &_f_c3, 1, c1);
+    assert(is_ok(t1) == 1 && v1 == _km_bits(m1), "1e300·1e-10/1e-10 = 1e300 (Rust: +∞)");
+    var m2: f64 = 0x01A56E1FC2F8F359;       # 1e-300
+    var c2: f64 = 10000000000.0;
+    store64(&_f_m3, m2);
+    store64(&_f_c3, c2);
+    var t2, v2 = theoretical_yield_moles(&_f_m3, 1, &_f_c3, 1, c2);
+    assert(is_ok(t2) == 1 && v2 == _km_bits(m2), "1e-300·1e10/1e10 = 1e-300 (Rust: 9.999999999999969e-301)");
+    pair(&_f_x, 0.0, 1.0);
+    var t3, v3 = theoretical_yield_moles(&_f_x, 2, &_f_11, 2, 2.0);
+    assert(is_ok(t3) == 1 && v3 == 0, "0 mol limiting: +0");
+    # percent_composition: water's O and methane's C and H, where Rust's ((mass·count)/mw)·100 is one ulp off
+    var out[64];
+    var water = KmMolecule_water();
+    var tw, vw = percent_composition(water, &out, 4);
+    assert(is_ok(tw) == 1 && load64(&out + 8) == 0x402661A0147683BB, "water H 11.19067443796836");
+    assert(load64(&out + 24) == 0x405633CBFD712F89, "water O 88.80932556203165 (Rust …163)");
+    var methane = KmMolecule_methane();
+    var tm, vm = percent_composition(methane, &out, 4);
+    assert(is_ok(tm) == 1 && load64(&out + 8) == 0x4052B785D5134ACA, "CH₄ C 74.86754347690581 (Rust …582)");
+    assert(load64(&out + 24) == 0x403921E8ABB2D4D6, "CH₄ H 25.132456523094184 (Rust …188)");
+    # the helper on its own: an exact midpoint resolved to even, values 2⁻¹⁰⁶ (relative) above and below midpoints
+    var x3: f64 = 3.0;
+    var y3: f64 = 3002399751580331.0;       # 3·y3 = 2⁵³ + 1, the midpoint of 2⁵³ and 2⁵³ + 2
+    var one: f64 = 1.0;
+    var q1: f64 = _km_cr_mul_div(x3, y3, one);
+    assert(_km_bits(q1) == 0x4340000000000000, "3·3002399751580331 = 2⁵³ + 1: the tie to even, 2⁵³");
+    var q2: f64 = _km_mul_div_acc(x3, y3, one);
+    assert(_km_bits(q2) == 0x4340000000000000, "the exact path: 2⁵³");
+    var xa: f64 = 6464608000247897.0;
+    var za: f64 = 4503599639716173.0;       # xa/za = M/2⁵³ + 1/(za·2⁵³), M odd with 54 bits
+    var q3: f64 = _km_cr_mul_div(xa, one, za);
+    assert(_km_bits(q3) == 0x3FF6F786D669203E, "just above a midpoint: up");
+    var xb: f64 = 7046190918900622.0;       # xb/za = M/2⁵³ − 1/(za·2⁵³)
+    var q4: f64 = _km_cr_mul_div(xb, one, za);
+    assert(_km_bits(q4) == 0x3FF908792996DFC2, "just below a midpoint: down");
+}
+
+# ADR 0002 #25: limiting_reagent compares mᵢ·c_{i₀} < m_{i₀}·cᵢ exactly: the brief's two overflowing ratios, two
+# underflowing ones, 0 against an underflowed ratio, an exact tie (the first index) and a near-tie the rounded ratios
+# miss; _km_ratio_lt's branches (zeros, an exponent gap, the doubled side).
+fn _t_cyrius_adr25_exact_comparison() {
+    test_group("cyrius_adr25_exact_comparison");
+    var dmaxw = 0x7FEFFFFFFFFFFFFF;
+    var dmax: f64 = dmaxw;
+    var w1 = 1;
+    var tiny: f64 = w1;
+    var w2 = 2;
+    var tiny2: f64 = w2;
+    var cp: f64 = 0x01A56E1FC2F8F359;       # 1e-300
+    pair(&_f_x, dmax, dmax);
+    pair(&_f_y, tiny, cp);
+    assert(lim(&_f_x, 2, &_f_y, 2) == 1, "DBL_MAX/2⁻¹⁰⁷⁴ > DBL_MAX/1e-300: index 1 (Rust: both +∞, 0)");
+    pair(&_f_x, tiny2, tiny);
+    pair(&_f_y, dmax, dmax);
+    assert(lim(&_f_x, 2, &_f_y, 2) == 1, "2·2⁻¹⁰⁷⁴/DBL_MAX > 2⁻¹⁰⁷⁴/DBL_MAX: index 1 (Rust: both 0, 0)");
+    pair(&_f_x, tiny, 0.0);
+    pair(&_f_y, dmax, 1.0);
+    assert(lim(&_f_x, 2, &_f_y, 2) == 1, "0 < 2⁻¹⁰⁷⁴/DBL_MAX: index 1 (Rust: both 0, 0)");
+    pair(&_f_x, 1.0, 2.0);
+    pair(&_f_y, 1.0, 2.0);
+    assert(lim(&_f_x, 2, &_f_y, 2) == 0, "1/1 = 2/2 exactly: the first");
+    var a: f64 = 9.051597531392973;
+    var b: f64 = 54.309585188357836;        # RN(6a) − 1 ulp: b/6 rounds to a/1, and is smaller
+    pair(&_f_x, a, b);
+    pair(&_f_y, 1.0, 6.0);
+    assert(lim(&_f_x, 2, &_f_y, 2) == 1, "a near-tie: index 1 (Rust: equal rounded ratios, 0)");
+    pair(&_f_x, b, a);
+    pair(&_f_y, 6.0, 1.0);
+    assert(lim(&_f_x, 2, &_f_y, 2) == 0, "the same reversed: index 0");
+    var nz: f64 = -0.0;
+    pair(&_f_x, nz, 0.0);
+    pair(&_f_y, 1.0, 1.0);
+    assert(lim(&_f_x, 2, &_f_y, 2) == 0, "−0 and +0: a tie, the first");
+    assert(_km_ratio_lt(0.0, 1.0, 0.0, 2.0) == 0 && _km_ratio_lt(0.0, 1.0, tiny, dmax) == 1, "zeros");
+    assert(_km_ratio_lt(tiny, dmax, 0.0, 1.0) == 0, "a positive ratio against 0");
+    assert(_km_ratio_lt(1.0, 8.0, 1.0, 2.0) == 1 && _km_ratio_lt(1.0, 2.0, 1.0, 8.0) == 0, "exponents 2 apart");
+    assert(_km_ratio_lt(3.0, 2.0, 1.0, 1.0) == 0 && _km_ratio_lt(1.0, 1.0, 3.0, 2.0) == 1,
+        "one apart: the doubled side");
+    assert(_km_ratio_lt(3.0, 6.0, 1.0, 2.0) == 0 && _km_ratio_lt(1.0, 2.0, 3.0, 6.0) == 0, "equal: neither is less");
+}
+
+# ADR 0002 #26: empirical_formula with exact ratios and the exact tolerance 1/10. The same element twice makes the ratio
+# the percentages' exact quotient: 11/10 and 19/10 sit on the edge (|r − round(r)| = 1/10, within), the next double
+# past them does not; 2.55·2 = 5.1 at k = 2. C 12.011 % with O 17.5989 % is exactly CO (Rust: Err). The count edge:
+# r = 2³² − 1 is Ok with u32::MAX, r = 2³² − ½ Err. Two subnormal percentages whose moles Rust rounds to 0 (its
+# "non-positive" Err) are exactly 1 : 2. The helpers: the fast test's three outcomes, the exact test on the edges.
+fn _t_cyrius_adr26_exact_tolerance() {
+    test_group("cyrius_adr26_exact_tolerance");
+    emp(&_emp_in, 0, 6, 10.0);
+    emp(&_emp_in, 1, 6, 11.0);
+    emp_ok(2);
+    assert(emp_is(0, 6, 1) == 1 && emp_is(1, 6, 1) == 1, "r = 11/10: exactly 1/10 off, within: 1 : 1");
+    var up11: f64 = 0x4026000000000001;     # 11 + 1 ulp
+    emp(&_emp_in, 1, 6, up11);
+    assert(emp_code(2) == KM_ERR_COMPUTATION_ERROR, "r = (11 + 1 ulp)/10: past the edge at every k");
+    var dn11: f64 = 0x4025FFFFFFFFFFFF;     # 11 − 1 ulp
+    emp(&_emp_in, 1, 6, dn11);
+    emp_ok(2);
+    assert(emp_is(1, 6, 1) == 1, "r = (11 − 1 ulp)/10: within");
+    emp(&_emp_in, 0, 8, 10.0);
+    emp(&_emp_in, 1, 8, 19.0);
+    emp_ok(2);
+    assert(emp_is(0, 8, 1) == 1 && emp_is(1, 8, 2) == 1, "r = 19/10: 1/10 below 2, within: 1 : 2");
+    emp(&_emp_in, 0, 8, 20.0);
+    emp(&_emp_in, 1, 8, 51.0);
+    emp_ok(2);
+    assert(emp_is(0, 8, 2) == 1 && emp_is(1, 8, 5) == 1, "r = 2.55: 5.1 at k = 2, 2 : 5");
+    emp(&_emp_in, 0, 6, 12.011);
+    emp(&_emp_in, 1, 8, 17.5989);
+    emp_ok(2);
+    assert(emp_is(0, 6, 1) == 1 && emp_is(1, 8, 1) == 1, "C 12.011 % O 17.5989 %: exactly CO (Rust: Err)");
+    emp(&_emp_in, 0, 6, 1.0);
+    emp(&_emp_in, 1, 6, 4294967295.0);
+    emp_ok(2);
+    assert(emp_is(1, 6, 0xFFFFFFFF) == 1, "r = 2³² − 1: u32::MAX");
+    emp(&_emp_in, 1, 6, 4294967295.5);
+    assert(emp_code(2) == KM_ERR_COMPUTATION_ERROR, "r = 2³² − ½: a count past u32::MAX");
+    var w1 = 1;
+    var tiny: f64 = w1;
+    var w2 = 2;
+    var tiny2: f64 = w2;
+    emp(&_emp_in, 0, 2, tiny);
+    emp(&_emp_in, 1, 2, tiny2);
+    emp_ok(2);
+    assert(emp_is(0, 2, 1) == 1 && emp_is(1, 2, 2) == 1, "He 2⁻¹⁰⁷⁴ % and 2·2⁻¹⁰⁷⁴ %: 1 : 2 (Rust: Err)");
     emp(&_emp_in, 0, 6, 12.011);
     emp(&_emp_in, 1, 8, 19.99875);
     emp_ok(2);
-    assert(emp_is(0, 6, 4) == 1 && emp_is(1, 8, 5) == 1, "O/C 1.25: C₄O₅");
+    assert(emp_is(0, 6, 4) == 1 && emp_is(1, 8, 5) == 1, "O/C 1.25: the smallest multiplier, ×4: C₄O₅");
+    # the fast test: proven within, proven beyond, undecided at the edge
+    var k1: f64 = 1.0;
+    var zero: f64 = 0.0;
+    var r1: f64 = 3.05;
+    var s1, c1 = _km_emp_close_fast(r1, zero, k1);
+    assert(s1 == 1 && c1 == 3, "3.05: within, 3");
+    var r2: f64 = 3.2;
+    var s2, c2 = _km_emp_close_fast(r2, zero, k1);
+    assert(s2 == 0, "3.2: beyond");
+    var r3: f64 = 1.1;
+    var s3, c3 = _km_emp_close_fast(r3, zero, k1);
+    assert(s3 == 0 - 1, "1.1 (the double, 8.9·10⁻¹⁷ past 1/10): undecided");
+    var k2: f64 = 2.0;
+    var r4: f64 = 2.5;
+    var s4, c4 = _km_emp_close_fast(r4, zero, k2);
+    assert(s4 == 1 && c4 == 5, "2.5·2 = 5: within");
+    # the exact test (the masses cancel for one element twice)
+    var mc: f64 = 12.011;
+    var a, b = _km_emp_close_exact(11.0, mc, 10.0, mc, 1);
+    assert(a == 1 && b == 1, "11/10 at k = 1: within, 1");
+    var e, f = _km_emp_close_exact(up11, mc, 10.0, mc, 1);
+    assert(e == 0, "(11 + 1 ulp)/10: beyond");
+    var g, h = _km_emp_close_exact(19.0, mc, 10.0, mc, 1);
+    assert(g == 1 && h == 2, "19/10: within, 2");
+    var i, j = _km_emp_close_exact(15.0, mc, 10.0, mc, 1);
+    assert(i == 0, "3/2: half off");
+    var p, q = _km_emp_close_exact(15.0, mc, 10.0, mc, 2);
+    assert(p == 1 && q == 3, "3/2 at k = 2: 3");
+    var u, v = _km_emp_close_exact(4294967295.0, mc, 1.0, mc, 1);
+    assert(u == 1 && v == 0xFFFFFFFF, "2³² − 1");
 }
 
 # Runs every test group; returns the failure count from assert_summary().
@@ -1185,7 +1368,9 @@ fn main() {
     _t_cyrius_checked_arithmetic();
     _t_cyrius_out_of_type();
     _t_cyrius_slices_and_buffers();
-    _t_cyrius_empirical_tolerance();
+    _t_cyrius_adr24_rounded_once();
+    _t_cyrius_adr25_exact_comparison();
+    _t_cyrius_adr26_exact_tolerance();
     return assert_summary();
 }
 

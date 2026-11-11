@@ -13,8 +13,9 @@ is gated at 0 ulp against the corrected oracle); M4 (structure, nuclear, spectro
 inorganic), M4c (nuclear), M4a (correctly rounded sin, cos, atan2, acos), M4d (potential, the trig switch), M4e
 (spectroscopy, hisab 1.4.0's FFT transcribed), M4e-2 (potential's geometry with an unbounded exponent, ADR 0002 #20),
 M4e-3 (the Bohr model, the Rydberg formula and the reduced mass rounded once, ADR 0002 #21 and #22), M4e-4 (the cited
-AME2020 / TICE 2009 isotope table with ³⁶S, ADR 0002 #23) and M4f (stoichiometry: the integer matrix and the rational
-oxidation states, ADR 0002 #7); M5 (numerics) next — live status in [`state.md`](state.md).
+AME2020 / TICE 2009 isotope table with ³⁶S, ADR 0002 #23), M4f (stoichiometry: the integer matrix and the rational
+oxidation states, ADR 0002 #7) and M4f-2 (stoichiometry's yields, limiting reagent and empirical formula exact, ADR 0002
+#24–#26); M5 (numerics) next — live status in [`state.md`](state.md).
 
 ---
 
@@ -70,7 +71,8 @@ type for average oxidation states, no separate extrapolating Antoine function. I
 - [ ] `bridge::*` → `Result` instead of `NaN` sentinels; remove `ionization_to_bond_energy_estimate` (physically unfounded heuristic)
 - [x] `organic::FunctionalGroup::hydrogen_bonding` → `hydrogen_bond_donor` (+ `hydrogen_bond_acceptor`); `Geometry::TShapedThreeLonePairs` → `TShaped` — done in the Cyrius API (M4b, ADR 0002 #6): `functional_group_is_hydrogen_bond_donor`, the new cited `functional_group_is_hydrogen_bond_acceptor`, `KM_GEOMETRY_T_SHAPED`
 - [x] `stoichiometry::assign_oxidation_states` → rational result so average states (Fe₃O₄ +8/3) are representable (today `Err`); `balance_equation` → integer matrix input — done in the Cyrius API (M4f, ADR 0002 #7): (Z, numerator, denominator) records, an average outside i32 Rust's Err; a flat row-major integer matrix with Rust's |entry| ≤ 2⁵³
-- [ ] M4f's measured candidates under the inexact-formula policy, for the user's decision (ADR 0002's M4f addition): `percent_yield`, `theoretical_yield_moles`, `limiting_reagent`, `percent_composition`, `empirical_formula` against their exact values; `balance_equation`'s i64 elimination overflowing where a valid u32 solution exists (with the overflow audit)
+- [x] M4f's measured candidates under the inexact-formula policy: `percent_yield`, `theoretical_yield_moles`, `percent_composition` → their exact rationals rounded once; `limiting_reagent` → the exact comparison of the ratios; `empirical_formula` → exact ratios and an exact 1/10 tolerance — done in the Cyrius API (M4f-2, ADR 0002 #24, #25 and #26, the user's decisions of 2026-11-10)
+- [ ] `balance_equation`'s i64 elimination overflowing where a valid u32 solution exists (M4f's measurement; with the overflow audit)
 - [x] `inorganic::cfse_octahedral` → the exact (3·e_g − 2·t₂g)/5 instead of `t2g·(−0.4) + eg·0.6` (which misses it on 13 of
   22 cases, d⁵ high-spin and d¹⁰ ≠ 0) — done in the Cyrius API (M4b, ADR 0002 #12, the user's decision)
 - [x] `nuclear::atoms_after_half_lives`, `is_secular_equilibrium`, `inorganic::delta_tet_from_oct` → the exact N₀/2ⁿ (correctly

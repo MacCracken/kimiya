@@ -659,3 +659,85 @@ pub fn cr_reduced_mass(m1: f64, m2: f64) -> f64 {
     let q = Big::new(u128::from(ma)).shl(u64::try_from(e1 - e2).unwrap_or(0)).add(&Big::new(u128::from(mb)));
     cr_ratio(&p, &q, e1)
 }
+
+// ── ADR 0002 #24, #25, #26 (M4f-2): stoichiometry's exact rationals and comparisons ─────────────────────────────
+
+/// ADR 0002 #24: RN(x·y/z) for positive finite doubles x, y, z, at any exponents: x·y/z = (Mₓ·M_y)/M_z·2^(Eₓ + E_y − E_z)
+/// rounded once by [`cr_ratio`] (percent_yield's 100·a/t, theoretical_yield_moles' m·p/c, percent_composition's
+/// mass·(100·count)/mw). Integer arithmetic only, independent of the port's double-double fast path and its multi-word
+/// division (`validate.py` checks every value again with `Fraction`).
+pub fn cr_mul_div(x: f64, y: f64, z: f64) -> f64 {
+    assert!(
+        [x, y, z].iter().all(|v| v.is_finite() && *v > 0.0),
+        "cr_mul_div({x:?}, {y:?}, {z:?})"
+    );
+    let ((mx, ex), (my, ey), (mz, ez)) = (decompose(x), decompose(y), decompose(z));
+    cr_ratio(&Big::new(u128::from(mx) * u128::from(my)), &Big::new(u128::from(mz)), ex + ey - ez)
+}
+
+/// a·2^ea against b·2^eb, for non-negative integers a and b, exactly.
+fn cmp_scaled(a: &Big, ea: i64, b: &Big, eb: i64) -> std::cmp::Ordering {
+    let e = ea.min(eb);
+    a.shl(u64::try_from(ea - e).unwrap_or(0)).cmp(&b.shl(u64::try_from(eb - e).unwrap_or(0)))
+}
+
+/// ADR 0002 #25: m₁/c₁ < m₂/c₂ exactly, for finite m₁, m₂ ≥ 0 and finite c₁, c₂ > 0 (m₁·c₂ < m₂·c₁; a zero m is the
+/// least, two zeros tie).
+pub fn ratio_lt(m1: f64, c1: f64, m2: f64, c2: f64) -> bool {
+    if m1 == 0.0 {
+        return m2 != 0.0;
+    }
+    if m2 == 0.0 {
+        return false;
+    }
+    let ((a1, e1), (b1, f1), (a2, e2), (b2, f2)) = (decompose(m1), decompose(c1), decompose(m2), decompose(c2));
+    let l = Big::new(u128::from(a1) * u128::from(b2));
+    let r = Big::new(u128::from(a2) * u128::from(b1));
+    cmp_scaled(&l, e1 + f2, &r, e2 + f1) == std::cmp::Ordering::Less
+}
+
+/// ADR 0002 #26: the empirical formula of (atomic mass, mass percent) pairs, each positive and finite, evaluated exactly:
+/// the moles p/m and their minimum (element j, by [`ratio_lt`]), the ratios rᵢ = pᵢ·m_j/(mᵢ·p_j) as integer fractions
+/// A/B (the exponents folded in, at any size: the port's 2³² − ½ cut is checked by `validate.py`, not assumed here), the
+/// smallest k in 1 ..= 6 with |rᵢ·k − round(rᵢ·k)| ≤ 1/10 for every i (k·A = q·B + R: 10·R ≤ B or 10·R ≥ 9·B), and the
+/// counts round(rᵢ·k), halves away from zero (q, or q + 1 when 2·R ≥ B). None for Rust's ComputationError: no such k,
+/// or a count past u32::MAX.
+pub fn empirical_exact(mp: &[(f64, f64)]) -> Option<Vec<u32>> {
+    use std::cmp::Ordering::{Greater, Less};
+    let mut j = 0;
+    for k in 1..mp.len() {
+        if ratio_lt(mp[k].1, mp[k].0, mp[j].1, mp[j].0) {
+            j = k;
+        }
+    }
+    let (pj, mj) = (decompose(mp[j].1), decompose(mp[j].0));
+    let fr: Vec<(Big, Big)> = mp
+        .iter()
+        .map(|&(m, p)| {
+            let (pi, mi) = (decompose(p), decompose(m));
+            let s = pi.1 + mj.1 - mi.1 - pj.1;
+            let a = Big::new(u128::from(pi.0) * u128::from(mj.0));
+            let b = Big::new(u128::from(mi.0) * u128::from(pj.0));
+            if s >= 0 {
+                (a.shl(u64::try_from(s).unwrap_or(0)), b)
+            } else {
+                (a, b.shl(u64::try_from(-s).unwrap_or(0)))
+            }
+        })
+        .collect();
+    let (ten, nine, two) = (Big::new(10), Big::new(9), Big::new(2));
+    let k = (1..=6_u128).find(|&k| {
+        fr.iter().all(|(a, b)| {
+            let (_, r) = a.mul(&Big::new(k)).divrem(b);
+            let r10 = r.mul(&ten);
+            r10.cmp(b) != Greater || r10.cmp(&b.mul(&nine)) != Less
+        })
+    })?;
+    fr.iter()
+        .map(|(a, b)| {
+            let (q, r) = a.mul(&Big::new(k)).divrem(b);
+            let c = if r.mul(&two).cmp(b) == Less { q } else { q.add(&Big::new(1)) };
+            if c.bits() > 32 { None } else { u32::try_from(c.0.first().copied().unwrap_or(0)).ok() }
+        })
+        .collect()
+}

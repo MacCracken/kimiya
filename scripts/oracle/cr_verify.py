@@ -1,6 +1,6 @@
 """Verify the correctly rounded exp, exp10, expm1, ln, log10, pow, sin, cos, atan2, acos, x·2^y and 1/(100·x) of
 src/mathx.cyr against MPFR (ADR 0006), and its unbounded-exponent final operations with potential's geometry (ADR 0002
-#20).
+#20); and the exact rationals of spectroscopy (#21, #22) and stoichiometry (#24 ... #26) against Fraction.
 
 For each primitive it generates seeded arguments (deterministic: random.Random with fixed seeds), builds
 a probe program that calls the Cyrius function on every argument, runs it on each target, and compares
@@ -58,6 +58,14 @@ pairs, equal masses, subnormal masses and their ties, three families of normal t
 45 … 64 around the proven 55, the fast path's 2^-1021 edge, the overflow end): the public function, its fast path and its
 exact path forced. Their reference is exact rational arithmetic (Fraction, rounded by CPython's correctly rounded int
 division).
+M4f-2 (ADR 0002 #24 ... #26) adds stoichiometry's exact rationals and comparisons, against Fraction as well: muldiv
+(_km_cr_mul_div = RN(x*y/z): binade-uniform triples, the fast path's 2^+-1021 edges and past, exact quotients and
+midpoints, values within 2^-100 of a midpoint on both sides, subnormal results and ties; the fast path and
+_km_mul_div_acc forced), pyield, tyield, pcomp (percent_yield, theoretical_yield_moles with two reactants,
+percent_composition's first entry: the public function, its fast path and the exact path forced), limit
+(limiting_reagent: the public function and the exact comparisons alone, on ties, near-ties and ratios that both
+overflow or underflow) and empir (empirical_formula, and _km_empirical_formula with every tolerance test exact:
+formulas' percentages, r*k at n +- 1/10 within ulps and exactly, subnormal percentages, ratios near 2^32).
 Through each function's _km_cr_<f>_fast entry it reports the fast path's fallback rate per region, and
 checks the fast path's result equals the function's wherever its test passes. It checks that the three
 targets give identical bits and flags.
@@ -69,7 +77,7 @@ Usage, from the repo root:
     python3 -I scripts/oracle/cr_verify.py --only pow,exp  # some functions (exp exp10 expm1 ln log10 pow sin cos
                                                            # atan2 acos exp2s h100 uxsqrt uxmul uxdiv uxadd
                                                            # uxatan2 dist bond dih ratio bohr trans ryd series
-                                                           # rmass)
+                                                           # rmass muldiv pyield tyield pcomp limit empir)
     python3 -I scripts/oracle/cr_verify.py --work DIR      # probe sources and binaries in DIR
                                                            # (default build/cr-verify, gitignored)
 Exit status 1 on any mismatch or cross-target difference, 2 on a build or run failure.
@@ -1080,6 +1088,396 @@ def args_rmass(rng):
             ("exponent gaps 45 ... 64", gaps), ("the 2^-1021 edge", edge), ("the overflow end", top)]
 
 
+# ── ADR 0002 #24 … #26 (M4f-2): stoichiometry's exact rationals and comparisons ───────────────────────────────────
+NANW = 0x7FF8000000000001          # the probe's Err word for the float functions (none of their results is NaN)
+ERRW = {1: 0xFFFFFFFFFFFFFF01, 5: 0xFFFFFFFFFFFFFF05, 6: 0xFFFFFFFFFFFFFF06}   # src/error.cyr's codes, encoded
+W64 = (1 << 64) - 1
+STOICH = [(27, "pyield"), (28, "tyield"), (29, "pcomp"), (30, "limit"), (31, "empir"), (32, "muldiv")]
+STOICH_NAMES = tuple(name for _, name in STOICH)
+ARITY.update({27: 2, 28: 5, 29: 4, 30: 7, 31: 7, 32: 3})
+
+
+@functools.lru_cache(maxsize=1)
+def masses():
+    """src/element_data.cyr's KM_ELEMENT_ATOMIC_MASS (generated from the oracle), by atomic number."""
+    import re
+    src = (_ROOT / "src/element_data.cyr").read_text()
+    block = src[src.index("var KM_ELEMENT_ATOMIC_MASS: f64[118] = {"):]
+    vals = re.findall(r"^\s+([0-9.]+),", block[:block.index("};")], re.M)
+    assert len(vals) == 118
+    return {z + 1: float(v) for z, v in enumerate(vals)}
+
+
+def _pos(x):
+    return math.isfinite(x) and x > 0
+
+
+def _nonneg(x):
+    return math.isfinite(x) and x >= 0
+
+
+def _rnd(q):
+    """Rust's round (halves away from zero) of a rational q >= 0."""
+    return math.floor(q + Fraction(1, 2))
+
+
+def _fw(x):
+    return NANW if x is None else bits(x)
+
+
+def ref_limit(ms, cs):
+    """limiting_reagent with exact ratios: the first index of the least m/c; None for Rust's Err."""
+    if len(ms) != len(cs) or not ms:
+        return None
+    best = None
+    for i, (m, c) in enumerate(zip(ms, cs)):
+        if not _nonneg(m) or not _pos(c):
+            return None
+        q = Fraction(m) / Fraction(c)
+        if best is None or q < best[0]:
+            best = (q, i)
+    return best[1]
+
+
+def ref_empir(els):
+    """empirical_formula with exact moles, ratios, tolerance 1/10 and counts: ("ok", counts) or ("E", code)."""
+    M = masses()
+    if not els:
+        return ("E", 5)
+    moles = []
+    for z, p in els:
+        if z not in M:
+            return ("E", 1)
+        if not _pos(p):
+            return ("E", 5)
+        moles.append(Fraction(p) / Fraction(M[z]))
+    mn = min(moles)
+    rs = [q / mn for q in moles]
+    mult = next((k for k in range(1, 7) if all(abs(r * k - _rnd(r * k)) <= Fraction(1, 10) for r in rs)), None)
+    if mult is None:
+        return ("E", 6)
+    cs = [_rnd(r * mult) for r in rs]
+    if any(c > U32 for c in cs):
+        return ("E", 6)
+    return ("ok", cs)
+
+
+def ref_stoich(name, a):
+    """The exact reference words (w0, w1) of ids 27 … 32 (w1 None: the second slot is the fast path's, compared with the
+    first where its flag is 1)."""
+    if name == "muldiv":
+        x, y, z = a
+        return bits(rn(Fraction(x) * Fraction(y) / Fraction(z))), None
+    if name == "pyield":
+        x, t = a
+        if not _pos(t) or not _nonneg(x):
+            return NANW, None
+        return _fw(x / t * 100.0 if x == 0 else rn(Fraction(x) * 100 / Fraction(t))), None
+    if name == "tyield":
+        m0, m1, c0, c1, p = a
+        if not _pos(p):
+            return NANW, None
+        i = ref_limit([m0, m1], [c0, c1])
+        if i is None:
+            return NANW, None
+        m, c = (m0, c0) if i == 0 else (m1, c1)
+        return _fw(m / c * p if m == 0 else rn(Fraction(m) * Fraction(p) / Fraction(c))), None
+    if name == "pcomp":
+        z0, n0, z1, n1 = a
+        M = masses()
+        if z0 not in M or z1 not in M:
+            return NANW, None
+        mw = 0.0
+        for z, c in ((z0, n0), (z1, n1)):
+            mw += M[z] * float(c)                  # Rust's molecular_weight: Σ mass·count in f64, in atom order
+        if not _pos(mw):
+            return NANW, None
+        return _fw(0.0 if n0 == 0 else rn(Fraction(M[z0]) * n0 * 100 / Fraction(mw))), None
+    if name == "limit":
+        n = a[0]
+        i = ref_limit(list(a[1:1 + n]), list(a[4:4 + n]))
+        return (W64 if i is None else i), None
+    n = a[0]
+    kind, v = ref_empir([(a[1 + 2 * k], a[2 + 2 * k]) for k in range(n)])
+    if kind == "E":
+        return ERRW[v], W64
+    return v[0] | ((v[1] if n >= 2 else 0) << 32), (v[2] if n == 3 else 0)
+
+
+def _pp(rng, lo=-1074, hi=1023):
+    """A positive double of a random binade in [2^lo, 2^hi]."""
+    return binade_uniform(rng, 1, lo, hi, signs=(1,))[0]
+
+
+def _odd_in(rng, lo, hi):
+    """A random odd integer in [lo, hi)."""
+    return rng.randrange(lo | 1, hi, 2)
+
+
+def args_muldiv(rng):
+    """(x, y, z) for _km_cr_mul_div = RN(x·y/z)."""
+    rand = [(_pp(rng), _pp(rng), _pp(rng)) for _ in range(300_000)]
+    mid = [(_pp(rng, -200, 200), _pp(rng, -200, 200), _pp(rng, -200, 200)) for _ in range(100_000)]
+    edge = []                                   # k = ex + ey − ez near the fast path's ±1021, and past the range
+    while len(edge) < 80_000:
+        k = rng.choice([rng.randint(-1085, -1015), rng.randint(1015, 1030)])
+        ex, ez = rng.randint(-1074, 1023), rng.randint(-1074, 1023)
+        ey = k - ex + ez
+        if -1074 <= ey <= 1023:
+            edge.append((_pp(rng, ex, ex), _pp(rng, ey, ey), _pp(rng, ez, ez)))
+    ties = []                                   # x·y/z = 3y with 3y a 54-bit odd integer (a midpoint), or exact
+    for _ in range(80_000):
+        z = _odd_in(rng, 1, 1 << 40)
+        y = _odd_in(rng, (1 << 53) // 3 + 1, (1 << 54) // 3) if rng.random() < 0.7 else rng.randrange(1, 1 << 53)
+        t = rng.randint(-1100, 900)
+        sx, sy = rng.randint(-60, 60), t
+        x = 3.0 * z * 2.0 ** sx
+        yy = float(y) * 2.0 ** sy if sy >= -1074 + 53 else float(Fraction(y) * Fraction(2) ** sy)
+        zz = float(z) * 2.0 ** sx
+        if _pos(x) and _pos(yy) and _pos(zz):
+            ties.append((x, yy, zz))
+    near = []                                   # x/z = M/2^53 + c/(z·2^53), M odd with 54 bits: within 2^-100 of a midpoint
+    while len(near) < 40_000:
+        z = rng.randrange((1 << 52) + 1, 1 << 53, 2)
+        c = rng.choice([1, -1, 3, -3, 7, -7])
+        x0 = (c * pow(1 << 53, -1, z)) % z      # x0·2^53 ≡ c (mod z)
+        x = x0 + z * rng.randint(1, max(1, ((1 << 53) - x0) // z))
+        if not z < x < (1 << 53):
+            continue
+        m = (x * (1 << 53) - c) // z
+        if m % 2 == 1 and (1 << 53) <= m < (1 << 54):
+            t, j = rng.randint(-900, 900), rng.randint(-60, 60)
+            near.append((float(x) * 2.0 ** t, 2.0 ** j, float(z) * 2.0 ** rng.randint(-60, 60)))
+    sub = []                                    # subnormal results and their ties: x = q·2^-1074, y/z = 1/2, 3/2, …
+    for _ in range(40_000):
+        q = rng.randrange(1, 1 << 52)
+        y, z = rng.choice([(1.0, 2.0), (3.0, 2.0), (5.0, 2.0), (1.0, 4.0), (3.0, 4.0), (100.0, 200.0), (1.0, 3.0)])
+        sub.append((fb(q), y * 2.0 ** rng.randint(0, 40), z * 2.0 ** rng.randint(0, 40)))
+    return [("random triples", rand), ("|exponents| <= 200", mid), ("the 2^±1021 edges and past", edge),
+            ("exact quotients and midpoints", ties), ("within 2^-100 of a midpoint", near),
+            ("subnormal results and ties", sub)]
+
+
+def args_pyield(rng):
+    """(a, t) for percent_yield = RN(100·a/t)."""
+    rand = [(_pp(rng), _pp(rng)) for _ in range(200_000)]
+    typical = []
+    for _ in range(100_000):
+        t = _pp(rng, -40, 40)
+        typical.append((t * rng.uniform(0.0, 1.2), t))
+    ints = [(float(k), 1000.0) for k in range(0, 1001)] + [(float(x), float(t)) for x in range(0, 80) for t in range(1, 80)]
+    ties = []
+    for _ in range(60_000):
+        kind = rng.randint(0, 3)
+        e, j = rng.randint(-1000, 900), rng.randint(-60, 60)
+        if kind == 0:                           # t = 5·2^j, a = m·2^e with 5m a 54-bit odd integer: a midpoint
+            m = _odd_in(rng, (1 << 53) // 5 + 1, (1 << 54) // 5)
+            ties.append((m * 2.0 ** e, 5.0 * 2.0 ** j))
+        elif kind == 1:                         # t = 3·2^j, a = 3m·2^e with 25m 54 bits and odd
+            m = _odd_in(rng, (1 << 53) // 25 + 1, (1 << 54) // 25)
+            ties.append((3.0 * m * 2.0 ** e, 3.0 * 2.0 ** j))
+        elif kind == 2:                         # a subnormal, t = 200·2^j: (q/2)·2^(-1074 - j), a tie for odd q
+            ties.append((fb(rng.randrange(1, 1 << 52)), 200.0 * 2.0 ** rng.randint(0, 3)))
+        else:                                   # exact: t = 25·2^j or 100·2^j
+            ties.append((_pp(rng), rng.choice([25.0, 100.0]) * 2.0 ** j))
+    edge = []
+    for _ in range(40_000):
+        t = _pp(rng, -60, 60)
+        if rng.random() < 0.5:                  # 100·a/t near DBL_MAX
+            a = rn(Fraction(fb(0x7FEFFFFFFFFFFFFF)) * Fraction(t) / 100)
+        else:                                   # near the subnormal grid's first few units
+            a = float(Fraction(rng.randint(1, 1 << 12)) * Fraction(2) ** -1074 * Fraction(t) / 100)
+        a = ulps(a, rng.randint(-8, 8))
+        if _pos(a):
+            edge.append((a, t))
+    specials = [(0.0, 10.0), (-0.0, 10.0), (5.0, 0.0), (-1.0, 10.0), (NAN, 10.0), (INF, 10.0), (5.0, INF),
+                (5.0, NAN), (fb(1), 10.0), (fb(3), 200.0), (fb(0x7FEFFFFFFFFFFFFF), 1.0), (1.0, fb(1))]
+    return [("binade-uniform pairs", rand), ("a = t·U(0, 1.2)", typical), ("integer percentages", ints),
+            ("ties and exact values", ties), ("the overflow and subnormal ends", edge), ("specials", specials)]
+
+
+def args_tyield(rng):
+    """(m0, m1, c0, c1, p) for theoretical_yield_moles with two reactants."""
+    rand = [(_pp(rng), _pp(rng), _pp(rng), _pp(rng), _pp(rng)) for _ in range(100_000)]
+    typical = [(_pp(rng, -10, 10), _pp(rng, -10, 10), float(rng.randint(1, 12)), float(rng.randint(1, 12)),
+                float(rng.randint(1, 12))) for _ in range(100_000)]
+    ties = []                                   # (a, k·a ± ulps) over (c, k·c): the ratios tie or nearly
+    for _ in range(80_000):
+        a, c, k = _pp(rng, -1000, 1000), float(rng.randint(1, 50)), float(rng.randint(2, 50))
+        ties.append((a, ulps(a * k, rng.randint(-2, 2)), c, c * k, _pp(rng, -100, 100)))
+    edge = []                                   # m/c past either end while m·p/c is finite
+    for _ in range(60_000):
+        if rng.random() < 0.5:
+            m, c = _pp(rng, 900, 1023), _pp(rng, -300, -100)
+            p = _pp(rng, -1074, -500)
+        else:
+            m, c = _pp(rng, -1074, -900), _pp(rng, 100, 300)
+            p = _pp(rng, 500, 1023)
+        edge.append((m, _pp(rng), c, _pp(rng), p))
+    specials = [(0.0, 1.0, 1.0, 1.0, 2.0), (-0.0, 0.0, 1.0, 1.0, 2.0), (3.0, 2.0, 2.0, 1.0, 2.0),
+                (NAN, 2.0, 2.0, 1.0, 2.0), (3.0, 2.0, 2.0, 1.0, 0.0), (3.0, 2.0, 2.0, 1.0, INF)]
+    return [("binade-uniform", rand), ("typical", typical), ("ratio ties and near-ties", ties),
+            ("m/c over- and underflowing", edge), ("specials", specials)]
+
+
+def args_pcomp(rng):
+    """(z0, count0, z1, count1) for percent_composition, entry 0."""
+    def count():
+        r = rng.random()
+        if r < 0.05:
+            return 0
+        if r < 0.1:
+            return U32
+        if r < 0.6:
+            return rng.randint(1, 30)
+        return rng.randint(1, U32)
+    rand = [(rng.randint(1, 118), count(), rng.randint(1, 118), count()) for _ in range(200_000)]
+    same = [(z, count(), z, count()) for z in range(1, 119) for _ in range(200)]
+    bad = [(0, 1, 8, 1), (119, 1, 8, 1), (1, 0, 8, 0), (8, 2, 255, 1)]
+    return [("random pairs", rand), ("the same element twice", same), ("Err paths", bad)]
+
+
+def args_limit(rng):
+    """(n, m0, m1, m2, c0, c1, c2) for limiting_reagent, n = 1 … 3 (unused slots 0)."""
+    def pack(ms, cs):
+        n = len(ms)
+        return (n,) + tuple(ms) + (0.0,) * (3 - n) + tuple(cs) + (0.0,) * (3 - n)
+    rand = []
+    for _ in range(150_000):
+        n = rng.randint(1, 3)
+        rand.append(pack([_pp(rng) for _ in range(n)], [_pp(rng) for _ in range(n)]))
+    ties = []
+    for _ in range(150_000):
+        a, c = _pp(rng, -1000, 1000), float(rng.randint(1, 60))
+        k = float(rng.randint(2, 60))
+        b = ulps(a * k, rng.randint(-2, 2))
+        ms, cs = [a, b], [c, c * k]
+        if rng.random() < 0.5:
+            ms, cs = ms[::-1], cs[::-1]
+        if rng.random() < 0.3:
+            ms.append(ulps(a * 3.0, rng.randint(-1, 1)))
+            cs.append(c * 3.0)
+        ties.append(pack(ms, cs))
+    ends = []
+    for _ in range(100_000):
+        if rng.random() < 0.5:                  # both ratios overflow
+            ms, cs = [_pp(rng, 1000, 1023), _pp(rng, 1000, 1023)], [_pp(rng, -1074, -30), _pp(rng, -1074, -30)]
+        else:                                   # both underflow
+            ms, cs = [_pp(rng, -1074, -1000), _pp(rng, -1074, -1000)], [_pp(rng, 30, 1023), _pp(rng, 30, 1023)]
+        if rng.random() < 0.2:
+            ms[rng.randint(0, 1)] = 0.0
+        ends.append(pack(ms, cs))
+    specials = [pack([3.0, 2.0], [2.0, 1.0]), pack([0.0, 0.0], [1.0, 2.0]), pack([-0.0, 0.0], [1.0, 1.0]),
+                pack([5.0, NAN], [1.0, 1.0]), pack([5.0, 1.0], [1.0, 0.0]), pack([-1.0, 1.0], [1.0, 1.0]),
+                pack([fb(0x7FEFFFFFFFFFFFFF)] * 2, [fb(1), 1e-300]), pack([fb(1), fb(2)], [fb(0x7FEFFFFFFFFFFFFF)] * 2)]
+    return [("random lists", rand), ("ties and near-ties", ties), ("both over- or underflowing", ends),
+            ("specials", specials)]
+
+
+def args_empir(rng):
+    """(n, z0, p0, z1, p1, z2, p2) for empirical_formula, n = 1 … 3 (unused slots 0)."""
+    M = masses()
+
+    def pack(els):
+        flat = [v for e in els for v in e]
+        return (len(els),) + tuple(flat) + (0, 0.0) * (3 - len(els))
+    formulas = []
+    for _ in range(60_000):                     # a formula's own percentages (Rust's percent_composition), scaled
+        n = rng.randint(1, 3)
+        pairs = [(rng.randint(1, 92), rng.randint(1, 12)) for _ in range(n)]
+        mw = 0.0
+        for z, c in pairs:
+            mw += M[z] * float(c)
+        s = 10.0 ** rng.uniform(-3, 3)
+        formulas.append(pack([(z, M[z] * float(c) / mw * 100.0 * s) for z, c in pairs]))
+    edge = []                                   # r·k within a few ulps of n ± 1/10 (the tolerance's knife edge)
+    for _ in range(80_000):
+        zi, zj = rng.randint(1, 118), rng.randint(1, 118)
+        k = rng.randint(1, 6)
+        target = Fraction(10 * rng.randint(1, 40) + rng.choice([1, -1]), 10 * k)
+        if target < 1:
+            continue
+        pj = _pp(rng, -20, 20)
+        pi = float(target * Fraction(M[zi]) * Fraction(pj) / Fraction(M[zj]))
+        edge.append(pack([(zj, pj), (zi, ulps(pi, rng.randint(-40, 40)))]))
+    exact = []                                  # the same element twice: r = (10n ± 1)/(10k) exactly, so r·k − n = ±1/10
+    for _ in range(40_000):
+        z, k = rng.randint(1, 118), rng.randint(1, 6)
+        num = 10 * rng.randint(k, 40) + rng.choice([1, -1])
+        w = rng.randrange(1, 1 << 40) * 2.0 ** rng.randint(-200, 200)
+        els = [(z, float(10 * k) * w), (z, float(num) * w)]
+        if rng.random() < 0.5:
+            els = els[::-1]
+        if rng.random() < 0.3:
+            els.append((z, float(10 * k) * w * rng.randint(1, 4)))
+        exact.append(pack(els))
+    sub = []                                    # subnormal percentages: Rust's moles underflow
+    for _ in range(30_000):
+        n = rng.randint(1, 3)
+        q = _pp(rng, -1074, -1020)
+        sub.append(pack([(rng.randint(1, 118), q * rng.choice([1.0, 2.0, 3.0, 0.5])) for _ in range(n)]))
+    big = []                                    # ratios near 2^32 − 1/2, 2^32 − 1/4 and past
+    for _ in range(20_000):
+        zi, zj = rng.randint(1, 118), rng.randint(1, 118)
+        target = rng.choice([Fraction(2 ** 32) - Fraction(1, 2), Fraction(2 ** 32) - Fraction(1, 4), Fraction(2 ** 32),
+                             Fraction(U32), Fraction(2 ** 33) + 3])
+        pj = _pp(rng, -10, 10)
+        pi = ulps(float(target * Fraction(M[zi]) * Fraction(pj) / Fraction(M[zj])), rng.randint(-3, 3))
+        big.append(pack([(zj, pj), (zi, pi)]))
+    specials = [pack([(1, 11.19), (8, 88.81)]), pack([(6, 12.011), (8, 17.5989)]), pack([(6, NAN), (8, 50.0)]),
+                pack([(0, 10.0), (8, 50.0)]), pack([(6, 1e-320), (8, 50.0)]), pack([(2, fb(1)), (2, fb(1))]),
+                pack([(6, 40.0), (6, 40.0)]), pack([(6, 40.0), (6, 20.0)])]
+    return [("formulas' percentages", formulas), ("r·k at n ± 1/10 ± ulps", edge), ("exactly n ± 1/10", exact),
+            ("subnormal percentages", sub), ("ratios near 2^32", big), ("specials", specials)]
+
+
+def stoich_checks(work, targets, which):
+    """Ids 27 … 32 against their exact references on every target, the exact path forced; True if anything failed."""
+    failed = False
+    gens = {"pyield": args_pyield, "tyield": args_tyield, "pcomp": args_pcomp, "limit": args_limit,
+            "empir": args_empir, "muldiv": args_muldiv}
+    for fid, name in STOICH:
+        if name not in which:
+            continue
+        t0 = time.time()
+        rng = random.Random(1027 + fid)
+        sections = gens[name](rng)
+        xs = [x for _, sec in sections for x in sec]
+        want = [ref_stoich(name, a) for a in xs]
+        first = None
+        for t in targets:
+            g0, g1, fl = run_probe(work, t, fid, 0, xs)
+            a0, a1, _ = run_probe(work, t, fid, 1, xs)
+            two = name == "empir"
+            bad = [i for i in range(len(xs)) if g0[i] != want[i][0] or (two and g1[i] != want[i][1])]
+            bad_acc = [i for i in range(len(xs)) if a0[i] != want[i][0] or (two and a1[i] != want[i][1])]
+            bad_fast = [] if two else [i for i in range(len(xs)) if fl[i] == 1 and g1[i] != g0[i]]
+            for i in bad[:5]:
+                print(f"  MISMATCH {name}{xs[i]!r} on {t}: got {g0[i]:016x} {g1[i]:016x}, want {want[i]}")
+            for i in bad_acc[:5]:
+                print(f"  MISMATCH {name} (exact path){xs[i]!r} on {t}: got {a0[i]:016x} {a1[i]:016x}, want {want[i]}")
+            for i in bad_fast[:5]:
+                print(f"  FAST/FULL DIFFER {name}{xs[i]!r} on {t}: {g1[i]:016x} vs {g0[i]:016x}")
+            cur = (g0, g1, fl, a0, a1)
+            xdiff = 0 if first is None else sum(1 for u, v in zip(cur, first) for p, q in zip(u, v) if p != q)
+            if first is None:
+                first = cur
+            slow = len(xs) - sum(1 for f in fl if f == 1)
+            print(f"{name:6} {t:8} {len(xs):9,} args: {len(bad)} mismatches; exact path forced: {len(bad_acc)} "
+                  f"mismatches; fast path: {len(bad_fast)} differ, fell back {slow:,}; bits or flags differing from "
+                  f"{targets[0]}: {xdiff}")
+            failed |= bool(bad or bad_acc or bad_fast or xdiff)
+            if t == targets[0] and not two and name != "limit":
+                rates = []
+                i = 0
+                for tag, sec in sections:
+                    rates.append(f"{tag} {sum(1 for f in fl[i:i + len(sec)] if f != 1)}/{len(sec)}")
+                    i += len(sec)
+                print("         fallbacks by region: " + "; ".join(rates))
+        print(f"       [{time.time() - t0:.0f} s]")
+    return failed
+
+
 def gen_args(name, lim):
     rng = random.Random({"exp": 1001, "exp10": 1002, "expm1": 1003, "ln": 1004, "log10": 1005, "pow": 1006,
                          "sin": 1007, "cos": 1008, "atan2": 1009, "acos": 1010, "exp2s": 1011, "h100": 1012,
@@ -1138,6 +1536,8 @@ include "src/mathx.cyr"
 include "src/validate.cyr"
 include "src/element_data.cyr"
 include "src/element.cyr"
+include "src/molecule.cyr"
+include "src/stoichiometry.cyr"
 include "src/thermo.cyr"
 include "src/organic_data.cyr"
 include "src/organic.cyr"
@@ -1160,6 +1560,11 @@ fn arity(fid): i64 {
     if (fid == 21 || fid == 24 || fid == 25) { return 2; }
     if (fid == 22 || fid == 23) { return 3; }
     if (fid == 26) { return 9; }
+    if (fid == 27) { return 2; }
+    if (fid == 28) { return 5; }
+    if (fid == 29) { return 4; }
+    if (fid == 30 || fid == 31) { return 7; }
+    if (fid == 32) { return 3; }
     return 1;
 }
 
@@ -1242,6 +1647,117 @@ fn run_spec(fid, mode, a): (f64, f64, i64) {
     if (is_ok(tm) == 1) { gm = vm; }
     var fm, om = _km_reduced_mass_fast(m1, m2);
     return (gm, fm, om);
+}
+
+# ADR 0002 #24 … #26 (M4f-2): ids 27 … 32 are percent_yield (a, t), theoretical_yield_moles (m0, m1, c0, c1, p: two
+# reactants), percent_composition (z0, c0, z1, c1: entry 0's percent), limiting_reagent (n, m0, m1, m2, c0, c1, c2),
+# empirical_formula (n, z0, p0, z1, p1, z2, p2) and _km_cr_mul_div (x, y, z), as result words: a float function's Err is
+# the NaN word 0x7FF8000000000001 (none of their results is NaN), limiting_reagent's Err −1, empirical_formula's Ok counts
+# (c0 | c1·2^32, c2) and its Err (0xFFFFFFFFFFFFFF00 | code, −1). Mode 0: the public function, the fast path's result
+# (_km_mul_div_fast; for limiting_reagent the index by exact comparisons alone) and its flag; mode 1: the exact path
+# forced (_km_mul_div_acc at the same operands, the exact comparisons alone, _km_empirical_formula's exact tests).
+#must_use
+fn run_stoich(fid, mode, a): (i64, i64, i64) {
+    var nanw = 0x7FF8000000000001;
+    if (fid == 32) {
+        var x: f64 = load64(a);
+        var y: f64 = load64(a + 8);
+        var z: f64 = load64(a + 16);
+        if (mode == 1) {
+            var xa: f64 = _km_mul_div_acc(x, y, z);
+            return (_km_bits(xa), _km_bits(xa), 0);
+        }
+        var xr: f64 = _km_cr_mul_div(x, y, z);
+        var xf, xo = _km_mul_div_fast(x, y, z);
+        return (_km_bits(xr), _km_bits(xf), xo);
+    }
+    if (fid == 27) {
+        var ya: f64 = load64(a);
+        var yt: f64 = load64(a + 8);
+        var hundred: f64 = 100.0;
+        var tp, vp = percent_yield(ya, yt);
+        if (is_ok(tp) != 1) { return (nanw, nanw, 1); }
+        if (ya == 0.0) { return (vp, vp, 1); }
+        if (mode == 1) {
+            var pa: f64 = _km_mul_div_acc(ya, hundred, yt);
+            return (_km_bits(pa), _km_bits(pa), 0);
+        }
+        var pf, po = _km_mul_div_fast(ya, hundred, yt);
+        return (vp, _km_bits(pf), po);
+    }
+    if (fid == 28) {
+        var pp: f64 = load64(a + 32);
+        var ty, vy = theoretical_yield_moles(a, 2, a + 16, 2, pp);
+        if (is_ok(ty) != 1) { return (nanw, nanw, 1); }
+        var tl, il = limiting_reagent(a, 2, a + 16, 2);
+        var mm: f64 = load64(a + 8 * il);
+        var cc: f64 = load64(a + 16 + 8 * il);
+        if (mm == 0.0) { return (vy, vy, 1); }
+        if (mode == 1) {
+            var ta: f64 = _km_mul_div_acc(mm, pp, cc);
+            return (_km_bits(ta), _km_bits(ta), 0);
+        }
+        var tf, tfo = _km_mul_div_fast(mm, pp, cc);
+        return (vy, _km_bits(tf), tfo);
+    }
+    if (fid == 29) {
+        var pairs[32];
+        store64(&pairs, load64(a));
+        store64(&pairs + 8, load64(a + 8));
+        store64(&pairs + 16, load64(a + 16));
+        store64(&pairs + 24, load64(a + 24));
+        var mol = KmMolecule_new(&pairs, 2);
+        var ob[64];
+        var tc, vc = percent_composition(mol, &ob, 4);
+        if (is_err_result(tc) == 1) { return (nanw, nanw, 1); }
+        var e0 = load64(&ob + 8);
+        var cnt0 = load64(a + 8);
+        if (cnt0 == 0) { return (e0, e0, 1); }
+        var tw, vw = mol.molecular_weight();
+        var mw: f64 = vw;
+        var ms: f64 = KM_ELEMENT_ATOMIC_MASS[load64(a) - 1];
+        var hc: f64 = f64_from(100 * cnt0);
+        if (mode == 1) {
+            var ca: f64 = _km_mul_div_acc(ms, hc, mw);
+            return (_km_bits(ca), _km_bits(ca), 0);
+        }
+        var cf, cfo = _km_mul_div_fast(ms, hc, mw);
+        return (e0, _km_bits(cf), cfo);
+    }
+    if (fid == 30) {
+        var nl = load64(a);
+        var tg, vg = limiting_reagent(a + 8, nl, a + 32, nl);
+        var got = vg;
+        if (is_err_result(tg) == 1) { got = 0 - 1; }
+        var slow = got;
+        if (got >= 0) {
+            slow = 0;
+            var i = 1;
+            while (i < nl) {
+                var mi: f64 = load64(a + 8 + 8 * i);
+                var ci: f64 = load64(a + 32 + 8 * i);
+                var ms0: f64 = load64(a + 8 + 8 * slow);
+                var cs0: f64 = load64(a + 32 + 8 * slow);
+                if (_km_ratio_lt(mi, ci, ms0, cs0) == 1) { slow = i; }
+                i = i + 1;
+            }
+        }
+        if (mode == 1) { return (slow, slow, 0); }
+        return (got, slow, 1);
+    }
+    var ne = load64(a);
+    var eb[64];
+    var k = 0;
+    while (k < 8) {
+        store64(&eb + 8 * k, 0);
+        k = k + 1;
+    }
+    var force = 0;
+    if (mode == 1) { force = 1; }
+    var te, ve = _km_empirical_formula(a + 8, ne, &eb, 4, force);
+    if (is_err_result(te) == 1) { return ((0 - 256) | ve, 0 - 1, 1); }
+    var w0 = load64(&eb + 8) | (load64(&eb + 24) << 32);
+    return (w0, load64(&eb + 40), 1);
 }
 
 # ADR 0002 #20 (M4e-2): ids 13 … 17 take (significand, exponent) words: _km_ux_sqrt_f64(s, e), _km_ux_mul_f64,
@@ -1364,7 +1880,12 @@ fn main(): i64 {
         var r: f64 = 0.0;
         var rf: f64 = 0.0;
         var ok = 0;
-        if (fid >= 21) {
+        if (fid >= 27) {
+            var w0, w1, wf = run_stoich(fid, mode, at);
+            store64(out + 8 * i, w0);
+            store64(out + 8 * n + 8 * i, w1);
+            store8(out + 16 * n + i, wf);
+        } elif (fid >= 21) {
             var r3, rf3, ok3 = run_spec(fid, mode, at);
             r = r3;
             rf = rf3;
@@ -1380,9 +1901,11 @@ fn main(): i64 {
             rf = rf2;
             ok = ok2;
         }
-        store64(out + 8 * i, r);
-        store64(out + 8 * n + 8 * i, rf);
-        store8(out + 16 * n + i, ok);
+        if (fid < 27) {
+            store64(out + 8 * i, r);
+            store64(out + 8 * n + 8 * i, rf);
+            store8(out + 16 * n + i, ok);
+        }
         i = i + 1;
     }
     var w = file_write_all("res.bin", out, 17 * n);
@@ -1534,8 +2057,9 @@ def main():
     lim = {k: fb(v) for k, v in mathx_tables.limits().items()}
 
     funcs = [f for f in FUNCS if only is None or f[1] in only]
+    stoich = [name for _, name in STOICH if only is None or name in only]
     plan = {}
-    wmax = 0
+    wmax = 7 * 600_000 if stoich else 0
     for fid, name, _, _, ref in funcs:
         xs, acc, spans = gen_args(name, lim)
         plan[name] = (xs, acc, spans)
@@ -1661,6 +2185,7 @@ def main():
               f"MPFR vs glibc {n_mg}")
         failed |= bool(n_om)
     failed |= m4a_checks(work, targets, plan)
+    failed |= stoich_checks(work, targets, stoich)
     print("cr_verify: " + ("FAILED" if failed else "all results correctly rounded, identical on every target"))
     sys.exit(1 if failed else 0)
 

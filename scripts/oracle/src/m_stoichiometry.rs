@@ -35,9 +35,10 @@
 
 use std::hint::black_box as bb;
 
+use crate::exact::{cr_mul_div, empirical_exact, ratio_lt};
 use crate::grids::{Rng, pow2, specials};
 use crate::m_reaction::{edges, res};
-use crate::tsv::{Class, Module, Tok, err, f, i, tokens_note};
+use crate::tsv::{Class, Module, Tok, err, f, i, same_toks, tokens_note};
 use kimiya::element::{ElementCategory, lookup_by_number};
 use kimiya::error::KimiyaError;
 use kimiya::molecule::Molecule;
@@ -885,19 +886,75 @@ fn slice_toks(xs: &[f64]) -> Vec<Tok> {
     v
 }
 
+/// ADR 0002 #25: the port's limiting reagent: Rust's validation, in its order, with the ratios compared exactly
+/// (mᵢ·c_{i₀} < m_{i₀}·cᵢ by `exact::ratio_lt`; the first index on an exact tie); None where Rust errs.
+fn port_limiting(mo: &[f64], co: &[f64]) -> Option<usize> {
+    if mo.len() != co.len() || mo.is_empty() {
+        return None;
+    }
+    let mut best = 0;
+    for k in 0..mo.len() {
+        if !(mo[k].is_finite() && mo[k] >= 0.0) || !(co[k].is_finite() && co[k] > 0.0) {
+            return None;
+        }
+        if k > 0 && ratio_lt(mo[k], co[k], mo[best], co[best]) {
+            best = k;
+        }
+    }
+    Some(best)
+}
+
+/// A class-B row of an f64 result, noted `[ADR 0002 #24: the port returns the correctly rounded <what> = <x> (f:…)]`
+/// where the port's value (None: the oracle's Err, asserted) differs from the oracle's.
+fn noted24(m: &mut Module, name: &str, ins: &[Tok], out: Result<f64, KimiyaError>, port: Option<f64>, what: &str) {
+    assert_eq!(out.is_ok(), port.is_some(), "{name}: the port's validation differs from the oracle's: {ins:?}");
+    if let (Ok(v), Some(c)) = (&out, port)
+        && c.to_bits() != v.to_bits()
+    {
+        let note = format!("ADR 0002 #24: the port returns the correctly rounded {what} = {c:?} (f:{:016x})", c.to_bits());
+        m.row_noted(name, Class::B, ins, &[f(*v)], &note);
+        return;
+    }
+    m.row(name, Class::B, ins, &[res(out)]);
+}
+
 fn limiting(m: &mut Module, mo: &[f64], co: &[f64]) {
-    let out = limiting_reagent(bb(mo), bb(co)).map_or_else(|e_| err(&e_), |k| i(i64::try_from(k).unwrap_or(-1)));
+    let oracle = limiting_reagent(bb(mo), bb(co));
+    let out = oracle.as_ref().map_or_else(err, |&k| i(i64::try_from(k).unwrap_or(-1)));
+    let port = port_limiting(mo, co);
+    assert_eq!(port.is_some(), oracle.is_ok(), "port_limiting's validation differs: {mo:?} {co:?}");
     let mut ins = slice_toks(mo);
     ins.extend(slice_toks(co));
+    if let (Ok(k), Some(p)) = (&oracle, port)
+        && *k != p
+    {
+        let note = format!(
+            "ADR 0002 #25: the port returns the exact limiting reagent (mᵢ·c_j < m_j·cᵢ, the first on a tie) = {p} (i:{p})"
+        );
+        m.row_noted("stoichiometry::limiting_reagent", Class::A, &ins, &[out], &note);
+        return;
+    }
     m.row("stoichiometry::limiting_reagent", Class::A, &ins, &[out]);
 }
 
 fn yield_moles(m: &mut Module, mo: &[f64], co: &[f64], p: f64) {
-    let out = res(theoretical_yield_moles(bb(mo), bb(co), bb(p)));
+    let out = theoretical_yield_moles(bb(mo), bb(co), bb(p));
+    let port = (p.is_finite() && p > 0.0).then(|| port_limiting(mo, co)).flatten().map(|k| {
+        let (mm, c) = (mo[k], co[k]);
+        if mm == 0.0 { mm / c * p } else { cr_mul_div(mm, p, c) }
+    });
     let mut ins = slice_toks(mo);
     ins.extend(slice_toks(co));
     ins.push(f(p));
-    m.row("stoichiometry::theoretical_yield_moles", Class::B, &ins, &[out]);
+    noted24(m, "stoichiometry::theoretical_yield_moles", &ins, out, port, "m·p/c at the exact limiting reagent");
+}
+
+/// ADR 0002 #24: percent_yield's row; the port's value is RN(100·a/t) (an actual yield of ±0: Rust's ±0).
+fn pyield(m: &mut Module, a: f64, t: f64) {
+    let out = percent_yield(bb(a), bb(t));
+    let ok = t.is_finite() && t > 0.0 && a.is_finite() && a >= 0.0;
+    let port = ok.then(|| if a == 0.0 { a / t * 100.0 } else { cr_mul_div(a, 100.0, t) });
+    noted24(m, "stoichiometry::percent_yield", &[f(a), f(t)], out, port, "100·a/t");
 }
 
 fn emit_yields(m: &mut Module) {
@@ -976,10 +1033,7 @@ fn emit_yields(m: &mut Module) {
     }
 
     // percent_yield: each argument over the edges with the other typical, the Rust tests, over- and underflow, seeded.
-    let py = |m: &mut Module, a: f64, t: f64| {
-        let out = res(percent_yield(bb(a), bb(t)));
-        m.row("stoichiometry::percent_yield", Class::B, &[f(a), f(t)], &[out]);
-    };
+    let py = pyield;
     for x in edges() {
         py(m, x, 10.0);
         py(m, 8.0, x);
@@ -1034,36 +1088,94 @@ fn pairs_in(pairs: &[(u8, u32)]) -> Vec<Tok> {
 
 fn composition(m: &mut Module, pairs: &[(u8, u32)]) {
     let mol = Molecule::new(pairs);
-    let outs = match percent_composition(bb(&mol)) {
-        Ok(v) => {
-            let mut t = vec![Tok::V(v.len())];
-            for &(z, p) in &v {
-                t.push(i(z));
-                t.push(f(p));
-            }
-            t
+    let oracle = percent_composition(bb(&mol));
+    let entries = |v: &[(u8, f64)]| {
+        let mut t = vec![Tok::V(v.len())];
+        for &(z, p) in v {
+            t.push(i(z));
+            t.push(f(p));
         }
-        Err(e_) => vec![err(&e_)],
+        t
     };
+    let outs = match &oracle {
+        Ok(v) => entries(v),
+        Err(e_) => vec![err(e_)],
+    };
+    // ADR 0002 #24: each entry RN(mass·(100·count)/mw) with mw the oracle's molecular_weight (a count of 0: +0, Rust's)
+    if oracle.is_ok() {
+        let mw = mol.molecular_weight().unwrap_or(f64::NAN);
+        let port: Vec<(u8, f64)> = mol
+            .atoms
+            .iter()
+            .map(|a| {
+                let mass = lookup_by_number(a.element_number).map_or(f64::NAN, |e| e.atomic_mass);
+                (a.element_number, if a.count == 0 { 0.0 } else { cr_mul_div(mass, 100.0 * f64::from(a.count), mw) })
+            })
+            .collect();
+        let pt = entries(&port);
+        if !same_toks(&pt, &outs) {
+            let note = format!(
+                "ADR 0002 #24: the port returns the correctly rounded mass·count·100/mw per entry {}",
+                tokens_note(&pt)
+            );
+            m.row_noted("stoichiometry::percent_composition", Class::B, &pairs_in(pairs), &outs, &note);
+            return;
+        }
+    }
     m.row("stoichiometry::percent_composition", Class::B, &pairs_in(pairs), &outs);
 }
 
-fn empirical(m: &mut Module, elements: &[(u8, f64)]) {
-    let outs = match empirical_formula(bb(elements)) {
-        Ok(v) => {
-            let mut t = vec![Tok::V(v.len())];
-            for &(z, c) in &v {
-                t.push(i(z));
-                t.push(i(c));
-            }
-            t
+/// ADR 0002 #26: the port's empirical formula: Rust's validation, in its order, then `exact::empirical_exact` (exact
+/// moles, minimum, ratios, tolerance 1/10 and counts). The Err is the variant's name.
+fn port_empirical(elements: &[(u8, f64)]) -> Result<Vec<(u8, u32)>, &'static str> {
+    if elements.is_empty() {
+        return Err("InvalidInput");
+    }
+    let mut mp = Vec::with_capacity(elements.len());
+    for &(z, p) in elements {
+        let e = lookup_by_number(z).ok_or("InvalidElement")?;
+        if !(p.is_finite() && p > 0.0) {
+            return Err("InvalidInput");
         }
-        Err(e_) => vec![err(&e_)],
+        mp.push((e.atomic_mass, p));
+    }
+    let counts = empirical_exact(&mp).ok_or("ComputationError")?;
+    Ok(elements.iter().zip(counts).map(|(&(z, _), c)| (z, c)).collect())
+}
+
+fn empirical(m: &mut Module, elements: &[(u8, f64)]) {
+    let counts = |v: &[(u8, u32)]| {
+        let mut t = vec![Tok::V(v.len())];
+        for &(z, c) in v {
+            t.push(i(z));
+            t.push(i(c));
+        }
+        t
+    };
+    let oracle = empirical_formula(bb(elements));
+    let outs = match &oracle {
+        Ok(v) => counts(v),
+        Err(e_) => vec![err(e_)],
     };
     let mut ins = vec![Tok::V(elements.len())];
     for &(z, p) in elements {
         ins.push(i(z));
         ins.push(f(p));
+    }
+    let port = match port_empirical(elements) {
+        Ok(v) => counts(&v),
+        Err(name) => vec![Tok::Err(name.to_string())],
+    };
+    if let Err(KimiyaError::InvalidInput(_) | KimiyaError::InvalidElement(_)) = &oracle {
+        assert!(same_toks(&port, &outs), "port_empirical's validation differs: {elements:?}");
+    }
+    if !same_toks(&port, &outs) {
+        let note = format!(
+            "ADR 0002 #26: with exact ratios and an exact 1/10 tolerance the port returns {}",
+            tokens_note(&port)
+        );
+        m.row_noted("stoichiometry::empirical_formula", Class::A, &ins, &outs, &note);
+        return;
     }
     m.row("stoichiometry::empirical_formula", Class::A, &ins, &outs);
 }
@@ -1230,11 +1342,208 @@ fn emit_composition(m: &mut Module) {
     }
 }
 
+/// ADR 0002 #24–#26's hard rows (M4f-2; appended, with their own seed, so the rows before keep theirs): percent_yield's
+/// exact ties at RN — subnormal (q·2⁻¹⁰⁷⁴ over 200·2^j, q odd: (q/2)·2⁻¹⁰⁷⁴) and normal (m·2^e over 5·2^j with 5m a 54-bit
+/// odd number; 3m·2^e over 3·2^j with 25m one) at scales across the range —, its exact values (over 25 and 100·2^j), the
+/// subnormal-result and overflow ends to the ulp; theoretical_yield_moles where m/c over- or underflows though m·p/c is
+/// finite, and its midpoints (m·3/1, m·3/2); limiting_reagent's exact ties, the near-ties the rounded ratios cannot tell
+/// apart (both orders), both ratios overflowing or underflowing, 0 against an underflowed ratio; empirical_formula's
+/// knife edges at ±1/10 — the same element twice with r = (10n ± 1)/(10k) exactly and one ulp either side, other elements
+/// with r·k within a few ulps of n ± 1/10 —, the subnormal percentages whose moles Rust rounds to 0, and the count's
+/// 2³² edge.
+fn emit_exact(m: &mut Module) {
+    let mut rng = Rng::new(0x5f24);
+    let dmax = f64::MAX;
+    let sub = f64::from_bits;
+    // percent_yield
+    pyield(m, sub(1), 10.0);
+    for q in [1_u64, 3, 5, 7, 9, 99, (1 << 52) - 1, (1 << 52) - 3, 1 << 51] {
+        for j in [0, 1, 2] {
+            pyield(m, sub(q), 200.0 * pow2(j));
+        }
+        pyield(m, sub(q), 300.0);
+        pyield(m, sub(q), 100.0);
+    }
+    for (lo, hi) in [((1_u64 << 53) / 5 + 1, (1_u64 << 54) / 5), ((1_u64 << 53) / 25 + 1, (1_u64 << 54) / 25)] {
+        for c in [lo | 1, ((lo + hi) / 2) | 1, (hi - 1) | 1] {
+            #[allow(clippy::cast_precision_loss)]
+            let cf = c as f64; // c < 2⁵³: exact
+            for e in [-1000, -500, -60, 0, 60, 500, 900] {
+                if lo < (1 << 50) {
+                    pyield(m, 3.0 * cf * pow2(e), 3.0 * pow2(e / 2)); // 25c a 54-bit odd number
+                } else {
+                    pyield(m, cf * pow2(e), 5.0 * pow2(e / 2)); // 5c a 54-bit odd number
+                }
+            }
+        }
+    }
+    for _ in 0..200 {
+        let a = rng.log_uniform(-300.0, 300.0);
+        pyield(m, a, 25.0);
+        pyield(m, a, 100.0 * pow2(i32::try_from(rng.int(-60, 60)).unwrap_or(0)));
+    }
+    for t in [1.0, 2.0, 0.5, 3.0, 7.0, 99.999, 1e-10, pow2(-60), pow2(60)] {
+        let a0 = dmax / 100.0 * t; // near 100·a/t = DBL_MAX
+        let mut a = a0;
+        for _ in 0..3 {
+            a = a.next_down();
+        }
+        for _ in 0..7 {
+            if a.is_finite() {
+                pyield(m, a, t);
+            }
+            a = a.next_up();
+        }
+    }
+    for k in [1_u64, 2, 3, 4, 5, 1 << 20] {
+        for j in [0, 10, 52] {
+            pyield(m, sub(k) * pow2(j), 100.0 * pow2(j)); // exactly k·2⁻¹⁰⁷⁴
+            pyield(m, sub(k) * pow2(j), 200.0 * pow2(j)); // (k/2)·2⁻¹⁰⁷⁴: a tie for odd k
+            pyield(m, sub(k) * pow2(j), 300.0 * pow2(j));
+        }
+    }
+    pyield(m, f64::MIN_POSITIVE, 100.0 * pow2(60));
+    pyield(m, f64::MIN_POSITIVE, 3.0);
+    // theoretical_yield_moles
+    for (mo, c, p) in [
+        (1e300, 1e-10, 1e-10),
+        (dmax, 0.5, 0.25),
+        (dmax, 0.5, 0.5),
+        (1e-300, 1e10, 1e10),
+        (sub(1), 2.0, 2.0),
+        (sub(3), 2.0, 2.0),
+        (sub(5), 4.0, 3.0),
+        (1e-310, 1e10, 1e20),
+        (1e308, 1e-300, 1e-300),
+    ] {
+        yield_moles(m, &[mo], &[c], p);
+    }
+    for _ in 0..40 {
+        // m/c past DBL_MAX or below 2⁻¹⁰²² while m·p/c is a normal double
+        let (mo, c) = (rng.log_uniform(300.0, 308.0), rng.log_uniform(-12.0, -1.0));
+        yield_moles(m, &[mo], &[c], c * rng.uniform(0.01, 1.0));
+        let (mu, cu) = (rng.log_uniform(-320.0, -300.0), rng.log_uniform(1.0, 12.0));
+        yield_moles(m, &[mu], &[cu], cu * rng.uniform(0.5, 2.0));
+    }
+    for _ in 0..100 {
+        #[allow(clippy::cast_precision_loss)]
+        let y = (rng.int(((1 << 53) / 3 + 1) / 2, ((1 << 54) / 3 - 1) / 2) * 2 + 1) as f64; // 3y a 54-bit odd number
+        let sc = pow2(i32::try_from(rng.int(-900, 900)).unwrap_or(0));
+        yield_moles(m, &[y * sc], &[1.0], 3.0);
+        yield_moles(m, &[y * sc], &[2.0], 3.0);
+        yield_moles(m, &[y * sc, 1e300], &[2.0, 1.0], 3.0);
+    }
+    // limiting_reagent: exact ties, near-ties (both orders), over- and underflowing ratios, 0 against an underflow
+    let lists: &[(&[f64], &[f64])] = &[
+        (&[1.0, 2.0], &[1.0, 2.0]),
+        (&[0.1, 0.2], &[1.0, 2.0]),
+        (&[0.2, 0.1], &[2.0, 1.0]),
+        (&[3.0, 6.0, 1.5], &[1.0, 2.0, 0.5]),
+        (&[f64::MAX, f64::MAX], &[f64::from_bits(1), 1e-300]),
+        (&[f64::MAX, f64::MAX], &[1e-300, f64::from_bits(1)]),
+        (&[f64::MAX, 1e308], &[1e-300, 1e-300]),
+        (&[1e308, f64::MAX], &[1e-300, 1e-300]),
+        (&[f64::from_bits(2), f64::from_bits(1)], &[f64::MAX, f64::MAX]),
+        (&[f64::from_bits(1), f64::from_bits(2)], &[f64::MAX, f64::MAX]),
+        (&[f64::from_bits(1), 0.0], &[f64::MAX, 1.0]),
+        (&[0.0, f64::from_bits(1)], &[1.0, f64::MAX]),
+        (&[-0.0, 0.0], &[1.0, 1.0]),
+        (&[9.051_597_531_392_973, 54.309_585_188_357_836], &[1.0, 6.0]),
+        (&[54.309_585_188_357_836, 9.051_597_531_392_973], &[6.0, 1.0]),
+    ];
+    for &(mo, co) in lists {
+        limiting(m, mo, co);
+        yield_moles(m, mo, co, 2.0);
+    }
+    for _ in 0..400 {
+        let a = rng.log_uniform(-300.0, 300.0);
+        #[allow(clippy::cast_precision_loss)]
+        let (c, k) = (rng.int(1, 30) as f64, rng.int(2, 30) as f64);
+        let am = a * k;
+        for b in [am.next_down(), am, am.next_up()] {
+            if (a / c).to_bits() == (b / (c * k)).to_bits() {
+                limiting(m, &[a, b], &[c, c * k]); // equal rounded ratios: the exact comparison decides
+                limiting(m, &[b, a], &[c * k, c]);
+                yield_moles(m, &[a, b], &[c, c * k], 3.0);
+            }
+        }
+        let big = |r: &mut Rng| r.log_uniform(300.0, 308.0);
+        let small = |r: &mut Rng| r.log_uniform(-320.0, -300.0);
+        let (m1, m2, c1, c2) = (big(&mut rng), big(&mut rng), small(&mut rng), small(&mut rng));
+        limiting(m, &[m1, m2], &[c1, c2]); // both ratios +∞ in Rust
+        limiting(m, &[c1, c2], &[m1, m2]); // both 0 in Rust
+    }
+    // empirical_formula: knife edges at ±1/10
+    let o_edge = 17.5989; // C 12.011 %, O 17.5989 %: r − 1 = 1/10 − 1/(10·9006636304787571)
+    let mut o = o_edge;
+    for _ in 0..3 {
+        o = f64::next_down(o);
+    }
+    for _ in 0..7 {
+        empirical(m, &[(6, 12.011), (8, o)]);
+        o = o.next_up();
+    }
+    for z in [6_u8, 8, 26, 92] {
+        for k in 1..=6_u32 {
+            for n in [k, k + 1, 2 * k + 1, 5 * k] {
+                for sgn in [1_i64, -1] {
+                    let num = 10 * i64::from(n) + sgn; // r = (10n ± 1)/(10k), so r·k − n = ±1/10
+                    #[allow(clippy::cast_precision_loss)]
+                    let (pa, pb) = (f64::from(10 * k), num as f64);
+                    for w in [1.0, pow2(-1000), pow2(900)] {
+                        let (a, b) = (pa * w, pb * w);
+                        empirical(m, &[(z, a), (z, b)]);
+                        empirical(m, &[(z, a), (z, b.next_up())]);
+                        empirical(m, &[(z, a), (z, b.next_down())]);
+                    }
+                }
+            }
+        }
+    }
+    let mass = |z: u8| lookup_by_number(z).map_or(1.0, |e| e.atomic_mass);
+    for _ in 0..300 {
+        let (zi, zj) = (u8::try_from(rng.int(1, 118)).unwrap_or(1), u8::try_from(rng.int(1, 118)).unwrap_or(1));
+        let k = rng.int(1, 6);
+        let n = rng.int(k, 6 * k);
+        let sgn = if rng.int(0, 1) == 0 { 1 } else { -1 };
+        #[allow(clippy::cast_precision_loss)]
+        let target = (10 * n + sgn) as f64 / (10 * k) as f64;
+        let pj = rng.log_uniform(-2.0, 2.0);
+        let pi = target * mass(zi) / mass(zj) * pj;
+        let mut x = pi;
+        for _ in 0..2 {
+            x = x.next_down();
+        }
+        for _ in 0..5 {
+            empirical(m, &[(zj, pj), (zi, x)]);
+            x = x.next_up();
+        }
+    }
+    // subnormal percentages whose moles Rust rounds to 0, or rounds coarsely
+    for (a, b) in [(sub(1), sub(2)), (sub(1), sub(1)), (sub(2), sub(4)), (sub(3), sub(6)), (sub(1), sub(3))] {
+        empirical(m, &[(2, a), (2, b)]);
+        empirical(m, &[(1, a), (1, b)]);
+        empirical(m, &[(118, a), (118, b)]);
+    }
+    for e in [-1074, -1070, -1060, -1050, -1040, -1023] {
+        let s = pow2(e);
+        empirical(m, &[(6, 12.011 * s), (8, 15.999 * s)]);
+        empirical(m, &[(6, 12.011 * s), (8, 2.0 * 15.999 * s)]);
+        empirical(m, &[(1, 2.0 * 1.008 * s), (8, 15.999 * s)]);
+    }
+    // the count's 2³² edge (one element twice: the ratio is the percentages' quotient)
+    for b in [4_294_967_295.0, 4_294_967_295.25, 4_294_967_295.5, 4_294_967_295.75, 4_294_967_294.5, 4_294_967_296.0] {
+        empirical(m, &[(6, 1.0), (6, b)]);
+        empirical(m, &[(6, 1.0), (6, f64::next_up(b))]);
+    }
+}
+
 pub fn emit() -> Module {
     let mut m = Module::new("stoichiometry");
     emit_balance(&mut m);
     emit_oxidation(&mut m);
     emit_yields(&mut m);
     emit_composition(&mut m);
+    emit_exact(&mut m);
     m
 }

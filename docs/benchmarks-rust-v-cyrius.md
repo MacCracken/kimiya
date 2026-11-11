@@ -355,3 +355,28 @@ All bodies are Rust's results (golden `stoichiometry`: 41,435 rows; the float fu
 385 ns, the null vector 165 ns, the sign / u32 checks and the verification 150 ns — about a nanosecond per operation and
 4 ns per call in this compiler's code, as M4e-3 measured, against Rust's inlined loop. The local work tables are not the
 cost (a 16-word table measured the same as the 512-word one).
+
+## M4f-2 exact stoichiometry (2026-11-10)
+
+ADR 0002 #24–#26: the yields and the percent composition rounded once (`_km_cr_mul_div`), the limiting reagent's exact
+comparison, the exact empirical formula. All Cyrius-only (rust-old/benches has no bench of these five). Before → after,
+the same host, back to back (the trimmed copy of `tests/kimiya.bcyr` with only the stoichiometry benches):
+
+| Bench | Body | Before | After |
+|---|---|---|---|
+| `stoichiometry/limiting_reagent` | (3, 2) mol over (2, 1): the rounded ratios differ, so they decide (Rust's own path) | 32 ns | 33 ns |
+| `stoichiometry/theoretical_yield_moles` | the same, × 2: RN(m·p/c), the fast path (the test passes) | 46 ns | 115 ns |
+| `stoichiometry/percent_yield` | 8 of 10: RN(100·a/t), the fast path | 14 ns | 81 ns |
+| `stoichiometry/percent_composition_glucose` | C₆H₁₂O₆: three RN(mass·count·100/mw) | 72 ns | 276 ns |
+| `stoichiometry/empirical_formula_glucose` | 40.00 / 6.71 / 53.29 %: the exact minimum, three double-double ratios, three fast tolerance tests at k = 1, the counts | 217 ns | 586 ns |
+| `stoichiometry/theoretical_yield_moles_tie` | y·3/2 with 3y = 2⁵³ + 1, a midpoint: the test fails, `_km_mul_div_tie` resolves it exactly | — | 133 ns |
+| `stoichiometry/percent_yield_subnormal` | 100·3·2⁻¹⁰⁷⁴/200, a subnormal tie: the exact path, `_km_cr_ratio` | — | 2.15 µs |
+| `stoichiometry/limiting_reagent_tie` | (1, 2) over (1, 2): equal rounded ratios, `_km_ratio_lt` | — | 94 ns |
+| `stoichiometry/empirical_formula_edge` | C 12.011 %, O 17.5989 %: the fast test undecided at k = 1, the exact one twice (the multiplier, the count) | — | 7.46 µs |
+
+The fast path of RN(x·y/z) is about 45 floating-point operations (two TwoProducts, the double-double quotient, its
+rounding test), the same work as M4e-3's reduced mass (14 → 73 ns); inlining its helper calls was measured at 81 → 73 ns
+for `percent_yield` and not kept. Midpoints, common with integer coefficients (6.6 % of `cr_verify.py`'s typical
+theoretical yields), cost 133 rather than 115 ns: the exact resolution stays in the fast path, so only subnormal operands
+and results near the range ends reach `_km_cr_ratio`. The empirical formula's exact test is a 36-bit restoring division
+on 8-limb integers (about 3.5 µs a test); it runs only for knife-edge inputs, within 2⁻⁵⁰ of n ± 1/10.

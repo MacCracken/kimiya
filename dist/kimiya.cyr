@@ -11965,8 +11965,10 @@ fn eyring_rate_from_activation(delta_h_activation_j: f64, delta_s_activation_j_p
 # Amounts in mol, masses in g, percentages in %. Element data (atomic masses, categories) are src/element_data.cyr's,
 # read through src/element.cyr's handles; molecules are src/molecule.cyr's KmMolecule. Fallible functions return a
 # value-form Result whose Err payload is a KM_ERR_* code, with Rust's checks, codes and order, and reject NaN and ±∞
-# inputs where Rust does. The float functions keep Rust's operation order, so they are bit-identical (class B:
-# + − × ÷ only); the integer ones are exact (class A).
+# inputs where Rust does. The integer functions are exact (class A). ADR 0002 #24–#26 (M4f-2): percent_yield,
+# theoretical_yield_moles and percent_composition return their exact rationals rounded once, limiting_reagent compares
+# its ratios exactly, and empirical_formula evaluates its moles, ratios, tolerance and counts exactly (the section
+# before limiting_reagent); every Rust check, Err code and order is kept.
 #
 # - ADR 0002 #7, balancing: balance_equation takes an integer matrix, flat row-major (entry (i, j) at word i·n + j)
 #   with its dimensions m (element rows) and n (species columns), where Rust takes `&[Vec<f64>]`. Rust's range for an
@@ -11991,14 +11993,15 @@ fn eyring_rate_from_activation(delta_h_activation_j: f64, delta_s_activation_j_p
 #   Err(KM_ERR_INVALID_INPUT). Rust's Vec results go to the caller's buffer `out` of `cap` elements (a negative cap or a
 #   null out holds none): Ok(count), or Err(KM_ERR_INVALID_INPUT) when the result does not fit, checked after Rust's
 #   own errors, with the buffer untouched (port plan §6.4, M4e).
-# - Rust's private MAX_COMPOSITION_ENTRY (2⁵³) and EMPIRICAL_TOLERANCE (0.1) are typed inline (port plan §6.4); the
-#   tolerance is pinned by golden rows on both sides of it and, to the ulp, by tests/stoichiometry.tcyr on
-#   _km_empirical_close. `round` is src/mathx.cyr's _km_round_half_away (Rust's halves away from zero), `f64::min`
-#   _km_min.
-# - Work tables: balance_equation's matrix copy and null vector, and empirical_formula's mole ratios, use function-local
-#   tables (512, 64 and 64 words) and move to the bump allocator (which never frees) only past them; an allocation
-#   failure is Err(KM_ERR_COMPUTATION_ERROR). assign_oxidation_states needs none: each state is a function of the atomic
-#   number once the solved element is known, so the result is written in one pass at the end.
+# - Rust's private MAX_COMPOSITION_ENTRY (2⁵³) is typed inline (port plan §6.4); its EMPIRICAL_TOLERANCE (0.1) is the
+#   exact 1/10 under ADR 0002 #26, pinned by the golden rows on both sides of the edge and by tests/stoichiometry.tcyr's
+#   exact edges (r = 11/10 and 19/10 within, one ulp past them not). `round` halves away from zero, as Rust's
+#   (src/mathx.cyr's _km_round_half_away on the fast path, q + [2R ≥ B] on the exact one).
+# - Work tables: balance_equation's matrix copy and null vector, and empirical_formula's ratios (a double-double each,
+#   then the counts), use function-local tables (512, 64 and 128 words) and move to the bump allocator (which never
+#   frees) only past them; an allocation failure is Err(KM_ERR_COMPUTATION_ERROR). assign_oxidation_states needs none:
+#   each state is a function of the atomic number once the solved element is known, so the result is written in one
+#   pass at the end.
 
 include "lib/alloc.cyr"
 
@@ -12637,13 +12640,177 @@ fn assign_oxidation_states(atoms, n, overall_charge, out, cap): Result {
     return Ok(n);
 }
 
+# ── exact rationals rounded once, exact comparisons (ADR 0002 #24, #25, #26) ──────────
+#
+# ADR 0002 #24–#26 (M4f-2, the user's decisions of 2026-11-10). Rust's checks, Err codes and their order are kept; only
+# the arithmetic changes. Every operand is a binary64 value, so every quantity below is an exact rational:
+# - #24: percent_yield RN(100·a/t), theoretical_yield_moles RN(m·p/c) (m and c at #25's index), percent_composition
+#   RN(mass·count·100/mw) per atom (mw molecular_weight's own double): _km_cr_mul_div, rounded ONCE (nearest, ties to
+#   even, subnormal results on the 2⁻¹⁰⁷⁴ grid, ±∞ only past DBL_MAX). Rust's (a/t)·100, (m/c)·p and
+#   ((mass·count)/mw)·100 round two to four times (1–2 ulp off on about a quarter of inputs; 0 or ∞ at the range ends
+#   where the value is representable).
+# - #25: limiting_reagent replaces its minimum i₀ by i when mᵢ·c_{i₀} < m_{i₀}·cᵢ exactly (the first index on an exact
+#   tie, Rust's strict `<`), where Rust compares rounded ratios (ties within an ulp, and both over- or underflowing,
+#   pick the wrong reactant). The rounded ratios RN(m/c) still decide whenever they differ: RN is monotone on the
+#   extended reals (over- and underflow included), so RN(x) < RN(y) ⇒ x < y and RN(x) > RN(y) ⇒ x > y; only equal
+#   rounded ratios go to the exact comparison _km_ratio_lt. An exact ratio is never ∞, so element 0 seeds the minimum.
+# - #26: empirical_formula with exact mole amounts, their exact minimum, exact ratios and the exact tolerance 1/10
+#   (_km_emp_close_fast / _km_emp_close_exact); see empirical_formula.
+# Zero operands keep Rust's expression (an exact ±0, Rust's sign).
+
+# RN(x·y/z), rounded once, for positive finite doubles x, y, z (subnormal operands and results included): the fast path,
+# then the exact path where it declines. Rust's form of #24's three functions differs from it by 1–2 ulp on about a
+# quarter of inputs.
+#must_use
+fn _km_cr_mul_div(x: f64, y: f64, z: f64): f64 {
+    var r, ok = _km_mul_div_fast(x, y, z);
+    if (ok == 1) { return r; }
+    var a: f64 = _km_mul_div_acc(x, y, z);
+    return a;
+}
+
+# RN(x·y/z) by the fast path, for positive finite doubles: (RN, 1), or (0, 0) when an operand is subnormal or the result
+# may leave the normal range. With x = sₓ·2^eₓ (sₓ in [1, 2)), likewise y and z, and k = eₓ + e_y − e_z: x·y/z = F·2^k
+# with F = sₓs_y/s_z in (½, 4). N = sₓ·s_y = p_h + p_l exactly (TwoProduct: both in [1, 2), the error a multiple of
+# 2⁻¹⁰⁴), and D = s_z is exact, so src/mathx.cyr's _km_dd_div_cr steps (inline, with d_l = 0: y₀ = RN(p_h/D), the
+# residual r from an exact TwoProduct, δ = RN(r/D)) have exact operands, and its proof gives y₀ + RN(δ − ε) < F <
+# y₀ + RN(δ + ε) for ε = 2⁻¹⁰⁰·y₀ (n_h in [1, 4], d_h in [1, 2) and n_h/d_h in [½, 4], inside its [2⁻⁹⁰⁰, 2⁹⁰⁰]): when
+# z₁ = RN(y₀ + RN(δ − ε)) and z₂ = RN(y₀ + RN(δ + ε)) agree, F rounds to them (exact values pass); otherwise the one
+# rounding boundary between, the midpoint of z₁ and z₂, decides, exactly (_km_mul_div_tie; midpoints are common here:
+# m·3/2 is one whenever 3m has 54 bits). For −1021 ≤ k ≤ 1021, F·2^k > 2⁻¹⁰²² is in the normal range, where the binary64
+# grid is the 53-bit grid scaled, so RN(F·2^k) = RN(F)·2^k: RN(F) ≤ 4 keeps it at most 2¹⁰²³ (finite), 2^k is a normal
+# double and the product exact.
+#must_use
+fn _km_mul_div_fast(x: f64, y: f64, z: f64): (f64, i64) {
+    var bx = _km_bits(x);
+    var by = _km_bits(y);
+    var bz = _km_bits(z);
+    var nmin = 0x0010000000000000;
+    if (bx < nmin || by < nmin || bz < nmin) { return (0.0, 0); }      # a subnormal operand
+    var k = (bx >> 52) + (by >> 52) - (bz >> 52) - 1023;                # eₓ + e_y − e_z
+    if (k < 0 - 1021 || k > 1021) { return (0.0, 0); }
+    var mask = 0x000FFFFFFFFFFFFF;
+    var one = 0x3FF0000000000000;
+    var sxb = (bx & mask) | one;
+    var syb = (by & mask) | one;
+    var szb = (bz & mask) | one;
+    var sx: f64 = sxb;
+    var sy: f64 = syb;
+    var sz: f64 = szb;
+    var ph, pl = _km_two_prod(sx, sy);
+    var y0: f64 = ph / sz;
+    var ta, tb = _km_two_prod(y0, sz);
+    var s0: f64 = ph - ta;
+    var s1: f64 = s0 - tb;
+    var rr: f64 = s1 + pl;
+    var dq: f64 = rr / sz;
+    var k100: f64 = 0x39B0000000000000;     # 2⁻¹⁰⁰
+    var eps: f64 = y0 * k100;
+    var lo: f64 = dq - eps;
+    var hi: f64 = dq + eps;
+    var z1: f64 = y0 + lo;
+    var z2: f64 = y0 + hi;
+    var f: f64 = z1;
+    if (z1 != z2) { f = _km_mul_div_tie(ph, pl, sz, z1, z2); }
+    var sc: f64 = _km_cr_pow2(k);
+    var r: f64 = f * sc;
+    return (r, 1);
+}
+
+# RN(F) for F = N/D (N = p_h + p_l, D = s_z, as in _km_mul_div_fast) where the rounding test left two adjacent doubles
+# z₁ < z₂ and F strictly between points that round to them: the midpoint μ = z₁ + u/2 (u = z₂ − z₁, exact) is the only
+# boundary there, so RN(F) is z₁ if F < μ, z₂ if F > μ, and the even one of the two if F = μ. The sign of F − μ is that
+# of T = N − D·μ = (p_h − a) + p_l − b − h, with D·z₁ = a + b (TwoProduct) and h = D·(u/2) exact: p_h − a is exact by
+# Sterbenz (a and p_h are within 2⁻⁵¹ of N), and each of the four terms is a multiple of 2⁻¹⁰⁷ (p_h, p_l of 2⁻¹⁰⁴; z₁ ≥
+# ½ − 2⁻⁵⁴ of 2⁻⁵⁴, so a, b of 2⁻¹⁰⁶; u/2 ≥ 2⁻⁵⁵, so h of 2⁻¹⁰⁷) below 2⁻⁴⁸ in magnitude (|N − D·z₁| ≤ D·u < 2⁻⁴⁹):
+# scaled by 2¹⁰⁷ (exact) each is an integer below 2⁵⁹, so T·2¹⁰⁷ is their exact sum in 64-bit integers.
+#must_use
+fn _km_mul_div_tie(ph: f64, pl: f64, sz: f64, z1: f64, z2: f64): f64 {
+    var u: f64 = z2 - z1;
+    var hu: f64 = u * 0.5;
+    var a, b = _km_two_prod(sz, z1);
+    var h: f64 = sz * hu;
+    var e1: f64 = ph - a;
+    var p107: f64 = 0x46A0000000000000;     # 2¹⁰⁷
+    var ie: f64 = e1 * p107;
+    var il: f64 = pl * p107;
+    var ib: f64 = b * p107;
+    var ih: f64 = h * p107;
+    var t = f64_to(ie) + f64_to(il) - f64_to(ib) - f64_to(ih);
+    if (t > 0) { return z2; }
+    if (t < 0) { return z1; }
+    if ((_km_bits(z1) & 1) == 0) { return z1; }
+    return z2;
+}
+
+# RN(x·y/z) by the exact path alone, for positive finite doubles: x = Mₓ·2^Eₓ (2⁵² ≤ M < 2⁵³, a subnormal's E below
+# −1074), likewise y and z, and x·y/z = (MₓM_y)/M_z·2^(Eₓ + E_y − E_z), rounded once by src/mathx.cyr's _km_cr_ratio
+# (the numerator below 2¹⁰⁶, the exponent within ±3,400).
+#must_use
+fn _km_mul_div_acc(x: f64, y: f64, z: f64): f64 {
+    var mx, ex = _km_f64_int(_km_bits(x));
+    var my, ey = _km_f64_int(_km_bits(y));
+    var mz, ez = _km_f64_int(_km_bits(z));
+    var a[64];
+    var b[64];
+    var p[64];
+    var q[64];
+    _km_bn_set(&a, mx);
+    _km_bn_set(&b, my);
+    _km_bn_mul(&p, &a, &b);
+    _km_bn_set(&q, mz);
+    var v: f64 = _km_cr_ratio(&p, &q, ex + ey - ez);
+    return v;
+}
+
+# 1 if m₁/c₁ < m₂/c₂ exactly, for finite m₁, m₂ ≥ 0 (−0 included) and finite c₁, c₂ > 0: m₁·c₂ < m₂·c₁. A zero m is the
+# smallest ratio (two zeros tie: 0). Otherwise, with each value M·2^E (2⁵² ≤ M < 2⁵³, _km_f64_int), the products are
+# P_L·2^E_L and P_R·2^E_R with P in [2¹⁰⁴, 2¹⁰⁶): exponents two or more apart decide (P_L·2^E_L < 2¹⁰⁶·2^E_L ≤
+# 2¹⁰⁴·2^E_R), and otherwise each P is an exact TwoProduct (h, l) of two integer-valued doubles below 2⁵³, the side with
+# the larger exponent doubled (exact), and the two compared as nuclear.cyr's _km_cmp_hundred does: h = RN(h + l), so by
+# RN's monotonicity h_L < h_R ⇒ P_L < P_R, and when h_L = h_R the exact difference is l_L − l_R.
+#must_use
+fn _km_ratio_lt(m1: f64, c1: f64, m2: f64, c2: f64): i64 {
+    if (m1 == 0.0) {
+        if (m2 == 0.0) { return 0; }
+        return 1;
+    }
+    if (m2 == 0.0) { return 0; }
+    var a1, e1 = _km_f64_int(_km_bits(m1));
+    var b1, f1 = _km_f64_int(_km_bits(c1));
+    var a2, e2 = _km_f64_int(_km_bits(m2));
+    var b2, f2 = _km_f64_int(_km_bits(c2));
+    var el = e1 + f2;                               # m₁·c₂ = a₁·b₂·2^el
+    var er = e2 + f1;                               # m₂·c₁ = a₂·b₁·2^er
+    if (el <= er - 2) { return 1; }
+    if (el >= er + 2) { return 0; }
+    var xa1: f64 = f64_from(a1);
+    var xb2: f64 = f64_from(b2);
+    var xa2: f64 = f64_from(a2);
+    var xb1: f64 = f64_from(b1);
+    var lh, ll = _km_two_prod(xa1, xb2);
+    var rh, rl = _km_two_prod(xa2, xb1);
+    if (el == er + 1) {
+        lh = lh * 2.0;
+        ll = ll * 2.0;
+    } elif (el == er - 1) {
+        rh = rh * 2.0;
+        rl = rl * 2.0;
+    }
+    if (lh < rh) { return 1; }
+    if (lh > rh) { return 0; }
+    if (ll < rl) { return 1; }
+    return 0;
+}
+
 # ── limiting reagent and yield ──────────────────────────────────────────────────────
 
-# The index of the limiting reagent: the reactant with the smallest ratio moles / coefficient (the first on a tie,
-# Rust's strict `<`), from the moles available (nm f64 at `moles_available`) and the stoichiometric coefficients (nc
-# f64 at `stoich_coefficients`). Ok(index). Err(KM_ERR_INVALID_INPUT) if either is no slice, the lengths differ, they
-# are empty, or (in reactant order) a moles value is negative or non-finite, or a coefficient not positive and finite.
-# Mirrors `stoichiometry::limiting_reagent`.
+# The index of the limiting reagent: the reactant with the smallest ratio moles / coefficient, from the moles available
+# (nm f64 at `moles_available`) and the stoichiometric coefficients (nc f64 at `stoich_coefficients`). ADR 0002 #25: the
+# ratios are compared exactly (mᵢ·c_{i₀} < m_{i₀}·cᵢ; the first index on an exact tie, Rust's strict `<`), where Rust
+# compares rounded ratios. Ok(index). Err(KM_ERR_INVALID_INPUT) if either is no slice, the lengths differ, they are
+# empty, or (in reactant order) a moles value is negative or non-finite, or a coefficient not positive and finite.
+# Mirrors `stoichiometry::limiting_reagent`, with ADR 0002 #25.
 #must_use
 fn limiting_reagent(moles_available, nm, stoich_coefficients, nc): Result {
     if (nm < 0 || nc < 0 || (nm > 0 && moles_available == 0) || (nc > 0 && stoich_coefficients == 0)) {
@@ -12651,7 +12818,7 @@ fn limiting_reagent(moles_available, nm, stoich_coefficients, nc): Result {
     }
     if (nm != nc) { return Err(KM_ERR_INVALID_INPUT); }                # Rust: equal length
     if (nm == 0) { return Err(KM_ERR_INVALID_INPUT); }                 # Rust: at least one reactant
-    var min_ratio: f64 = _KM_INF;
+    var min_ratio: f64 = 0.0;               # RN(m/c) of the current minimum (element 0 seeds it)
     var min_idx = 0;
     var i = 0;
     while (i < nm) {
@@ -12660,18 +12827,25 @@ fn limiting_reagent(moles_available, nm, stoich_coefficients, nc): Result {
         if (_km_is_non_negative(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
         if (_km_is_positive(coeff) != 1) { return Err(KM_ERR_INVALID_INPUT); }
         var ratio: f64 = moles / coeff;
-        if (ratio < min_ratio) {
+        if (i == 0 || ratio < min_ratio) {
             min_ratio = ratio;
             min_idx = i;
+        } elif (ratio == min_ratio) {
+            # equal rounded ratios: the exact comparison (min_ratio stays: the two round alike)
+            var m0: f64 = load64(moles_available + 8 * min_idx);
+            var c0: f64 = load64(stoich_coefficients + 8 * min_idx);
+            if (_km_ratio_lt(moles, coeff, m0, c0) == 1) { min_idx = i; }
         }
         i = i + 1;
     }
     return Ok(min_idx);
 }
 
-# The theoretical yield of a product in mol: (moles / coefficient of the limiting reagent) × the product's coefficient,
-# in Rust's order. Err(KM_ERR_INVALID_INPUT) if the product coefficient is not positive and finite (checked first), or
-# whatever limiting_reagent returns for the reactant data. Mirrors `stoichiometry::theoretical_yield_moles`.
+# The theoretical yield of a product in mol: (moles / coefficient of the limiting reagent) × the product's coefficient.
+# ADR 0002 #24: the correctly rounded m·p/c (rounded once) at #25's limiting reagent, where Rust's (m/c)·p rounds twice
+# (and overflows or underflows where m/c leaves the range though m·p/c does not); 0 moles give Rust's ±0.
+# Err(KM_ERR_INVALID_INPUT) if the product coefficient is not positive and finite (checked first), or whatever
+# limiting_reagent returns for the reactant data. Mirrors `stoichiometry::theoretical_yield_moles`, with ADR 0002 #24.
 #must_use
 fn theoretical_yield_moles(moles_available, nm, stoich_reactants, nr, stoich_product: f64): Result {
     if (_km_is_positive(stoich_product) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -12680,27 +12854,40 @@ fn theoretical_yield_moles(moles_available, nm, stoich_reactants, nr, stoich_pro
     # Rust's `get(idx)` can't miss: limiting_reagent returns an index below the common length.
     var moles: f64 = load64(moles_available + 8 * idx);
     var coeff: f64 = load64(stoich_reactants + 8 * idx);
-    var y: f64 = moles / coeff * stoich_product;
+    if (moles == 0.0) {
+        var y0: f64 = moles / coeff * stoich_product;
+        return Ok(y0);
+    }
+    var y: f64 = _km_cr_mul_div(moles, stoich_product, coeff);
     return Ok(y);
 }
 
 # Percent yield, (actual / theoretical) × 100, in %; actual and theoretical in the same unit. Above 100 % is allowed
-# (an impure or wet product). Err(KM_ERR_INVALID_INPUT) if the theoretical yield is not positive and finite (checked
-# first), or the actual yield negative or non-finite. Mirrors `stoichiometry::percent_yield`.
+# (an impure or wet product). ADR 0002 #24: the correctly rounded 100·a/t (rounded once), where Rust's (a/t)·100 rounds
+# twice (0 at percent_yield(5·10⁻³²⁴, 10), whose value is 5·10⁻³²³); an actual yield of ±0 gives Rust's ±0.
+# Err(KM_ERR_INVALID_INPUT) if the theoretical yield is not positive and finite (checked first), or the actual yield
+# negative or non-finite. Mirrors `stoichiometry::percent_yield`, with ADR 0002 #24.
 #must_use
 fn percent_yield(actual: f64, theoretical: f64): Result {
     if (_km_is_positive(theoretical) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(actual) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var p: f64 = actual / theoretical * 100.0;
+    if (actual == 0.0) {
+        var z: f64 = actual / theoretical * 100.0;
+        return Ok(z);
+    }
+    var hundred: f64 = 100.0;
+    var p: f64 = _km_cr_mul_div(actual, hundred, theoretical);
     return Ok(p);
 }
 
-# The mass percent of each atom entry of a molecule, mass × count / molecular weight × 100, in Rust's order: one
-# 16-byte (atomic number, mass percent as f64 bits) record per entry, in entry order, to the caller's buffer `out` of
-# `cap` records: Ok(count). Errors as molecular_weight (Err(KM_ERR_INVALID_ELEMENT) for an atom that names no element;
+# The mass percent of each atom entry of a molecule, mass × count / molecular weight × 100: one 16-byte (atomic number,
+# mass percent as f64 bits) record per entry, in entry order, to the caller's buffer `out` of `cap` records: Ok(count).
+# ADR 0002 #24: each the correctly rounded mass·count·100/mw (rounded once; 100·count < 2³⁹ is an exact double) with mw
+# molecular_weight's own double, where Rust's ((mass·count)/mw)·100 rounds three times; a count of 0 gives Rust's +0.
+# Errors as molecular_weight (Err(KM_ERR_INVALID_ELEMENT) for an atom that names no element;
 # Err(KM_ERR_COMPUTATION_ERROR) for a molecule whose atoms could not be allocated), then Err(KM_ERR_COMPUTATION_ERROR)
-# if the molecular weight is not positive (no atoms, or every count 0); Err(KM_ERR_INVALID_INPUT) if the records do
-# not fit in cap (`out` untouched). Mirrors `stoichiometry::percent_composition`.
+# if the molecular weight is not positive (no atoms, or every count 0); Err(KM_ERR_INVALID_INPUT) if the records do not
+# fit in cap (`out` untouched). Mirrors `stoichiometry::percent_composition`, with ADR 0002 #24.
 #must_use
 fn percent_composition(molecule: KmMolecule, out, cap): Result {
     var tw, vw = molecule.molecular_weight();
@@ -12715,8 +12902,12 @@ fn percent_composition(molecule: KmMolecule, out, cap): Result {
     while (k < na) {
         var z = load64(data + 16 * k);
         var mass: f64 = KM_ELEMENT_ATOMIC_MASS[z - 1];   # z is an element: molecular_weight checked it
-        var count: f64 = f64_from(load64(data + 16 * k + 8));
-        var frac: f64 = mass * count / mw * 100.0;
+        var cnt = load64(data + 16 * k + 8);            # a u32 (molecule.cyr stores counts mod 2³²)
+        var frac: f64 = 0.0;
+        if (cnt != 0) {
+            var hc: f64 = f64_from(100 * cnt);
+            frac = _km_cr_mul_div(mass, hc, mw);
+        }
         store64(out + 16 * k, z);
         store64(out + 16 * k + 8, frac);
         k = k + 1;
@@ -12724,105 +12915,258 @@ fn percent_composition(molecule: KmMolecule, out, cap): Result {
     return Ok(na);
 }
 
-# 1 if a scaled mole ratio lies within Rust's private EMPIRICAL_TOLERANCE (0.1) of the nearest integer:
-# |scaled − round(scaled)| ≤ 0.1, round halves away from zero (NaN: 0). The test of Rust's multiplier search.
+# ── the empirical formula (ADR 0002 #26) ────────────────────────────────────────────
+#
+# Exactly evaluated: the moles pctᵢ/massᵢ are exact rationals, their minimum (element j) is exact, the ratios
+# rᵢ = pctᵢ·mass_j/(massᵢ·pct_j) ≥ 1 are exact, the multiplier is the smallest k in 1 ..= 6 with
+# |rᵢ·k − round(rᵢ·k)| ≤ 1/10 exactly for every i, and the counts are round(rᵢ·k) exactly (halves away from zero).
+# - A ratio rᵢ ≥ 2³² − ½ is Err(KM_ERR_COMPUTATION_ERROR) whichever way the search goes: no multiplier is that Err, and
+#   a multiplier k makes the count round(rᵢ·k) ≥ round(rᵢ) ≥ 2³² > u32::MAX, the same code (every check after the
+#   validation is ComputationError, and the cap is checked after them). So the port decides it as soon as the ratios are
+#   known (below: r̃ₕ ≥ 2³² − ¼), and the other ratios lie in [1, 2³²): every rᵢ·k is below 6·2³² < 2³⁵.
+# - Each rᵢ as a double-double: with pct = M_p·2^E_p and mass = M_m·2^E_m (2⁵² ≤ M < 2⁵³, _km_f64_int: a subnormal pct
+#   included), rᵢ = F·2^s, F = (M_pᵢ·M_mⱼ)/(M_mᵢ·M_pⱼ) in (¼, 4) and s = E_pᵢ + E_mⱼ − E_mᵢ − E_pⱼ. The two products are
+#   exact TwoProducts of integer-valued doubles below 2⁵³ (in [2¹⁰⁴, 2¹⁰⁶)), and F = y₀ + d by _km_dd_quot
+#   (_km_dd_div_cr's steps, to 13.12u², u = 2⁻⁵³; |d| ≤ 3.03u·y₀). rᵢ ≥ 1 gives s ≥ −1; s ≥ 35 gives rᵢ > 2³³ (the Err);
+#   otherwise r̃ = (r̃ₕ, r̃ₗ) = (y₀·2^s, d·2^s), exact scalings. r̃ₕ ≥ 2³² − ¼ ⇒ rᵢ ≥ r̃ₕ(1 − 3.1u) > 2³² − ½ (the Err);
+#   otherwise rᵢ ≤ r̃ₕ(1 + 3.1u) < 2³².
+# Rust's "non-positive min" and "ratio not finite" Errs (the moles underflowing to 0, a ratio overflowing) are rounding
+# artefacts the exact evaluation removes; its remaining Errs are its own (ADR 0002 #26 lists the inputs that change).
+
+# The double-double quotient (y₀, d) of n = n_h + n_l by d = d_h + d_l, normalised operands with n_h, d_h and n_h/d_h in
+# [2⁻⁹⁰⁰, 2⁹⁰⁰]: src/mathx.cyr's _km_dd_div_cr without its rounding test, so y₀ + d is n/d to 13.12u² (its proof: the
+# residual from an exact TwoProduct of y₀·d_h, n_h − a exact by Sterbenz, four roundings to 7.04u²·n, then
+# d = RN(r/d_h)).
 #must_use
-fn _km_empirical_close(scaled: f64): i64 {
-    var rnd: f64 = _km_round_half_away(scaled);
-    var d: f64 = scaled - rnd;
-    var ad: f64 = f64_abs(d);
-    if (ad <= 0.1) { return 1; }
-    return 0;
+fn _km_dd_quot(nh: f64, nl: f64, dh: f64, dl: f64): (f64, f64) {
+    var y0: f64 = nh / dh;
+    var a, b = _km_two_prod(y0, dh);
+    var s: f64 = nh - a;
+    var s1: f64 = s - b;
+    var s2: f64 = s1 + nl;
+    var s3: f64 = y0 * dl;
+    var r: f64 = s2 - s3;
+    var d: f64 = r / dh;
+    return (y0, d);
+}
+
+# The tolerance test of one ratio r̃ = (r̃ₕ, r̃ₗ) (below 2³² − ¼) with the multiplier k (kf = k, 1 ≤ k ≤ 6) by the fast
+# path: (1, count) when |r·k − round(r·k)| ≤ 1/10 is proven (count = round(r·k)), (0, 0) when its failure is, (−1, 0)
+# when the rounded evaluation can't decide. x = r·k < 2³⁵; k·r̃ₕ = p_h + p_l (TwoProduct, exact), n = round(p_h),
+# and δ = RN(RN(p_h − n) + RN(p_l + RN(k·r̃ₗ))) with p_h − n exact (a multiple of ulp(p_h) below ½). Its error
+# against x − n: k·r̃ is x to 13.12u²·x < 2⁻⁶⁶, |k·r̃ₗ| < 2⁻¹⁸ rounds to 2⁻⁷¹, |p_l + ·| < 2⁻¹⁷ to 2⁻⁷⁰, the last sum
+# (below 0.51) to 2⁻⁵⁴: under 2⁻⁵³ in all. With 0.1 = 1/10 + 2⁻⁵⁷·³² (the double), |δ| ≤ 0.1 − 2⁻⁵⁰ proves
+# |x − n| < 1/10 (then round(x) = n), and |δ| ≥ 0.1 + 2⁻⁵⁰ proves |x − n| > 1/10, while every other integer is at least
+# ½ − 2⁻¹⁶ from x (|x − p_h| < 2⁻¹⁶): a failure. Between, the exact test decides.
+#must_use
+fn _km_emp_close_fast(rh: f64, rl: f64, kf: f64): (i64, i64) {
+    var ph, pl = _km_two_prod(rh, kf);
+    var w: f64 = rl * kf;
+    var w2: f64 = pl + w;
+    var nn: f64 = _km_round_half_away(ph);
+    var d1: f64 = ph - nn;
+    var dd: f64 = d1 + w2;
+    var ad: f64 = f64_abs(dd);
+    var lo: f64 = 0x3FB999999999995A;       # 0.1 − 2⁻⁵⁰
+    var hi: f64 = 0x3FB99999999999DA;       # 0.1 + 2⁻⁵⁰
+    if (ad <= lo) { return (1, f64_to(nn)); }
+    if (ad >= hi) { return (0, 0); }
+    return (0 - 1, 0);
+}
+
+# The tolerance test of the ratio rᵢ = pctᵢ·mass_j/(massᵢ·pct_j) with the multiplier k (1 ≤ k ≤ 6) by the exact path,
+# for rᵢ in [1, 2³²): (1, round(rᵢ·k)) when |rᵢ·k − round(rᵢ·k)| ≤ 1/10, else (0, 0). In integers (src/mathx.cyr's
+# _km_bn_*): rᵢ·k = A/B with A = k·M_pᵢ·M_mⱼ·2^max(s, 0) < 2¹⁴³ and B = M_mᵢ·M_pⱼ·2^max(−s, 0) < 2¹⁰⁸ (−1 ≤ s ≤ 34);
+# q = ⌊A/B⌋ < 2³⁵ by restoring division over 36 bits, R = A − q·B; the test is 10·R ≤ B or 10·R ≥ 9·B (the fraction
+# R/B within 1/10 of 0 or of 1), and the count q, or q + 1 when 2·R ≥ B (a half rounds away from zero).
+#must_use
+fn _km_emp_close_exact(pi: f64, mi: f64, pj: f64, mj: f64, k): (i64, i64) {
+    var api, epi = _km_f64_int(_km_bits(pi));
+    var ami, emi = _km_f64_int(_km_bits(mi));
+    var apj, epj = _km_f64_int(_km_bits(pj));
+    var amj, emj = _km_f64_int(_km_bits(mj));
+    var s = epi + emj - emi - epj;
+    var a[64];
+    var b[64];
+    var t[64];
+    var u[64];
+    _km_bn_set(&t, api);
+    _km_bn_set(&u, amj);
+    _km_bn_mul(&a, &t, &u);
+    _km_bn_mul_small(&a, k);
+    _km_bn_set(&t, ami);
+    _km_bn_set(&u, apj);
+    _km_bn_mul(&b, &t, &u);
+    if (s > 0) { _km_bn_shl(&a, s); }
+    if (s < 0) { _km_bn_shl(&b, 0 - s); }
+    var q = 0;
+    var bit = 35;
+    while (bit >= 0) {
+        _km_bn_copy(&t, &b);
+        _km_bn_shl(&t, bit);
+        if (_km_bn_cmp(&a, &t) >= 0) {
+            _km_bn_sub(&a, &a, &t);
+            q = q + (1 << bit);
+        }
+        bit = bit - 1;
+    }
+    _km_bn_copy(&t, &a);                    # 10·R
+    _km_bn_mul_small(&t, 10);
+    var pass = 0;
+    if (_km_bn_cmp(&t, &b) <= 0) {
+        pass = 1;
+    } else {
+        _km_bn_copy(&u, &b);                # 9·B
+        _km_bn_mul_small(&u, 9);
+        if (_km_bn_cmp(&t, &u) >= 0) { pass = 1; }
+    }
+    if (pass != 1) { return (0, 0); }
+    _km_bn_copy(&t, &a);                    # 2·R against B
+    _km_bn_shl(&t, 1);
+    if (_km_bn_cmp(&t, &b) >= 0) { q = q + 1; }
+    return (1, q);
+}
+
+# The tolerance test of element i's ratio (r̃ₕ, r̃ₗ) with multiplier k: the fast path, the exact one where it can't
+# decide (or always, when force is 1: scripts/oracle/cr_verify.py's check of the exact path). (1, count) or (0, 0).
+#must_use
+fn _km_emp_close(rh: f64, rl: f64, k, pi: f64, mi: f64, pj: f64, mj: f64, force): (i64, i64) {
+    if (force != 1) {
+        var kf: f64 = f64_from(k);
+        var st, c = _km_emp_close_fast(rh, rl, kf);
+        if (st >= 0) { return (st, c); }
+    }
+    var st2, c2 = _km_emp_close_exact(pi, mi, pj, mj, k);
+    return (st2, c2);
 }
 
 # The empirical formula from mass percentages: n (atomic number, mass percent) records at `elements` (16 bytes: Z, then
 # the f64 bits; Rust's `&[(u8, f64)]`; only the ratios matter, so the percentages need not sum to 100). The moles
 # (percent / atomic mass) are divided by the smallest, then multiplied by the smallest integer k in 1 ..= 6 that brings
-# every ratio within 0.1 of an integer; the rounded counts, one 16-byte (atomic number, count) record per element in
-# input order, go to the caller's buffer `out` of `cap` records: Ok(n). Err(KM_ERR_INVALID_INPUT) for an empty list
-# or (elements, n) no slice; per element in order, Err(KM_ERR_INVALID_ELEMENT) for an atomic number outside 1 ..= 118,
-# then Err(KM_ERR_INVALID_INPUT) for a mass percent not positive and finite; Err(KM_ERR_COMPUTATION_ERROR) if the
-# smallest mole amount underflows to 0, a ratio is not finite, no multiplier in 1 ..= 6 gives integer ratios within
-# 0.1, a count exceeds u32::MAX, or a work table can't be allocated; Err(KM_ERR_INVALID_INPUT) if the n records do not
-# fit in cap (`out` untouched). Mirrors `stoichiometry::empirical_formula`.
+# every ratio within 1/10 of an integer; the rounded counts, one 16-byte (atomic number, count) record per element in
+# input order, go to the caller's buffer `out` of `cap` records: Ok(n). ADR 0002 #26: the moles, their minimum, the
+# ratios, the tolerance test and the counts are exact (the section comment), where Rust rounds each and tests
+# |r·k − round(r·k)| ≤ 0.1 on rounded values (14 golden rows flip between Ok and Err at the ±1/10 edge).
+# Err(KM_ERR_INVALID_INPUT) for an empty list or (elements, n) no slice; per element in order,
+# Err(KM_ERR_INVALID_ELEMENT) for an atomic number outside 1 ..= 118, then Err(KM_ERR_INVALID_INPUT) for a mass percent
+# not positive and finite; Err(KM_ERR_COMPUTATION_ERROR) if no multiplier in 1 ..= 6 gives integer ratios within 1/10, a
+# count exceeds u32::MAX (every ratio of 2³² − ½ or more), or a work table can't be allocated; Err(KM_ERR_INVALID_INPUT)
+# if the n records do not fit in cap (`out` untouched). Mirrors `stoichiometry::empirical_formula`, with ADR 0002 #26.
 #must_use
 fn empirical_formula(elements, n, out, cap): Result {
+    return _km_empirical_formula(elements, n, out, cap, 0);
+}
+
+# empirical_formula, with every tolerance test by the exact path when force is 1 (scripts/oracle/cr_verify.py's check
+# of that path; the result is the same).
+#must_use
+fn _km_empirical_formula(elements, n, out, cap, force): Result {
     if (n < 0 || (n > 0 && elements == 0)) { return Err(KM_ERR_INVALID_INPUT); }
     if (n == 0) { return Err(KM_ERR_INVALID_INPUT); }                  # Rust: need at least one element
-    var mst: f64[64];
-    var moles = &mst;
+    # The ratios as double-doubles (r̃ₕ, r̃ₗ), two words per element, later the counts: a local table, the heap past it.
+    var rst: f64[128];
+    var rt = &rst;
     if (n > 64) {
-        moles = alloc(8 * n);
-        if (moles == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        rt = alloc(16 * n);
+        if (rt == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
     }
-    # Convert mass % to moles (a 100 g sample).
+    # Rust's validation, in its order (its mass % → moles conversion can't fail).
     var k = 0;
     while (k < n) {
         var h = element_lookup_by_number(load64(elements + 16 * k));
         if (h == 0) { return Err(KM_ERR_INVALID_ELEMENT); }
         var pct: f64 = load64(elements + 16 * k + 8);
         if (_km_is_positive(pct) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-        var mass: f64 = KM_ELEMENT_ATOMIC_MASS[h - 1];
-        var mol: f64 = pct / mass;
-        store64(moles + 8 * k, mol);
         k = k + 1;
     }
-    # Divide by the smallest mole value (Rust's fold from +∞ with f64::min).
-    var min_moles: f64 = _KM_INF;
+    # The exact minimum of the moles pct/mass (element j): the rounded quotients decide unless they are equal (RN is
+    # monotone), and _km_ratio_lt decides those.
+    var j = 0;
+    var pj: f64 = load64(elements + 8);
+    var mj: f64 = KM_ELEMENT_ATOMIC_MASS[load64(elements) - 1];
+    var qj: f64 = pj / mj;
+    k = 1;
+    while (k < n) {
+        var pk: f64 = load64(elements + 16 * k + 8);
+        var mk: f64 = KM_ELEMENT_ATOMIC_MASS[load64(elements + 16 * k) - 1];
+        var qk: f64 = pk / mk;
+        var take = 0;
+        if (qk < qj) {
+            take = 1;
+        } elif (qk == qj) {
+            take = _km_ratio_lt(pk, mk, pj, mj);
+        }
+        if (take == 1) {
+            j = k;
+            pj = pk;
+            mj = mk;
+            qj = qk;
+        }
+        k = k + 1;
+    }
+    # The ratios rᵢ = F·2^s (the section comment); s ≥ 35, or r̃ₕ ≥ 2³² − ¼, is the ComputationError.
+    var apj, epj = _km_f64_int(_km_bits(pj));
+    var amj, emj = _km_f64_int(_km_bits(mj));
+    var fpj: f64 = f64_from(apj);
+    var fmj: f64 = f64_from(amj);
+    var rmax: f64 = 4294967295.75;          # 2³² − ¼
     k = 0;
     while (k < n) {
-        var mk: f64 = load64(moles + 8 * k);
-        min_moles = _km_min(min_moles, mk);
+        var pr: f64 = load64(elements + 16 * k + 8);
+        var mr: f64 = KM_ELEMENT_ATOMIC_MASS[load64(elements + 16 * k) - 1];
+        var apk, epk = _km_f64_int(_km_bits(pr));
+        var amk, emk = _km_f64_int(_km_bits(mr));
+        var s = epk + emj - emk - epj;
+        if (s >= 35) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        var fpk: f64 = f64_from(apk);
+        var fmk: f64 = f64_from(amk);
+        var nh, nl = _km_two_prod(fpk, fmj);
+        var dh, dl = _km_two_prod(fmk, fpj);
+        var y0, d = _km_dd_quot(nh, nl, dh, dl);
+        var sc: f64 = _km_cr_pow2(s);
+        var rh: f64 = y0 * sc;
+        var rl: f64 = d * sc;
+        if (rh >= rmax) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        store64(rt + 16 * k, rh);
+        store64(rt + 16 * k + 8, rl);
         k = k + 1;
     }
-    if (_km_is_positive(min_moles) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
-    k = 0;
-    while (k < n) {
-        var mr: f64 = load64(moles + 8 * k);
-        var r: f64 = mr / min_moles;
-        store64(moles + 8 * k, r);
-        if (_km_is_finite(r) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
-        k = k + 1;
-    }
-    # The smallest multiplier that makes every ratio close to an integer.
-    var mult: f64 = 0.0;
-    var found = 0;
+    # The smallest multiplier that brings every ratio within 1/10 of an integer.
+    var mult = 0;
     var kk = 1;
-    while (kk <= 6 && found == 0) {
-        var kf: f64 = f64_from(kk);
+    while (kk <= 6 && mult == 0) {
         var all = 1;
-        var j = 0;
-        while (j < n && all == 1) {
-            var rj: f64 = load64(moles + 8 * j);
-            var scaled: f64 = rj * kf;
-            if (_km_empirical_close(scaled) != 1) { all = 0; }
-            j = j + 1;
+        var i = 0;
+        while (i < n && all == 1) {
+            var ri: f64 = load64(rt + 16 * i);
+            var li: f64 = load64(rt + 16 * i + 8);
+            var pi: f64 = load64(elements + 16 * i + 8);
+            var mi: f64 = KM_ELEMENT_ATOMIC_MASS[load64(elements + 16 * i) - 1];
+            var st, c = _km_emp_close(ri, li, kk, pi, mi, pj, mj, force);
+            if (st != 1) { all = 0; }
+            i = i + 1;
         }
-        if (all == 1) {
-            found = 1;
-            mult = kf;
-        }
+        if (all == 1) { mult = kk; }
         kk = kk + 1;
     }
-    if (found != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }         # Rust: no multiplier in 1..=6
-    # The counts: Rust's collect stops at the first count above u32::MAX (r ≥ 1 and mult ≥ 1, so each is at least 1).
-    var umax: f64 = 4294967295.0;
+    if (mult == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }         # Rust: no multiplier in 1..=6
+    # The counts, round(rᵢ·mult) (each passes the test at mult, so the same path gives it); past u32::MAX Rust's Err.
     k = 0;
     while (k < n) {
-        var rc: f64 = load64(moles + 8 * k);
-        var sc: f64 = rc * mult;
-        var cnt: f64 = _km_round_half_away(sc);
-        if (cnt > umax) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        var rc: f64 = load64(rt + 16 * k);
+        var lc: f64 = load64(rt + 16 * k + 8);
+        var pc: f64 = load64(elements + 16 * k + 8);
+        var mc: f64 = KM_ELEMENT_ATOMIC_MASS[load64(elements + 16 * k) - 1];
+        var stc, cnt = _km_emp_close(rc, lc, mult, pc, mc, pj, mj, force);
+        if (stc != 1 || cnt > _KM_U32_MAX) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        store64(rt + 16 * k, cnt);
         k = k + 1;
     }
     if (out == 0 || cap < n) { return Err(KM_ERR_INVALID_INPUT); }
     k = 0;
     while (k < n) {
-        var rw: f64 = load64(moles + 8 * k);
-        var sw: f64 = rw * mult;
-        var cw: f64 = _km_round_half_away(sw);
         store64(out + 16 * k, load64(elements + 16 * k));
-        store64(out + 16 * k + 8, f64_to(cw));
+        store64(out + 16 * k + 8, load64(rt + 16 * k));
         k = k + 1;
     }
     return Ok(n);
