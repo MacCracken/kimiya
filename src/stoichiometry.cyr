@@ -685,7 +685,9 @@ fn assign_oxidation_states(atoms, n, overall_charge, out, cap): Result {
 # the arithmetic changes. Every operand is a binary64 value, so every quantity below is an exact rational:
 # - #24: percent_yield RN(100·a/t), theoretical_yield_moles RN(m·p/c) (m and c at #25's index), percent_composition
 #   RN(mass·count·100/mw) per atom (mw molecular_weight's own double): _km_cr_mul_div, rounded ONCE (nearest, ties to
-#   even, subnormal results on the 2⁻¹⁰⁷⁴ grid, ±∞ only past DBL_MAX). Rust's (a/t)·100, (m/c)·p and
+#   even, subnormal results on the 2⁻¹⁰⁷⁴ grid, ±∞ only past DBL_MAX). Written here in M4f-2; since the overflow audit's
+#   B1 it is src/mathx.cyr's, the 2/1 shape of the correctly rounded monomial _km_cr_mono (the same value on every
+#   argument). Rust's (a/t)·100, (m/c)·p and
 #   ((mass·count)/mw)·100 round two to four times (1–2 ulp off on about a quarter of inputs; 0 or ∞ at the range ends
 #   where the value is representable).
 # - #25: limiting_reagent replaces its minimum i₀ by i when mᵢ·c_{i₀} < m_{i₀}·cᵢ exactly (the first index on an exact
@@ -696,111 +698,6 @@ fn assign_oxidation_states(atoms, n, overall_charge, out, cap): Result {
 # - #26: empirical_formula with exact mole amounts, their exact minimum, exact ratios and the exact tolerance 1/10
 #   (_km_emp_close_fast / _km_emp_close_exact); see empirical_formula.
 # Zero operands keep Rust's expression (an exact ±0, Rust's sign).
-
-# RN(x·y/z), rounded once, for positive finite doubles x, y, z (subnormal operands and results included): the fast path,
-# then the exact path where it declines. Rust's form of #24's three functions differs from it by 1–2 ulp on about a
-# quarter of inputs.
-#must_use
-fn _km_cr_mul_div(x: f64, y: f64, z: f64): f64 {
-    var r, ok = _km_mul_div_fast(x, y, z);
-    if (ok == 1) { return r; }
-    var a: f64 = _km_mul_div_acc(x, y, z);
-    return a;
-}
-
-# RN(x·y/z) by the fast path, for positive finite doubles: (RN, 1), or (0, 0) when an operand is subnormal or the result
-# may leave the normal range. With x = sₓ·2^eₓ (sₓ in [1, 2)), likewise y and z, and k = eₓ + e_y − e_z: x·y/z = F·2^k
-# with F = sₓs_y/s_z in (½, 4). N = sₓ·s_y = p_h + p_l exactly (TwoProduct: both in [1, 2), the error a multiple of
-# 2⁻¹⁰⁴), and D = s_z is exact, so src/mathx.cyr's _km_dd_div_cr steps (inline, with d_l = 0: y₀ = RN(p_h/D), the
-# residual r from an exact TwoProduct, δ = RN(r/D)) have exact operands, and its proof gives y₀ + RN(δ − ε) < F <
-# y₀ + RN(δ + ε) for ε = 2⁻¹⁰⁰·y₀ (n_h in [1, 4], d_h in [1, 2) and n_h/d_h in [½, 4], inside its [2⁻⁹⁰⁰, 2⁹⁰⁰]): when
-# z₁ = RN(y₀ + RN(δ − ε)) and z₂ = RN(y₀ + RN(δ + ε)) agree, F rounds to them (exact values pass); otherwise the one
-# rounding boundary between, the midpoint of z₁ and z₂, decides, exactly (_km_mul_div_tie; midpoints are common here:
-# m·3/2 is one whenever 3m has 54 bits). For −1021 ≤ k ≤ 1021, F·2^k > 2⁻¹⁰²² is in the normal range, where the binary64
-# grid is the 53-bit grid scaled, so RN(F·2^k) = RN(F)·2^k: RN(F) ≤ 4 keeps it at most 2¹⁰²³ (finite), 2^k is a normal
-# double and the product exact.
-#must_use
-fn _km_mul_div_fast(x: f64, y: f64, z: f64): (f64, i64) {
-    var bx = _km_bits(x);
-    var by = _km_bits(y);
-    var bz = _km_bits(z);
-    var nmin = 0x0010000000000000;
-    if (bx < nmin || by < nmin || bz < nmin) { return (0.0, 0); }      # a subnormal operand
-    var k = (bx >> 52) + (by >> 52) - (bz >> 52) - 1023;                # eₓ + e_y − e_z
-    if (k < 0 - 1021 || k > 1021) { return (0.0, 0); }
-    var mask = 0x000FFFFFFFFFFFFF;
-    var one = 0x3FF0000000000000;
-    var sxb = (bx & mask) | one;
-    var syb = (by & mask) | one;
-    var szb = (bz & mask) | one;
-    var sx: f64 = sxb;
-    var sy: f64 = syb;
-    var sz: f64 = szb;
-    var ph, pl = _km_two_prod(sx, sy);
-    var y0: f64 = ph / sz;
-    var ta, tb = _km_two_prod(y0, sz);
-    var s0: f64 = ph - ta;
-    var s1: f64 = s0 - tb;
-    var rr: f64 = s1 + pl;
-    var dq: f64 = rr / sz;
-    var k100: f64 = 0x39B0000000000000;     # 2⁻¹⁰⁰
-    var eps: f64 = y0 * k100;
-    var lo: f64 = dq - eps;
-    var hi: f64 = dq + eps;
-    var z1: f64 = y0 + lo;
-    var z2: f64 = y0 + hi;
-    var f: f64 = z1;
-    if (z1 != z2) { f = _km_mul_div_tie(ph, pl, sz, z1, z2); }
-    var sc: f64 = _km_cr_pow2(k);
-    var r: f64 = f * sc;
-    return (r, 1);
-}
-
-# RN(F) for F = N/D (N = p_h + p_l, D = s_z, as in _km_mul_div_fast) where the rounding test left two adjacent doubles
-# z₁ < z₂ and F strictly between points that round to them: the midpoint μ = z₁ + u/2 (u = z₂ − z₁, exact) is the only
-# boundary there, so RN(F) is z₁ if F < μ, z₂ if F > μ, and the even one of the two if F = μ. The sign of F − μ is that
-# of T = N − D·μ = (p_h − a) + p_l − b − h, with D·z₁ = a + b (TwoProduct) and h = D·(u/2) exact: p_h − a is exact by
-# Sterbenz (a and p_h are within 2⁻⁵¹ of N), and each of the four terms is a multiple of 2⁻¹⁰⁷ (p_h, p_l of 2⁻¹⁰⁴; z₁ ≥
-# ½ − 2⁻⁵⁴ of 2⁻⁵⁴, so a, b of 2⁻¹⁰⁶; u/2 ≥ 2⁻⁵⁵, so h of 2⁻¹⁰⁷) below 2⁻⁴⁸ in magnitude (|N − D·z₁| ≤ D·u < 2⁻⁴⁹):
-# scaled by 2¹⁰⁷ (exact) each is an integer below 2⁵⁹, so T·2¹⁰⁷ is their exact sum in 64-bit integers.
-#must_use
-fn _km_mul_div_tie(ph: f64, pl: f64, sz: f64, z1: f64, z2: f64): f64 {
-    var u: f64 = z2 - z1;
-    var hu: f64 = u * 0.5;
-    var a, b = _km_two_prod(sz, z1);
-    var h: f64 = sz * hu;
-    var e1: f64 = ph - a;
-    var p107: f64 = 0x46A0000000000000;     # 2¹⁰⁷
-    var ie: f64 = e1 * p107;
-    var il: f64 = pl * p107;
-    var ib: f64 = b * p107;
-    var ih: f64 = h * p107;
-    var t = f64_to(ie) + f64_to(il) - f64_to(ib) - f64_to(ih);
-    if (t > 0) { return z2; }
-    if (t < 0) { return z1; }
-    if ((_km_bits(z1) & 1) == 0) { return z1; }
-    return z2;
-}
-
-# RN(x·y/z) by the exact path alone, for positive finite doubles: x = Mₓ·2^Eₓ (2⁵² ≤ M < 2⁵³, a subnormal's E below
-# −1074), likewise y and z, and x·y/z = (MₓM_y)/M_z·2^(Eₓ + E_y − E_z), rounded once by src/mathx.cyr's _km_cr_ratio
-# (the numerator below 2¹⁰⁶, the exponent within ±3,400).
-#must_use
-fn _km_mul_div_acc(x: f64, y: f64, z: f64): f64 {
-    var mx, ex = _km_f64_int(_km_bits(x));
-    var my, ey = _km_f64_int(_km_bits(y));
-    var mz, ez = _km_f64_int(_km_bits(z));
-    var a[64];
-    var b[64];
-    var p[64];
-    var q[64];
-    _km_bn_set(&a, mx);
-    _km_bn_set(&b, my);
-    _km_bn_mul(&p, &a, &b);
-    _km_bn_set(&q, mz);
-    var v: f64 = _km_cr_ratio(&p, &q, ex + ey - ez);
-    return v;
-}
 
 # 1 if m₁/c₁ < m₂/c₂ exactly, for finite m₁, m₂ ≥ 0 (−0 included) and finite c₁, c₂ > 0: m₁·c₂ < m₂·c₁. A zero m is the
 # smallest ratio (two zeros tie: 0). Otherwise, with each value M·2^E (2⁵² ≤ M < 2⁵³, _km_f64_int), the products are

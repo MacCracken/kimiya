@@ -6182,6 +6182,749 @@ fn _km_dd_div_cr(nh: f64, nl: f64, dh: f64, dl: f64): (f64, i64) {
     return (z1, 1);
 }
 
+# ── correctly rounded monomials (the overflow audit's B1): ADR 0002 #27, #28 ─────────────────────────────────────────
+#
+# RN(x₁·…·xₐ / (y₁·…·y_b)) in binary64, rounded ONCE — to nearest, ties to even, subnormal results on the 2⁻¹⁰⁷⁴ grid,
+# ±∞ only where the exact value rounds past DBL_MAX, the sign the xor of the factors' signs (a zero factor, or an exact
+# value that rounds to zero, gives that signed zero, as IEEE's products and quotients do) — for finite doubles with
+# nonzero denominator factors. It is the library-wide overflow audit's "round once" treatment (the user's decision of
+# 2026-11-10) of the functions whose whole formula is one product or quotient of inputs and constants: thermo's
+# calorimetry, phase's colligative properties and kinetics' rationals (ADR 0002 #27, #28), where Rust's two to four
+# roundings are 1–2 ulp off on about a quarter of inputs and an intermediate that over- or underflows gives 0, ±∞ or NaN
+# although the value is representable. M4f-2's RN(x·y/z) (ADR 0002 #24, written in stoichiometry.cyr) is its first
+# shape, _km_cr_mul_div below. A physical constant enters as its double, an integer literal of Rust's formula (2, 1000)
+# as an exact factor.
+# Domain: at most _KM_MONO_NMAX numerator and _KM_MONO_DMAX denominator factors, every one finite and every denominator
+# factor nonzero (otherwise NaN), and on each side odd parts of the significands of at most 253 bits in all (the exact
+# path's capacity: any four doubles and a 41-bit integer per side; otherwise NaN). No caller comes near either limit.
+#
+# The value. Each nonzero factor is x = s·2^e (s in [1, 2), a subnormal normalised exactly), so the value is ±F·2^k with
+# F = N/D, N the product of the numerator's significands other than 1 (a power of two only moves k), D likewise, and
+# k = Σ eᵢ − Σ eⱼ. With cn and cd such factors, N is in [1, 2^cn), D in [1, 2^cd) and F in (2^−cd, 2^cn).
+# The fast path, _km_cr_mono_fast (u = 2⁻⁵³):
+# - N and D as normalised double-doubles: one factor exactly, two by an exact TwoProduct, each further one by
+#   _km_dd_mul_d (relative error at most 3.01u², proven there). With cn ≤ 6 and cd ≤ 4 that is at most four steps for
+#   N and two for D, so |δN| + |δD| ≤ 6·3.01u²·(1 + 2⁻⁴⁰) < 18.1u², inside _km_dd_div_cr's budget of 32u².
+# - RN(F) by _km_dd_div_cr's steps and rounding test (_km_dd_div_ends; N, D and N/D lie in [2⁻⁴, 2⁶], inside its
+#   [2⁻⁹⁰⁰, 2⁹⁰⁰]): z₁ = z₂ proves RN(F) = z₁.
+# - Where the test fails, F lies strictly between two points within 2⁻⁹⁸·F of each other that round to z₁ < z₂, so z₁
+#   and z₂ are adjacent and their midpoint μ = z₁ + (z₂ − z₁)/2 is the one rounding boundary between (consecutive
+#   boundaries are at least 2⁻⁵⁴·F apart). For cn ≤ 3 and cd ≤ 2 the operands are exact expansions — N one to four
+#   doubles (s₀s₁ = p_h + p_l, then p_h·s₂ and p_l·s₂ as TwoProducts), D one or two — and D·μ = Σ (dⱼ·z₁ + dⱼ·(u/2)) a
+#   sum of TwoProducts and exact power-of-two scalings, so N − D·μ is an exact sum of at most ten doubles, and its sign
+#   decides (_km_mono_tie): F > μ gives z₂, F < μ gives z₁, F = μ (a tie) the even one. Midpoints are common with small
+#   integer factors (3·y with 3y of 54 bits). Otherwise (cn > 3 or cd > 2, e.g. osmotic_pressure's five factors, whose R
+#   and 1000 have odd parts of 53 and 7 bits, so that its value is never a midpoint, nor exact) the exact path decides.
+# - The scale: y = RN(F) = s_y·2^(e_y) with e_y in [−cd, cn], and K = k + e_y. For K ≥ −1021 the exact value exceeds
+#   2⁻¹⁰²² (F ≥ y(1 − 2⁻⁵³)), where the binary64 grid is the 53-bit grid scaled, so RN(F·2^k) = y·2^k: y's bits with k
+#   added to the exponent field when K ≤ 1023, and ±∞ for K ≥ 1024 (the 53-bit rounding y·2^k ≥ 2¹⁰²⁴ exceeds DBL_MAX:
+#   IEEE overflow). For K ≤ −1076 the value is below 2^(K + 1) ≤ 2⁻¹⁰⁷⁵, under half of 2⁻¹⁰⁷⁴: ±0. Between, the result
+#   may be subnormal: the exact path.
+# The exact path, _km_cr_mono_acc: each factor x = M·2^E with M odd (_km_f64_int, the trailing zeros moved into E);
+# P = Π M over the numerator and Q over the denominator (multi-word integers below 2²⁵⁴, by the capacity check), and
+# _km_cr_ratio(P, Q, Σ E) rounds P/Q·2^E once, exactly, ties to even, at the binade's or the subnormal grid, +∞ past
+# DBL_MAX; the sign is applied after (RN is symmetric).
+# scripts/oracle/cr_verify.py's `mono` family checks both paths against Fraction on x86_64 ELF, x86_64 PE and aarch64.
+# The shapes the modules call (below) have straight-line fast paths of their own and fall back to this one.
+
+# The factor limits (the fast path's error budget above, the significand tables below).
+const _KM_MONO_NMAX = 6;
+const _KM_MONO_DMAX = 4;
+
+# (a_h + a_l)·b as a normalised double-double (h, l), for a normalised a (|a_l| ≤ u·|a_h|, u = 2⁻⁵³) and a double b with
+# |a_h|, |b| < 2⁹⁹⁶ and |a_h·b| ≥ 2⁻⁹⁰⁰ (TwoProduct's conditions): a_h·b = p + e exactly; c = RN(a_l·b), within
+# u·|a_l·b| ≤ u²·P (P = |a_h·b|); t = RN(e + c), within 2u²(1 + u)·P (|e| ≤ u·|p| and |c| ≤ u(1 + u)·P);
+# FastTwoSum(p, t) exact (|t| ≤ 2.01u·|p|). So h + l = a·b + δ with |δ| ≤ (3 + 2u)u²·P ≤ 3.01u²·|a·b|
+# (P ≤ |a·b|/(1 − u)), and |l| ≤ u·|h|.
+#must_use
+fn _km_dd_mul_d(ah: f64, al: f64, b: f64): (f64, f64) {
+    var p: f64 = ah * b;                            # a_h·b = p + e: TwoProduct, inline (Veltkamp's 2^27 + 1 split)
+    var sp: f64 = 134217729.0;
+    var ca: f64 = sp * ah;
+    var ahh: f64 = ca - (ca - ah);
+    var ahl: f64 = ah - ahh;
+    var cb: f64 = sp * b;
+    var bh: f64 = cb - (cb - b);
+    var bl: f64 = b - bh;
+    var e: f64 = (ahl * bl) - (((p - (ahh * bh)) - (ahl * bh)) - (ahh * bl));
+    var c: f64 = al * b;
+    var t: f64 = e + c;
+    var h: f64 = p + t;                             # FastTwoSum(p, t), inline
+    var l: f64 = t - (h - p);
+    return (h, l);
+}
+
+# _km_dd_div_cr's steps without the verdict: (z₁, z₂) = (RN(y₀ + RN(d − ε)), RN(y₀ + RN(d + ε))) for the quotient n/d of
+# normalised double-doubles under _km_dd_div_cr's conditions, whose proof gives y₀ + RN(d − ε) < v < y₀ + RN(d + ε) for
+# the exact value v: z₁ = z₂ is RN(v), and otherwise v lies strictly between two points within 2⁻⁹⁸·v of each other
+# that round to z₁ and z₂.
+#must_use
+fn _km_dd_div_ends(nh: f64, nl: f64, dh: f64, dl: f64): (f64, f64) {
+    var y0: f64 = nh / dh;
+    var a: f64 = y0 * dh;                           # y0·d_h = a + b: TwoProduct, inline (Veltkamp's 2^27 + 1 split)
+    var sp: f64 = 134217729.0;
+    var cy: f64 = sp * y0;
+    var yh: f64 = cy - (cy - y0);
+    var yl: f64 = y0 - yh;
+    var cd: f64 = sp * dh;
+    var dhh: f64 = cd - (cd - dh);
+    var dhl: f64 = dh - dhh;
+    var b: f64 = (yl * dhl) - (((a - (yh * dhh)) - (yl * dhh)) - (yh * dhl));
+    var s: f64 = nh - a;
+    var s1: f64 = s - b;
+    var s2: f64 = s1 + nl;
+    var s3: f64 = y0 * dl;
+    var r: f64 = s2 - s3;
+    var d: f64 = r / dh;
+    var k100: f64 = 0x39B0000000000000;             # 2^-100
+    var eps: f64 = y0 * k100;
+    var lo: f64 = d - eps;
+    var hi: f64 = d + eps;
+    var z1: f64 = y0 + lo;
+    var z2: f64 = y0 + hi;
+    return (z1, z2);
+}
+
+# The sign (−1, 0 or 1) of the exact sum of the n doubles at p (finite, every partial sum far below DBL_MAX; n ≤ 16), by
+# Shewchuk's Grow-Expansion with zero elimination ("Adaptive Precision Floating-Point Arithmetic and Fast Robust
+# Geometric Predicates", Discrete Comput. Geom. 18 (1997), Theorem 10): each term is added to a nonoverlapping expansion
+# kept in increasing magnitude by a chain of TwoSums (Knuth's, inline), which keeps it nonoverlapping and its sum exact;
+# zero components are dropped. Each nonzero component then exceeds the sum of all smaller ones in magnitude, so the
+# largest one's sign is the sum's, and an empty expansion is the sum 0.
+#must_use
+fn _km_exp_sign(p, n): i64 {
+    var ex: f64[16];
+    var m = 0;
+    var i = 0;
+    while (i < n) {
+        var q: f64 = load64(p + 8 * i);
+        var j = 0;
+        var w = 0;
+        while (j < m) {
+            var ej: f64 = load64(&ex + 8 * j);
+            var s: f64 = q + ej;
+            var bb: f64 = s - q;
+            var er: f64 = (q - (s - bb)) + (ej - bb);
+            if (er != 0.0) {
+                store64(&ex + 8 * w, er);
+                w = w + 1;
+            }
+            q = s;
+            j = j + 1;
+        }
+        if (q != 0.0) {
+            store64(&ex + 8 * w, q);
+            w = w + 1;
+        }
+        m = w;
+        i = i + 1;
+    }
+    if (m == 0) { return 0; }
+    var top: f64 = load64(&ex + 8 * (m - 1));
+    if (top > 0.0) { return 1; }
+    return 0 - 1;
+}
+
+# For the n doubles at p: (g + 2·f, c, e) with g the xor of their sign bits, f = 1 if one is ±0 or 2 if one is not
+# finite (else 0), c the count of significands other than 1, stored at out as f64 words in [1, 2), and e the sum of
+# their exponents. A subnormal is first scaled by 2⁵⁴ (exactly).
+#must_use
+fn _km_mono_sig(p, n, out): (i64, i64, i64) {
+    var sg = 0;
+    var flag = 0;
+    var c = 0;
+    var e = 0;
+    var i = 0;
+    while (i < n) {
+        var b = load64(p + 8 * i);
+        sg = sg ^ (b >> 63);
+        var a = b & 0x7FFFFFFFFFFFFFFF;
+        var be = a >> 52;
+        if (be == 0x7FF) {
+            flag = 2;
+        } elif (a == 0) {
+            if (flag == 0) { flag = 1; }
+        } else {
+            if (be == 0) {
+                var xs: f64 = a;
+                var p54: f64 = 0x4350000000000000;  # 2^54
+                var ys: f64 = xs * p54;
+                a = _km_bits(ys);
+                be = (a >> 52) - 54;
+            }
+            e = e + be - 1023;
+            var m = a & 0x000FFFFFFFFFFFFF;
+            if (m != 0) {
+                store64(out + 8 * c, m | 0x3FF0000000000000);
+                c = c + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return (sg + 2 * flag, c, e);
+}
+
+# The product of the c significands at s (in [1, 2) each) as a normalised double-double: 1, the one factor, an exact
+# TwoProduct, then _km_dd_mul_d per further factor.
+#must_use
+fn _km_mono_prod(s, c): (f64, f64) {
+    if (c == 0) { return (1.0, 0.0); }
+    var h: f64 = load64(s);
+    var l: f64 = 0.0;
+    if (c == 1) { return (h, l); }
+    var s1: f64 = load64(s + 8);
+    var ph, pl = _km_two_prod(h, s1);
+    h = ph;
+    l = pl;
+    var i = 2;
+    while (i < c) {
+        var si: f64 = load64(s + 8 * i);
+        var qh, ql = _km_dd_mul_d(h, l, si);
+        h = qh;
+        l = ql;
+        i = i + 1;
+    }
+    return (h, l);
+}
+
+# RN(F) for F = N/D (the cn significands at sn, the cd at sd; cn ≤ 3, cd ≤ 2) where the rounding test left the adjacent
+# doubles z₁ < z₂ with their midpoint μ the one boundary between (the section comment): the sign of N − D·μ, an exact
+# sum of doubles — N exactly (1, s₀, p_h + p_l, or the TwoProducts p_h·s₂ and p_l·s₂: s₀s₁ = p_h + p_l, every product of
+# numbers in [2⁻¹⁰⁴, 8) with an error far above the subnormal range), and −D·μ = −Σ (dⱼ·z₁ + dⱼ·(u/2)) with
+# D = d₀ (+ d₁) exactly, dⱼ·z₁ TwoProducts and dⱼ·(u/2) exact (u = z₂ − z₁ is exact by Sterbenz, a power of two at least
+# 2⁻⁵⁸) — by _km_exp_sign. D > 0, so F > μ gives z₂, F < μ gives z₁, and F = μ the even one.
+#must_use
+fn _km_mono_tie(sn, cn, sd, cd, z1: f64, z2: f64): f64 {
+    var tb: f64[10];
+    var nt = 1;
+    if (cn == 0) {
+        var one: f64 = 1.0;
+        store64(&tb, one);
+    } elif (cn == 1) {
+        store64(&tb, load64(sn));
+    } else {
+        var s0: f64 = load64(sn);
+        var s1: f64 = load64(sn + 8);
+        var ph, pl = _km_two_prod(s0, s1);
+        if (cn == 2) {
+            store64(&tb, ph);
+            store64(&tb + 8, pl);
+            nt = 2;
+        } else {
+            var s2: f64 = load64(sn + 16);
+            var a, b = _km_two_prod(ph, s2);
+            var c, d = _km_two_prod(pl, s2);
+            store64(&tb, a);
+            store64(&tb + 8, b);
+            store64(&tb + 16, c);
+            store64(&tb + 24, d);
+            nt = 4;
+        }
+    }
+    var d0: f64 = 1.0;
+    var d1: f64 = 0.0;
+    if (cd >= 1) { d0 = load64(sd); }
+    if (cd == 2) {
+        var t1: f64 = load64(sd + 8);
+        var qh, ql = _km_two_prod(d0, t1);
+        d0 = qh;
+        d1 = ql;
+    }
+    var u: f64 = z2 - z1;
+    var hu: f64 = u * 0.5;
+    var a0, b0 = _km_two_prod(d0, z1);
+    var h0: f64 = d0 * hu;
+    var na0: f64 = -a0;
+    var nb0: f64 = -b0;
+    var nh0: f64 = -h0;
+    store64(&tb + 8 * nt, na0);
+    store64(&tb + 8 * nt + 8, nb0);
+    store64(&tb + 8 * nt + 16, nh0);
+    nt = nt + 3;
+    if (d1 != 0.0) {
+        var a1, b1 = _km_two_prod(d1, z1);
+        var h1: f64 = d1 * hu;
+        var na1: f64 = -a1;
+        var nb1: f64 = -b1;
+        var nh1: f64 = -h1;
+        store64(&tb + 8 * nt, na1);
+        store64(&tb + 8 * nt + 8, nb1);
+        store64(&tb + 8 * nt + 16, nh1);
+        nt = nt + 3;
+    }
+    var sg = _km_exp_sign(&tb, nt);
+    if (sg > 0) { return z2; }
+    if (sg < 0) { return z1; }
+    if ((_km_bits(z1) & 1) == 0) { return z1; }
+    return z2;
+}
+
+# RN(Π num / Π den) by the fast path (the section comment), for the nn doubles at num and the nd at den: (RN, 1), or
+# (0, 0) when the result may be subnormal or the rounding test fails beyond _km_mono_tie's shapes. NaN (with 1) outside
+# the domain: more than _KM_MONO_NMAX or _KM_MONO_DMAX factors, a non-finite factor, a zero denominator factor.
+#must_use
+fn _km_cr_mono_fast(num, nn, den, nd): (f64, i64) {
+    if (nn < 0 || nd < 0 || nn > _KM_MONO_NMAX || nd > _KM_MONO_DMAX) {
+        var nan0: f64 = _km_nan();
+        return (nan0, 1);
+    }
+    var sn: f64[6];
+    var sd: f64[4];
+    var gfn, cn, en = _km_mono_sig(num, nn, &sn);
+    var gfd, cd, ed = _km_mono_sig(den, nd, &sd);
+    if ((gfn >> 1) == 2 || (gfd >> 1) != 0) {
+        var nan1: f64 = _km_nan();
+        return (nan1, 1);
+    }
+    var neg = (gfn ^ gfd) & 1;
+    if ((gfn >> 1) == 1) {
+        var z: f64 = 0.0;
+        if (neg == 1) { z = -z; }
+        return (z, 1);
+    }
+    var nh, nl = _km_mono_prod(&sn, cn);
+    var dh, dl = _km_mono_prod(&sd, cd);
+    var z1, z2 = _km_dd_div_ends(nh, nl, dh, dl);
+    var y: f64 = z1;
+    if (z1 != z2) {
+        if (cn > 3 || cd > 2) { return (0.0, 0); }
+        y = _km_mono_tie(&sn, cn, &sd, cd, z1, z2);
+    }
+    var k = en - ed;
+    var yb = _km_bits(y);
+    var kk = k + (yb >> 52) - 1023;                # K = k + e_y
+    if (kk > 1023) {
+        var inf: f64 = _KM_INF;
+        if (neg == 1) { inf = -inf; }
+        return (inf, 1);
+    }
+    if (kk < 0 - 1075) {
+        var zu: f64 = 0.0;
+        if (neg == 1) { zu = -zu; }
+        return (zu, 1);
+    }
+    if (kk < 0 - 1021) { return (0.0, 0); }
+    var rb = yb + (k << 52);                        # the exponent field + k, in 2 … 2046
+    if (neg == 1) { rb = rb | 0x8000000000000000; }
+    var r: f64 = rb;
+    return (r, 1);
+}
+
+# RN(Π num / Π den) by the exact path alone (the section comment), for every argument of the domain; NaN outside it (as
+# _km_cr_mono_fast, and past the 253-bit capacity).
+#must_use
+fn _km_cr_mono_acc(num, nn, den, nd): f64 {
+    var nan: f64 = _km_nan();
+    if (nn < 0 || nd < 0 || nn > _KM_MONO_NMAX || nd > _KM_MONO_DMAX) { return nan; }
+    var pb[64];
+    var qb[64];
+    var tb[64];
+    var rb[64];
+    var neg = 0;
+    var zero = 0;
+    var ee = 0;
+    var side = 0;
+    while (side < 2) {
+        var p = num;
+        var n = nn;
+        var acc = &pb;
+        if (side == 1) {
+            p = den;
+            n = nd;
+            acc = &qb;
+        }
+        _km_bn_set(acc, 1);
+        var bits = 0;
+        var i = 0;
+        while (i < n) {
+            var b = load64(p + 8 * i);
+            neg = neg ^ (b >> 63);
+            var a = b & 0x7FFFFFFFFFFFFFFF;
+            if ((a >> 52) == 0x7FF) { return nan; }
+            if (a == 0) {
+                if (side == 1) { return nan; }
+                zero = 1;
+            } else {
+                var mm, e = _km_f64_int(a);
+                while ((mm & 1) == 0) {
+                    mm = mm >> 1;
+                    e = e + 1;
+                }
+                var t = mm;
+                while (t != 0) {
+                    t = t >> 1;
+                    bits = bits + 1;
+                }
+                if (side == 0) { ee = ee + e; } else { ee = ee - e; }
+                _km_bn_set(&tb, mm);
+                _km_bn_mul(&rb, acc, &tb);
+                _km_bn_copy(acc, &rb);
+            }
+            i = i + 1;
+        }
+        if (bits > 253) { return nan; }
+        side = side + 1;
+    }
+    var r: f64 = 0.0;
+    if (zero == 0) { r = _km_cr_ratio(&pb, &qb, ee); }
+    if (neg == 1) { r = -r; }
+    return r;
+}
+
+# RN(Π num / Π den), correctly rounded (the section comment): the fast path, then the exact path where it declines.
+#must_use
+fn _km_cr_mono(num, nn, den, nd): f64 {
+    var r, ok = _km_cr_mono_fast(num, nn, den, nd);
+    if (ok == 1) { return r; }
+    var a: f64 = _km_cr_mono_acc(num, nn, den, nd);
+    return a;
+}
+
+# The shapes the modules call. Each has a straight-line fast path for normal operands (finite, nonzero, not subnormal) —
+# the general fast path's arithmetic without its factor tables and loops, which cost a lot in this compiler
+# (heat_transfer: 148 ns a call through _km_cr_mono_fast, 65 through _km_mul3_fast) — and falls back to _km_cr_mono (a
+# zero, subnormal or non-finite operand, a failed rounding test, a possibly subnormal result). Shared by them:
+# - the operands: x = (−1)^g·s·2^e with s in [1, 2) from the bit fields (an operand whose |bits| lie outside
+#   [2⁻¹⁰²², +∞) declines), the sign the xor of the g's;
+# - for a product N of significands with no denominator, N's double-double h + l (relative error δ, |l| ≤ u·h) is
+#   rounded by _km_dd_round_ends: with ε = 2⁻¹⁰⁰·h = 64u²·h, RN(l ∓ ε) are within u(|l| + ε) ≤ 1.01u²·h of l ∓ ε, so for
+#   |δ| ≤ 32u² (|N − (h + l)| ≤ 32.1u²·h) h + RN(l − ε) < N < h + RN(l + ε), and when the two sums round alike N rounds
+#   to them (the argument of _km_dd_div_cr's test);
+# - with a denominator, _km_dd_div_ends (its budget |δN| + |δD| ≤ 32u²);
+# - the scale, _km_mono_fin: y = RN(F) and K = k + e_y as in _km_cr_mono_fast (y's bits plus k in the exponent field for
+#   −1021 ≤ K ≤ 1023, ±∞ past 1023); K < −1021 declines.
+
+# (z₁, z₂) = (RN(h + RN(l − ε)), RN(h + RN(l + ε))), ε = 2⁻¹⁰⁰·h, for a positive normalised double-double h + l within
+# 32u² of an exact value N (the section comment): z₁ = z₂ is RN(N).
+#must_use
+fn _km_dd_round_ends(h: f64, l: f64): (f64, f64) {
+    var k100: f64 = 0x39B0000000000000;             # 2^-100
+    var eps: f64 = h * k100;
+    var lo: f64 = l - eps;
+    var hi: f64 = l + eps;
+    var z1: f64 = h + lo;
+    var z2: f64 = h + hi;
+    return (z1, z2);
+}
+
+# (±y·2^k, 1) for y = RN(F) positive and normal, when the result's exponent K = k + e_y lies in [−1021, 1023], (±∞, 1)
+# past 1023, (0, 0) below −1021 (the section comment).
+#must_use
+fn _km_mono_fin(y: f64, k, neg): (f64, i64) {
+    var yb = load64(&y);
+    var kk = k + (yb >> 52) - 1023;
+    if (kk > 1023) {
+        var inf: f64 = _KM_INF;
+        if (neg == 1) { inf = -inf; }
+        return (inf, 1);
+    }
+    if (kk < 0 - 1021) { return (0.0, 0); }
+    var rb = yb + (k << 52);
+    if (neg == 1) { rb = rb | 0x8000000000000000; }
+    var r: f64 = rb;
+    return (r, 1);
+}
+
+# RN(x·y/z) by its fast path: (RN, 1), or (0, 0) to fall back. M4f-2's _km_mul_div_fast (stoichiometry.cyr), now for
+# both signs. N = sₓ·s_y = p_h + p_l exactly (TwoProduct), D = s_z exact, so _km_dd_div_cr's steps (inline, d_l = 0)
+# have exact operands and its test proves RN(F) when z₁ = z₂ (F in (½, 4)); otherwise the one boundary between, the
+# midpoint of z₁ and z₂, decides exactly (_km_mul_div_tie; midpoints are common here: m·3/2 is one whenever 3m has 54
+# bits).
+#must_use
+fn _km_mul_div_fast(x: f64, y: f64, z: f64): (f64, i64) {
+    var bx = load64(&x);
+    var by = load64(&y);
+    var bz = load64(&z);
+    var neg = (bx ^ by ^ bz) >> 63;
+    var abs = 0x7FFFFFFFFFFFFFFF;
+    var ax = bx & abs;
+    var ay = by & abs;
+    var az = bz & abs;
+    var nmin = 0x0010000000000000;
+    var nmax = 0x7FF0000000000000;
+    if (ax < nmin || ay < nmin || az < nmin || ax >= nmax || ay >= nmax || az >= nmax) { return (0.0, 0); }
+    var k = (ax >> 52) + (ay >> 52) - (az >> 52) - 1023;                # eₓ + e_y − e_z
+    var mask = 0x000FFFFFFFFFFFFF;
+    var one = 0x3FF0000000000000;
+    var sxb = (ax & mask) | one;
+    var syb = (ay & mask) | one;
+    var szb = (az & mask) | one;
+    var sx: f64 = sxb;
+    var sy: f64 = syb;
+    var sz: f64 = szb;
+    var ph, pl = _km_two_prod(sx, sy);
+    var y0: f64 = ph / sz;
+    var ta, tb = _km_two_prod(y0, sz);
+    var s0: f64 = ph - ta;
+    var s1: f64 = s0 - tb;
+    var rr: f64 = s1 + pl;
+    var dq: f64 = rr / sz;
+    var k100: f64 = 0x39B0000000000000;     # 2⁻¹⁰⁰
+    var eps: f64 = y0 * k100;
+    var lo: f64 = dq - eps;
+    var hi: f64 = dq + eps;
+    var z1: f64 = y0 + lo;
+    var z2: f64 = y0 + hi;
+    var f: f64 = z1;
+    if (z1 != z2) { f = _km_mul_div_tie(ph, pl, sz, z1, z2); }
+    var r, ok = _km_mono_fin(f, k, neg);
+    return (r, ok);
+}
+
+# RN(F) for F = N/D (N = p_h + p_l, D = s_z, as in _km_mul_div_fast) where the rounding test left two adjacent doubles
+# z₁ < z₂ and F strictly between points that round to them: the midpoint μ = z₁ + u/2 (u = z₂ − z₁, exact) is the only
+# boundary there, so RN(F) is z₁ if F < μ, z₂ if F > μ, and the even one of the two if F = μ. The sign of F − μ is that
+# of T = N − D·μ = (p_h − a) + p_l − b − h, with D·z₁ = a + b (TwoProduct) and h = D·(u/2) exact: p_h − a is exact by
+# Sterbenz (a and p_h are within 2⁻⁵¹ of N), and each of the four terms is a multiple of 2⁻¹⁰⁷ (p_h, p_l of 2⁻¹⁰⁴; z₁ ≥
+# ½ − 2⁻⁵⁴ of 2⁻⁵⁴, so a, b of 2⁻¹⁰⁶; u/2 ≥ 2⁻⁵⁵, so h of 2⁻¹⁰⁷) below 2⁻⁴⁸ in magnitude (|N − D·z₁| ≤ D·u < 2⁻⁴⁹):
+# scaled by 2¹⁰⁷ (exact) each is an integer below 2⁵⁹, so T·2¹⁰⁷ is their exact sum in 64-bit integers. (M4f-2's, moved
+# with it; _km_mono_tie is its general form.)
+#must_use
+fn _km_mul_div_tie(ph: f64, pl: f64, sz: f64, z1: f64, z2: f64): f64 {
+    var u: f64 = z2 - z1;
+    var hu: f64 = u * 0.5;
+    var a, b = _km_two_prod(sz, z1);
+    var h: f64 = sz * hu;
+    var e1: f64 = ph - a;
+    var p107: f64 = 0x46A0000000000000;     # 2¹⁰⁷
+    var ie: f64 = e1 * p107;
+    var il: f64 = pl * p107;
+    var ib: f64 = b * p107;
+    var ih: f64 = h * p107;
+    var t = f64_to(ie) + f64_to(il) - f64_to(ib) - f64_to(ih);
+    if (t > 0) { return z2; }
+    if (t < 0) { return z1; }
+    if ((_km_bits(z1) & 1) == 0) { return z1; }
+    return z2;
+}
+
+# RN(x·y/z), correctly rounded, for every argument of _km_cr_mono's domain: M4f-2's stoichiometry (ADR 0002 #24: the
+# yields and the percent composition) and kinetics' steady_state_intermediate (#28).
+#must_use
+fn _km_cr_mul_div(x: f64, y: f64, z: f64): f64 {
+    var r, ok = _km_mul_div_fast(x, y, z);
+    if (ok == 1) { return r; }
+    var nb: f64[2];
+    store64(&nb, x);
+    store64(&nb + 8, y);
+    var db: f64[1];
+    store64(&db, z);
+    var g: f64 = _km_cr_mono(&nb, 2, &db, 1);
+    return g;
+}
+
+# RN(x·y/z) by the exact path alone (tests/stoichiometry.tcyr, cr_verify.py).
+#must_use
+fn _km_mul_div_acc(x: f64, y: f64, z: f64): f64 {
+    var nb: f64[2];
+    store64(&nb, x);
+    store64(&nb + 8, y);
+    var db: f64[1];
+    store64(&db, z);
+    var r: f64 = _km_cr_mono_acc(&nb, 2, &db, 1);
+    return r;
+}
+
+# RN(x·y·z) by its fast path: N = sₓs_ys_z by _km_dd_mul_d on the exact TwoProduct sₓs_y (within 3.01u², N in [1, 8)),
+# rounded by _km_dd_round_ends; a failed test (a midpoint or near one) falls back.
+#must_use
+fn _km_mul3_fast(x: f64, y: f64, z: f64): (f64, i64) {
+    var bx = load64(&x);
+    var by = load64(&y);
+    var bz = load64(&z);
+    var neg = (bx ^ by ^ bz) >> 63;
+    var abs = 0x7FFFFFFFFFFFFFFF;
+    var ax = bx & abs;
+    var ay = by & abs;
+    var az = bz & abs;
+    var nmin = 0x0010000000000000;
+    var nmax = 0x7FF0000000000000;
+    if (ax < nmin || ay < nmin || az < nmin || ax >= nmax || ay >= nmax || az >= nmax) { return (0.0, 0); }
+    var k = (ax >> 52) + (ay >> 52) + (az >> 52) - 3069;                # eₓ + e_y + e_z
+    var mask = 0x000FFFFFFFFFFFFF;
+    var one = 0x3FF0000000000000;
+    var sxb = (ax & mask) | one;
+    var syb = (ay & mask) | one;
+    var szb = (az & mask) | one;
+    var sx: f64 = sxb;
+    var sy: f64 = syb;
+    var sz: f64 = szb;
+    var ph, pl = _km_two_prod(sx, sy);
+    var h, l = _km_dd_mul_d(ph, pl, sz);
+    var z1, z2 = _km_dd_round_ends(h, l);
+    if (z1 != z2) { return (0.0, 0); }
+    var r, ok = _km_mono_fin(z1, k, neg);
+    return (r, ok);
+}
+
+# RN(x·y·z), correctly rounded: heat_transfer, boiling_point_elevation, freezing_point_depression (ADR 0002 #27).
+#must_use
+fn _km_cr_mul3(x: f64, y: f64, z: f64): f64 {
+    var r, ok = _km_mul3_fast(x, y, z);
+    if (ok == 1) { return r; }
+    var nb: f64[3];
+    store64(&nb, x);
+    store64(&nb + 8, y);
+    store64(&nb + 16, z);
+    var g: f64 = _km_cr_mono(&nb, 3, 0, 0);
+    return g;
+}
+
+# RN(x/(y·z)) by its fast path: N = sₓ exact, D = s_ys_z an exact TwoProduct, F in (¼, 2) by _km_dd_div_ends; a failed
+# test falls back (x/(y·z) is never a 53-bit midpoint: one would need sₓ's odd part to have 54 bits).
+#must_use
+fn _km_div2_fast(x: f64, y: f64, z: f64): (f64, i64) {
+    var bx = load64(&x);
+    var by = load64(&y);
+    var bz = load64(&z);
+    var neg = (bx ^ by ^ bz) >> 63;
+    var abs = 0x7FFFFFFFFFFFFFFF;
+    var ax = bx & abs;
+    var ay = by & abs;
+    var az = bz & abs;
+    var nmin = 0x0010000000000000;
+    var nmax = 0x7FF0000000000000;
+    if (ax < nmin || ay < nmin || az < nmin || ax >= nmax || ay >= nmax || az >= nmax) { return (0.0, 0); }
+    var k = (ax >> 52) - (ay >> 52) - (az >> 52) + 1023;                # eₓ − e_y − e_z
+    var mask = 0x000FFFFFFFFFFFFF;
+    var one = 0x3FF0000000000000;
+    var sxb = (ax & mask) | one;
+    var syb = (ay & mask) | one;
+    var szb = (az & mask) | one;
+    var sx: f64 = sxb;
+    var sy: f64 = syb;
+    var sz: f64 = szb;
+    var dh, dl = _km_two_prod(sy, sz);
+    var z1, z2 = _km_dd_div_ends(sx, 0.0, dh, dl);
+    if (z1 != z2) { return (0.0, 0); }
+    var r, ok = _km_mono_fin(z1, k, neg);
+    return (r, ok);
+}
+
+# RN(x/(y·z)), correctly rounded: specific_heat_from_calorimetry (#27), zero_order_half_life past 2·k's overflow (#28).
+#must_use
+fn _km_cr_div2(x: f64, y: f64, z: f64): f64 {
+    var r, ok = _km_div2_fast(x, y, z);
+    if (ok == 1) { return r; }
+    var nb: f64[1];
+    store64(&nb, x);
+    var db: f64[2];
+    store64(&db, y);
+    store64(&db + 8, z);
+    var g: f64 = _km_cr_mono(&nb, 1, &db, 2);
+    return g;
+}
+
+# RN(x·y·z/w) by its fast path: N as in _km_mul3_fast (within 3.01u²), D = s_w exact, F in (½, 8) by _km_dd_div_ends; a
+# failed test falls back.
+#must_use
+fn _km_mul3_div_fast(x: f64, y: f64, z: f64, w: f64): (f64, i64) {
+    var bx = load64(&x);
+    var by = load64(&y);
+    var bz = load64(&z);
+    var bw = load64(&w);
+    var neg = (bx ^ by ^ bz ^ bw) >> 63;
+    var abs = 0x7FFFFFFFFFFFFFFF;
+    var ax = bx & abs;
+    var ay = by & abs;
+    var az = bz & abs;
+    var aw = bw & abs;
+    var nmin = 0x0010000000000000;
+    var nmax = 0x7FF0000000000000;
+    if (ax < nmin || ay < nmin || az < nmin || aw < nmin) { return (0.0, 0); }
+    if (ax >= nmax || ay >= nmax || az >= nmax || aw >= nmax) { return (0.0, 0); }
+    var k = (ax >> 52) + (ay >> 52) + (az >> 52) - (aw >> 52) - 2046;   # eₓ + e_y + e_z − e_w
+    var mask = 0x000FFFFFFFFFFFFF;
+    var one = 0x3FF0000000000000;
+    var sxb = (ax & mask) | one;
+    var syb = (ay & mask) | one;
+    var szb = (az & mask) | one;
+    var swb = (aw & mask) | one;
+    var sx: f64 = sxb;
+    var sy: f64 = syb;
+    var sz: f64 = szb;
+    var sw: f64 = swb;
+    var ph, pl = _km_two_prod(sx, sy);
+    var h, l = _km_dd_mul_d(ph, pl, sz);
+    var z1, z2 = _km_dd_div_ends(h, l, sw, 0.0);
+    if (z1 != z2) { return (0.0, 0); }
+    var r, ok = _km_mono_fin(z1, k, neg);
+    return (r, ok);
+}
+
+# RN(x·y·z/w), correctly rounded: pre_equilibrium_rate (#28).
+#must_use
+fn _km_cr_mul3_div(x: f64, y: f64, z: f64, w: f64): f64 {
+    var r, ok = _km_mul3_div_fast(x, y, z, w);
+    if (ok == 1) { return r; }
+    var nb: f64[3];
+    store64(&nb, x);
+    store64(&nb + 8, y);
+    store64(&nb + 16, z);
+    var db: f64[1];
+    store64(&db, w);
+    var g: f64 = _km_cr_mono(&nb, 3, &db, 1);
+    return g;
+}
+
+# RN(a·b·c·d·f) by its fast path: the exact TwoProduct s_a·s_b, then _km_dd_mul_d by s_c, s_d and s_f (within
+# 3·3.01u²·(1 + 2⁻⁵⁰) < 9.1u², N in [1, 32)), rounded by _km_dd_round_ends; a failed test falls back.
+#must_use
+fn _km_mul5_fast(a: f64, b: f64, c: f64, d: f64, f: f64): (f64, i64) {
+    var ba = load64(&a);
+    var bb = load64(&b);
+    var bc = load64(&c);
+    var bd = load64(&d);
+    var bf = load64(&f);
+    var neg = (ba ^ bb ^ bc ^ bd ^ bf) >> 63;
+    var abs = 0x7FFFFFFFFFFFFFFF;
+    var aa = ba & abs;
+    var ab = bb & abs;
+    var ac = bc & abs;
+    var ad = bd & abs;
+    var af = bf & abs;
+    var nmin = 0x0010000000000000;
+    var nmax = 0x7FF0000000000000;
+    if (aa < nmin || ab < nmin || ac < nmin || ad < nmin || af < nmin) { return (0.0, 0); }
+    if (aa >= nmax || ab >= nmax || ac >= nmax || ad >= nmax || af >= nmax) { return (0.0, 0); }
+    var k = (aa >> 52) + (ab >> 52) + (ac >> 52) + (ad >> 52) + (af >> 52) - 5115;
+    var mask = 0x000FFFFFFFFFFFFF;
+    var one = 0x3FF0000000000000;
+    var sab = (aa & mask) | one;
+    var sbb = (ab & mask) | one;
+    var scb = (ac & mask) | one;
+    var sdb = (ad & mask) | one;
+    var sfb = (af & mask) | one;
+    var sa: f64 = sab;
+    var sb: f64 = sbb;
+    var sc: f64 = scb;
+    var sd: f64 = sdb;
+    var sf: f64 = sfb;
+    var ph, pl = _km_two_prod(sa, sb);
+    var h1, l1 = _km_dd_mul_d(ph, pl, sc);
+    var h2, l2 = _km_dd_mul_d(h1, l1, sd);
+    var h3, l3 = _km_dd_mul_d(h2, l2, sf);
+    var z1, z2 = _km_dd_round_ends(h3, l3);
+    if (z1 != z2) { return (0.0, 0); }
+    var r, ok = _km_mono_fin(z1, k, neg);
+    return (r, ok);
+}
+
+# RN(a·b·c·d·f), correctly rounded: osmotic_pressure's i·M·R·1000·T (#27).
+#must_use
+fn _km_cr_mul5(a: f64, b: f64, c: f64, d: f64, f: f64): f64 {
+    var r, ok = _km_mul5_fast(a, b, c, d, f);
+    if (ok == 1) { return r; }
+    var nb: f64[5];
+    store64(&nb, a);
+    store64(&nb + 8, b);
+    store64(&nb + 16, c);
+    store64(&nb + 24, d);
+    store64(&nb + 32, f);
+    var g: f64 = _km_cr_mono(&nb, 5, 0, 0);
+    return g;
+}
+
 # --- validate.cyr ---
 
 # validate.cyr — input-validation predicates (port of rust-old/src/validate.rs).
@@ -8094,8 +8837,16 @@ fn is_spontaneous(delta_g: f64): i64 {
 #
 # Calorimetry functions use grams and J/(g·°C) (a temperature *difference* in °C equals one in K);
 # enthalpies are in J or J/mol as passed in. Every function is + − × ÷ in Rust's operation order,
-# so every result is bit-identical (class B). WATER_SPECIFIC_HEAT is KM_WATER_SPECIFIC_HEAT in
-# src/constants.cyr (generated; thermo has no data file of its own).
+# so every result is bit-identical (class B), except the two below. WATER_SPECIFIC_HEAT is
+# KM_WATER_SPECIFIC_HEAT in src/constants.cyr (generated; thermo has no data file of its own).
+# - ADR 0002 #27 (the overflow audit's B1; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide
+#   audit" and "round once"): heat_transfer's (m·c)·ΔT and specific_heat_from_calorimetry's q/(m·ΔT) are each one
+#   product or quotient of inputs, so the port returns the exact value rounded once (src/mathx.cyr's correctly
+#   rounded monomial, _km_cr_mul3 and _km_cr_div2), where Rust rounds twice (1–2 ulp off on about a quarter of
+#   inputs) and an intermediate m·c or m·ΔT that over- or underflows gives ±∞, 0 or NaN although the value is
+#   representable (specific_heat_from_calorimetry(4184, 1000, DBL_MAX) is 0 in Rust, 2.33·10⁻³⁰⁸ here; m·c = ∞ with
+#   ΔT = 0 is Rust's NaN, here the exact 0). Rust's checks and Err codes are kept, and heat_transfer's non-finite
+#   inputs keep Rust's expression (IEEE's ±∞ and NaN).
 # - A Rust slice `&[f64]` is a pointer to n f64 values and the count n. Rust's f64 `sum` folds from
 #   −0.0, so the sum of no values is −0.0, as here. A count below 0, or a null pointer with values,
 #   is no slice: the result is NaN (these functions have no error channel).
@@ -8120,12 +8871,20 @@ fn _km_sum(xs, n): f64 {
     return s;
 }
 
-# Heat transfer q = m × c × ΔT in J, from the mass in g, the specific heat in J/(g·°C) and ΔT in °C.
-# Mirrors `thermo::heat_transfer`.
+# Heat transfer q = m × c × ΔT in J, from the mass in g, the specific heat in J/(g·°C) and ΔT in °C. ADR 0002 #27:
+# the correctly rounded m·c·ΔT for finite inputs (its sign the product's; a zero factor gives that signed zero), where
+# Rust's (m·c)·ΔT rounds twice; a non-finite input gives Rust's (m·c)·ΔT. Mirrors `thermo::heat_transfer`, with ADR
+# 0002 #27.
 #must_use
 fn heat_transfer(mass_g: f64, specific_heat: f64, delta_t: f64): f64 {
-    var q: f64 = (mass_g * specific_heat) * delta_t;
-    return q;
+    var f, ok = _km_mul3_fast(mass_g, specific_heat, delta_t);
+    if (ok == 1) { return f; }
+    if (_km_is_finite(mass_g) != 1 || _km_is_finite(specific_heat) != 1 || _km_is_finite(delta_t) != 1) {
+        var q: f64 = (mass_g * specific_heat) * delta_t;
+        return q;
+    }
+    var r: f64 = _km_cr_mul3(mass_g, specific_heat, delta_t);
+    return r;
 }
 
 # Hess's law: the total enthalpy change, the sum of the n step enthalpies at `enthalpies_j` in
@@ -8151,8 +8910,9 @@ fn enthalpy_from_formation(products_hf, np, reactants_hf, nr): f64 {
 
 # Specific heat at constant pressure from calorimetry, c_p = q / (m × ΔT) in J/(g·°C), from q in J,
 # m in g and ΔT in °C (or K): Ok(c_p), or Err(KM_ERR_INVALID_INPUT) if q is not finite, m is not
-# positive and finite, or ΔT is non-finite or zero (|ΔT| < 10⁻¹², hisab's EPSILON_F64). Mirrors
-# `thermo::specific_heat_from_calorimetry`.
+# positive and finite, or ΔT is non-finite or zero (|ΔT| < 10⁻¹², hisab's EPSILON_F64). ADR 0002 #27:
+# the correctly rounded q/(m·ΔT), where Rust's q/(m·ΔT) rounds twice (and m·ΔT can over- or underflow);
+# q = ±0 gives Rust's signed zero. Mirrors `thermo::specific_heat_from_calorimetry`, with ADR 0002 #27.
 #must_use
 fn specific_heat_from_calorimetry(energy_j: f64, mass_g: f64, delta_t: f64): Result {
     if (_km_is_finite(energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -8160,7 +8920,7 @@ fn specific_heat_from_calorimetry(energy_j: f64, mass_g: f64, delta_t: f64): Res
     var eps: f64 = EPSILON_F64;
     var adt: f64 = f64_abs(delta_t);
     if (_km_is_finite(delta_t) != 1 || adt < eps) { return Err(KM_ERR_INVALID_INPUT); }
-    var c: f64 = energy_j / (mass_g * delta_t);
+    var c: f64 = _km_cr_div2(energy_j, mass_g, delta_t);
     return Ok(c);
 }
 
@@ -10014,9 +10774,10 @@ const KM_KF_CAMPHOR = 40.0;
 #
 # Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and reject NaN
 # and ±∞ inputs. Every expression keeps Rust's operation order, so the arithmetic functions are
-# bit-identical (class B); clausius_clapeyron (one exp, _km_cr_exp) and the Antoine functions (one
-# 10^x, _km_cr_exp10) are class C on src/mathx.cyr's correctly rounded primitives (ADR 0006), so
-# they are compared exactly against the corrected oracle (docs/development/port-parity.md §10). The
+# bit-identical (class B), except the colligative products under ADR 0002 #27 (below);
+# clausius_clapeyron (one exp, _km_cr_exp) and the Antoine functions (one 10^x, _km_cr_exp10) are
+# class C on src/mathx.cyr's correctly rounded primitives (ADR 0006), so they are compared exactly
+# against the corrected oracle (docs/development/port-parity.md §10). The
 # data — struct KmAntoineCoeffs, the 8 ANTOINE_DATA sets, the mmHg → Pa factor and the KM_KB_* /
 # KM_KF_* constants — is src/phase_data.cyr (generated).
 #
@@ -10024,6 +10785,15 @@ const KM_KF_CAMPHOR = 40.0;
 # Result, Err outside the coefficient set's fitted range t_min_c ..= t_max_c, at or below the pole
 # (C + T ≤ 0) and for any non-finite input, where Rust 1.2 extrapolates silently or returns NaN.
 # There is no extrapolating variant. In range the value is Rust's, operation for operation.
+#
+# ADR 0002 #27 (the overflow audit's B1; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide
+# audit" and "round once"): boiling_point_elevation's and freezing_point_depression's (K·m)·i and
+# osmotic_pressure's (((i·M)·R)·1000)·T are each one product of inputs and constants, so the port returns the
+# exact product rounded once (src/mathx.cyr's correctly rounded monomial: _km_cr_mul3, and _km_cr_mul5 with R as
+# KM_GAS_CONSTANT's double and 1000 exact), where Rust rounds two or four times (1–2 ulp off on about a quarter of
+# inputs) and a partial product that over- or underflows gives ±∞, 0 or NaN although the value is representable
+# (osmotic_pressure(5·10⁻³²⁴, 0.1, 298.15) is 0 in Rust, 1.22·10⁻³¹⁸ here). Rust's checks and Err codes are kept;
+# the two unvalidated colligative functions keep Rust's expression for a non-finite input.
 #
 # ANTOINE_DATA rows are reached by handle (port plan §6.4): row + 1, and 0 for None.
 # antoine_data_name(h) and antoine_data_coeffs(h) read row h − 1; an invalid handle gives "" and a
@@ -10094,32 +10864,49 @@ fn henry_solubility(partial_pressure: f64, henry_constant: f64): Result {
 
 # Boiling point elevation ΔT_b = K_b × m × i in K, from the ebullioscopic constant K_b (K·kg/mol,
 # e.g. KM_KB_WATER), the molality m (mol solute / kg solvent) and the van 't Hoff factor i (1 for
-# non-electrolytes). Mirrors `phase::boiling_point_elevation`.
+# non-electrolytes). ADR 0002 #27: the correctly rounded K·m·i for finite inputs (a zero factor gives its
+# signed zero), Rust's (K·m)·i for a non-finite one. Mirrors `phase::boiling_point_elevation`, with ADR 0002 #27.
 #must_use
 fn boiling_point_elevation(kb: f64, molality: f64, van_t_hoff_factor: f64): f64 {
-    var dt: f64 = (kb * molality) * van_t_hoff_factor;
-    return dt;
+    var f, ok = _km_mul3_fast(kb, molality, van_t_hoff_factor);
+    if (ok == 1) { return f; }
+    if (_km_is_finite(kb) != 1 || _km_is_finite(molality) != 1 || _km_is_finite(van_t_hoff_factor) != 1) {
+        var dt: f64 = (kb * molality) * van_t_hoff_factor;
+        return dt;
+    }
+    var r: f64 = _km_cr_mul3(kb, molality, van_t_hoff_factor);
+    return r;
 }
 
 # Freezing point depression ΔT_f = K_f × m × i, the (positive) depression in K, from the cryoscopic
-# constant K_f (K·kg/mol, e.g. KM_KF_WATER), the molality m and the van 't Hoff factor i. Mirrors
-# `phase::freezing_point_depression`.
+# constant K_f (K·kg/mol, e.g. KM_KF_WATER), the molality m and the van 't Hoff factor i. ADR 0002 #27: the
+# correctly rounded K·m·i for finite inputs, Rust's (K·m)·i for a non-finite one. Mirrors
+# `phase::freezing_point_depression`, with ADR 0002 #27.
 #must_use
 fn freezing_point_depression(kf: f64, molality: f64, van_t_hoff_factor: f64): f64 {
-    var dt: f64 = (kf * molality) * van_t_hoff_factor;
-    return dt;
+    var f, ok = _km_mul3_fast(kf, molality, van_t_hoff_factor);
+    if (ok == 1) { return f; }
+    if (_km_is_finite(kf) != 1 || _km_is_finite(molality) != 1 || _km_is_finite(van_t_hoff_factor) != 1) {
+        var dt: f64 = (kf * molality) * van_t_hoff_factor;
+        return dt;
+    }
+    var r: f64 = _km_cr_mul3(kf, molality, van_t_hoff_factor);
+    return r;
 }
 
 # Osmotic pressure π = i × M × R × T in Pa, from the van 't Hoff factor i, the molarity M (mol/L)
 # and T in K (R in L·Pa/(mol·K) is KM_GAS_CONSTANT × 1000). Ok(π),
 # Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite, or Err(KM_ERR_INVALID_INPUT) if
-# i is not positive and finite or M is negative or non-finite. Mirrors `phase::osmotic_pressure`.
+# i is not positive and finite or M is negative or non-finite. ADR 0002 #27: the correctly rounded
+# i·M·R·1000·T (R KM_GAS_CONSTANT's double, 1000 exact), where Rust's (((i·M)·R)·1000)·T rounds four times; a
+# molarity of ±0 gives Rust's signed zero. Mirrors `phase::osmotic_pressure`, with ADR 0002 #27.
 #must_use
 fn osmotic_pressure(van_t_hoff_factor: f64, molarity: f64, temperature_k: f64): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_positive(van_t_hoff_factor) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(molarity) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var p: f64 = (((van_t_hoff_factor * molarity) * KM_GAS_CONSTANT) * 1000.0) * temperature_k;
+    var r: f64 = KM_GAS_CONSTANT;
+    var p: f64 = _km_cr_mul5(van_t_hoff_factor, molarity, r, 1000.0, temperature_k);
     return Ok(p);
 }
 
@@ -11720,6 +12507,16 @@ fn moles_electrons_to_charge(moles: f64): f64 {
 #   inline (port plan §6.4): LN_2 by its bits, 0x3FE62E42FEFA39EF, as src/mathx.cyr writes ln 2's high part. Both
 #   are pinned by golden rows (half_life_first_order(1) is LN_2 exactly; orders at 1 ± 10⁻¹² and the ulps
 #   either side) and by tests/kinetics.tcyr.
+# - ADR 0002 #28 (the overflow audit's B1; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide audit"
+#   and "round once"): an intermediate product, quotient or sum of inputs can over- or underflow although the result is
+#   representable (zero_order_half_life(DBL_MAX, DBL_MAX) is 0 in Rust, 1/2 here; michaelis_menten(100, DBL_MAX,
+#   DBL_MAX) is ∞/∞ = NaN in Rust, 50 here). Where the whole formula is one product or quotient — [A]₀/(2k),
+#   k₁·[A]/k₂, k₂·(k₁/k₋₁)·[A] — the port returns the exact value rounded once (src/mathx.cyr's correctly rounded
+#   monomial; [A]₀/(2k) is Rust's own correctly rounded division wherever 2k is finite). The two with a sum inside,
+#   1/(1/[A]₀ + k·t) and Vmax·[S]/(Km + [S]), get ADR 0002 #20's semantics: Rust's operation sequence evaluated with an
+#   unbounded exponent (src/mathx.cyr's _km_ux_*), the final division rounded once into binary64, behind a cheap test
+#   that proves Rust's chain stayed in the normal range, so every such input keeps Rust's bits. Rust's checks, Err codes
+#   and order are kept.
 # - lineweaver_burk's (slope, intercept) tuple becomes the caller's buffer of two f64 (16 bytes,
 #   `var lb[16];`), as peng_robinson_z_roots's Vec: Ok(2), the count written, with the slope at out and the
 #   intercept at out + 8; on Err the buffer is untouched.
@@ -11766,15 +12563,56 @@ fn first_order_concentration(initial: f64, rate_constant: f64, time: f64): f64 {
 # The concentration remaining after second-order decay, 1/[A] = 1/[A]₀ + k·t, in mol/L (in (0, [A]₀]), from
 # [A]₀ in mol/L, k in L·mol⁻¹·s⁻¹ and t in s. Ok([A]); Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ is not positive
 # and finite; Err(KM_ERR_INVALID_INPUT) if k or t is negative or not finite (k·t ≤ −1/[A]₀ would give an infinite
-# or negative concentration). Mirrors `kinetics::second_order_concentration`.
+# or negative concentration). ADR 0002 #28: Rust's 1/(1/[A]₀ + k·t) evaluated with an unbounded exponent, the final
+# division rounded once (Rust's bits wherever its chain stays in the normal range). Mirrors
+# `kinetics::second_order_concentration`, with ADR 0002 #28.
 #must_use
 fn second_order_concentration(initial: f64, rate_constant: f64, time: f64): Result {
     if (_km_is_positive(initial) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
     if (_km_is_non_negative(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(time) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var inv: f64 = (1.0 / initial) + (rate_constant * time);
+    var c, ok = _km_second_order_fast(initial, rate_constant, time);
+    if (ok == 1) { return Ok(c); }
+    var u: f64 = _km_second_order_ux(initial, rate_constant, time);
+    return Ok(u);
+}
+
+# second_order_concentration's fast path, for its validated inputs: (Rust's 1/(1/[A]₀ + k·t), 1) while that chain
+# provably is the unbounded-exponent one (ADR 0002 #28, #20's semantics), or (0, 0). The test: 1/[A]₀ and a nonzero
+# k·t in [2⁻¹⁰²¹, DBL_MAX] (a result that large is the 53-bit rounding of an exact value above 2⁻¹⁰²², in the normal
+# range, where binary64's rounding is the 53-bit one; a finite one is not past it), k·t = 0 only from a zero factor
+# (exact), and the sum of the two non-negative terms finite (at least 2⁻¹⁰²¹: its rounding is the 53-bit one). The
+# final 1/sum is then one IEEE division of the same operand, rounded once in both.
+#must_use
+fn _km_second_order_fast(initial: f64, rate_constant: f64, time: f64): (f64, i64) {
+    var a: f64 = 1.0 / initial;
+    var b: f64 = rate_constant * time;
+    var inv: f64 = a + b;
     var c: f64 = 1.0 / inv;
-    return Ok(c);
+    var lo: f64 = 0x0020000000000000;       # 2⁻¹⁰²¹
+    var hi: f64 = 0x7FEFFFFFFFFFFFFF;       # DBL_MAX
+    var bok = 0;
+    if (b >= lo && b <= hi) { bok = 1; }
+    if (b == 0.0 && (rate_constant == 0.0 || time == 0.0)) { bok = 1; }
+    if (a >= lo && a <= hi && bok == 1 && inv <= hi) { return (c, 1); }
+    return (0.0, 0);
+}
+
+# second_order_concentration with an unbounded exponent (ADR 0002 #28), for its validated inputs: Rust's
+# 1/(1/[A]₀ + k·t) with every operation rounded to 53 bits and nothing over- or underflowing (src/mathx.cyr's _km_ux_*),
+# the final division rounded once into binary64 (_km_ux_div_f64: its subnormal grid, or ±∞ past DBL_MAX).
+#must_use
+fn _km_second_order_ux(initial: f64, rate_constant: f64, time: f64): f64 {
+    var one: f64 = 1.0;
+    var os, oe = _km_ux_from(one);
+    var cs, ce = _km_ux_from(initial);
+    var as1, ae = _km_ux_div(os, oe, cs, ce);
+    var ks, ke = _km_ux_from(rate_constant);
+    var ts, te = _km_ux_from(time);
+    var bs, be = _km_ux_mul(ks, ke, ts, te);
+    var ss, se = _km_ux_add(as1, ae, bs, be);
+    var c: f64 = _km_ux_div_f64(os, oe, ss, se);
+    return c;
 }
 
 # The zero-order concentration [A] = [A]₀ − k·t in mol/L, from [A]₀ in mol/L, k in mol·L⁻¹·s⁻¹ and t in s, or
@@ -11790,13 +12628,22 @@ fn zero_order_concentration(initial: f64, rate_constant: f64, time: f64): f64 {
 
 # The zero-order half-life t½ = [A]₀/(2k) in s, from [A]₀ in mol/L and k in mol·L⁻¹·s⁻¹. Ok(t½);
 # Err(KM_ERR_INVALID_INPUT) if k is not positive and finite; Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ is not
-# positive and finite (k checked first). Mirrors `kinetics::zero_order_half_life`.
+# positive and finite (k checked first). ADR 0002 #28: the correctly rounded [A]₀/(2k) — Rust's own division wherever
+# 2k is finite (2k is then exact, and one IEEE division of exact operands rounds the exact quotient once, subnormal
+# results included), and the correctly rounded monomial past it (k ≥ 2¹⁰²³, where Rust's 2k = ∞ gives 0). Mirrors
+# `kinetics::zero_order_half_life`, with ADR 0002 #28.
 #must_use
 fn zero_order_half_life(initial: f64, rate_constant: f64): Result {
     if (_km_is_positive(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(initial) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
-    var t: f64 = initial / (2.0 * rate_constant);
-    return Ok(t);
+    var d: f64 = 2.0 * rate_constant;
+    if (d < _KM_INF) {
+        var t: f64 = initial / d;
+        return Ok(t);
+    }
+    var two: f64 = 2.0;
+    var r: f64 = _km_cr_div2(initial, two, rate_constant);
+    return Ok(r);
 }
 
 # The general nth-order half-life t½ = (2^(n−1) − 1) / ((n − 1)·k·[A]₀^(n−1)) in s, for any finite order n ≠ 1,
@@ -11829,13 +12676,14 @@ fn nth_order_half_life(initial: f64, rate_constant: f64, order: f64): Result {
 # (k₂ ≫ k₁). From the first-order rate constants k₁, k₂ in s⁻¹ and [A] in mol/L. Ok([B]_ss);
 # Err(KM_ERR_INVALID_INPUT) if k₂ is not positive and finite or k₁ is negative or not finite;
 # Err(KM_ERR_INVALID_CONCENTRATION) if [A] is negative or not finite. Mirrors
-# `kinetics::steady_state_intermediate`.
+# `kinetics::steady_state_intermediate`. ADR 0002 #28: the correctly rounded k₁·[A]/k₂, where Rust's (k₁·[A])/k₂ rounds
+# twice; a zero k₁ or [A] gives Rust's signed zero.
 #must_use
 fn steady_state_intermediate(k1: f64, concentration_a: f64, k2: f64): Result {
     if (_km_is_positive(k2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(k1) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(concentration_a) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
-    var b: f64 = (k1 * concentration_a) / k2;
+    var b: f64 = _km_cr_mul_div(k1, concentration_a, k2);
     return Ok(b);
 }
 
@@ -11853,13 +12701,15 @@ fn steady_state_rate(k_slow: f64, concentration: f64): f64 {
 # mol·L⁻¹·s⁻¹, from the fast equilibrium's k₁ (`k_forward`) and k₋₁ (`k_reverse`, same units), k₂ (`k_slow`,
 # s⁻¹) and [A] in mol/L. Ok(rate); Err(KM_ERR_INVALID_INPUT) if k₋₁ is not positive and finite or k₁ or k₂ is
 # negative or not finite; Err(KM_ERR_INVALID_CONCENTRATION) if [A] is negative or not finite. Mirrors
-# `kinetics::pre_equilibrium_rate`.
+# `kinetics::pre_equilibrium_rate`. ADR 0002 #28: the correctly rounded k₂·k₁·[A]/k₋₁, where Rust's
+# (k₂·(k₁/k₋₁))·[A] rounds three times (and is 0·∞ = NaN where k₁/k₋₁ or the product overflows and a factor is 0: the
+# value is that 0); a zero factor gives its signed zero.
 #must_use
 fn pre_equilibrium_rate(k_forward: f64, k_reverse: f64, k_slow: f64, concentration_a: f64): Result {
     if (_km_is_positive(k_reverse) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(k_forward) != 1 || _km_is_non_negative(k_slow) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(concentration_a) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
-    var rate: f64 = (k_slow * (k_forward / k_reverse)) * concentration_a;
+    var rate: f64 = _km_cr_mul3_div(k_slow, k_forward, concentration_a, k_reverse);
     return Ok(rate);
 }
 
@@ -11868,15 +12718,51 @@ fn pre_equilibrium_rate(k_forward: f64, k_reverse: f64, k_slow: f64, concentrati
 # The Michaelis–Menten rate v = Vmax·[S]/(Km + [S]), from the maximum rate Vmax in mol·L⁻¹·s⁻¹, the Michaelis
 # constant Km (the substrate concentration at half Vmax) in mol/L and the substrate concentration [S] in mol/L.
 # Ok(v) in the units of Vmax; Err(KM_ERR_INVALID_INPUT) if Vmax or Km is not positive and finite (Vmax checked
-# first); Err(KM_ERR_INVALID_CONCENTRATION) if [S] is negative or not finite. Mirrors
-# `kinetics::michaelis_menten`.
+# first); Err(KM_ERR_INVALID_CONCENTRATION) if [S] is negative or not finite. ADR 0002 #28: Rust's
+# (Vmax·[S])/(Km + [S]) evaluated with an unbounded exponent, the final division rounded once (Rust's bits wherever
+# its chain stays in the normal range). Mirrors `kinetics::michaelis_menten`, with ADR 0002 #28.
 #must_use
 fn michaelis_menten(v_max: f64, km: f64, substrate: f64): Result {
     if (_km_is_positive(v_max) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(km) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(substrate) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
-    var v: f64 = (v_max * substrate) / (km + substrate);
-    return Ok(v);
+    var v, ok = _km_michaelis_menten_fast(v_max, km, substrate);
+    if (ok == 1) { return Ok(v); }
+    var u: f64 = _km_michaelis_menten_ux(v_max, km, substrate);
+    return Ok(u);
+}
+
+# michaelis_menten's fast path, for its validated inputs: (Rust's (Vmax·[S])/(Km + [S]), 1) while that chain provably is
+# the unbounded-exponent one (ADR 0002 #28, #20's semantics), or (0, 0). The test: Vmax·[S] in [2⁻¹⁰²¹, DBL_MAX] (the
+# 53-bit rounding of an exact value in the normal range), or 0 from [S] = ±0 (exact); and Km + [S] finite (a sum of two
+# non-negative doubles: below 2⁻¹⁰²¹ it is exact, above it the 53-bit rounding). The final quotient is then one IEEE
+# division of the same operands, rounded once in both.
+#must_use
+fn _km_michaelis_menten_fast(v_max: f64, km: f64, substrate: f64): (f64, i64) {
+    var p: f64 = v_max * substrate;
+    var d: f64 = km + substrate;
+    var v: f64 = p / d;
+    var lo: f64 = 0x0020000000000000;       # 2⁻¹⁰²¹
+    var hi: f64 = 0x7FEFFFFFFFFFFFFF;       # DBL_MAX
+    var pok = 0;
+    if (p >= lo && p <= hi) { pok = 1; }
+    if (substrate == 0.0) { pok = 1; }
+    if (pok == 1 && d <= hi) { return (v, 1); }
+    return (0.0, 0);
+}
+
+# michaelis_menten with an unbounded exponent (ADR 0002 #28), for its validated inputs: Rust's (Vmax·[S])/(Km + [S])
+# with every operation rounded to 53 bits and nothing over- or underflowing (src/mathx.cyr's _km_ux_*), the final
+# division rounded once into binary64 (_km_ux_div_f64: its subnormal grid, or ±∞ past DBL_MAX).
+#must_use
+fn _km_michaelis_menten_ux(v_max: f64, km: f64, substrate: f64): f64 {
+    var vs, ve = _km_ux_from(v_max);
+    var ks, ke = _km_ux_from(km);
+    var ss, se = _km_ux_from(substrate);
+    var ps, pe = _km_ux_mul(vs, ve, ss, se);
+    var ds, de = _km_ux_add(ks, ke, ss, se);
+    var v: f64 = _km_ux_div_f64(ps, pe, ds, de);
+    return v;
 }
 
 # The Lineweaver–Burk linearisation 1/v = (Km/Vmax)·(1/[S]) + 1/Vmax: the plot's slope Km/Vmax (s) and intercept
@@ -12646,7 +13532,9 @@ fn assign_oxidation_states(atoms, n, overall_charge, out, cap): Result {
 # the arithmetic changes. Every operand is a binary64 value, so every quantity below is an exact rational:
 # - #24: percent_yield RN(100·a/t), theoretical_yield_moles RN(m·p/c) (m and c at #25's index), percent_composition
 #   RN(mass·count·100/mw) per atom (mw molecular_weight's own double): _km_cr_mul_div, rounded ONCE (nearest, ties to
-#   even, subnormal results on the 2⁻¹⁰⁷⁴ grid, ±∞ only past DBL_MAX). Rust's (a/t)·100, (m/c)·p and
+#   even, subnormal results on the 2⁻¹⁰⁷⁴ grid, ±∞ only past DBL_MAX). Written here in M4f-2; since the overflow audit's
+#   B1 it is src/mathx.cyr's, the 2/1 shape of the correctly rounded monomial _km_cr_mono (the same value on every
+#   argument). Rust's (a/t)·100, (m/c)·p and
 #   ((mass·count)/mw)·100 round two to four times (1–2 ulp off on about a quarter of inputs; 0 or ∞ at the range ends
 #   where the value is representable).
 # - #25: limiting_reagent replaces its minimum i₀ by i when mᵢ·c_{i₀} < m_{i₀}·cᵢ exactly (the first index on an exact
@@ -12657,111 +13545,6 @@ fn assign_oxidation_states(atoms, n, overall_charge, out, cap): Result {
 # - #26: empirical_formula with exact mole amounts, their exact minimum, exact ratios and the exact tolerance 1/10
 #   (_km_emp_close_fast / _km_emp_close_exact); see empirical_formula.
 # Zero operands keep Rust's expression (an exact ±0, Rust's sign).
-
-# RN(x·y/z), rounded once, for positive finite doubles x, y, z (subnormal operands and results included): the fast path,
-# then the exact path where it declines. Rust's form of #24's three functions differs from it by 1–2 ulp on about a
-# quarter of inputs.
-#must_use
-fn _km_cr_mul_div(x: f64, y: f64, z: f64): f64 {
-    var r, ok = _km_mul_div_fast(x, y, z);
-    if (ok == 1) { return r; }
-    var a: f64 = _km_mul_div_acc(x, y, z);
-    return a;
-}
-
-# RN(x·y/z) by the fast path, for positive finite doubles: (RN, 1), or (0, 0) when an operand is subnormal or the result
-# may leave the normal range. With x = sₓ·2^eₓ (sₓ in [1, 2)), likewise y and z, and k = eₓ + e_y − e_z: x·y/z = F·2^k
-# with F = sₓs_y/s_z in (½, 4). N = sₓ·s_y = p_h + p_l exactly (TwoProduct: both in [1, 2), the error a multiple of
-# 2⁻¹⁰⁴), and D = s_z is exact, so src/mathx.cyr's _km_dd_div_cr steps (inline, with d_l = 0: y₀ = RN(p_h/D), the
-# residual r from an exact TwoProduct, δ = RN(r/D)) have exact operands, and its proof gives y₀ + RN(δ − ε) < F <
-# y₀ + RN(δ + ε) for ε = 2⁻¹⁰⁰·y₀ (n_h in [1, 4], d_h in [1, 2) and n_h/d_h in [½, 4], inside its [2⁻⁹⁰⁰, 2⁹⁰⁰]): when
-# z₁ = RN(y₀ + RN(δ − ε)) and z₂ = RN(y₀ + RN(δ + ε)) agree, F rounds to them (exact values pass); otherwise the one
-# rounding boundary between, the midpoint of z₁ and z₂, decides, exactly (_km_mul_div_tie; midpoints are common here:
-# m·3/2 is one whenever 3m has 54 bits). For −1021 ≤ k ≤ 1021, F·2^k > 2⁻¹⁰²² is in the normal range, where the binary64
-# grid is the 53-bit grid scaled, so RN(F·2^k) = RN(F)·2^k: RN(F) ≤ 4 keeps it at most 2¹⁰²³ (finite), 2^k is a normal
-# double and the product exact.
-#must_use
-fn _km_mul_div_fast(x: f64, y: f64, z: f64): (f64, i64) {
-    var bx = _km_bits(x);
-    var by = _km_bits(y);
-    var bz = _km_bits(z);
-    var nmin = 0x0010000000000000;
-    if (bx < nmin || by < nmin || bz < nmin) { return (0.0, 0); }      # a subnormal operand
-    var k = (bx >> 52) + (by >> 52) - (bz >> 52) - 1023;                # eₓ + e_y − e_z
-    if (k < 0 - 1021 || k > 1021) { return (0.0, 0); }
-    var mask = 0x000FFFFFFFFFFFFF;
-    var one = 0x3FF0000000000000;
-    var sxb = (bx & mask) | one;
-    var syb = (by & mask) | one;
-    var szb = (bz & mask) | one;
-    var sx: f64 = sxb;
-    var sy: f64 = syb;
-    var sz: f64 = szb;
-    var ph, pl = _km_two_prod(sx, sy);
-    var y0: f64 = ph / sz;
-    var ta, tb = _km_two_prod(y0, sz);
-    var s0: f64 = ph - ta;
-    var s1: f64 = s0 - tb;
-    var rr: f64 = s1 + pl;
-    var dq: f64 = rr / sz;
-    var k100: f64 = 0x39B0000000000000;     # 2⁻¹⁰⁰
-    var eps: f64 = y0 * k100;
-    var lo: f64 = dq - eps;
-    var hi: f64 = dq + eps;
-    var z1: f64 = y0 + lo;
-    var z2: f64 = y0 + hi;
-    var f: f64 = z1;
-    if (z1 != z2) { f = _km_mul_div_tie(ph, pl, sz, z1, z2); }
-    var sc: f64 = _km_cr_pow2(k);
-    var r: f64 = f * sc;
-    return (r, 1);
-}
-
-# RN(F) for F = N/D (N = p_h + p_l, D = s_z, as in _km_mul_div_fast) where the rounding test left two adjacent doubles
-# z₁ < z₂ and F strictly between points that round to them: the midpoint μ = z₁ + u/2 (u = z₂ − z₁, exact) is the only
-# boundary there, so RN(F) is z₁ if F < μ, z₂ if F > μ, and the even one of the two if F = μ. The sign of F − μ is that
-# of T = N − D·μ = (p_h − a) + p_l − b − h, with D·z₁ = a + b (TwoProduct) and h = D·(u/2) exact: p_h − a is exact by
-# Sterbenz (a and p_h are within 2⁻⁵¹ of N), and each of the four terms is a multiple of 2⁻¹⁰⁷ (p_h, p_l of 2⁻¹⁰⁴; z₁ ≥
-# ½ − 2⁻⁵⁴ of 2⁻⁵⁴, so a, b of 2⁻¹⁰⁶; u/2 ≥ 2⁻⁵⁵, so h of 2⁻¹⁰⁷) below 2⁻⁴⁸ in magnitude (|N − D·z₁| ≤ D·u < 2⁻⁴⁹):
-# scaled by 2¹⁰⁷ (exact) each is an integer below 2⁵⁹, so T·2¹⁰⁷ is their exact sum in 64-bit integers.
-#must_use
-fn _km_mul_div_tie(ph: f64, pl: f64, sz: f64, z1: f64, z2: f64): f64 {
-    var u: f64 = z2 - z1;
-    var hu: f64 = u * 0.5;
-    var a, b = _km_two_prod(sz, z1);
-    var h: f64 = sz * hu;
-    var e1: f64 = ph - a;
-    var p107: f64 = 0x46A0000000000000;     # 2¹⁰⁷
-    var ie: f64 = e1 * p107;
-    var il: f64 = pl * p107;
-    var ib: f64 = b * p107;
-    var ih: f64 = h * p107;
-    var t = f64_to(ie) + f64_to(il) - f64_to(ib) - f64_to(ih);
-    if (t > 0) { return z2; }
-    if (t < 0) { return z1; }
-    if ((_km_bits(z1) & 1) == 0) { return z1; }
-    return z2;
-}
-
-# RN(x·y/z) by the exact path alone, for positive finite doubles: x = Mₓ·2^Eₓ (2⁵² ≤ M < 2⁵³, a subnormal's E below
-# −1074), likewise y and z, and x·y/z = (MₓM_y)/M_z·2^(Eₓ + E_y − E_z), rounded once by src/mathx.cyr's _km_cr_ratio
-# (the numerator below 2¹⁰⁶, the exponent within ±3,400).
-#must_use
-fn _km_mul_div_acc(x: f64, y: f64, z: f64): f64 {
-    var mx, ex = _km_f64_int(_km_bits(x));
-    var my, ey = _km_f64_int(_km_bits(y));
-    var mz, ez = _km_f64_int(_km_bits(z));
-    var a[64];
-    var b[64];
-    var p[64];
-    var q[64];
-    _km_bn_set(&a, mx);
-    _km_bn_set(&b, my);
-    _km_bn_mul(&p, &a, &b);
-    _km_bn_set(&q, mz);
-    var v: f64 = _km_cr_ratio(&p, &q, ex + ey - ez);
-    return v;
-}
 
 # 1 if m₁/c₁ < m₂/c₂ exactly, for finite m₁, m₂ ≥ 0 (−0 included) and finite c₁, c₂ > 0: m₁·c₂ < m₂·c₁. A zero m is the
 # smallest ratio (two zeros tie: 0). Otherwise, with each value M·2^E (2⁵² ≤ M < 2⁵³, _km_f64_int), the products are

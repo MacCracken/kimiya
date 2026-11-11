@@ -4,8 +4,16 @@
 #
 # Calorimetry functions use grams and J/(g·°C) (a temperature *difference* in °C equals one in K);
 # enthalpies are in J or J/mol as passed in. Every function is + − × ÷ in Rust's operation order,
-# so every result is bit-identical (class B). WATER_SPECIFIC_HEAT is KM_WATER_SPECIFIC_HEAT in
-# src/constants.cyr (generated; thermo has no data file of its own).
+# so every result is bit-identical (class B), except the two below. WATER_SPECIFIC_HEAT is
+# KM_WATER_SPECIFIC_HEAT in src/constants.cyr (generated; thermo has no data file of its own).
+# - ADR 0002 #27 (the overflow audit's B1; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide
+#   audit" and "round once"): heat_transfer's (m·c)·ΔT and specific_heat_from_calorimetry's q/(m·ΔT) are each one
+#   product or quotient of inputs, so the port returns the exact value rounded once (src/mathx.cyr's correctly
+#   rounded monomial, _km_cr_mul3 and _km_cr_div2), where Rust rounds twice (1–2 ulp off on about a quarter of
+#   inputs) and an intermediate m·c or m·ΔT that over- or underflows gives ±∞, 0 or NaN although the value is
+#   representable (specific_heat_from_calorimetry(4184, 1000, DBL_MAX) is 0 in Rust, 2.33·10⁻³⁰⁸ here; m·c = ∞ with
+#   ΔT = 0 is Rust's NaN, here the exact 0). Rust's checks and Err codes are kept, and heat_transfer's non-finite
+#   inputs keep Rust's expression (IEEE's ±∞ and NaN).
 # - A Rust slice `&[f64]` is a pointer to n f64 values and the count n. Rust's f64 `sum` folds from
 #   −0.0, so the sum of no values is −0.0, as here. A count below 0, or a null pointer with values,
 #   is no slice: the result is NaN (these functions have no error channel).
@@ -30,12 +38,20 @@ fn _km_sum(xs, n): f64 {
     return s;
 }
 
-# Heat transfer q = m × c × ΔT in J, from the mass in g, the specific heat in J/(g·°C) and ΔT in °C.
-# Mirrors `thermo::heat_transfer`.
+# Heat transfer q = m × c × ΔT in J, from the mass in g, the specific heat in J/(g·°C) and ΔT in °C. ADR 0002 #27:
+# the correctly rounded m·c·ΔT for finite inputs (its sign the product's; a zero factor gives that signed zero), where
+# Rust's (m·c)·ΔT rounds twice; a non-finite input gives Rust's (m·c)·ΔT. Mirrors `thermo::heat_transfer`, with ADR
+# 0002 #27.
 #must_use
 fn heat_transfer(mass_g: f64, specific_heat: f64, delta_t: f64): f64 {
-    var q: f64 = (mass_g * specific_heat) * delta_t;
-    return q;
+    var f, ok = _km_mul3_fast(mass_g, specific_heat, delta_t);
+    if (ok == 1) { return f; }
+    if (_km_is_finite(mass_g) != 1 || _km_is_finite(specific_heat) != 1 || _km_is_finite(delta_t) != 1) {
+        var q: f64 = (mass_g * specific_heat) * delta_t;
+        return q;
+    }
+    var r: f64 = _km_cr_mul3(mass_g, specific_heat, delta_t);
+    return r;
 }
 
 # Hess's law: the total enthalpy change, the sum of the n step enthalpies at `enthalpies_j` in
@@ -61,8 +77,9 @@ fn enthalpy_from_formation(products_hf, np, reactants_hf, nr): f64 {
 
 # Specific heat at constant pressure from calorimetry, c_p = q / (m × ΔT) in J/(g·°C), from q in J,
 # m in g and ΔT in °C (or K): Ok(c_p), or Err(KM_ERR_INVALID_INPUT) if q is not finite, m is not
-# positive and finite, or ΔT is non-finite or zero (|ΔT| < 10⁻¹², hisab's EPSILON_F64). Mirrors
-# `thermo::specific_heat_from_calorimetry`.
+# positive and finite, or ΔT is non-finite or zero (|ΔT| < 10⁻¹², hisab's EPSILON_F64). ADR 0002 #27:
+# the correctly rounded q/(m·ΔT), where Rust's q/(m·ΔT) rounds twice (and m·ΔT can over- or underflow);
+# q = ±0 gives Rust's signed zero. Mirrors `thermo::specific_heat_from_calorimetry`, with ADR 0002 #27.
 #must_use
 fn specific_heat_from_calorimetry(energy_j: f64, mass_g: f64, delta_t: f64): Result {
     if (_km_is_finite(energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -70,6 +87,6 @@ fn specific_heat_from_calorimetry(energy_j: f64, mass_g: f64, delta_t: f64): Res
     var eps: f64 = EPSILON_F64;
     var adt: f64 = f64_abs(delta_t);
     if (_km_is_finite(delta_t) != 1 || adt < eps) { return Err(KM_ERR_INVALID_INPUT); }
-    var c: f64 = energy_j / (mass_g * delta_t);
+    var c: f64 = _km_cr_div2(energy_j, mass_g, delta_t);
     return Ok(c);
 }

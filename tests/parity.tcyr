@@ -345,7 +345,35 @@ fn _par_in_slice(k): i64 {
     return buf;
 }
 
-# `thermo` rows: src/thermo.cyr. hess_law's input is one slice, enthalpy_from_formation's two.
+# The overflow audit's B1 (ADR 0002 #27, #28): a row of thermo's, phase's or kinetics' functions whose note names the
+# port's value (the correctly rounded monomial, or Rust's sequence with an unbounded exponent) must be that value bit
+# for bit (_par_map_exact: mapped, accepted under ADR 2, even within class B's tolerance), counted per function; an
+# unnoted row is compared with the oracle as usual.
+var _par_mapped = 0;                         # the ADR mapping the current row took (the Antoine mapping's below)
+var _par_adr27_heat = 0;                     # #27: heat_transfer, specific_heat_from_calorimetry,
+var _par_adr27_cal = 0;                      # boiling_point_elevation, freezing_point_depression, osmotic_pressure
+var _par_adr27_bp = 0;
+var _par_adr27_fp = 0;
+var _par_adr27_osm = 0;
+var _par_adr28_soc = 0;                      # #28: second_order_concentration, zero_order_half_life,
+var _par_adr28_zhl = 0;                      # steady_state_intermediate, pre_equilibrium_rate, michaelis_menten
+var _par_adr28_ssi = 0;
+var _par_adr28_pre = 0;
+var _par_adr28_mm = 0;
+
+# The got list for an f64-valued function's row whose note may name the port's value under ADR 0002 #`adr` (the C string
+# `tag`): mapped when it does, compared with the oracle as usual otherwise.
+fn _par_got_noted_f(adr, tag, v: f64) {
+    if (_par_note_has(tag) == 1) {
+        _par_map_exact(adr, _km_bits(v), 102);
+        return 0;
+    }
+    _par_got_f(v);
+    return 0;
+}
+
+# `thermo` rows: src/thermo.cyr. hess_law's input is one slice, enthalpy_from_formation's two. ADR 0002 #27:
+# heat_transfer and specific_heat_from_calorimetry rows noted with the port's correctly rounded value are mapped.
 fn _par_thermo(fp, fl): i64 {
     if (_par_eq(fp, fl, "thermo::hess_law") == 1) {
         var r: f64 = hess_law(_par_in_slice(0), _par_in(0));
@@ -364,12 +392,14 @@ fn _par_thermo(fp, fl): i64 {
     var z: f64 = _par_in(2);
     if (_par_eq(fp, fl, "thermo::heat_transfer") == 1) {
         var r: f64 = heat_transfer(x, y, z);
-        _par_got_f(r);
+        _par_got_noted_f(27, "[ADR 0002 #27:", r);
+        if (_par_mapped == 27) { _par_adr27_heat = _par_adr27_heat + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "thermo::specific_heat_from_calorimetry") == 1) {
         var t, v = specific_heat_from_calorimetry(x, y, z);
-        _par_got_res(t, v);
+        _par_got_noted(27, "[ADR 0002 #27:", t, v);
+        if (_par_mapped == 27) { _par_adr27_cal = _par_adr27_cal + 1; }
         return 1;
     }
     return 0;
@@ -563,8 +593,8 @@ fn _par_got_coeffs(c: KmAntoineCoeffs) {
 # - oracle NaN, or T out of range (a non-finite range end is no range): the port must be Err. The
 #   row is then *mapped*, counted as accepted under ADR 2 (_par_mapped = 2) and tallied below; an
 #   Ok there is a FAIL.
-# _par_mapped is cleared for every row by _par_dispatch.
-var _par_mapped = 0;
+# _par_mapped (declared with the B1 counters above thermo's dispatcher, which reads it first) is cleared for every row
+# by _par_dispatch.
 var _par_map_nan = 0;     # rows mapped because the oracle is NaN (pole, non-finite input)
 var _par_map_range = 0;   # rows mapped because T is out of range (oracle finite: extrapolation)
 var _par_map_ok = 0;      # in-range, finite rows compared as values
@@ -661,17 +691,20 @@ fn _par_phase(fp, fl): i64 {
     }
     if (_par_eq(fp, fl, "phase::boiling_point_elevation") == 1) {
         var r: f64 = boiling_point_elevation(x, y, z);
-        _par_got_f(r);
+        _par_got_noted_f(27, "[ADR 0002 #27:", r);
+        if (_par_mapped == 27) { _par_adr27_bp = _par_adr27_bp + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "phase::freezing_point_depression") == 1) {
         var r: f64 = freezing_point_depression(x, y, z);
-        _par_got_f(r);
+        _par_got_noted_f(27, "[ADR 0002 #27:", r);
+        if (_par_mapped == 27) { _par_adr27_fp = _par_adr27_fp + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "phase::osmotic_pressure") == 1) {
         var t, v = osmotic_pressure(x, y, z);
-        _par_got_res(t, v);
+        _par_got_noted(27, "[ADR 0002 #27:", t, v);
+        if (_par_mapped == 27) { _par_adr27_osm = _par_adr27_osm + 1; }
         return 1;
     }
     var w: f64 = _par_in(3);
@@ -957,7 +990,9 @@ fn _par_electrochemistry(fp, fl): i64 {
 }
 
 # `kinetics` rows: src/kinetics.cyr. Every input is an f64. lineweaver_burk's Ok output is the slope and the
-# intercept the port writes to the caller's buffer (the Rust tuple, port plan §6.4); its count must be 2.
+# intercept the port writes to the caller's buffer (the Rust tuple, port plan §6.4); its count must be 2. ADR 0002 #28:
+# second_order_concentration, zero_order_half_life, steady_state_intermediate, pre_equilibrium_rate and
+# michaelis_menten rows noted with the port's value are mapped.
 fn _par_kinetics(fp, fl): i64 {
     var x: f64 = _par_in(0);
     if (_par_eq(fp, fl, "kinetics::half_life_first_order") == 1) {
@@ -973,7 +1008,8 @@ fn _par_kinetics(fp, fl): i64 {
     }
     if (_par_eq(fp, fl, "kinetics::zero_order_half_life") == 1) {
         var t, v = zero_order_half_life(x, y);
-        _par_got_res(t, v);
+        _par_got_noted(28, "[ADR 0002 #28:", t, v);
+        if (_par_mapped == 28) { _par_adr28_zhl = _par_adr28_zhl + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "kinetics::eyring_rate") == 1) {
@@ -1003,7 +1039,8 @@ fn _par_kinetics(fp, fl): i64 {
     }
     if (_par_eq(fp, fl, "kinetics::second_order_concentration") == 1) {
         var t, v = second_order_concentration(x, y, z);
-        _par_got_res(t, v);
+        _par_got_noted(28, "[ADR 0002 #28:", t, v);
+        if (_par_mapped == 28) { _par_adr28_soc = _par_adr28_soc + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "kinetics::zero_order_concentration") == 1) {
@@ -1018,12 +1055,14 @@ fn _par_kinetics(fp, fl): i64 {
     }
     if (_par_eq(fp, fl, "kinetics::steady_state_intermediate") == 1) {
         var t, v = steady_state_intermediate(x, y, z);
-        _par_got_res(t, v);
+        _par_got_noted(28, "[ADR 0002 #28:", t, v);
+        if (_par_mapped == 28) { _par_adr28_ssi = _par_adr28_ssi + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "kinetics::michaelis_menten") == 1) {
         var t, v = michaelis_menten(x, y, z);
-        _par_got_res(t, v);
+        _par_got_noted(28, "[ADR 0002 #28:", t, v);
+        if (_par_mapped == 28) { _par_adr28_mm = _par_adr28_mm + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "kinetics::eyring_rate_from_activation") == 1) {
@@ -1039,7 +1078,8 @@ fn _par_kinetics(fp, fl): i64 {
     }
     if (_par_eq(fp, fl, "kinetics::pre_equilibrium_rate") == 1) {
         var t, v = pre_equilibrium_rate(x, y, z, w);
-        _par_got_res(t, v);
+        _par_got_noted(28, "[ADR 0002 #28:", t, v);
+        if (_par_mapped == 28) { _par_adr28_pre = _par_adr28_pre + 1; }
         return 1;
     }
     return 0;
@@ -2453,8 +2493,9 @@ fn _par_accepted(fp, fl, ip, il): i64 {
     # ADR 0002 #3: a SEMF row where the oracle's NaN (z > a or a = 0) is the port's Err(InvalidInput).
     if (_par_mapped == 3) { return 2; }
     # ADR 0002 #13 … #22: a row whose note names the port's exact value, which the port returned; #23 its whole result;
-    # #24 … #26 (M4f-2) stoichiometry's exact value, index or whole result.
-    if (_par_mapped >= 13 && _par_mapped <= 26) { return 2; }
+    # #24 … #26 (M4f-2) stoichiometry's exact value, index or whole result; #27, #28 (the overflow audit's B1) thermo's,
+    # phase's and kinetics' rounded-once or unbounded-exponent value.
+    if (_par_mapped >= 13 && _par_mapped <= 28) { return 2; }
     # ADR 0002 #7 (M4f): an oxidation-state row whose note names the port's exact rational states, or a balancing row
     # whose f64 matrix has no integer counterpart (the oracle's Err(InvalidInput)).
     if (_par_mapped == 7) { return 2; }
@@ -2463,13 +2504,13 @@ fn _par_accepted(fp, fl, ip, il): i64 {
 
 # 1 for an ADR whose accepted rows are counted but not printed row by row: ADR 0002 #4's Antoine mapping, #13 … #22's
 # exact-value rows (M4c … M4e-3; about 17,000 rows between them), #23's isotope rows (M4e-4), #7's oxidation-state
-# and balancing rows (M4f) and #24 … #26's stoichiometry rows (M4f-2), each summarised by _par_module_done with its
-# count; the validate.py proofs check every one of them. ADR 0002 #12's CFSE rows (13) and #3's SEMF rows (23) are
-# printed by name.
+# and balancing rows (M4f), #24 … #26's stoichiometry rows (M4f-2) and #27 / #28's (the overflow audit's B1), each
+# summarised by _par_module_done with its count; the validate.py proofs check every one of them. ADR 0002 #12's CFSE
+# rows (13) and #3's SEMF rows (23) are printed by name.
 #must_use
 fn _par_accepted_quiet(adr): i64 {
     if (adr == 2 && _par_mapped == 2) { return 1; }
-    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 26) { return 1; }
+    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 28) { return 1; }
     if (adr == 2 && _par_mapped == 7) { return 1; }
     return 0;
 }
@@ -2482,11 +2523,40 @@ fn _par_accepted_bits(adr): i64 {
     return 0;
 }
 
-# After the phase module: the ADR 0002 #4 mapping summary; after thermochem, ADR 0002 #1's; after organic, #6's; after
-# inorganic, #12's and #15's; after nuclear, #3's, #13's and #14's; after potential, #16's, #17's, #18's and #20's;
-# after spectroscopy, #19's, #21's (per function), #22's and #23's (per function); after stoichiometry, #7's (the
-# oxidation states, the integer matrix) and #24's (per function), #25's and #26's.
+# After the phase module: the ADR 0002 #27 (per function) and #4 mapping summaries; after thermo, #27's (per function);
+# after kinetics, #28's (per function); after thermochem, ADR 0002 #1's; after organic, #6's; after inorganic, #12's and
+# #15's; after nuclear, #3's, #13's and #14's; after potential, #16's, #17's, #18's and #20's; after spectroscopy,
+# #19's, #21's (per function), #22's and #23's (per function); after stoichiometry, #7's (the oxidation states, the
+# integer matrix) and #24's (per function), #25's and #26's.
 fn _par_module_done(mp, ml) {
+    if (_par_eq(mp, ml, "thermo") == 1) {
+        print("  ADR 0002 #27 rounded once: ", 29);
+        fmt_int(_par_adr27_heat + _par_adr27_cal);
+        print(" rows (heat_transfer ", 21);
+        fmt_int(_par_adr27_heat);
+        print(", specific_heat_from_calorimetry ", 33);
+        fmt_int(_par_adr27_cal);
+        print(") where the port's correctly rounded value differs from Rust's", 62);
+        println(" (accepted, ADR 2, counted, not listed)");
+        return 0;
+    }
+    if (_par_eq(mp, ml, "kinetics") == 1) {
+        print("  ADR 0002 #28 kinetics rationals: ", 35);
+        fmt_int(_par_adr28_soc + _par_adr28_zhl + _par_adr28_ssi + _par_adr28_pre + _par_adr28_mm);
+        print(" rows (second_order_concentration ", 34);
+        fmt_int(_par_adr28_soc);
+        print(", zero_order_half_life ", 23);
+        fmt_int(_par_adr28_zhl);
+        print(", steady_state_intermediate ", 28);
+        fmt_int(_par_adr28_ssi);
+        print(", pre_equilibrium_rate ", 23);
+        fmt_int(_par_adr28_pre);
+        print(", michaelis_menten ", 19);
+        fmt_int(_par_adr28_mm);
+        print(") where the port's rounded-once or unbounded-exponent value differs from Rust's", 79);
+        println(" (accepted, ADR 2, counted, not listed)");
+        return 0;
+    }
     if (_par_eq(mp, ml, "stoichiometry") == 1) {
         print("  ADR 0002 #7 exact oxidation states: ", 38);
         fmt_int(_par_adr7_ox);
@@ -2619,6 +2689,16 @@ fn _par_module_done(mp, ml) {
         return 0;
     }
     if (_par_eq(mp, ml, "phase") != 1) { return 0; }
+    print("  ADR 0002 #27 rounded once: ", 29);
+    fmt_int(_par_adr27_bp + _par_adr27_fp + _par_adr27_osm);
+    print(" rows (boiling_point_elevation ", 31);
+    fmt_int(_par_adr27_bp);
+    print(", freezing_point_depression ", 28);
+    fmt_int(_par_adr27_fp);
+    print(", osmotic_pressure ", 19);
+    fmt_int(_par_adr27_osm);
+    print(") where the port's correctly rounded value differs from Rust's", 62);
+    println(" (accepted, ADR 2, counted, not listed)");
     print("  ADR 0002 #4 Antoine mapping: ", 31);
     fmt_int(_par_map_ok);
     print(" in-range rows compared as values; accepted (ADR 2), port Err for ", 66);

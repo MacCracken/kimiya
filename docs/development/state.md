@@ -21,6 +21,7 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
 | M3 Solutions & electrochemistry | ✅ **done 2026-11-09.** M3a: `src/solution.cyr` (concentration units, pH, Henderson–Hasselbalch, the weak acid / base charge-balance Newton transcribed as `_km_charge_balance_root`, ionic strength over ion records, Debye–Hückel, Davies, Kohlrausch) with its ten constants generated into `src/constants.cyr`; generated `src/electrochemistry_data.cyr` (49 STANDARD_POTENTIALS rows, the first UTF-8 string blob) + `src/electrochemistry.cyr` (handles, Nernst, cell potentials, ΔG, Faraday's laws). M3b: `src/kinetics.cyr` (Arrhenius, the zero / first / second / nth-order laws and half-lives, steady state and pre-equilibrium, Michaelis–Menten, Lineweaver–Burk into the caller's two-f64 buffer, collision theory, Eyring). Golden `solution` 28,566 + `electrochemistry` 18,574 + `kinetics` 30,146 rows; at M3b 119,044 ok, 0 failed, 22,205 measured (the six kinetics class-C functions, gated since M3c), 10 pending, 441 accepted on all three targets; 131 Rust tests ported; surface parity 203/203; 7 benches vs Rust. Its primitives moved to the correctly rounded ones in M3c |
 | M3c Correct rounding (ADR 0006) | ✅ **done 2026-11-09.** M3c-1: the corrected oracle — `scripts/oracle/mpfr_ref.py` (MPFR 4.2 through ctypes), `validate.py --write-corrections` → `tests/golden/<module>.cr.tsv` (665 rows), the harness compares corrected rows against them. M3c-2: correctly rounded `_km_cr_exp`, `_km_cr_expm1`, `_km_cr_exp10`, `_km_cr_ln`, `_km_cr_log10`, `_km_cr_pow` in `src/mathx.cyr` (two-phase, Ziv), tables generated into `src/mathx_data.cyr` by `scripts/oracle/mathx_tables.py`, verified by `scripts/oracle/cr_verify.py` (≥ 1,000,000 arguments per primitive against MPFR, 0 mismatches, the same bits on every target) and `tests/mathx.tcyr`. M3c-3: every module on them in Rust's operation order (`_km_acos` / `_km_cos` kept; x^2.5 is `_km_cr_pow`); `_km_log10`, `_km_expm1`, `_km_log10_ln`, the `_km_ln` wrapper, `_km_pow_2_5` and `_km_dd_div` removed; every class-C function at bound 0; glibc-matching is a failure; 2,486 hard rows (subnormal exp × prefactor) added to `reaction`, `phase`, `thermochem`, `gas`. **143,071 ok, 0 failed, 0 measured, 10 pending, 1,105 accepted (ADR 6: 665; ADR 0002 #4: 440), 0 glibc-matching** on x86_64 ELF, x86_64 PE and aarch64, every class-C row 0 ulp (sin, atan2 and the 247 cos rows past \|x\| = 8 on the stdlib at 2 ulp); ADR 0004's row a plain ok; 15 test files, 0 warnings; surface parity 203/203 ([`port-parity.md`](port-parity.md) §9–§10) |
 | M4 Structure, nuclear & spectroscopy | ✅ **done 2026-11-10.** **M4b ✅ done 2026-11-09** — generated `src/organic_data.cyr` (`KmBondType`, `KmGeometry`, `KmFunctionalGroup` with their property columns: bond energies, ideal angles, the UTF-8 pattern blob, the polar / donor flags and ADR 0002 #6's new acceptor column: IUPAC 2011's criterion, weak acceptors included, every group but the alkane, one source per family) + `src/organic.cyr` (`bond_type_energy_kj`, `enthalpy_from_bonds` over bond records, `predict_geometry` → `Option`, `geometry_ideal_bond_angle`, the `functional_group_*` properties; ADR 0002 #6: `KM_GEOMETRY_T_SHAPED`, `functional_group_is_hydrogen_bond_donor`, `…_acceptor`); generated `src/inorganic_data.cyr` (`KmLigand`, the private octahedral occupancy and unpaired-electron tables read through the API, the 10 Madelung / Born constants, the 30 Shannon IONIC_RADII rows) + `src/inorganic.cyr` (CFSE exact by ADR 0002 #12, (3·e_g − 2·t₂g)/5 in one correctly rounded division, Δ_tet, the spectrochemical series, spin-only moments, Born–Landé, Born–Haber, `lookup_ionic_radius` handles). Golden `organic` 9,104 + `inorganic` 15,107 rows and the last 10 `constants` rows: **167,279 ok, 0 failed, 0 measured, 0 pending, 1,118 accepted (ADR 6: 665; ADR 2: 440 Antoine + 13 exact-CFSE rows, by name), 0 glibc-matching** on x86_64 ELF, x86_64 PE and aarch64, every M4b row 0 ulp from its reference; 51 Rust tests ported (+ 2 integration); surface parity 323/323. **M4c ✅ done 2026-11-09** — generated `src/nuclear_data.cyr` (the 18 ISOTOPES rows: label blob, `u8` Z, `u16` A, half-life, a UTF-8 decay-mode blob) + `src/nuclear.cyr` (decay constants and laws, mass defect and binding energies, the SEMF → `Result` by ADR 0002 #3, Q-values over slices, the two-step decay chain into the caller's buffer with Rust's equal-rate limit, the secular-equilibrium test, `lookup_isotope` handles), every transcendental correctly rounded; by the user's decision on the review, ADR 0002 #13 (N₀/2ⁿ rounded once where Rust's 2⁻ⁿ is not a normal double: correctly rounded for an integer n or N₀ = ±2^j, faithful otherwise), #14 (the exact λ_p < λ_d/100) and, for M4b's inorganic, #15 (the correctly rounded 4Δ/9 past Δ·4's overflow). Golden `nuclear` 54,057 rows (the SEMF over every Z ≤ A ≤ 3Z with A ≤ 300) + 23 corrected rows, `inorganic` 15,162: **219,266 ok, 0 failed, 0 measured, 0 pending, 3,243 accepted (ADR 6: 688; ADR 2: 440 Antoine + 13 CFSE + 23 SEMF + 1,812 N₀/2ⁿ + 208 secular + 59 Δ_tet, all but the Antoine ones by name), 0 glibc-matching** on all three targets, every row 0 ulp from its reference; 36 Rust tests ported; surface parity 347/347. **M4a ✅ done 2026-11-09** — correctly rounded `_km_cr_sin`, `_km_cr_cos`, `_km_cr_sincos`, `_km_cr_atan2`, `_km_cr_acos` (two-phase; Cody–Waite and Payne–Hanek reduction, generated tables, `_km_td_norm` for the accurate division and square root), verified against MPFR by `cr_verify.py` on about 1.0–1.1 million arguments each (100,000 through the accurate path) on all three targets. **M4d ✅ done 2026-11-09** — `src/potential.cyr` (Lennard-Jones, Morse, Coulomb, distances, bond and dihedral angles through three-f64 point pointers, on `_km_cr_exp` and `_km_cr_atan2`); gas.cyr on M4a's `_km_cr_acos` / `_km_cr_cos` (every gas row keeps its bits) and ADR 0005's double-double `_km_cos` / `_km_acos` removed; the `math` trig rows at bound 0 (no golden transcendental row on the stdlib); ADR 0002 #13 correctly rounded (`_km_cr_exp2_scaled`), the new #16 (σ·2^(1/6) correctly rounded), #17 (Lennard-Jones past 4·ε's overflow), #18 (the Morse width past 2·D_e's overflow). Golden `potential` 26,938 rows + 1 corrected: **244,803 ok, 0 failed, 0 measured, 0 pending, 4,644 accepted (ADR 6: 689; ADR 2: 440 Antoine + 13 CFSE + 23 SEMF + 1,810 N₀/2ⁿ + 208 secular + 59 Δ_tet + 1,041 r_min + 180 Lennard-Jones + 181 Morse width), 0 glibc-matching** on all three targets, every row 0 ulp from its reference; 33 Rust tests ported; surface parity 357/357. **M4e ✅ done 2026-11-09** — generated `src/spectroscopy_data.cyr` (`KmSpectralSeries` and its n_lower column, the isotope abundance table from the oracle's `isotope_abundances(z)` at every u8 z, Rust's private R_H read through the API) + `src/spectroscopy.cyr` (Beer–Lambert on `_km_cr_exp10` / `_km_cr_log10`, the photon conversions, the Bohr levels and the Rydberg formula, the spectral series, the oscillator and rotor, `isotope_pattern`'s pruned convolution with Rust's stable sort, `fft_spectrum` on hisab 1.4.0's `num::fft` transcribed with correctly rounded twiddles (ADR 0003 amendment), `find_peaks`; Vec results into caller buffers); ADR 0002 #19 (the wavenumbers' correctly rounded 1/(100·x), `_km_cr_hundredth_div`). Golden `spectroscopy` 52,985 rows + 118 corrected: **296,016 ok, 0 failed, 0 measured, 0 pending, 6,416 accepted (ADR 6: 807; ADR 2: … + 1,654 1/(100x)), 0 glibc-matching** on all three targets, every row 0 ulp from its reference; 62 Rust tests ported (+ 2 integration); surface parity 394/394. **M4e-2 ✅ done 2026-11-10** — ADR 0002 #20 (the user's decision, "Yes, prescale"): `distance_3d`, `bond_angle` and `dihedral_angle` evaluate Rust's sequence with an unbounded exponent range (the final √ / atan2 rounded once), Rust's chain kept as a fast path behind a proven range test, `src/mathx.cyr`'s general `_km_ux_*` helpers as the slow path (and the machinery of the library-wide audit after M4). Golden `potential` 31,761 rows (4,823 new edge rows, 3,605 mapped under #20) + 3 corrected: **297,232 ok, 0 failed, 0 measured, 0 pending, 10,023 accepted (ADR 6: 809; ADR 2: … + 3,605 unbounded-exponent geometry rows), 0 glibc-matching** on all three targets; no row whose Rust chain stays in the normal range changes. **M4e-3 ✅ done 2026-11-10** — ADR 0002 #21 and #22 (the user's decisions, "Compute exactly" and "Round once"): `bohr_energy_level`, `bohr_transition_energy`, `rydberg_wavelength` and `spectral_series_wavelength` return their exact rationals rounded once, `reduced_mass` the correctly rounded m₁·m₂/(m₁ + m₂) for every pair of positive finite masses; double-double fast paths with a rounding test (`_km_dd_mul`, `_km_dd_div_cr`) and an exact slow path on `src/mathx.cyr`'s new multi-word integers and `_km_cr_ratio(p, q, e)` (RN(p/q·2^e), for reuse by M4f and the overflow audit). Golden `spectroscopy` 66,691 rows (13,706 new: every exact Bohr level, the 13 transition ties of an exhaustive search and its exact-value families, n₁ = n₂ − 1 at every scale, the reduced mass's tie families, gaps and range ends): **301,484 ok, 0 failed, 0 measured, 0 pending, 19,477 accepted (ADR 6: 809; ADR 2: … + 6,617 exact Rydberg rationals + 2,837 exact reduced masses), 0 glibc-matching** on all three targets. **M4e-4 ✅ done 2026-11-10** — ADR 0002 #23 (the user's decision, "Upgrade the data"): the isotope table is the cited AME2020 masses at full precision and the TICE 2009 abundances with ³⁶S, from `scripts/oracle/isotopes.tsv` (each mass with its verbatim AME2020 line; the generator checks it against the oracle's table: the same isotopes plus ³⁶S, Rust's abundances, Rust's masses these to five decimals, each element summing to 1); `isotope_pattern`'s algorithm unchanged. Golden `spectroscopy` keeps the oracle's values, 354 rows (7 `isotope_abundances`, 347 `isotope_pattern`) noted with the port's whole result and mapped: **301,130 ok, 0 failed, 0 measured, 0 pending, 19,831 accepted (ADR 6: 809; ADR 2: … + 354 #23 rows), 0 glibc-matching** on all three targets. **M4f ✅ done 2026-11-10** — `src/stoichiometry.cyr` with ADR 0002 #7 realised: `balance_equation` on an integer matrix (flat row-major, Rust's \|entry\| ≤ 2⁵³ kept; Rust's fraction-free Gauss–Jordan elimination with checked i64 arithmetic and the i128 verification on a signed three-word sum, every overflow an Err at Rust's step), `assign_oxidation_states` with exact rational states ((Z, numerator, denominator) records; Rust's non-integer-average Err is the average, an average outside i32 stays Rust's Err), `limiting_reagent`, `theoretical_yield_moles`, `percent_yield`, `percent_composition`, `empirical_formula` operation for operation. Golden `stoichiometry` 41,435 rows (9,090 oxidation rows noted with the port's exact states, 78 balancing rows with no integer counterpart, both mapped under ADR 2): **333,397 ok, 0 failed, 0 measured, 0 pending, 28,999 accepted (ADR 6: 809; ADR 2: … + 9,168 #7 rows), 0 glibc-matching** on all three targets, every float row 0 ulp; 63 Rust tests ported (7 adapted for #7) + 6 Cyrius-only groups; surface parity 401/401. The five float functions' measured misses of the exact values are reported, not fixed (ADR 0002's M4f addition). **M4f-2 ✅ done 2026-11-10** — ADR 0002 #24, #25 and #26 (the user's decisions, "Round once", "Compare exactly", "Evaluate exactly"): `percent_yield`, `theoretical_yield_moles` and `percent_composition` return their exact rationals rounded once (`_km_cr_mul_div`: a double-double fast path with a rounding test and an exact midpoint resolution, `_km_cr_ratio` past the normal range), `limiting_reagent` compares its ratios exactly (the rounded ones where they differ, `_km_ratio_lt` where they tie), `empirical_formula` evaluates its moles, ratios, 1/10 tolerance and counts exactly (a proven 2³² − ½ cut, a fast tolerance test that defers to an exact integer one at the knife edge); Rust's checks, codes and order kept. Golden `stoichiometry` 47,776 rows (6,341 hard rows appended), the oracle's values kept, 3,154 noted with the port's result and mapped (#24: 1,126 `percent_yield`, 240 `theoretical_yield_moles`, 598 `percent_composition`; #25: 920; #26: 270): **336,584 ok, 0 failed, 0 measured, 0 pending, 32,153 accepted (ADR 6: 809; ADR 2: … + 3,154 #24–#26 rows), 0 glibc-matching** on all three targets; `cr_verify.py` 2.23 million arguments against `Fraction`, 0 mismatches |
+| Overflow audit (after M4) | **B1 ✅ done 2026-11-10** — ADR 0002 #27 and #28 (the user's decisions "Library-wide audit" and "Round once"): the survey's F1 (`heat_transfer`, `specific_heat_from_calorimetry`, `boiling_point_elevation`, `freezing_point_depression`, `osmotic_pressure` rounded once) and F4 (`zero_order_half_life`, `steady_state_intermediate`, `pre_equilibrium_rate` rounded once; `second_order_concentration`, `michaelis_menten` with an unbounded exponent behind a range test, Rust's bits in range); M4f-2's `_km_cr_mul_div` generalised into `src/mathx.cyr`'s correctly rounded monomial `_km_cr_mono` (the fast path takes subnormal operands and resolves midpoints by an exact expansion sign; `_km_cr_ratio` for possibly subnormal results). Golden `thermo` 1,644, `phase` 4,174, `kinetics` 31,210 rows (2,129 edge rows appended), the oracle's values kept, 1,318 noted and mapped (#27: 682; #28: 636): **337,395 ok, 0 failed, 0 measured, 0 pending, 33,471 accepted (ADR 6: 809; ADR 2: … + 1,318 #27–#28 rows), 0 glibc-matching** on all three targets. B2–B12 ☐ (the survey's families F2, F3, F5–F16) |
 | M5 Numerics | ☐ |
 | M7 Release 2.0.0 | ☐ |
 
@@ -48,7 +49,10 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
   (`_km_ux_*`: (significand, exponent) pairs, + − × ÷ √, cmp / max, the round-once `_km_ux_round` and the final
   `_km_ux_{add,sub,mul,div,sqrt,atan2}_f64`, ADR 0002 #20); since M4e-3 multi-word unsigned integers (`_km_bn_*`, 8 limbs
   of 32 bits), `_km_cr_ratio(p, q, e)` = RN(p/q·2^e) and the double-double `_km_dd_mul` / `_km_dd_div_cr` (ADR 0002 #21,
-  #22); ADR 0005's double-double `_km_acos` / `_km_cos` were removed in M4d), `src/validate.cyr`, `src/element_data.cyr`
+  #22); since the overflow audit's B1 the correctly rounded monomial `_km_cr_mono` (RN(Π num / Π den), with
+  `_km_dd_mul_d`, `_km_dd_div_ends`, `_km_mono_tie`, `_km_exp_sign` and the shapes `_km_cr_mul_div` (moved from
+  stoichiometry), `_km_cr_mul3`, `_km_cr_div2`, `_km_cr_mul3_div`, `_km_cr_mul5`, each with a straight-line fast path;
+  ADR 0002 #27, #28); ADR 0005's double-double `_km_acos` / `_km_cos` were removed in M4d), `src/validate.cyr`, `src/element_data.cyr`
   (generated: 118 elements, 32 property rows, `KmElementCategory`), `src/element.cyr`, `src/molecule.cyr`,
   `src/reaction.cyr`, `src/thermo.cyr`, `src/thermochem_data.cyr` (generated: `KmShomate`, 76 THERMOCHEM_DATA rows
   with formula / name blobs, 34 SHOMATE_DATA segments), `src/thermochem.cyr`, `src/phase_data.cyr` (generated:
@@ -71,8 +75,9 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
   the Rydberg formula and the reduced mass rounded once, ADR 0002 #21, #22), `src/stoichiometry.cyr` (M4f, between kinetics
   and organic_data: balancing on an integer matrix and rational oxidation states, ADR 0002 #7; calls element's lookups and
   `KmMolecule`; its checked i64 helpers `_km_i64_*_ck` and the signed 128-bit `_km_i128_*`; includes `lib/alloc.cyr`; M4f-2:
-  the yields and percent composition rounded once (`_km_cr_mul_div`), the exact limiting reagent (`_km_ratio_lt`) and the
-  exact empirical formula, ADR 0002 #24–#26, on `src/mathx.cyr`'s `_km_bn_*` and `_km_cr_ratio`); plus the
+  the yields and percent composition rounded once (`_km_cr_mul_div`, since B1 `src/mathx.cyr`'s), the exact limiting
+  reagent (`_km_ratio_lt`) and the exact empirical formula, ADR 0002 #24–#26, on `src/mathx.cyr`'s `_km_bn_*` and
+  `_km_cr_ratio`); plus the
   `src/main.cyr` stub. Generated files are written by
   `scripts/oracle/` and never edited. Every transcendental the modules call is correctly rounded; `gas` and `nuclear`
   include `lib/ganita.cyr` (cbrt), `gas` `lib/math.cyr` (`f64_clamp`; `mathx.cyr` no longer needs it since M4d). `dist/kimiya.deps`: string, vec, str, math, ganita, alloc (M4e), tagged; the bundle also
@@ -82,8 +87,8 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
 
 - `tests/parity.tcyr` (+ `tests/parity_core.cyr`, `tests/ulp.cyr`): the golden-corpus harness — 18 modules
   (constants, electrochemistry, element, gas, inorganic, kinetics, math, molecule, nuclear, organic, phase, potential,
-  reaction, solution, spectroscopy, stoichiometry, thermo, thermochem), 336,584 ok, 0 failed, 0 measured, 0 pending,
-  32,153 accepted (809
+  reaction, solution, spectroscopy, stoichiometry, thermo, thermochem), 337,395 ok, 0 failed, 0 measured, 0 pending,
+  33,471 accepted (809
   under ADR 6, against the corrected oracle; under ADR 2 the 440 ADR 0002 #4 mapped Antoine rows, the 13 #12 exact-CFSE and
   23 #3 SEMF rows printed by name, and, counted, the 1,810 #13, 208 #14, 59 #15, 1,041 #16, 180 #17, 181 #18, 1,654 #19,
   3,605 #20, 6,617 #21 (per function: 3,823 levels, 1,351 transition energies, 1,376 wavelengths, 67 series lines),
@@ -91,14 +96,17 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
   #7 `assign_oxidation_states` rows whose note names its whole result, the 78 #7 `balance_equation` rows with no
   integer-matrix counterpart, and the 3,154 stoichiometry rows of #24 (1,126 `percent_yield`, 240
   `theoretical_yield_moles`, 598 `percent_composition`), #25 (920 `limiting_reagent`) and #26 (270 `empirical_formula`)
-  whose note names the port's value, index or whole result), 0 glibc-matching, on x86_64 ELF, x86_64 PE and aarch64 (`_PAR_MAX` 8448
+  whose note names the port's value, index or whole result, and the overflow audit's B1: 682 #27 (151 `heat_transfer`,
+  171 `specific_heat_from_calorimetry`, 82 + 82 colligative, 196 `osmotic_pressure`) and 636 #28 rows (89
+  `second_order_concentration`, 90 `zero_order_half_life`, 118 `steady_state_intermediate`, 179 `pre_equilibrium_rate`,
+  160 `michaelis_menten`)), 0 glibc-matching, on x86_64 ELF, x86_64 PE and aarch64 (`_PAR_MAX` 8448
   tokens since M4e, for the 2¹³-sample FFT rows); ADR 0002 #6's renamed items compared
   under the Rust names (class A, summarised). Every class-C function and every `math` primitive at bound 0 (ADR 0006;
   sin, cos, atan2 and acos on M4a's primitives since M4d)
 - `tests/golden/`: `constants.tsv` (45, all compared since M4b), `electrochemistry.tsv` (18,574), `element.tsv` (975),
-  `gas.tsv` (21,093), `inorganic.tsv` (15,162), `kinetics.tsv` (30,146), `math.tsv` (26,147), `molecule.tsv` (2,472),
-  `nuclear.tsv` (54,057), `organic.tsv` (9,104), `phase.tsv` (3,646), `potential.tsv` (31,761), `reaction.tsv` (1,558),
-  `solution.tsv` (28,566), `spectroscopy.tsv` (66,691), `stoichiometry.tsv` (47,776), `thermo.tsv` (1,107),
+  `gas.tsv` (21,093), `inorganic.tsv` (15,162), `kinetics.tsv` (31,210), `math.tsv` (26,147), `molecule.tsv` (2,472),
+  `nuclear.tsv` (54,057), `organic.tsv` (9,104), `phase.tsv` (4,174), `potential.tsv` (31,761), `reaction.tsv` (1,558),
+  `solution.tsv` (28,566), `spectroscopy.tsv` (66,691), `stoichiometry.tsv` (47,776), `thermo.tsv` (1,644),
   `thermochem.tsv` (9,857), `modules.txt` — generated by
   `scripts/oracle/`; the corrected oracle (ADR 0006) `gas.cr.tsv` (11), `kinetics.cr.tsv` (323), `math.cr.tsv` (96),
   `nuclear.cr.tsv` (23), `phase.cr.tsv` (4), `potential.cr.tsv` (3), `reaction.cr.tsv` (2), `solution.cr.tsv` (229),
@@ -110,18 +118,22 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
   every expected value MPFR's; since M4e-2 the unbounded-exponent arithmetic (ADR 0002 #20: 48 MPFR values past binary64's
   range, 20,000 seeded pairs against IEEE's own operations); since M4e-3 the multi-word integers, `_km_cr_ratio` (ties,
   subnormal results, the overflow threshold) and the double-double quotient (10,000 seeded quotients, exact against
-  double-double) (26 groups, 1,566 assertions); `scripts/oracle/cr_verify.py` checks ≥ 1,000,000 arguments per primitive
+  double-double); since the overflow audit's B1 the correctly rounded monomial (36 exact cases, the sign and tie
+  helpers, 20,000 seeded arguments against the exact path) (29 groups, 1,588 assertions); `scripts/oracle/cr_verify.py` checks ≥ 1,000,000 arguments per primitive
   (611,518 pairs for x·2^y, 1,049,032 for 1/(100·x); the five unbounded-exponent final operations 1,040,039, the three
   geometry functions 114,000 edge geometries, the slow path forced; M4e-3's `ratio` 320,000, `bohr` 260,429, `trans` and
   `ryd` 555,944 each, `series` 55,345 and `rmass` 502,000 against `Fraction`, the exact path forced; M4f-2's `muldiv`
   640,000, `pyield` 397,518, `tyield` 340,006, `pcomp` 223,604, `limit` 400,008 and `empir` 223,899 against `Fraction`,
-  the exact paths forced) on every target
+  the exact paths forced; B1's `mono` 430,010, `monotie` 240,000 and the ten functions' `heat`, `boil`, `frz` 281,000
+  each, `shc` 200,010, `osm` 200,008, `zhl` 185,006, `ssi` 220,007, `pre` 220,008, `soc` 200,010, `mm` 200,008 against
+  `Fraction` and `mpfr_ref.UX`, the slow paths forced) on every target
 - Reference tests, the Rust tests ported one for one: `tests/error.tcyr` (2 Rust + 1 Cyrius-only group,
   24 assertions), `tests/validate.tcyr` (3 + 1, 25), `tests/element.tcyr` (22 + 1, 96), `tests/molecule.tcyr`
   (11 + 1, 39; `serde_roundtrip` doesn't port), `tests/reaction.tcyr` (10 + 1, 29), `tests/thermo.tcyr`
-  (10 + 1, 24), `tests/thermochem.tcyr` (62 + 6, 400; 4 tests assert J/mol for ADR 0002 #1), `tests/phase.tcyr`
-  (31 + 2, 117), `tests/gas.tcyr` (39 + 2, 159), `tests/solution.tcyr` (49 + 5, 135), `tests/electrochemistry.tcyr`
-  (35 + 3, 1,394), `tests/kinetics.tcyr` (47 + 4, 138; 2 tests adapted for the Lineweaver–Burk buffer),
+  (10 + 2, 36; B1's #27), `tests/thermochem.tcyr` (62 + 6, 400; 4 tests assert J/mol for ADR 0002 #1), `tests/phase.tcyr`
+  (31 + 3, 126; B1's #27), `tests/gas.tcyr` (39 + 2, 159), `tests/solution.tcyr` (49 + 5, 135), `tests/electrochemistry.tcyr`
+  (35 + 3, 1,394), `tests/kinetics.tcyr` (47 + 5, 153; 2 tests adapted for the Lineweaver–Burk buffer; B1's #28, and one Cyrius-only
+  assertion of Rust's 1/∞ = +0 now the port's [A]₀),
   `tests/organic.tcyr` (21 + the 2 organic integration tests + 4, 136; 5 tests use ADR 0002 #6's names; the acceptor
   property's reference tests), `tests/inorganic.tcyr` (30 + 7, 332; the exact CFSE of ADR 0002 #12, the exact Δ_tet of #15), `tests/nuclear.tcyr`
   (36 + 8, 243; `semi_empirical_invalid_is_nan` asserts ADR 0002 #3's Err; #13's correctly rounded and #14's exact values),
@@ -160,7 +172,11 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
   `isotope_pattern_s8` (M4e-4), `stoichiometry/balance_ch4_combustion`, `oxidation_states_kmno4` (M4f, against Rust) and
   the Cyrius-only `balance_kmno4_hcl`, `oxidation_states_fe3o4`, `limiting_reagent`, `theoretical_yield_moles`,
   `percent_yield`, `percent_composition_glucose`, `empirical_formula_glucose`, and ADR 0002 #24–#26's exact paths
-  `theoretical_yield_moles_tie`, `percent_yield_subnormal`, `limiting_reagent_tie`, `empirical_formula_edge` (M4f-2)
+  `theoretical_yield_moles_tie`, `percent_yield_subnormal`, `limiting_reagent_tie`, `empirical_formula_edge` (M4f-2),
+  and the overflow audit's B1: `thermo/specific_heat_from_calorimetry`, `phase/boiling_point_elevation`,
+  `freezing_point_depression`, `osmotic_pressure`, `kinetics/second_order_concentration`, `zero_order_half_life`,
+  `steady_state_intermediate`, `pre_equilibrium_rate` and the edges `thermo/heat_transfer_tie`,
+  `phase/osmotic_pressure_subnormal`, `kinetics/second_order_concentration_edge`, `michaelis_menten_edge`
 - `tests/kimiya.fcyr`: scaffold fuzz harness
 
 ## Dependencies
@@ -182,10 +198,18 @@ Plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md).
 ## Next
 
 **M5** numerics (port plan §4): the transcribed hisab 1.4.0 solvers (ADR 0003), reaction dynamics, networks, fitting,
-sensitivity. Before or beside it, the library-wide overflow audit (below), and the user's decisions on M4f's measured
-candidates.
+sensitivity. Before it, the library-wide overflow audit (below), which the user's decision of 2026-11-09 placed after M4.
 
 Follow-ups:
+- **The library-wide overflow audit — in progress (B1 of B12 done).** The survey (sixteen families over every ported
+  module, with replicas, synthetic grids and probes; the main session's record) batches the fixes B1 … B12; the user's
+  decisions: the audit itself (2026-11-09), "Round once" for a formula that is a single product or quotient of inputs,
+  #20's edge fix for one with a sum inside (2026-11-10), and the correctly rounded ±∞ or 0 where Rust gives NaN for an
+  out-of-range value. **B1 ✅ (2026-11-10)**: F1 → ADR 0002 #27 (thermo's calorimetry, phase's colligative products) and
+  F4 → #28 (the kinetics rationals), on the new correctly rounded monomial `_km_cr_mono` and the `_km_ux_*` helpers.
+  Next: B2 (F3, solution and electrochemistry), then B3 (F5, spectroscopy), B4 (F6, potentials, Born–Landé, BE per
+  nucleon), B5 (F2, gas laws), B6 (F7, F8), B7 (F9), B8 (the FFT magnitudes, the flame's sign test, `find_peaks`), B9
+  (F15, `balance_equation`), B10 (F10's exponentials), B11 (F11, F12), B12 (the iterative functions). The history:
 - **The library-wide audit of intermediate over- and underflow** (the user's decision, 2026-11-09, with ADR 0002 #20):
   after M4, check every ported module for products and quotients of inputs that over- or underflow in Rust's chain where
   the result is representable, and fix each edge as #20 does — Rust's sequence evaluated with an unbounded exponent, the
@@ -198,15 +222,12 @@ Follow-ups:
   in M4e-3: ADR 0002 #22 covers them), and since M4f `balance_equation`'s checked i64 elimination where a valid u32
   solution exists (an exact rational or multi-word elimination). Each fix is an ADR 0002 row, accepted before it lands. M4e-3's `_km_cr_ratio`
   (RN(p/q·2^e) of exact integers) is the tool where a quotient of products is the whole formula.
-- **M4f, measured and reported to the user (kept as Rust's; ADR 0002's M4f addition has the numbers):** `percent_yield`'s
-  (a/t)·100 one ulp from RN(100a/t) on about a quarter of inputs (24 % of the corpus's Ok rows), and 0 for some subnormal
-  results; `theoretical_yield_moles`' (m/c)·p one ulp from RN(m·p/c) on 15–26 %, ±∞ or 0 where m/c over- or underflows
-  though m·p/c is finite; `limiting_reagent`'s rounded ratios choosing another index than the exact m_i·c_j < m_j·c_i
-  on near-ties (21 % of seeded ones) and where both ratios over- or underflow (about half); `percent_composition`'s
-  ((mass·count)/mw)·100 up to 2 ulp from RN(mass·count·100/mw) on a quarter of entries; `empirical_formula` with exact
-  ratios and an exact 1/10 flipping Ok ↔ Err on 14 corpus rows; `balance_equation`'s checked i64 elimination failing
-  where a valid u32 solution exists (104 corpus rows; [[3037000500, 1, −3037000501], [1, 3037000500, −3037000501]] with
-  x = [1, 1, 1]) — for the overflow audit below.
+- **M4f, measured and reported to the user; fixed in M4f-2** by the user's decisions of 2026-11-10 (ADR 0002's M4f
+  addition has the measurements, its M4f-2 addition the fixes): `percent_yield`, `theoretical_yield_moles` and
+  `percent_composition` rounded once (#24), `limiting_reagent`'s exact comparison (#25), `empirical_formula`'s exact
+  ratios and 1/10 tolerance (#26). Still open: `balance_equation`'s checked i64 elimination failing where a valid u32
+  solution exists (104 corpus rows; [[3037000500, 1, −3037000501], [1, 3037000500, −3037000501]] with x = [1, 1, 1]) —
+  for the overflow audit above.
 - **hisab's FFT twiddles are not correctly rounded** (M4e, ADR 0003 amendment): hisab 3.4.1's `num_fft` takes them from
   the stdlib's `f64_cos` / `f64_sin` and reseeds them every 64 steps, so its transforms differ from 1.4.0's and from a
   correctly rounded reference in the last bits from n = 256 on, and by platform. kimiya transcribes 1.4.0's `num::fft`

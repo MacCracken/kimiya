@@ -88,6 +88,7 @@ var _bench_emp = 0;         # glucose's mass percents: [(6, 40.00), (1, 6.71), (
 var _bench_mol = 0;         # glucose as a KmMolecule (its atoms vec)
 var _bench_st_x = 0;        # ADR 0002 #24–#26's exact paths: 9 f64 slots (bench_stoich_exact)
 var _bench_emp2 = 0;        # [(6, 12.011), (8, 17.5989)]: r − 1 within 1/(10·9·10¹⁵) of 1/10
+var _bench_b1 = 0;          # the audit's B1 (ADR 0002 #27, #28): 12 × 4 f64 input slots (bench_audit_b1)
 
 # element/lookup_by_symbol: `lookup_by_symbol(black_box("Fe"))`, a linear scan to row 26.
 fn bench_lookup_by_symbol(per_batch, batches) {
@@ -1078,6 +1079,65 @@ fn bench_stoich_exact(name, which, per_batch, batches) {
     bench_report(b);
 }
 
+# Cyrius-only, the overflow audit's B1 (ADR 0002 #27, #28): the colligative, calorimetry and kinetics functions without
+# a Rust bench, on typical inputs, then on the edges that take each one's other paths. which: 0 specific_heat
+# (4184 J, 1000 g, 1 K), 1 boiling_point_elevation (0.512, 1, 2), 2 freezing_point_depression (1.86, 0.5, 2),
+# 3 osmotic_pressure (2, 0.1 M, 298.15 K), 4 second_order_concentration (1, 0.1, 10), 5 zero_order_half_life (1, 0.1),
+# 6 steady_state_intermediate (0.1, 1, 10), 7 pre_equilibrium_rate (10, 2, 0.1, 1); the edges: 8 heat_transfer_tie
+# (3·y·1 with 3y = 2⁵³ + 1, a midpoint), 9 osmotic_pressure_subnormal (5·10⁻³²⁴ M: a subnormal result),
+# 10 second_order_concentration_edge (1, DBL_MAX, 10: k·t overflows), 11 michaelis_menten_edge (100, DBL_MAX, DBL_MAX:
+# Vmax·[S] and Km + [S] overflow).
+fn bench_audit_b1(name, which, per_batch, batches) {
+    var x = _bench_b1;
+    var a0: f64 = load64(x + 8 * (4 * which));
+    var a1: f64 = load64(x + 8 * (4 * which + 1));
+    var a2: f64 = load64(x + 8 * (4 * which + 2));
+    var a3: f64 = load64(x + 8 * (4 * which + 3));
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            if (which == 0) {
+                var t0, v0 = specific_heat_from_calorimetry(a0, a1, a2);
+                _bench_sink = v0;
+            } elif (which == 1) {
+                var r1: f64 = boiling_point_elevation(a0, a1, a2);
+                _bench_sink = r1;
+            } elif (which == 2) {
+                var r2: f64 = freezing_point_depression(a0, a1, a2);
+                _bench_sink = r2;
+            } elif (which == 3 || which == 9) {
+                var t3, v3 = osmotic_pressure(a0, a1, a2);
+                _bench_sink = v3;
+            } elif (which == 4 || which == 10) {
+                var t4, v4 = second_order_concentration(a0, a1, a2);
+                _bench_sink = v4;
+            } elif (which == 5) {
+                var t5, v5 = zero_order_half_life(a0, a1);
+                _bench_sink = v5;
+            } elif (which == 6) {
+                var t6, v6 = steady_state_intermediate(a0, a1, a2);
+                _bench_sink = v6;
+            } elif (which == 7) {
+                var t7, v7 = pre_equilibrium_rate(a0, a1, a2, a3);
+                _bench_sink = v7;
+            } elif (which == 8) {
+                var r8: f64 = heat_transfer(a0, a1, a2);
+                _bench_sink = r8;
+            } else {
+                var t11, v11 = michaelis_menten(a0, a1, a2);
+                _bench_sink = v11;
+            }
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
 # Runs every bench.
 fn main(): i64 {
     alloc_init();
@@ -1400,6 +1460,63 @@ fn main(): i64 {
     bench_stoich_exact("stoichiometry/percent_yield_subnormal", 1, 100000, 20);
     bench_stoich_exact("stoichiometry/limiting_reagent_tie", 2, 1000000, 20);
     bench_stoich_exact("stoichiometry/empirical_formula_edge", 3, 100000, 20);
+    _bench_b1 = alloc(48 * 8);
+    var bx: f64[48];
+    var dmax: f64 = 0x7FEFFFFFFFFFFFFF;
+    var q = 0;
+    while (q < 48) {
+        bx[q] = 0.0;
+        q = q + 1;
+    }
+    bx[0] = 4184.0;                         # 0 specific_heat_from_calorimetry
+    bx[1] = 1000.0;
+    bx[2] = 1.0;
+    bx[4] = 0.512;                          # 1 boiling_point_elevation
+    bx[5] = 1.0;
+    bx[6] = 2.0;
+    bx[8] = 1.86;                           # 2 freezing_point_depression
+    bx[9] = 0.5;
+    bx[10] = 2.0;
+    bx[12] = 2.0;                           # 3 osmotic_pressure
+    bx[13] = 0.1;
+    bx[14] = 298.15;
+    bx[16] = 1.0;                           # 4 second_order_concentration
+    bx[17] = 0.1;
+    bx[18] = 10.0;
+    bx[20] = 1.0;                           # 5 zero_order_half_life
+    bx[21] = 0.1;
+    bx[24] = 0.1;                           # 6 steady_state_intermediate
+    bx[25] = 1.0;
+    bx[26] = 10.0;
+    bx[28] = 10.0;                          # 7 pre_equilibrium_rate
+    bx[29] = 2.0;
+    bx[30] = 0.1;
+    bx[31] = 1.0;
+    bx[32] = 3.0;                           # 8 heat_transfer_tie: 3·y with 3y = 2⁵³ + 1
+    bx[33] = 3002399751580331.0;
+    bx[34] = 1.0;
+    bx[37] = 0.1;                           # 9 osmotic_pressure_subnormal (slot 36: 5·10⁻³²⁴, below)
+    bx[38] = 298.15;
+    bx[40] = 1.0;                           # 10 second_order_concentration_edge
+    bx[41] = dmax;
+    bx[42] = 10.0;
+    bx[44] = 100.0;                         # 11 michaelis_menten_edge
+    bx[45] = dmax;
+    bx[46] = dmax;
+    memcpy(_bench_b1, &bx, 48 * 8);
+    store64(_bench_b1 + 8 * 36, 1);         # 5·10⁻³²⁴ (2⁻¹⁰⁷⁴: through an untyped word)
+    bench_audit_b1("thermo/specific_heat_from_calorimetry", 0, 1000000, 20);
+    bench_audit_b1("phase/boiling_point_elevation", 1, 1000000, 20);
+    bench_audit_b1("phase/freezing_point_depression", 2, 1000000, 20);
+    bench_audit_b1("phase/osmotic_pressure", 3, 1000000, 20);
+    bench_audit_b1("kinetics/second_order_concentration", 4, 1000000, 20);
+    bench_audit_b1("kinetics/zero_order_half_life", 5, 1000000, 20);
+    bench_audit_b1("kinetics/steady_state_intermediate", 6, 1000000, 20);
+    bench_audit_b1("kinetics/pre_equilibrium_rate", 7, 1000000, 20);
+    bench_audit_b1("thermo/heat_transfer_tie", 8, 1000000, 20);
+    bench_audit_b1("phase/osmotic_pressure_subnormal", 9, 100000, 20);
+    bench_audit_b1("kinetics/second_order_concentration_edge", 10, 1000000, 20);
+    bench_audit_b1("kinetics/michaelis_menten_edge", 11, 1000000, 20);
     return 0;
 }
 

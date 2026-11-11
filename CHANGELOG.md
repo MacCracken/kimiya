@@ -597,6 +597,45 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     `_km_ratio_lt`'s branches); no Rust test's assertion changes (`empirical_formula_nan_inf_are_errors`' subnormal case
     is still the ComputationError, its ratio about 3.75·10³²⁰): 317 assertions; benches `stoichiometry/theoretical_yield_moles_tie`,
     `percent_yield_subnormal`, `limiting_reagent_tie`, `empirical_formula_edge`
+- **The library-wide overflow audit, B1** ([ADR 0002 #27 and #28](docs/adr/0002-port-api-divergences.md), the user's
+  decisions "Library-wide audit" of 2026-11-09 and "Round once" of 2026-11-10; port plan §6.4 "Decided in the overflow
+  audit's B1"; the behaviour changes are under *Breaking*):
+  - **mathx** — the correctly rounded monomial `_km_cr_mono(num, nn, den, nd)` = RN(Π num / Π den) (up to 6 and 4
+    finite factors; signs, IEEE's signed zeros, ties to even, subnormal results, ±∞ past DBL_MAX): M4f-2's `_km_cr_mul_div`
+    moved from `stoichiometry.cyr` and generalised — a double-double fast path (`_km_dd_mul_d`, `_km_dd_div_ends` and
+    `_km_dd_div_cr`'s rounding test) that takes subnormal operands and resolves midpoints exactly for up to three
+    numerator and two denominator factors (`_km_mono_tie`, the sign of an exact sum by Shewchuk's Grow-Expansion,
+    `_km_exp_sign`), and the exact `_km_cr_mono_acc` on `_km_bn_*` / `_km_cr_ratio`; the shapes the modules call
+    (`_km_cr_mul_div` — the stoichiometry calls, the same results —, `_km_cr_mul3`, `_km_cr_div2`, `_km_cr_mul3_div`,
+    `_km_cr_mul5`) each have a straight-line fast path (`_km_mul_div_fast` with M4f-2's `_km_mul_div_tie`,
+    `_km_mul3_fast`, `_km_div2_fast`, `_km_mul3_div_fast`, `_km_mul5_fast`; `_km_dd_round_ends`, `_km_mono_fin`) and
+    fall back to the general one
+  - **thermo**, **phase** — `heat_transfer`, `specific_heat_from_calorimetry`, `boiling_point_elevation`,
+    `freezing_point_depression` and `osmotic_pressure` rounded once (#27)
+  - **kinetics** — `zero_order_half_life`, `steady_state_intermediate`, `pre_equilibrium_rate` rounded once;
+    `second_order_concentration` and `michaelis_menten` under #20's semantics, Rust's chain behind a range test
+    (`_km_second_order_fast`, `_km_michaelis_menten_fast`) and an unbounded-exponent slow path (`_km_second_order_ux`,
+    `_km_michaelis_menten_ux`) (#28)
+  - generator: `scripts/oracle/src/audit.rs` (the port's values independently: `exact::cr_monomial`, `exact::Ux`'s new
+    `div` and `div_f64`; Rust's validation replicated and asserted; the notes; each module's B1 edge rows appended with
+    their own seed: thermo +537, phase +528, kinetics +1,064)
+  - golden modules `thermo` 1,644, `phase` 4,174, `kinetics` 31,210 rows; the oracle's values kept, 1,318 rows noted
+    with the port's value — #27: 151 `heat_transfer`, 171 `specific_heat_from_calorimetry`, 82 + 82 colligative, 196
+    `osmotic_pressure`; #28: 89 `second_order_concentration`, 90 `zero_order_half_life`, 118
+    `steady_state_intermediate`, 179 `pre_equilibrium_rate`, 160 `michaelis_menten`; the harness maps them
+    (`_par_got_noted`, the new `_par_got_noted_f`) and counts them per function
+  - `validate.py` §19: every row of the ten functions recomputed (`Fraction`; `mpfr_ref.UX` for the two #20-style ones),
+    each note proven, no in-range row of the #20-style ones noted, `zero_order_half_life` noted only past 2k's overflow,
+    the hard rows counted
+  - `cr_verify.py`: `mono`, `monotie` and the ten functions (`heat`, `shc`, `boil`, `frz`, `osm`, `zhl`, `ssi`, `pre`,
+    `soc`, `mm`: the public function, the fast path, the slow path forced) against `Fraction` and MPFR on x86_64 ELF,
+    x86_64 PE and aarch64
+  - tests: `tests/mathx.tcyr` `cr_mono_values` (36 exact cases), `cr_mono_sign_and_tie`, `cr_mono_agrees` (20,000 seeded
+    arguments, the fast and exact paths); `tests/thermo.tcyr` `cyrius_adr27_rounded_once`, `tests/phase.tcyr`
+    `cyrius_adr27_rounded_once`, `tests/kinetics.tcyr` `cyrius_adr28` (the survey's edges, a 1-ulp in-range case each,
+    5,000 seeded inputs against the exact or slow paths); no Rust test changes; one Cyrius-only kinetics assertion of
+    Rust's `second_order_concentration(2⁻¹⁰⁷⁴, 0, 1)` = +0 now pins [A]₀; benches for the eight functions without a Rust
+    bench and four edge benches
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -769,6 +808,32 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   `ComputationError` or 1.2's validation error, in 1.2's order.
   *Migration:* none for measured compositions away from the knife edge.
 
+### Breaking (relative to Rust 1.2.0, ADR 0002 #27)
+- **thermo**, **phase** — `heat_transfer`, `specific_heat_from_calorimetry`, `boiling_point_elevation`,
+  `freezing_point_depression` and `osmotic_pressure` return the exact product or quotient rounded once — RN(m·c·ΔT),
+  RN(q/(m·ΔT)), RN(K·m·i), RN(i·M·R·1000·T) with R as `KM_GAS_CONSTANT`'s double — where 1.2 rounded two to four times:
+  about a quarter of ordinary results move by 1–2 ulp (`heat_transfer(100, 4.184, −300)` is −125520, 1.2's
+  −125520.00000000001; `boiling_point_elevation(1.22, 2.5, 1.9)` 5.795, 1.2's 5.794999999999999), and the range ends are
+  right (`specific_heat_from_calorimetry(4184, 1000, DBL_MAX)` is 2.33·10⁻³⁰⁸, 1.2's 0; `osmotic_pressure(5e-324, 0.1,
+  298.15)` 1.22·10⁻³¹⁸, 1.2's 0; `heat_transfer(1e200, 1e200, 1e-200)` 1e200, 1.2's +∞; `heat_transfer(1e300, 1e300, 0)`
+  +0, 1.2's NaN). A zero factor gives the product's signed zero; a non-finite input of the three unvalidated functions
+  gives 1.2's IEEE result; the errors and their order are 1.2's.
+  *Migration:* none for code that compares with a tolerance; code that tested 1.2's NaN for a zero ΔT, K or i against an
+  overflowing product gets 0.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #28)
+- **kinetics** — `zero_order_half_life`, `steady_state_intermediate` and `pre_equilibrium_rate` return RN([A]₀/(2k)),
+  RN(k₁·[A]/k₂) and RN(k₂·k₁·[A]/k₋₁), rounded once (`zero_order_half_life(DBL_MAX, DBL_MAX)` is ½, 1.2's 0;
+  `pre_equilibrium_rate(1e300, 1, 1e300, 0)` 0, 1.2's NaN; `pre_equilibrium_rate(10, 2⁻¹⁰²², 0.1, 1)` 2¹⁰²², 1.2's +∞; about a
+  quarter of ordinary `steady_state_intermediate` and `pre_equilibrium_rate` results move by 1–2 ulp;
+  `zero_order_half_life` changes only for k ≥ 2¹⁰²³). `second_order_concentration` and `michaelis_menten` evaluate 1.2's
+  operation sequence with an unbounded exponent, the final division rounded once: every input whose 1.2 chain stays in
+  the normal range keeps its bits, and the edges are right (`second_order_concentration(1, DBL_MAX, 10)` 5.56·10⁻³¹⁰, 1.2's
+  0; `michaelis_menten(100, DBL_MAX, DBL_MAX)` 50, 1.2's NaN; `michaelis_menten(DBL_MAX, 5, 10)` 1.198·10³⁰⁸, 1.2's +∞;
+  `second_order_concentration(DBL_MAX, 0, 0)` DBL_MAX's predecessor, 1/RN₅₃(1/DBL_MAX), 1.2's +∞). The errors and their
+  order are 1.2's.
+  *Migration:* none for code that compares with a tolerance or stays within the normal range.
+
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
@@ -894,6 +959,16 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   2.15 µs (`_km_cr_ratio`), `limiting_reagent_tie` 94 ns, `empirical_formula_edge` 7.46 µs (two exact tolerance tests).
   Inlining the fast path's helpers was measured (81 → 73 ns) and not kept: the cost is its ~45 floating-point
   operations, as for M4e-3's reduced mass
+- The overflow audit's B1, ADR 0002 #27 and #28 (Cyrius before → after, the same host, back to back): `thermo/heat_transfer`
+  5.4 → 65 ns (Rust 0.95), `kinetics/michaelis_menten` 17 → 24 ns (Rust 2.92); Cyrius-only
+  `specific_heat_from_calorimetry` 18 → 86, `boiling_point_elevation` 6.1 → 66, `freezing_point_depression` 6.4 → 67,
+  `osmotic_pressure` 20 → 139, `steady_state_intermediate` 21 → 88, `pre_equilibrium_rate` 27 → 125,
+  `zero_order_half_life` 16 → 16, `second_order_concentration` 23 → 33; the other paths `heat_transfer_tie` 365 ns (a
+  midpoint, `_km_mono_tie`), `osmotic_pressure_subnormal` 4.04 µs (the exact path), `second_order_concentration_edge`
+  230 ns and `michaelis_menten_edge` 126 ns (the unbounded-exponent slow paths); stoichiometry within noise of M4f-2
+  (`percent_yield` 82, `theoretical_yield_moles` 115, `percent_composition_glucose` 266, `percent_yield_subnormal`
+  2.19 → 1.62 µs). Routing every shape through the general `_km_cr_mono` was measured (`heat_transfer` 148 ns,
+  `percent_yield` 108, `percent_composition_glucose` 422) and replaced by straight-line fast paths per shape
 
 ## [1.2.0] - 2026-11-08
 

@@ -3,9 +3,10 @@
 #
 # Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and reject NaN
 # and ±∞ inputs. Every expression keeps Rust's operation order, so the arithmetic functions are
-# bit-identical (class B); clausius_clapeyron (one exp, _km_cr_exp) and the Antoine functions (one
-# 10^x, _km_cr_exp10) are class C on src/mathx.cyr's correctly rounded primitives (ADR 0006), so
-# they are compared exactly against the corrected oracle (docs/development/port-parity.md §10). The
+# bit-identical (class B), except the colligative products under ADR 0002 #27 (below);
+# clausius_clapeyron (one exp, _km_cr_exp) and the Antoine functions (one 10^x, _km_cr_exp10) are
+# class C on src/mathx.cyr's correctly rounded primitives (ADR 0006), so they are compared exactly
+# against the corrected oracle (docs/development/port-parity.md §10). The
 # data — struct KmAntoineCoeffs, the 8 ANTOINE_DATA sets, the mmHg → Pa factor and the KM_KB_* /
 # KM_KF_* constants — is src/phase_data.cyr (generated).
 #
@@ -13,6 +14,15 @@
 # Result, Err outside the coefficient set's fitted range t_min_c ..= t_max_c, at or below the pole
 # (C + T ≤ 0) and for any non-finite input, where Rust 1.2 extrapolates silently or returns NaN.
 # There is no extrapolating variant. In range the value is Rust's, operation for operation.
+#
+# ADR 0002 #27 (the overflow audit's B1; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide
+# audit" and "round once"): boiling_point_elevation's and freezing_point_depression's (K·m)·i and
+# osmotic_pressure's (((i·M)·R)·1000)·T are each one product of inputs and constants, so the port returns the
+# exact product rounded once (src/mathx.cyr's correctly rounded monomial: _km_cr_mul3, and _km_cr_mul5 with R as
+# KM_GAS_CONSTANT's double and 1000 exact), where Rust rounds two or four times (1–2 ulp off on about a quarter of
+# inputs) and a partial product that over- or underflows gives ±∞, 0 or NaN although the value is representable
+# (osmotic_pressure(5·10⁻³²⁴, 0.1, 298.15) is 0 in Rust, 1.22·10⁻³¹⁸ here). Rust's checks and Err codes are kept;
+# the two unvalidated colligative functions keep Rust's expression for a non-finite input.
 #
 # ANTOINE_DATA rows are reached by handle (port plan §6.4): row + 1, and 0 for None.
 # antoine_data_name(h) and antoine_data_coeffs(h) read row h − 1; an invalid handle gives "" and a
@@ -83,32 +93,49 @@ fn henry_solubility(partial_pressure: f64, henry_constant: f64): Result {
 
 # Boiling point elevation ΔT_b = K_b × m × i in K, from the ebullioscopic constant K_b (K·kg/mol,
 # e.g. KM_KB_WATER), the molality m (mol solute / kg solvent) and the van 't Hoff factor i (1 for
-# non-electrolytes). Mirrors `phase::boiling_point_elevation`.
+# non-electrolytes). ADR 0002 #27: the correctly rounded K·m·i for finite inputs (a zero factor gives its
+# signed zero), Rust's (K·m)·i for a non-finite one. Mirrors `phase::boiling_point_elevation`, with ADR 0002 #27.
 #must_use
 fn boiling_point_elevation(kb: f64, molality: f64, van_t_hoff_factor: f64): f64 {
-    var dt: f64 = (kb * molality) * van_t_hoff_factor;
-    return dt;
+    var f, ok = _km_mul3_fast(kb, molality, van_t_hoff_factor);
+    if (ok == 1) { return f; }
+    if (_km_is_finite(kb) != 1 || _km_is_finite(molality) != 1 || _km_is_finite(van_t_hoff_factor) != 1) {
+        var dt: f64 = (kb * molality) * van_t_hoff_factor;
+        return dt;
+    }
+    var r: f64 = _km_cr_mul3(kb, molality, van_t_hoff_factor);
+    return r;
 }
 
 # Freezing point depression ΔT_f = K_f × m × i, the (positive) depression in K, from the cryoscopic
-# constant K_f (K·kg/mol, e.g. KM_KF_WATER), the molality m and the van 't Hoff factor i. Mirrors
-# `phase::freezing_point_depression`.
+# constant K_f (K·kg/mol, e.g. KM_KF_WATER), the molality m and the van 't Hoff factor i. ADR 0002 #27: the
+# correctly rounded K·m·i for finite inputs, Rust's (K·m)·i for a non-finite one. Mirrors
+# `phase::freezing_point_depression`, with ADR 0002 #27.
 #must_use
 fn freezing_point_depression(kf: f64, molality: f64, van_t_hoff_factor: f64): f64 {
-    var dt: f64 = (kf * molality) * van_t_hoff_factor;
-    return dt;
+    var f, ok = _km_mul3_fast(kf, molality, van_t_hoff_factor);
+    if (ok == 1) { return f; }
+    if (_km_is_finite(kf) != 1 || _km_is_finite(molality) != 1 || _km_is_finite(van_t_hoff_factor) != 1) {
+        var dt: f64 = (kf * molality) * van_t_hoff_factor;
+        return dt;
+    }
+    var r: f64 = _km_cr_mul3(kf, molality, van_t_hoff_factor);
+    return r;
 }
 
 # Osmotic pressure π = i × M × R × T in Pa, from the van 't Hoff factor i, the molarity M (mol/L)
 # and T in K (R in L·Pa/(mol·K) is KM_GAS_CONSTANT × 1000). Ok(π),
 # Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite, or Err(KM_ERR_INVALID_INPUT) if
-# i is not positive and finite or M is negative or non-finite. Mirrors `phase::osmotic_pressure`.
+# i is not positive and finite or M is negative or non-finite. ADR 0002 #27: the correctly rounded
+# i·M·R·1000·T (R KM_GAS_CONSTANT's double, 1000 exact), where Rust's (((i·M)·R)·1000)·T rounds four times; a
+# molarity of ±0 gives Rust's signed zero. Mirrors `phase::osmotic_pressure`, with ADR 0002 #27.
 #must_use
 fn osmotic_pressure(van_t_hoff_factor: f64, molarity: f64, temperature_k: f64): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_positive(van_t_hoff_factor) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(molarity) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var p: f64 = (((van_t_hoff_factor * molarity) * KM_GAS_CONSTANT) * 1000.0) * temperature_k;
+    var r: f64 = KM_GAS_CONSTANT;
+    var p: f64 = _km_cr_mul5(van_t_hoff_factor, molarity, r, 1000.0, temperature_k);
     return Ok(p);
 }
 

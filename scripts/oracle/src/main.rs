@@ -27,6 +27,7 @@
 //! `src/spectroscopy_data.cyr` (M4e; since M4e-4 its isotope table from the cited `isotopes.tsv`, ADR 0002 #23, checked
 //! against the oracle); `stoichiometry` (M4f: no data file); …
 
+mod audit;
 mod cyr;
 mod exact;
 mod glibc;

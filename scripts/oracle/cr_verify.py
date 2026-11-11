@@ -1,6 +1,7 @@
 """Verify the correctly rounded exp, exp10, expm1, ln, log10, pow, sin, cos, atan2, acos, x·2^y and 1/(100·x) of
 src/mathx.cyr against MPFR (ADR 0006), and its unbounded-exponent final operations with potential's geometry (ADR 0002
-#20); and the exact rationals of spectroscopy (#21, #22) and stoichiometry (#24 ... #26) against Fraction.
+#20); and the exact rationals of spectroscopy (#21, #22), stoichiometry (#24 ... #26) and the overflow audit's B1 (#27,
+#28: the correctly rounded monomial, thermo's, phase's and kinetics' rationals) against Fraction and MPFR.
 
 For each primitive it generates seeded arguments (deterministic: random.Random with fixed seeds), builds
 a probe program that calls the Cyrius function on every argument, runs it on each target, and compares
@@ -66,6 +67,17 @@ percent_composition's first entry: the public function, its fast path and the ex
 (limiting_reagent: the public function and the exact comparisons alone, on ties, near-ties and ratios that both
 overflow or underflow) and empir (empirical_formula, and _km_empirical_formula with every tolerance test exact:
 formulas' percentages, r*k at n +- 1/10 within ulps and exactly, subnormal percentages, ratios near 2^32).
+The overflow audit's B1 (ADR 0002 #27, #28) adds mono (_km_cr_mono = RN(prod num / prod den), every shape up to four
+factors a side and five or six with short ones, both signs, zeros, the result at the range ends, 53-bit midpoints of
+the 3/0, 2/1, 2/2 and 3/1 shapes and the subnormal grid's ties, the domain's NaNs; its fast path and its exact path
+forced), monotie (_km_mono_tie: the exact sign decision for z1 < z2 = nextup(z1) against Fraction, F near, far and
+exactly at their midpoint), and the ten functions: heat, shc, boil, frz, osm, zhl, ssi, pre (heat_transfer,
+specific_heat_from_calorimetry, boiling_point_elevation, freezing_point_depression, osmotic_pressure,
+zero_order_half_life, steady_state_intermediate, pre_equilibrium_rate: the public function, its shape's fast path, the
+monomial's exact path forced; references Fraction) and soc, mm (second_order_concentration,
+michaelis_menten: the public function, its Rust-chain fast path where the range test passes, the unbounded-exponent slow
+path forced; reference mpfr_ref.UX), each on binade-uniform, typical, partial-products-past-the-range, midpoint,
+subnormal and Err arguments.
 Through each function's _km_cr_<f>_fast entry it reports the fast path's fallback rate per region, and
 checks the fast path's result equals the function's wherever its test passes. It checks that the three
 targets give identical bits and flags.
@@ -77,7 +89,8 @@ Usage, from the repo root:
     python3 -I scripts/oracle/cr_verify.py --only pow,exp  # some functions (exp exp10 expm1 ln log10 pow sin cos
                                                            # atan2 acos exp2s h100 uxsqrt uxmul uxdiv uxadd
                                                            # uxatan2 dist bond dih ratio bohr trans ryd series
-                                                           # rmass muldiv pyield tyield pcomp limit empir)
+                                                           # rmass muldiv pyield tyield pcomp limit empir mono
+                                                           # heat shc boil frz osm zhl ssi pre soc mm monotie)
     python3 -I scripts/oracle/cr_verify.py --work DIR      # probe sources and binaries in DIR
                                                            # (default build/cr-verify, gitignored)
 Exit status 1 on any mismatch or cross-target difference, 2 on a build or run failure.
@@ -1478,6 +1491,474 @@ def stoich_checks(work, targets, which):
     return failed
 
 
+
+# ── The overflow audit's B1 (ADR 0002 #27, #28): the correctly rounded monomial and thermo's, phase's, kinetics' ──────
+# ids 33 … 44: mono (_km_cr_mono: n_num, n_den, six numerator and four denominator words, the unused 1.0), heat, shc,
+# boil, frz, osm, zhl, ssi, pre (heat_transfer, specific_heat_from_calorimetry, boiling_point_elevation,
+# freezing_point_depression, osmotic_pressure, zero_order_half_life, steady_state_intermediate, pre_equilibrium_rate:
+# the public function, its shape's straight-line fast path and flag; mode 1 the monomial's exact path at its factors),
+# soc, mm (second_order_concentration, michaelis_menten: the public function, Rust's chain where the function's fast
+# test passes and the flag; mode 1 the unbounded-exponent slow path forced) and monotie (_km_mono_tie: cn, cd, three
+# numerator and two denominator significands, z1; the sign decision for z1 < z2 = nextup(z1), against Fraction whatever
+# the distance of F from their midpoint). A float function's Err is the NaN word (none of their Ok results is NaN where
+# the inputs are finite), a non-finite input of heat / boil / frz Rust's expression (both modes).
+AUDIT = [(33, "mono"), (34, "heat"), (35, "shc"), (36, "boil"), (37, "frz"), (38, "osm"), (39, "zhl"), (40, "ssi"),
+         (41, "pre"), (42, "soc"), (43, "mm"), (44, "monotie")]
+AUDIT_NAMES = tuple(name for _, name in AUDIT)
+ARITY.update({33: 12, 34: 3, 35: 3, 36: 3, 37: 3, 38: 3, 39: 2, 40: 3, 41: 4, 42: 3, 43: 3, 44: 8})
+R_GAS = _const("src/constants.cyr", "KM_GAS_CONSTANT")
+DMAX = fb(0x7FEFFFFFFFFFFFFF)
+
+
+def mono_ref(num, den):
+    """RN(Π num / Π den) for finite factors, nonzero denominators: the sign the xor of the factors' signs, a zero factor
+    that signed zero, the magnitude rounded once (rn: CPython's correctly rounded int division)."""
+    neg = sum(1 for v in num + den if math.copysign(1.0, v) < 0) % 2 == 1
+    if any(v == 0.0 for v in num):
+        return -0.0 if neg else 0.0
+    q = Fraction(1)
+    for v in num:
+        q *= abs(Fraction(v))
+    for v in den:
+        q /= abs(Fraction(v))
+    r = rn(q)
+    return -r if neg else r
+
+
+def _odd_bits(x):
+    """The bit length of the odd part of |x|'s significand (0 for 0)."""
+    if x == 0.0:
+        return 0
+    m = abs(Fraction(x))
+    n, d = m.numerator, m.denominator
+    while n % 2 == 0:
+        n //= 2
+    return n.bit_length()
+
+
+def _ok_side(vals):
+    return sum(_odd_bits(v) for v in vals) <= 253
+
+
+def ref_audit(name, a):
+    """The reference word of ids 33 … 44 (NANW for an Err)."""
+    fin = all(math.isfinite(v) for v in a if isinstance(v, float))
+    if name == "mono":
+        nn, nd = a[0], a[1]
+        num, den = list(a[2:2 + nn]), list(a[8:8 + nd])
+        if not all(math.isfinite(v) for v in num + den) or any(v == 0.0 for v in den):
+            return NANW
+        return bits(mono_ref(num, den))
+    if name in ("heat", "boil", "frz"):
+        x, y, z = a
+        return bits(mono_ref([x, y, z], []) if fin else x * y * z)
+    if name == "shc":
+        e, m, dt = a
+        if not (math.isfinite(e) and _pos(m) and math.isfinite(dt) and abs(dt) >= 1e-12):
+            return NANW
+        return bits(mono_ref([e], [m, dt]))
+    if name == "osm":
+        i, c, t = a
+        if not (_pos(t) and _pos(i) and _nonneg(c)):
+            return NANW
+        return bits(mono_ref([i, c, R_GAS, 1000.0, t], []))
+    if name == "zhl":
+        c0, k = a
+        if not (_pos(k) and _pos(c0)):
+            return NANW
+        return bits(mono_ref([c0], [2.0, k]))
+    if name == "ssi":
+        k1, c, k2 = a
+        if not (_pos(k2) and _nonneg(k1) and _nonneg(c)):
+            return NANW
+        return bits(mono_ref([k1, c], [k2]))
+    if name == "pre":
+        kf, kr, ks, c = a
+        if not (_pos(kr) and _nonneg(kf) and _nonneg(ks) and _nonneg(c)):
+            return NANW
+        return bits(mono_ref([ks, kf, c], [kr]))
+    if name == "soc":
+        c0, k, t = a
+        if not (_pos(c0) and _nonneg(k) and _nonneg(t)):
+            return NANW
+        with mpfr_ref.unbounded():
+            one = mpfr_ref.UX(1.0)
+            return bits(mpfr_ref.ux_div_final(one, one / mpfr_ref.UX(c0) + mpfr_ref.UX(k) * mpfr_ref.UX(t)))
+    if name == "mm":
+        v, km, sb = a
+        if not (_pos(v) and _pos(km) and _nonneg(sb)):
+            return NANW
+        with mpfr_ref.unbounded():
+            p = mpfr_ref.UX(v) * mpfr_ref.UX(sb)
+            return bits(mpfr_ref.ux_div_final(p, mpfr_ref.UX(km) + mpfr_ref.UX(sb)))
+    cn, cd = a[0], a[1]
+    f = Fraction(1)
+    for v in a[2:2 + cn]:
+        f *= Fraction(v)
+    for v in a[5:5 + cd]:
+        f /= Fraction(v)
+    z1 = a[7]
+    z2 = math.nextafter(z1, INF)
+    mu = (Fraction(z1) + Fraction(z2)) / 2
+    if f > mu:
+        return bits(z2)
+    if f < mu:
+        return bits(z1)
+    return bits(z1) if bits(z1) % 2 == 0 else bits(z2)
+
+
+def _unit_sig(rng):
+    """A random double in [1, 2) (B1's monotie)."""
+    return 1.0 + rng.randrange(1 << 52) * 2.0 ** -52
+
+
+def _spp(rng, lo=-1074, hi=1023):
+    """A signed double of a random binade in [2^lo, 2^hi]."""
+    return _pp(rng, lo, hi) * rng.choice((1.0, -1.0))
+
+
+def _around(rng, c, w=200):
+    """A positive double of a random binade within w of 2^c, clamped to the range (B1's compensating factors)."""
+    lo = min(max(-1074, c - w), 1023)
+    return _pp(rng, lo, max(lo, min(1023, c + w)))
+
+
+SHAPES = [(1, 0), (2, 0), (3, 0), (4, 0), (1, 1), (2, 1), (3, 1), (4, 1), (1, 2), (2, 2), (3, 2), (1, 3), (2, 3), (1, 4),
+          (4, 2), (2, 4)]
+
+
+def _mono_pack(num, den):
+    return (len(num), len(den)) + tuple(num) + (1.0,) * (6 - len(num)) + tuple(den) + (1.0,) * (4 - len(den))
+
+
+def args_mono(rng):
+    """Arguments of _km_cr_mono: every shape up to four factors a side (five and six with short factors: osmotic's),
+    within the exact path's capacity."""
+    def factor(lo=-1074, hi=1023):
+        r = rng.random()
+        if r < 0.03:
+            return 2.0 ** rng.randint(max(lo, -1074), min(hi, 1023)) * rng.choice((1.0, -1.0))
+        if r < 0.08:
+            return float(rng.randint(1, 1000)) * rng.choice((1.0, -1.0)) * 2.0 ** rng.randint(-40, 40)
+        return _spp(rng, lo, hi)
+    rand, mid, edge, ties, zeros, five, dom = [], [], [], [], [], [], []
+    for _ in range(140_000):
+        nn, nd = rng.choice(SHAPES)
+        rand.append(_mono_pack([factor() for _ in range(nn)], [factor() for _ in range(nd)]))
+    for _ in range(100_000):
+        nn, nd = rng.choice(SHAPES)
+        mid.append(_mono_pack([factor(-200, 200) for _ in range(nn)], [factor(-200, 200) for _ in range(nd)]))
+    while len(edge) < 60_000:                       # the total exponent near the subnormal range, 2^-1075 or 2^1024
+        nn, nd = rng.choice(SHAPES)
+        num, den = [factor(-300, 300) for _ in range(nn)], [factor(-300, 300) for _ in range(nd)]
+        q = Fraction(1)
+        for v in num:
+            q *= abs(Fraction(v))
+        for v in den:
+            q /= abs(Fraction(v))
+        e = q.numerator.bit_length() - q.denominator.bit_length()
+        sh = rng.choice([rng.randint(-1080, -1018), rng.randint(1018, 1026)]) - e
+        lead = num[0]
+        try:
+            moved = math.ldexp(lead, sh)
+        except OverflowError:
+            continue
+        if math.isfinite(moved) and moved != 0.0 and math.ldexp(moved, -sh) == lead:
+            num[0] = moved
+            edge.append(_mono_pack(num, den))
+    for _ in range(80_000):                         # exact 53-bit midpoints, and the subnormal grid's ties
+        y = float(_odd_in(rng, (1 << 53) // 3 + 1, (1 << 54) // 3))
+        k, j = rng.randint(-900, 900), rng.randint(-60, 60)
+        z, w = float(rng.randrange(1, 1 << 20) | 1), float(rng.randrange(1, 1 << 20) | 1)
+        kind = rng.randint(0, 6)
+        if kind == 0:
+            num, den = [3.0, y * 2.0 ** k], []
+        elif kind == 1:
+            num, den = [3.0, y * 2.0 ** k, 2.0 ** j], []
+        elif kind == 2:
+            num, den = [3.0 * z, y * 2.0 ** k], [z]
+        elif kind == 3:
+            num, den = [3.0, y * 2.0 ** k, w], [w]
+        elif kind == 4:
+            num, den = [3.0 * z * w, y * 2.0 ** k], [z, w]
+        elif kind == 5:
+            num, den = [-1.5, y, 2.0 ** j, w * 2.0 ** -20], [w]
+        else:
+            q = rng.randrange(1, 1 << 52) | 1
+            num, den = [fb(q), 0.5 * 2.0 ** rng.randint(0, 40)], [2.0 ** rng.randint(0, 40)]
+        ties.append(_mono_pack(num, den))
+    for _ in range(10_000):                         # zeros and signs, overflowing partial products included
+        nn, nd = rng.choice(SHAPES)
+        num = [factor() for _ in range(nn)]
+        num[rng.randrange(nn)] = rng.choice((0.0, -0.0))
+        zeros.append(_mono_pack(num, [factor() for _ in range(nd)]))
+    while len(five) < 40_000:                       # five and six numerator factors (osmotic's i·M·R·1000·T)
+        nn = rng.choice((5, 6))
+        num = [factor() for _ in range(3)] + [R_GAS, 1000.0] + ([float(rng.randint(1, 12))] if nn == 6 else [])
+        rng.shuffle(num)
+        den = [factor() for _ in range(rng.randint(0, 2))]
+        if _ok_side(num) and _ok_side(den):
+            five.append(_mono_pack(num, den))
+    dom = [_mono_pack([1.0, INF], []), _mono_pack([NAN], [1.0]), _mono_pack([1.0], [0.0]), _mono_pack([0.0], [-0.0]),
+           _mono_pack([DMAX, DMAX], [fb(1)]), _mono_pack([fb(1), fb(1)], [DMAX]), _mono_pack([], []),
+           _mono_pack([fb(1)], [2.0]), _mono_pack([fb(3)], [2.0]), _mono_pack([DMAX], [0.5])]
+    return [("random shapes", rand), ("|exponents| <= 200", mid), ("the result at the range ends", edge),
+            ("midpoints and subnormal ties", ties), ("zeros", zeros), ("five and six factors", five), ("domain", dom)]
+
+
+def args_mul3(rng):
+    """(x, y, z) for heat_transfer and the colligative functions."""
+    rand = [(_spp(rng), _spp(rng), _spp(rng)) for _ in range(80_000)]
+    mid = [(_spp(rng, -150, 150), _spp(rng, -150, 150), _spp(rng, -150, 150)) for _ in range(60_000)]
+    typical = [(_pp(rng, -10, 20), _pp(rng, -4, 5), _spp(rng, -10, 10)) for _ in range(60_000)]
+    comp = []                                       # x·y past DBL_MAX or below 2^-1022, z bringing it back
+    for _ in range(40_000):
+        if rng.random() < 0.5:
+            x, y = _spp(rng, 520, 1023), _spp(rng, 520, 1023)
+        else:
+            x, y = _spp(rng, -1074, -520), _spp(rng, -1074, -520)
+        e = math.frexp(x)[1] + math.frexp(y)[1]
+        comp.append((x, y, _around(rng, -e) * rng.choice((1.0, -1.0))))
+    ties = []
+    for _ in range(40_000):
+        y = float(_odd_in(rng, (1 << 53) // 3 + 1, (1 << 54) // 3))
+        if rng.random() < 0.6:
+            ties.append((3.0 * rng.choice((1.0, -1.0)), y * 2.0 ** rng.randint(-900, 900), 2.0 ** rng.randint(-60, 60)))
+        else:
+            ties.append((fb(rng.randrange(1, 1 << 52) | 1), 0.5 * 2.0 ** rng.randint(0, 40), 2.0 ** -rng.randint(0, 40)))
+    sp = [0.0, -0.0, INF, -INF, NAN, 1.0, fb(1), DMAX, 1e300, 1e-300]
+    specials = [(a, b, c) for a in sp for b in sp for c in sp]
+    return [("binade-uniform", rand), ("|exponents| <= 150", mid), ("typical", typical),
+            ("partial products past the range", comp), ("midpoints and subnormal ties", ties), ("specials", specials)]
+
+
+def args_shc(rng):
+    """(q, m, ΔT) for specific_heat_from_calorimetry."""
+    rand = [(_spp(rng), _pp(rng), _spp(rng, -39, 1023)) for _ in range(80_000)]
+    typical = [(_spp(rng, -10, 30), _pp(rng, -10, 20), _spp(rng, -10, 10)) for _ in range(60_000)]
+    comp = []
+    for _ in range(40_000):
+        if rng.random() < 0.5:
+            m, dt = _pp(rng, 520, 1023), _spp(rng, 520, 1023)
+            q = _spp(rng, 600, 1023)
+        else:
+            m, dt = _pp(rng, -1074, -600), _spp(rng, -39, 20)
+            q = _spp(rng, -1074, -900)
+        comp.append((q, m, dt))
+    sub = [(fb(rng.randrange(1, 1 << 52)) * rng.choice((1.0, -1.0)), float(rng.choice((1, 2, 4, 3, 5))),
+            rng.choice((1.0, -1.0, 2.0, 0.5))) for _ in range(20_000)]
+    eps = 1e-12
+    bad = [(1.0, 1.0, math.nextafter(eps, 0.0)), (1.0, 1.0, eps), (1.0, 0.0, 1.0), (NAN, 1.0, 1.0), (1.0, 1.0, INF),
+           (INF, 1.0, 1.0), (1.0, -1.0, 1.0), (0.0, 1.0, 1.0), (-0.0, 1.0, -1.0), (0.0, DMAX, DMAX)]
+    return [("binade-uniform", rand), ("typical", typical), ("m·ΔT past the range", comp),
+            ("subnormal results and ties", sub), ("Err and zeros", bad)]
+
+
+def args_osm(rng):
+    """(i, M, T) for osmotic_pressure."""
+    rand = [(_pp(rng), _pp(rng), _pp(rng)) for _ in range(80_000)]
+    typical = [(rng.uniform(1.0, 4.0), _pp(rng, -20, 4), _pp(rng, 0, 13)) for _ in range(60_000)]
+    comp = []
+    for _ in range(40_000):
+        if rng.random() < 0.5:
+            i, c = _pp(rng, 520, 1023), _pp(rng, 520, 1023)
+        else:
+            i, c = _pp(rng, -1074, -520), _pp(rng, -1074, -520)
+        e = math.frexp(i)[1] + math.frexp(c)[1] + 13
+        comp.append((i, c, _around(rng, -e)))
+    sub = [(_pp(rng, -1074, -1000), _pp(rng, -40, 2), _pp(rng, -20, 13)) for _ in range(20_000)]
+    bad = [(2.0, 0.0, 298.15), (2.0, -0.0, 298.15), (0.0, 0.1, 298.15), (2.0, 0.1, 0.0), (2.0, -1.0, 298.15),
+           (NAN, 0.1, 298.15), (2.0, INF, 298.15), (2.0, 0.1, INF)]
+    return [("binade-uniform", rand), ("typical", typical), ("partial products past the range", comp),
+            ("subnormal results", sub), ("Err and zeros", bad)]
+
+
+def args_zhl(rng):
+    """([A]0, k) for zero_order_half_life."""
+    rand = [(_pp(rng), _pp(rng)) for _ in range(80_000)]
+    typical = [(_pp(rng, -20, 5), _pp(rng, -30, 10)) for _ in range(40_000)]
+    big = [(_pp(rng), 2.0 ** 1023 * rng.uniform(1.0, 2.0)) for _ in range(40_000)] + \
+        [(_pp(rng), ulps(2.0 ** 1023, rng.randint(-5, 5))) for _ in range(5_000)]
+    sub = [(_pp(rng, -1074, -900), _pp(rng, 0, 200)) for _ in range(20_000)]
+    bad = [(1.0, 0.0), (0.0, 1.0), (NAN, 1.0), (1.0, INF), (-1.0, 1.0), (1.0, -1.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("k >= 2^1023: 2k overflows", big),
+            ("subnormal results", sub), ("Err", bad)]
+
+
+def args_ssi(rng):
+    """(k1, [A], k2) for steady_state_intermediate."""
+    rand = [(_pp(rng), _pp(rng), _pp(rng)) for _ in range(80_000)]
+    typical = [(_pp(rng, -20, 10), _pp(rng, -20, 4), _pp(rng, -10, 20)) for _ in range(60_000)]
+    comp = []
+    for _ in range(40_000):
+        if rng.random() < 0.5:
+            a, b = _pp(rng, 520, 1023), _pp(rng, 520, 1023)
+        else:
+            a, b = _pp(rng, -1074, -520), _pp(rng, -1074, -520)
+        e = math.frexp(a)[1] + math.frexp(b)[1]
+        comp.append((a, b, _around(rng, e)))
+    ties = []
+    for _ in range(40_000):
+        y = float(_odd_in(rng, (1 << 53) // 3 + 1, (1 << 54) // 3))
+        if rng.random() < 0.6:
+            ties.append((y * 2.0 ** rng.randint(-900, 900), 3.0, 2.0 ** rng.randint(-60, 60)))
+        else:
+            ties.append((fb(rng.randrange(1, 1 << 52) | 1), 1.0, 2.0 * 2.0 ** rng.randint(0, 40)))
+    bad = [(0.0, 1.0, 1.0), (-0.0, 1.0, 1.0), (1.0, 0.0, 1.0), (1.0, 1.0, 0.0), (NAN, 1.0, 1.0), (1.0, -1.0, 1.0),
+           (0.0, DMAX, fb(1))]
+    return [("binade-uniform", rand), ("typical", typical), ("k1·[A] past the range", comp),
+            ("midpoints and subnormal ties", ties), ("Err and zeros", bad)]
+
+
+def args_pre(rng):
+    """(k_forward, k_reverse, k_slow, [A]) for pre_equilibrium_rate."""
+    rand = [(_pp(rng), _pp(rng), _pp(rng), _pp(rng)) for _ in range(80_000)]
+    typical = [(_pp(rng, -10, 20), _pp(rng, -10, 20), _pp(rng, -20, 10), _pp(rng, -20, 4)) for _ in range(60_000)]
+    comp = []
+    for _ in range(40_000):
+        if rng.random() < 0.5:
+            kf, kr = _pp(rng, 400, 1023), _pp(rng, -1074, -400)
+        else:
+            kf, kr = _pp(rng, -1074, -400), _pp(rng, 400, 1023)
+        e = math.frexp(kf)[1] - math.frexp(kr)[1]
+        ks = _around(rng, -e, 300)
+        comp.append((kf, kr, ks, _pp(rng, -100, 100)))
+    ties = []
+    for _ in range(40_000):
+        y = float(_odd_in(rng, (1 << 53) // 3 + 1, (1 << 54) // 3))
+        ties.append((3.0, 2.0 ** rng.randint(-60, 60), y * 2.0 ** rng.randint(-800, 800), 2.0 ** rng.randint(-60, 60)))
+    bad = [(1e300, 1.0, 1e300, 0.0), (1e300, 1e-300, 0.0, 1.0), (0.0, 1.0, 1.0, 1.0), (1.0, 0.0, 1.0, 1.0),
+           (NAN, 1.0, 1.0, 1.0), (1.0, 1.0, -1.0, 1.0), (1.0, 1.0, 1.0, -1.0), (-0.0, 1.0, 1.0, 1.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("k_f/k_r past the range", comp), ("midpoints", ties),
+            ("Err and zeros", bad)]
+
+
+def args_soc(rng):
+    """([A]0, k, t) for second_order_concentration."""
+    def nz(lo=-1074, hi=1023):
+        return 0.0 if rng.random() < 0.03 else _pp(rng, lo, hi)
+    rand = [(_pp(rng), nz(), nz()) for _ in range(80_000)]
+    typical = [(_pp(rng, -20, 4), nz(-20, 20), nz(-10, 20)) for _ in range(60_000)]
+    edge = []
+    for _ in range(60_000):
+        kind = rng.randint(0, 4)
+        if kind == 0:
+            edge.append((_pp(rng, -1074, -1015), nz(-40, 40), nz(-40, 40)))
+        elif kind == 1:
+            edge.append((_pp(rng, 1015, 1023), nz(-1074, -900), nz(-40, 40)))
+        elif kind == 2:
+            edge.append((_pp(rng, -40, 40), _pp(rng, 500, 1023), _pp(rng, 500, 1023)))
+        elif kind == 3:
+            edge.append((_pp(rng, -40, 40), _pp(rng, -1074, -500), _pp(rng, -1074, -500)))
+        else:
+            edge.append((_pp(rng, -1074, -900), _pp(rng, 800, 1023), _pp(rng, 0, 200)))
+    bad = [(0.0, 1.0, 1.0), (1.0, -1.0, 1.0), (1.0, 1.0, -1.0), (NAN, 1.0, 1.0), (1.0, INF, 1.0), (1.0, 1.0, NAN),
+           (DMAX, 0.0, 0.0), (fb(1), 0.0, 1.0), (1.0, 2.0 ** 1000, 2.0 ** 75), (1.0, -0.0, 1.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("the chain past the range", edge), ("Err and specials", bad)]
+
+
+def args_mm(rng):
+    """(Vmax, Km, [S]) for michaelis_menten."""
+    def nz(lo=-1074, hi=1023):
+        return 0.0 if rng.random() < 0.03 else _pp(rng, lo, hi)
+    rand = [(_pp(rng), _pp(rng), nz()) for _ in range(80_000)]
+    typical = [(_pp(rng, -20, 10), _pp(rng, -20, 4), nz(-27, 10)) for _ in range(60_000)]
+    edge = []
+    for _ in range(60_000):
+        kind = rng.randint(0, 3)
+        if kind == 0:
+            edge.append((_pp(rng, 0, 1023), _pp(rng, 1000, 1023), _pp(rng, 1000, 1023)))
+        elif kind == 1:
+            edge.append((_pp(rng, 500, 1023), _pp(rng, -1074, 1023), _pp(rng, 500, 1023)))
+        elif kind == 2:
+            edge.append((_pp(rng, -1074, -500), _pp(rng, -1074, 0), _pp(rng, -1074, -500)))
+        else:
+            edge.append((_pp(rng, -1074, 1023), _pp(rng, -1074, -1015), _pp(rng, -1074, -1015)))
+    bad = [(0.0, 1.0, 1.0), (1.0, 0.0, 1.0), (1.0, 1.0, -1.0), (NAN, 1.0, 1.0), (1.0, 1.0, INF), (100.0, DMAX, DMAX),
+           (DMAX, DMAX, DMAX), (1.0, 1.0, -0.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("the chain past the range", edge), ("Err and specials", bad)]
+
+
+def args_monotie(rng):
+    """(cn, cd, s0, s1, s2, t0, t1, z1) for _km_mono_tie: z1 the double below F or a nearby one, and exact midpoints."""
+    near, far, mids = [], [], []
+    for _ in range(100_000):
+        cn, cd = rng.randint(0, 3), rng.randint(0, 2)
+        ss, ts = [_unit_sig(rng) for _ in range(cn)], [_unit_sig(rng) for _ in range(cd)]
+        f = Fraction(1)
+        for v in ss:
+            f *= Fraction(v)
+        for v in ts:
+            f /= Fraction(v)
+        z = rn(f)
+        z1 = z if Fraction(z) <= f else math.nextafter(z, 0.0)
+        near.append((cn, cd) + tuple(ss + [1.0] * (3 - cn)) + tuple(ts + [1.0] * (2 - cd)) + (z1,))
+        far.append((cn, cd) + tuple(ss + [1.0] * (3 - cn)) + tuple(ts + [1.0] * (2 - cd)) +
+                   (ulps(z1, rng.choice((-3, -2, -1, 1, 2, 3))),))
+    for _ in range(40_000):                         # F = 1.5·s_y = 3y/2^b exactly a midpoint (3y odd, of 54 bits)
+        y = _odd_in(rng, (1 << 53) // 3 + 1, (1 << 54) // 3)
+        b = y.bit_length()
+        sy = y * 2.0 ** -(b - 1)
+        f = Fraction(3 * y, 1 << b)
+        zr = rn(f)
+        z1 = zr if Fraction(zr) < f else math.nextafter(zr, 0.0)
+        mids.append((2, 0, 1.5, sy, 1.0, 1.0, 1.0, z1))
+    return [("z1 below F", near), ("z1 a few ulps away", far), ("exact midpoints", mids)]
+
+
+def audit_checks(work, targets, which):
+    """Ids 33 … 44 against their exact references on every target, the exact path forced; True if anything failed."""
+    failed = False
+    gens = {"mono": args_mono, "heat": args_mul3, "shc": args_shc, "boil": args_mul3, "frz": args_mul3, "osm": args_osm,
+            "zhl": args_zhl, "ssi": args_ssi, "pre": args_pre, "soc": args_soc, "mm": args_mm, "monotie": args_monotie}
+
+    def eq(a, b):
+        return a == b or (math.isnan(fb(a)) and math.isnan(fb(b)))
+    for fid, name in AUDIT:
+        if name not in which:
+            continue
+        t0 = time.time()
+        rng = random.Random(1033 + fid)
+        sections = gens[name](rng)
+        xs = [x for _, sec in sections for x in sec]
+        want = [ref_audit(name, a) for a in xs]
+        first = None
+        for t in targets:
+            g0, g1, fl = run_probe(work, t, fid, 0, xs)
+            a0, _, _ = run_probe(work, t, fid, 1, xs)
+            bad = [i for i in range(len(xs)) if not eq(g0[i], want[i])]
+            bad_acc = [i for i in range(len(xs)) if not eq(a0[i], want[i])]
+            bad_fast = [i for i in range(len(xs)) if fl[i] == 1 and not eq(g1[i], g0[i])]
+            for i in bad[:5]:
+                print(f"  MISMATCH {name}{xs[i]!r} on {t}: got {g0[i]:016x}, want {want[i]:016x}")
+            for i in bad_acc[:5]:
+                print(f"  MISMATCH {name} (slow path){xs[i]!r} on {t}: got {a0[i]:016x}, want {want[i]:016x}")
+            for i in bad_fast[:5]:
+                print(f"  FAST/FULL DIFFER {name}{xs[i]!r} on {t}: {g1[i]:016x} vs {g0[i]:016x}")
+            # A NaN word is one value across targets: heat / boil / frz keep Rust's (m·c)·ΔT for a non-finite input, and
+            # the hardware's default NaN of ∞·0 is negative on x86_64 and positive on aarch64 (as Rust's own result is;
+            # the parity rules match any NaN). Every other word must be identical.
+            def canon(ws):
+                return [NANW if math.isnan(fb(w)) else w for w in ws]
+            cur = (canon(g0), canon(g1), fl, canon(a0))
+            xdiff = 0 if first is None else sum(1 for u, v in zip(cur, first) for p, q in zip(u, v) if p != q)
+            if first is None:
+                first = cur
+            slow = len(xs) - sum(1 for f in fl if f == 1)
+            print(f"{name:7} {t:8} {len(xs):9,} args: {len(bad)} mismatches; slow path forced: {len(bad_acc)} "
+                  f"mismatches; fast path: {len(bad_fast)} differ, fell back {slow:,}; bits or flags differing from "
+                  f"{targets[0]}: {xdiff}")
+            failed |= bool(bad or bad_acc or bad_fast or xdiff)
+            if t == targets[0] and name != "monotie":
+                rates = []
+                i = 0
+                for tag, sec in sections:
+                    rates.append(f"{tag} {sum(1 for f in fl[i:i + len(sec)] if f != 1)}/{len(sec)}")
+                    i += len(sec)
+                print("         fallbacks by region: " + "; ".join(rates))
+        print(f"       [{time.time() - t0:.0f} s]")
+    return failed
+
 def gen_args(name, lim):
     rng = random.Random({"exp": 1001, "exp10": 1002, "expm1": 1003, "ln": 1004, "log10": 1005, "pow": 1006,
                          "sin": 1007, "cos": 1008, "atan2": 1009, "acos": 1010, "exp2s": 1011, "h100": 1012,
@@ -1539,6 +2020,9 @@ include "src/element.cyr"
 include "src/molecule.cyr"
 include "src/stoichiometry.cyr"
 include "src/thermo.cyr"
+include "src/phase_data.cyr"
+include "src/phase.cyr"
+include "src/kinetics.cyr"
 include "src/organic_data.cyr"
 include "src/organic.cyr"
 include "src/inorganic_data.cyr"
@@ -1565,6 +2049,11 @@ fn arity(fid): i64 {
     if (fid == 29) { return 4; }
     if (fid == 30 || fid == 31) { return 7; }
     if (fid == 32) { return 3; }
+    if (fid == 33) { return 12; }
+    if (fid == 39) { return 2; }
+    if (fid == 41) { return 4; }
+    if (fid == 44) { return 8; }
+    if (fid >= 34 && fid <= 43) { return 3; }
     return 1;
 }
 
@@ -1760,6 +2249,157 @@ fn run_stoich(fid, mode, a): (i64, i64, i64) {
     return (w0, load64(&eb + 40), 1);
 }
 
+# The overflow audit's B1 (ADR 0002 #27, #28): ids 33 … 44 as result words (cr_verify.py's AUDIT): mode 0 the public
+# function (an Err as the NaN word 0x7FF8000000000001), the fast path's result at the function's factors and its flag
+# (the monomial's _km_cr_mono_fast; for second_order_concentration and michaelis_menten their Rust-chain fast path);
+# mode 1 the slow path forced (_km_cr_mono_acc; _km_second_order_ux, _km_michaelis_menten_ux). Id 33 is _km_cr_mono
+# itself (n_num, n_den, 6 + 4 factor words), id 44 _km_mono_tie (cn, cd, s0 … s2, t0, t1, z1; z2 = nextup(z1)). An Err
+# row, and a non-finite input of the unvalidated functions, return the public result in both slots and modes.
+#must_use
+fn run_audit(fid, mode, a): (i64, i64, i64) {
+    var nanw = 0x7FF8000000000001;
+    if (fid == 33) {
+        var nn = load64(a);
+        var nd = load64(a + 8);
+        if (mode == 1) {
+            var ma: f64 = _km_cr_mono_acc(a + 16, nn, a + 64, nd);
+            return (_km_bits(ma), _km_bits(ma), 0);
+        }
+        var mr: f64 = _km_cr_mono(a + 16, nn, a + 64, nd);
+        var mf, mo = _km_cr_mono_fast(a + 16, nn, a + 64, nd);
+        return (_km_bits(mr), _km_bits(mf), mo);
+    }
+    if (fid == 44) {
+        var z1: f64 = load64(a + 56);
+        var zb = _km_bits(z1) + 1;
+        var z2: f64 = zb;
+        var tr: f64 = _km_mono_tie(a + 16, load64(a), a + 40, load64(a + 8), z1, z2);
+        return (_km_bits(tr), _km_bits(tr), 1);
+    }
+    var x: f64 = load64(a);
+    var y: f64 = load64(a + 8);
+    var z: f64 = load64(a + 16);
+    var w: f64 = load64(a + 24);
+    var nb: f64[5];
+    var db: f64[2];
+    var nn2 = 3;
+    var nd2 = 0;
+    var pw = 0;
+    var ok = 1;
+    if (fid == 34 || fid == 36 || fid == 37) {
+        var r3: f64 = 0.0;
+        if (fid == 34) { r3 = heat_transfer(x, y, z); }
+        if (fid == 36) { r3 = boiling_point_elevation(x, y, z); }
+        if (fid == 37) { r3 = freezing_point_depression(x, y, z); }
+        pw = _km_bits(r3);
+        if (_km_is_finite(x) != 1 || _km_is_finite(y) != 1 || _km_is_finite(z) != 1) { ok = 0; }
+        store64(&nb, x);
+        store64(&nb + 8, y);
+        store64(&nb + 16, z);
+    } elif (fid == 35) {
+        var t35, v35 = specific_heat_from_calorimetry(x, y, z);
+        pw = v35;
+        if (is_ok(t35) != 1) { pw = nanw; ok = 0; }
+        store64(&nb, x);
+        store64(&db, y);
+        store64(&db + 8, z);
+        nn2 = 1;
+        nd2 = 2;
+    } elif (fid == 38) {
+        var t38, v38 = osmotic_pressure(x, y, z);
+        pw = v38;
+        if (is_ok(t38) != 1) { pw = nanw; ok = 0; }
+        var rg: f64 = KM_GAS_CONSTANT;
+        var th: f64 = 1000.0;
+        store64(&nb, x);
+        store64(&nb + 8, y);
+        store64(&nb + 16, rg);
+        store64(&nb + 24, th);
+        store64(&nb + 32, z);
+        nn2 = 5;
+    } elif (fid == 39) {
+        var t39, v39 = zero_order_half_life(x, y);
+        pw = v39;
+        if (is_ok(t39) != 1) { pw = nanw; ok = 0; }
+        var two: f64 = 2.0;
+        store64(&nb, x);
+        store64(&db, two);
+        store64(&db + 8, y);
+        nn2 = 1;
+        nd2 = 2;
+    } elif (fid == 40) {
+        var t40, v40 = steady_state_intermediate(x, y, z);
+        pw = v40;
+        if (is_ok(t40) != 1) { pw = nanw; ok = 0; }
+        store64(&nb, x);
+        store64(&nb + 8, y);
+        store64(&db, z);
+        nn2 = 2;
+        nd2 = 1;
+    } elif (fid == 41) {
+        var t41, v41 = pre_equilibrium_rate(x, y, z, w);
+        pw = v41;
+        if (is_ok(t41) != 1) { pw = nanw; ok = 0; }
+        store64(&nb, z);
+        store64(&nb + 8, x);
+        store64(&nb + 16, w);
+        store64(&db, y);
+        nd2 = 1;
+    } elif (fid == 42) {
+        var t42, v42 = second_order_concentration(x, y, z);
+        if (is_ok(t42) != 1) { return (nanw, nanw, 1); }
+        if (mode == 1) {
+            var su: f64 = _km_second_order_ux(x, y, z);
+            return (_km_bits(su), _km_bits(su), 0);
+        }
+        var sf, so = _km_second_order_fast(x, y, z);
+        return (v42, _km_bits(sf), so);
+    } else {
+        var t43, v43 = michaelis_menten(x, y, z);
+        if (is_ok(t43) != 1) { return (nanw, nanw, 1); }
+        if (mode == 1) {
+            var mu: f64 = _km_michaelis_menten_ux(x, y, z);
+            return (_km_bits(mu), _km_bits(mu), 0);
+        }
+        var vf, vo = _km_michaelis_menten_fast(x, y, z);
+        return (v43, _km_bits(vf), vo);
+    }
+    if (ok != 1) { return (pw, pw, 1); }
+    if (mode == 1) {
+        var aa: f64 = _km_cr_mono_acc(&nb, nn2, &db, nd2);
+        return (_km_bits(aa), _km_bits(aa), 0);
+    }
+    var ff: f64 = 0.0;
+    var fo = 0;
+    if (fid == 34 || fid == 36 || fid == 37) {
+        var f3, o3 = _km_mul3_fast(x, y, z);
+        ff = f3;
+        fo = o3;
+    } elif (fid == 35) {
+        var f5, o5 = _km_div2_fast(x, y, z);
+        ff = f5;
+        fo = o5;
+    } elif (fid == 38) {
+        var rg5: f64 = KM_GAS_CONSTANT;
+        var f8, o8 = _km_mul5_fast(x, y, rg5, 1000.0, z);
+        ff = f8;
+        fo = o8;
+    } elif (fid == 39) {
+        var f9, o9 = _km_div2_fast(x, 2.0, y);
+        ff = f9;
+        fo = o9;
+    } elif (fid == 40) {
+        var f0, o0 = _km_mul_div_fast(x, y, z);
+        ff = f0;
+        fo = o0;
+    } else {
+        var f1, o1 = _km_mul3_div_fast(z, x, w, y);
+        ff = f1;
+        fo = o1;
+    }
+    return (pw, _km_bits(ff), fo);
+}
+
 # ADR 0002 #20 (M4e-2): ids 13 … 17 take (significand, exponent) words: _km_ux_sqrt_f64(s, e), _km_ux_mul_f64,
 # _km_ux_div_f64, _km_ux_add_f64 and _km_ux_atan2_f64 (mode 1: _km_ux_atan2_acc; mode 0's second slot: _km_ux_atan2_fast);
 # ids 18 … 20 the geometry's points (6, 9, 12 f64): mode 0 the public function, its second slot the slow path forced
@@ -1880,7 +2520,12 @@ fn main(): i64 {
         var r: f64 = 0.0;
         var rf: f64 = 0.0;
         var ok = 0;
-        if (fid >= 27) {
+        if (fid >= 33) {
+            var u0, u1, uf = run_audit(fid, mode, at);
+            store64(out + 8 * i, u0);
+            store64(out + 8 * n + 8 * i, u1);
+            store8(out + 16 * n + i, uf);
+        } elif (fid >= 27) {
             var w0, w1, wf = run_stoich(fid, mode, at);
             store64(out + 8 * i, w0);
             store64(out + 8 * n + 8 * i, w1);
@@ -2058,8 +2703,11 @@ def main():
 
     funcs = [f for f in FUNCS if only is None or f[1] in only]
     stoich = [name for _, name in STOICH if only is None or name in only]
+    audit = [name for _, name in AUDIT if only is None or name in only]
     plan = {}
     wmax = 7 * 600_000 if stoich else 0
+    if audit:
+        wmax = max(wmax, 12 * 450_000)
     for fid, name, _, _, ref in funcs:
         xs, acc, spans = gen_args(name, lim)
         plan[name] = (xs, acc, spans)
@@ -2186,6 +2834,7 @@ def main():
         failed |= bool(n_om)
     failed |= m4a_checks(work, targets, plan)
     failed |= stoich_checks(work, targets, stoich)
+    failed |= audit_checks(work, targets, audit)
     print("cr_verify: " + ("FAILED" if failed else "all results correctly rounded, identical on every target"))
     sys.exit(1 if failed else 0)
 

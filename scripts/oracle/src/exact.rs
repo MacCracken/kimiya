@@ -1,7 +1,8 @@
-//! Exact integer arithmetic for the exact values ADR 0002 #13, #16, #19, #20, #21 and #22 name (M4c … M4e-3): binary64
-//! rounding of m·2^e for a mantissa of any size, the two irrational factors the port rounds once, 2⁻ᶠ (N₀/2ⁿ for a
-//! fractional n) and 2^(1/6) (σ·2^(1/6)), the rational 1/(100·x) (the wavenumber conversions), binary64 with an unbounded
-//! exponent (the geometry), and the exact rationals p/q·2^e of the Bohr model, the Rydberg formula and the reduced mass.
+//! Exact integer arithmetic for the exact values ADR 0002 #13, #16, #19 … #22 and #24 … #28 name (M4c … the overflow
+//! audit's B1): binary64 rounding of m·2^e for a mantissa of any size, the two irrational factors the port rounds once,
+//! 2⁻ᶠ (N₀/2ⁿ for a fractional n) and 2^(1/6) (σ·2^(1/6)), the rational 1/(100·x) (the wavenumber conversions), binary64
+//! with an unbounded exponent (the geometry, and B1's kinetics), the exact rationals p/q·2^e of the Bohr model, the
+//! Rydberg formula and the reduced mass, and the correctly rounded monomials of stoichiometry and B1.
 //! Integer arithmetic only, independent of the port's double-word and multi-word code (`validate.py` checks every value
 //! again, with `Fraction` and MPFR).
 
@@ -498,6 +499,38 @@ impl Ux {
         round_scaled((r << 1) | sticky, e - 1, false)
     }
 
+    /// (2Q + sticky, exponent) for |x/y| = (Q + f)·2^(e − 64), Q = ⌊m₁·2⁶⁴/m₂⌋ (at least 64 bits: m₁ ≥ 2⁵², m₂ < 2⁵³) and
+    /// sticky = [f > 0]; x nonzero, y nonzero.
+    fn div_parts(self, o: Self) -> (u128, i64) {
+        let num = u128::from(self.m) << 64;
+        let d = u128::from(o.m);
+        ((num / d) << 1 | u128::from(num % d != 0), self.e - o.e - 65)
+    }
+
+    /// RN53(x/y) for y ≠ 0 (ADR 0002 #28, the overflow audit's B1: kinetics' 1/[A]₀ and 1/(…), Vmax·[S]/(Km + [S])), a
+    /// zero x giving IEEE's signed zero.
+    pub fn div(self, o: Self) -> Self {
+        assert!(!o.is_zero(), "Ux::div by zero");
+        let neg = self.neg != o.neg;
+        if self.is_zero() {
+            return Self { neg, m: 0, e: 0 };
+        }
+        let (mant, e) = self.div_parts(o);
+        Self::round(neg, mant, e)
+    }
+
+    /// x/y rounded once into binary64 (its subnormal grid, ±∞ past DBL_MAX), y ≠ 0: `div_parts` and `round_scaled`
+    /// (which drops at least twelve bits, so the sticky bit decides every midpoint).
+    pub fn div_f64(self, o: Self) -> f64 {
+        assert!(!o.is_zero(), "Ux::div_f64 by zero");
+        let neg = self.neg != o.neg;
+        if self.is_zero() {
+            return if neg { -0.0 } else { 0.0 };
+        }
+        let (mant, e) = self.div_parts(o);
+        round_scaled(mant, e, neg)
+    }
+
     /// Whether this is exactly the double x (a finite x; zeros by sign too).
     pub fn is(self, x: f64) -> bool {
         x.is_finite() && Self::from_f64(x) == self
@@ -673,6 +706,35 @@ pub fn cr_mul_div(x: f64, y: f64, z: f64) -> f64 {
     );
     let ((mx, ex), (my, ey), (mz, ez)) = (decompose(x), decompose(y), decompose(z));
     cr_ratio(&Big::new(u128::from(mx) * u128::from(my)), &Big::new(u128::from(mz)), ex + ey - ez)
+}
+
+/// The overflow audit's B1 (ADR 0002 #27, #28): RN(Π num / Π den) for finite doubles with nonzero denominator factors,
+/// rounded once (nearest, ties to even; subnormal results on the 2⁻¹⁰⁷⁴ grid; ±∞ past DBL_MAX), its sign the xor of the
+/// factors' signs (a zero factor, or a value that rounds to zero, gives that signed zero): Π Mᵢ over Π Mⱼ·2^(ΣEᵢ − ΣEⱼ)
+/// by [`cr_ratio`]. Integer arithmetic only, independent of the port's double-double fast path and its multi-word
+/// division (`validate.py` checks every value again with `Fraction`).
+pub fn cr_monomial(num: &[f64], den: &[f64]) -> f64 {
+    assert!(
+        num.iter().chain(den).all(|v| v.is_finite()) && den.iter().all(|v| *v != 0.0),
+        "cr_monomial({num:?}, {den:?})"
+    );
+    let neg = num.iter().chain(den).fold(false, |a, v| a != v.is_sign_negative());
+    let sign = if neg { -1.0 } else { 1.0 };
+    if num.contains(&0.0) {
+        return sign * 0.0;
+    }
+    let (mut p, mut q, mut e) = (Big::new(1), Big::new(1), 0_i64);
+    for &x in num {
+        let (m, ex) = decompose(x);
+        p = p.mul(&Big::new(u128::from(m)));
+        e += ex;
+    }
+    for &y in den {
+        let (m, ey) = decompose(y);
+        q = q.mul(&Big::new(u128::from(m)));
+        e -= ey;
+    }
+    sign * cr_ratio(&p, &q, e)
 }
 
 /// a·2^ea against b·2^eb, for non-negative integers a and b, exactly.

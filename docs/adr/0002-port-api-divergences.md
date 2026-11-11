@@ -42,6 +42,8 @@ are compared through the stated mapping:
 | 24 *(2026-11-10, M4f-2)* | `stoichiometry::percent_yield` computes (a/t)·100, `theoretical_yield_moles` (m/c)·p and `percent_composition` ((mass·count)/mw)·100: two to four roundings of exact rationals, so about a quarter of results are 1–2 ulp off, and at the range ends the result is 0 or ∞ where the value is representable (`percent_yield(5e-324, 10)` is 0, not 5e-323; the yield's m/c over- or underflows though m·p/c is finite) | each exact rational **rounded once**: RN(100·a/t), RN(m·p/c) with m and c at #25's index, RN(mass·count·100/mw) with mw `molecular_weight`'s own double — `_km_cr_mul_div`: a double-double fast path on the significands with `_km_dd_div_cr`'s rounding test and an exact resolution of the midpoint where it fails, the exact `_km_cr_ratio` for subnormal operands and results that may leave the normal range. Zero operands keep Rust's ±0; Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)` (the yields) or with the whole result (composition), mapped and counted (1,126 `percent_yield`, 240 `theoretical_yield_moles`, 598 `percent_composition`) |
 | 25 *(2026-11-10, M4f-2)* | `stoichiometry::limiting_reagent` compares the rounded ratios m/c, so it can pick the wrong reactant when two ratios are within an ulp, or when both overflow to ∞ or underflow (`[DBL_MAX, DBL_MAX]` over `[5e-324, 1e-300]` gives 0; the exact answer is 1) | the exact comparison: i replaces the current minimum i₀ when mᵢ·c_{i₀} < m_{i₀}·cᵢ exactly (the first index on an exact tie, Rust's strict `<`); the rounded ratios still decide wherever they differ (RN is monotone), and equal ones go to `_km_ratio_lt`, an exact comparison of the two products (exact TwoProducts of the significands, the exponents first). Rust's validation and its order are kept | class A; equal rows plain; the others noted `(i:…)`, mapped and counted (920 rows) |
 | 26 *(2026-11-10, M4f-2)* | `stoichiometry::empirical_formula` tests \|r·k − round(r·k)\| ≤ 0.1 on rounded mole ratios: inputs at the ±1/10 edge flip between Ok and Err (14 of M4f's 3,383 rows; C 12.011 % with O 17.5989 % is an Err, but exactly CO), and its "non-positive min" and "ratio not finite" Errs are underflow and overflow artefacts | exact evaluation: the moles pctᵢ/massᵢ and their minimum exact, the ratios rᵢ = pctᵢ·mass_j/(massᵢ·pct_j) exact, the multiplier the smallest k in 1 ..= 6 with \|rᵢ·k − round(rᵢ·k)\| ≤ 1/10 exactly for every i, the counts round(rᵢ·k) exactly (past u32::MAX Rust's Err); a ratio of 2³² − ½ or more is the ComputationError (proven), the others a double-double with a tolerance test that is proven or defers to an exact integer test. Rust's validation and its order are kept | class A; equal rows plain; the others noted with the whole result `(v:n i:z i:c …)` or `(E:ComputationError)`, mapped and counted (270 rows) |
+| 27 *(2026-11-10, the overflow audit's B1)* | `thermo::heat_transfer` computes (m·c)·ΔT, `specific_heat_from_calorimetry` q/(m·ΔT), `phase::boiling_point_elevation` and `freezing_point_depression` (K·m)·i, `osmotic_pressure` (((i·M)·R)·1000)·T: two to four roundings of one product or quotient of inputs, so about a quarter of results are 1–2 ulp off, and a partial product that over- or underflows gives 0, ±∞ or NaN although the value is representable (`specific_heat_from_calorimetry(4184, 1000, DBL_MAX)` 0, not 2.33·10⁻³⁰⁸; `osmotic_pressure(5e-324, 0.1, 298.15)` 0, not 1.22·10⁻³¹⁸; `heat_transfer(1e300, 1e300, 0)` ∞·0 = NaN, not 0) | each exact product or quotient **rounded once** — RN(m·c·ΔT), RN(q/(m·ΔT)), RN(K·m·i), RN(i·M·R·1000·T) with R `KM_GAS_CONSTANT`'s double and 1000 exact — by `src/mathx.cyr`'s correctly rounded monomial `_km_cr_mono` (M4f-2's `_km_cr_mul_div` generalised: a double-double fast path with `_km_dd_div_cr`'s rounding test and an exact midpoint resolution, the exact `_km_cr_ratio` past the normal range): the sign the factors' xor, a zero factor that signed zero, ties to even, subnormal results on the 2⁻¹⁰⁷⁴ grid, ±∞ only past DBL_MAX. A non-finite input of the three unvalidated functions keeps Rust's expression; Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (151 `heat_transfer`, 171 `specific_heat_from_calorimetry`, 82 + 82 colligative, 196 `osmotic_pressure`: 682) |
+| 28 *(2026-11-10, the overflow audit's B1)* | `kinetics::zero_order_half_life` computes [A]₀/(2k), `steady_state_intermediate` (k₁·[A])/k₂, `pre_equilibrium_rate` (k₂·(k₁/k₋₁))·[A], `second_order_concentration` 1/(1/[A]₀ + k·t) and `michaelis_menten` (Vmax·[S])/(Km + [S]): an intermediate over- or underflows where the result is representable (`zero_order_half_life(DBL_MAX, DBL_MAX)` 0, not ½; `second_order_concentration(1, DBL_MAX, 10)` 0, not 5.56·10⁻³¹⁰; `michaelis_menten(100, DBL_MAX, DBL_MAX)` ∞/∞ = NaN, not 50; `pre_equilibrium_rate(1e300, 1, 1e300, 0)` ∞·0 = NaN, not 0), and the monomials' two or three roundings are 1–2 ulp off on a quarter of inputs | the three monomials **rounded once** (#27's helper: RN([A]₀/(2k)) — Rust's own division wherever 2k is finite, where it already is that value —, RN(k₁·[A]/k₂), RN(k₂·k₁·[A]/k₋₁)); the two with a sum inside under **#20's semantics**: Rust's operation sequence with an unbounded exponent (`_km_ux_*`), the final division rounded once into binary64, behind a range test (`_km_second_order_fast`, `_km_michaelis_menten_fast`) that proves Rust's chain stayed normal, so those inputs keep Rust's bits. Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (89 `second_order_concentration`, 90 `zero_order_half_life`, 118 `steady_state_intermediate`, 179 `pre_equilibrium_rate`, 160 `michaelis_menten`: 636) |
 
 Deferred with their modules (port plan §2.2), and decided when they port: #5 `bridge::*` →
 `Result` and removal of `ionization_to_bond_energy_estimate`; #10 soorat `from_molecule` →
@@ -639,6 +641,119 @@ arguments in all) against `Fraction` on x86_64 ELF, x86_64 PE and aarch64, the e
 217 → 586, `limiting_reagent` 32 → 33; the new exact-path benches `theoretical_yield_moles_tie` 133 ns (a midpoint,
 resolved in the fast path), `percent_yield_subnormal` 2.15 µs (`_km_cr_ratio`), `limiting_reagent_tie` 94 ns,
 `empirical_formula_edge` 7.46 µs (two exact tolerance tests).
+
+## Addition, 2026-11-10 (audit B1): #27 and #28
+
+**The user's decisions, verbatim.** The questions were the main session's; the answers are the user's.
+1. **The audit (2026-11-09).** Q: "Intermediate products of inputs can overflow or underflow even when the true result is
+   representable (…). The same pattern exists in modules ported earlier. How far should the edge-only fix you approved
+   for the geometry functions go?" A: **"Library-wide audit (Recommended)"** — "After M4, audit every ported module for
+   intermediate over/underflow and fix each edge (in-range rows keep Rust's bits), one ADR 0002 row per function
+   family."
+2. **Round once in range (2026-11-10).** Q: "… For the audit's formulas that are a single product/quotient of inputs
+   (n·R·T/P, ε·l·c, the Faraday products), which?" A: **"Round once (Recommended)"** — "Correctly rounded for every
+   input, like #22 and #24: about a quarter of normal-range results move by 1–2 ulp, and each such call gets roughly 5×
+   slower (e.g. ~15 → ~80 ns). Formulas with sums inside get the edge fix only."
+3. **Settled under the user's policy:** "where Rust gives NaN but the true value is out of range, the port returns the
+   correctly rounded ±∞ or 0. Edges that are physically meaningless (T = 10⁻³⁰⁰ K) are fixed too." No such NaN occurs in
+   B1's functions: their NaNs from finite inputs are 0·∞ with an exact zero factor, whose value 0 is representable, and
+   Michaelis–Menten's ∞/∞ of a value below Vmax; so in B1 the point shows only as the exact 0 or the finite value where
+   Rust gives NaN (of the 785 golden rows where Rust's value is 0, ±∞ or NaN and the port's is representable).
+
+The survey behind the audit (sixteen families over every ported module, with the replicas, grids and probes that found
+them) proposed the order of the batches; B1 is its families F1 (#27) and F4 (#28), one row each.
+
+**The treatment, per function** (the decisions' rule: one product or quotient rounds once, a sum inside gets #20's edge
+fix):
+
+| Function | Rust's formula | Treatment | Why |
+|---|---|---|---|
+| `thermo::heat_transfer` | (m·c)·ΔT | rounded once, RN(m·c·ΔT) | one product of inputs; no validation, so a non-finite input keeps Rust's expression (IEEE's ±∞, NaN) |
+| `thermo::specific_heat_from_calorimetry` | q/(m·ΔT) | rounded once, RN(q/(m·ΔT)) | one quotient |
+| `phase::boiling_point_elevation`, `freezing_point_depression` | (K·m)·i | rounded once, RN(K·m·i) | one product; non-finite inputs as `heat_transfer` |
+| `phase::osmotic_pressure` | (((i·M)·R)·1000)·T | rounded once, RN(i·M·R·1000·T) | one product; R enters as its double, 1000 exact |
+| `kinetics::zero_order_half_life` | [A]₀/(2k) | rounded once, RN([A]₀/(2k)) | one quotient; Rust's division is already that value wherever 2k is finite (2k exact, one IEEE division), so it stays the fast path and the monomial serves k ≥ 2¹⁰²³ |
+| `kinetics::steady_state_intermediate` | (k₁·[A])/k₂ | rounded once, RN(k₁·[A]/k₂) | one quotient of a product |
+| `kinetics::pre_equilibrium_rate` | (k₂·(k₁/k₋₁))·[A] | rounded once, RN(k₂·k₁·[A]/k₋₁) | one quotient of a product (Rust's k₁/k₋₁ is a quotient inside a product, not a sum) |
+| `kinetics::second_order_concentration` | 1/(1/[A]₀ + k·t) | #20's semantics | a sum inside |
+| `kinetics::michaelis_menten` | (Vmax·[S])/(Km + [S]) | #20's semantics | a sum inside |
+
+The survey's F4 lists "steady state": that is `steady_state_intermediate`; `steady_state_rate` (k·[X], one operation on
+inputs) is in its "no finding" list and is unchanged.
+
+**#27 and the monomials of #28, the machinery** (`src/mathx.cyr`, "correctly rounded monomials"). M4f-2's RN(x·y/z),
+`_km_cr_mul_div`, written in `stoichiometry.cyr`, moved to `src/mathx.cyr` and became the 2/1 shape of
+`_km_cr_mono(num, nn, den, nd)` = RN(Π num / Π den), for at most six numerator and four denominator doubles, all finite
+and the denominators nonzero (otherwise NaN), the exact path's capacity on each side 253 bits of odd significand parts
+(four arbitrary doubles and a 41-bit integer; osmotic_pressure's five factors use 219): the sign is the xor of the
+factors' signs and a zero factor gives that signed zero (IEEE's rule for products and quotients, so Rust's ±0 wherever
+Rust's chain gives one, and the exact 0 where Rust's 0·∞ is NaN). With each factor s·2^e, the value is F·2^k, F = N/D
+over the significands other than 1:
+- *the fast path* (`_km_cr_mono_fast`): N and D as double-doubles — exact for one or two factors (a TwoProduct), each
+  further factor by `_km_dd_mul_d` (proven within 3.01u², u = 2⁻⁵³), at most 18.1u² in all, inside `_km_dd_div_cr`'s
+  32u² budget — and its rounding test (`_km_dd_div_ends`). When the test fails, F lies within 2⁻⁹⁸·F of the one midpoint
+  μ of two adjacent doubles z₁ < z₂, and for three numerator and two denominator factors or fewer the sign of N − D·μ, an
+  exact sum of at most ten doubles (N's exact expansion of TwoProducts, D·z₁'s TwoProducts, D·(u/2) exact), decides it
+  (`_km_mono_tie`, by Shewchuk's Grow-Expansion with zero elimination, `_km_exp_sign`): ties go to even. Midpoints are
+  common with small integer factors (3·y with 3y of 54 bits), so they stay in the fast path, as M4f-2's
+  `_km_mul_div_tie` kept them. The result y = RN(F) scales exactly where y·2^k ≥ 2⁻¹⁰²¹ (the binary64 grid is the 53-bit
+  one there), is ±∞ past 2¹⁰²³ (IEEE overflow is the 53-bit rounding past DBL_MAX) and ±0 below 2⁻¹⁰⁷⁶;
+- *the exact path* (`_km_cr_mono_acc`): the odd integer significands multiplied in `_km_bn_*`, `_km_cr_ratio` rounding
+  P/Q·2^E once (ties to even, the subnormal grid, +∞ past DBL_MAX), the sign after; it serves possibly subnormal results,
+  the rare failed test beyond the tie shapes, and the tests' forced exact path.
+Through its factor tables and loops the general fast path is slow in this compiler (`heat_transfer` took 148 ns a call
+through it, 65 through its own straight-line path), so each shape the
+modules call has a straight-line fast path of its own for normal operands, the same arithmetic without the tables:
+`_km_mul_div_fast` (M4f-2's, with its 64-bit integer midpoint resolution `_km_mul_div_tie`, now for both signs),
+`_km_mul3_fast` and `_km_mul5_fast` (no denominator: the product's double-double rounded by `_km_dd_round_ends`, ε =
+2⁻¹⁰⁰·h against a proven 9.1u² at most), `_km_div2_fast` and `_km_mul3_div_fast` (`_km_dd_div_ends`), all scaled by
+`_km_mono_fin`; a zero, subnormal or non-finite operand, a failed test (a midpoint other than the 2/1 shape's, or within
+2⁻⁹⁸ of one) or a possibly subnormal result falls back to `_km_cr_mono`. `stoichiometry` calls the 2/1 wrapper
+`_km_cr_mul_div` with the same results (the same correctly rounded value on every argument; `cr_verify.py`'s `muldiv`,
+`pyield`, `tyield` and `pcomp` families pass unchanged); the other wrappers are `_km_cr_mul3`, `_km_cr_div2`,
+`_km_cr_mul3_div` and `_km_cr_mul5`.
+
+**#28's unbounded-exponent functions** (`src/kinetics.cyr`), on #20's helpers. `_km_second_order_fast` returns Rust's
+1/(1/[A]₀ + k·t) when 1/[A]₀ and a nonzero k·t lie in [2⁻¹⁰²¹, DBL_MAX] (a result that large is the 53-bit rounding of
+an exact value in the normal range; k·t = 0 only from a zero factor) and the sum is finite (a sum of two non-negative
+doubles at least 2⁻¹⁰²¹); `_km_michaelis_menten_fast` when Vmax·[S] lies in [2⁻¹⁰²¹, DBL_MAX] or [S] = ±0 and Km + [S] is
+finite (a sum of non-negative doubles below 2⁻¹⁰²¹ is exact). The final division is then one IEEE division of the same
+operands as the unbounded chain's, rounded once in both, so every such input keeps Rust's bits. Otherwise
+`_km_second_order_ux` / `_km_michaelis_menten_ux` evaluate Rust's chain with `_km_ux_from`, `_km_ux_div`, `_km_ux_mul`,
+`_km_ux_add` and the final `_km_ux_div_f64`. Under these semantics an intermediate keeps its 53-bit rounding:
+`second_order_concentration(DBL_MAX, 0, 0)` is 1/RN₅₃(1/DBL_MAX) = 1/(2⁻¹⁰²⁴(1 + 2⁻⁵²)), DBL_MAX's predecessor (Rust's ∞),
+and `michaelis_menten(100, DBL_MAX, DBL_MAX)` is exactly 50 (Rust's NaN).
+
+**Golden comparison** (as #16–#26). The corpus keeps the oracle's values; where the port's value differs, the note names
+it: `[ADR 0002 #27: the port returns the correctly rounded m·c·ΔT = <x> (f:…)]` (likewise `q/(m·ΔT)`, `K·m·i`,
+`i·M·R·1000·T`), `[ADR 0002 #28: the port returns the correctly rounded [A]₀/(2k) = <x> (f:…)]` (likewise `k₁·[A]/k₂`,
+`k₂·k₁·[A]/k₋₁`) and `[ADR 0002 #28: the port returns Rust's sequence evaluated with an unbounded exponent (the final
+division rounded once) = <x> (f:…)]`. The generator computes them independently of the port (`scripts/oracle/src/audit.rs`:
+`exact::cr_monomial` in `Big` integers, `exact::Ux` with its new `div` and `div_f64`), with Rust's validation replicated
+and asserted against the oracle on every row, and appends 2,129 edge rows with their own seeds (thermo 537, phase 528,
+kinetics 1,064: partial products past DBL_MAX or below 2⁻¹⁰²² with the other factor bringing them back, the true overflow
+and underflow ends, 0 against an overflowing product, 53-bit midpoints at scales across the range and the subnormal grid's
+ties, k ≥ 2¹⁰²³, 1/[A]₀ and k·t past either end, ∞/∞). The harness maps a noted row (`_par_got_noted`, and
+`_par_got_noted_f` for the three f64-valued functions) and counts it per function: **682 #27 rows** (151 `heat_transfer`,
+171 `specific_heat_from_calorimetry`, 82 `boiling_point_elevation`, 82 `freezing_point_depression`, 196
+`osmotic_pressure`) and **636 #28 rows** (89 `second_order_concentration`, 90 `zero_order_half_life`, 118
+`steady_state_intermediate`, 179 `pre_equilibrium_rate`, 160 `michaelis_menten`). Of the rows that existed before B1,
+88 of 359, 90 of 374, 33 + 33 of 186 each, 74 of 207, 4 of 987, 2 of 262, 52 of 264, 69 of 283 and 5 of 370 change: the
+monomials' in-range quarter, and the edges. `validate.py` §19 recomputes every row of the ten functions — the monomials
+with `Fraction`, the two others through `mpfr_ref.UX` — and proves that a row is noted exactly where the port's value
+differs from the oracle's, the note naming it bit for bit (so every unnoted row is the port's value too), that no row whose
+f64 chain stays in the normal range is noted for the two #20-style functions (1,003 and 328 rows: Rust's bits), and that
+`zero_order_half_life` is noted only where 2k overflows; it counts the hard rows (785 where Rust's value is 0, ±∞ or NaN
+and the port's representable, 323 53-bit midpoints, 551 subnormal results with 133 ties). `cr_verify.py` checks `mono`,
+`monotie` and the ten functions' public, fast and forced slow paths (`heat`, `shc`, `boil`, `frz`, `osm`, `zhl`, `ssi`,
+`pre`, `soc`, `mm`) against `Fraction` and `mpfr_ref.UX` on x86_64 ELF, x86_64 PE and aarch64.
+
+**Cost** (`tests/kimiya.bcyr`, before → after, the same host; `docs/benchmarks-rust-v-cyrius.md`'s B1 section):
+`thermo/heat_transfer` 5.4 → 65 ns (Rust 0.95), `specific_heat_from_calorimetry` 18 → 86, the colligative pair 6 → 66–67,
+`osmotic_pressure` 20 → 139, `steady_state_intermediate` 21 → 88, `pre_equilibrium_rate` 27 → 125, `zero_order_half_life`
+16 → 16, `second_order_concentration` 23 → 33, `michaelis_menten` 17 → 24 (Rust 2.92); a midpoint `heat_transfer_tie`
+365 ns, a subnormal `osmotic_pressure_subnormal` 4.04 µs, the unbounded-exponent edges 230 and 126 ns; stoichiometry
+as in M4f-2 (`percent_yield` 82, `theoretical_yield_moles` 115, `percent_composition_glucose` 266 ns).
 
 ## Consequences
 

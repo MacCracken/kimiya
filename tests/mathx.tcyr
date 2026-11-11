@@ -1,7 +1,7 @@
 # mathx.tcyr — the correctly rounded exp, exp10, expm1, ln, log10 (M3c-2a), pow (M3c-2b), sin, cos, sincos,
 # atan2 and acos (M4a), x·2^y (M4d) and 1/(100·x) (M4e) of src/mathx.cyr (ADR 0006), the unbounded-exponent
-# arithmetic (M4e-2, ADR 0002 #20), and the multi-word integers, RN(p/q·2^e) and the double-double quotient (M4e-3, ADR
-# 0002 #21, #22).
+# arithmetic (M4e-2, ADR 0002 #20), the multi-word integers, RN(p/q·2^e) and the double-double quotient (M4e-3, ADR
+# 0002 #21, #22), and the correctly rounded monomial (the overflow audit's B1, ADR 0002 #27, #28).
 #
 # Special values, the exact and tie cases, the thresholds, subnormal results (rounded once), the known
 # hardest-to-round arguments (Lefèvre–Muller's binary64 worst cases for exp, ln, sin, cos, arctan and arccos),
@@ -1586,6 +1586,303 @@ fn _t_bn_ratio_agrees() {
     assert(passed > 9900, "the double-double test passes almost always");
 }
 
+# ── the correctly rounded monomial (the overflow audit's B1, ADR 0002 #27, #28) ──
+# RN(Π num / Π den), rounded once, for 36 cases: signs, zeros (Rust's NaN at 1e300·1e300·0 is the exact 0), overflow
+# and underflow to ±∞ and ±0, partial products past both ends, the subnormal grid's ties, 53-bit midpoints of the 3/0,
+# 2/1 and 2/2 shapes (the fast path's exact tie resolution), osmotic_pressure's five factors, the empty product, and the
+# domain's NaNs. Each row: n_num, n_den, six numerator and four denominator words (unused ones 1.0), the expected bits
+# (Fraction, rounded by CPython's correctly rounded int division).
+var _T_MONO: i64[468] = {
+    # −2·3·5: -30.0
+    3, 0, 0xC000000000000000, 0x4008000000000000, 0x4014000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0xC03E000000000000,
+    # 0·(−1)·1 = −0: -0.0
+    3, 0, 0x0000000000000000, 0xBFF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x8000000000000000,
+    # 1e300·1e300·0 = +0 (Rust NaN): 0.0
+    3, 0, 0x7E37E43C8800759C, 0x7E37E43C8800759C, 0x0000000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x0000000000000000,
+    # 1e300·(−1e300)·0 = −0: -0.0
+    3, 0, 0x7E37E43C8800759C, 0xFE37E43C8800759C, 0x0000000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x8000000000000000,
+    # 1e300³ = +∞: inf
+    3, 0, 0x7E37E43C8800759C, 0x7E37E43C8800759C, 0x7E37E43C8800759C, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x7FF0000000000000,
+    # −1e300·1e300·1e300 = −∞: -inf
+    3, 0, 0xFE37E43C8800759C, 0x7E37E43C8800759C, 0x7E37E43C8800759C, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0xFFF0000000000000,
+    # 2^600·2^600·2^-1000 = 2^200: 1.6069380442589903e+60
+    3, 0, 0x6570000000000000, 0x6570000000000000, 0x0170000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x4C70000000000000,
+    # 1e200·1e200·1e-200: 1e+200
+    3, 0, 0x6974E718D7D7625A, 0x6974E718D7D7625A, 0x16687E92154EF7AC, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x6974E718D7D7625A,
+    # 2^-1074·½ = 0 (a tie, to even): 0.0
+    3, 0, 0x0000000000000001, 0x3FE0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x0000000000000000,
+    # 3·2^-1074·½ = 2·2^-1074 (a tie): 1e-323
+    3, 0, 0x0000000000000003, 0x3FE0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x0000000000000002,
+    # 5·2^-1074·½ = 2·2^-1074 (a tie): 1e-323
+    3, 0, 0x0000000000000005, 0x3FE0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x0000000000000002,
+    # −5·2^-1074·½ = −2·2^-1074: -1e-323
+    3, 0, 0x8000000000000005, 0x3FE0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x8000000000000002,
+    # 3·y·1 = 2^53 + 1: the tie to 2^53: 9007199254740992.0
+    3, 0, 0x4008000000000000, 0x4325555555555556, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x4340000000000000,
+    # 3·(y + 1) = 2^53 + 4: exact: 9007199254740996.0
+    3, 0, 0x4008000000000000, 0x4325555555555558, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x4340000000000002,
+    # 3·(y + 2)·2^-60: the tie 2^53 + 7 to 2^53 + 8: 0.007812500000000007
+    3, 0, 0x4008000000000000, 0x432555555555555A, 0x3C30000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3F80000000000004,
+    # −1.5·y: −(2^53 + 1)/2, a tie: -4503599627370496.0
+    3, 0, 0xBFF8000000000000, 0x4325555555555556, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0xC330000000000000,
+    # y·3/1: the 2/1 tie: 9007199254740992.0
+    2, 1, 0x4325555555555556, 0x4008000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x4340000000000000,
+    # y·3/2: 4503599627370496.0
+    2, 1, 0x4325555555555556, 0x4008000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x4000000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x4330000000000000,
+    # (3·7·11)·y/(7·11): 2/2, a tie: 9007199254740992.0
+    2, 2, 0x406CE00000000000, 0x4325555555555556, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x401C000000000000, 0x4026000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x4340000000000000,
+    # 4184/(1000·DBL_MAX): subnormal: 2.3274272559985327e-308
+    1, 2, 0x40B0580000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x408F400000000000, 0x7FEFFFFFFFFFFFFF, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x0010BC6A7EF9DB23,
+    # 1/(3·DBL_MAX) = 0? subnormal: 1.854228215422666e-309
+    1, 2, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x4008000000000000, 0x7FEFFFFFFFFFFFFF, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x0001555555555555,
+    # DBL_MAX·DBL_MAX/2^-1074 = +∞: inf
+    2, 1, 0x7FEFFFFFFFFFFFFF, 0x7FEFFFFFFFFFFFFF, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x0000000000000001, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x7FF0000000000000,
+    # 2^-1074·2^-1074/DBL_MAX = 0: 0.0
+    2, 1, 0x0000000000000001, 0x0000000000000001, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x7FEFFFFFFFFFFFFF, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x0000000000000000,
+    # DBL_MAX·2·0.5: 1.7976931348623157e+308
+    3, 0, 0x7FEFFFFFFFFFFFFF, 0x4000000000000000, 0x3FE0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x7FEFFFFFFFFFFFFF,
+    # DBL_MAX·(1 + 2^-52) = +∞: inf
+    2, 0, 0x7FEFFFFFFFFFFFFF, 0x3FF0000000000001, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x7FF0000000000000,
+    # osmotic 5e-324·0.1·R·1000·298.15: 1.22477e-318
+    5, 0, 0x0000000000000001, 0x3FB999999999999A, 0x4020A1013E883FC4, 0x408F400000000000, 0x4072A26666666666,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x000000000003C858,
+    # osmotic 2·0.1·R·1000·298.15: 495791.40591134
+    5, 0, 0x4000000000000000, 0x3FB999999999999A, 0x4020A1013E883FC4, 0x408F400000000000, 0x4072A26666666666,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x411E42BD9FA738EA,
+    # six short factors: 16516.5
+    6, 0, 0x4008000000000000, 0x4014000000000000, 0x401C000000000000, 0x4026000000000000, 0x402A000000000000,
+    0x3FF199999999999A, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x40D0212000000000,
+    # 1/3: 0.3333333333333333
+    1, 1, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x4008000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FD5555555555555,
+    # x/(y·z)·w/v: 4/4: 0.014285714285714287
+    4, 4, 0x3FF199999999999A, 0x400199999999999A, 0x400A666666666666, 0x401199999999999A, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x4016000000000000, 0x401A666666666666, 0x401ECCCCCCCCCCCD, 0x402199999999999A,
+    0x3F8D41D41D41D41E,
+    # 2^-1022·2^-30·3 (subnormal, exact): 6.2167845e-317
+    3, 0, 0x0010000000000000, 0x3E10000000000000, 0x4008000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x0000000000C00000,
+    # the empty product: 1: 1.0
+    0, 0, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000,
+    # −0/(−1) = +0: 0.0
+    1, 1, 0x8000000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0xBFF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x0000000000000000,
+    # ∞ factor: NaN: nan
+    2, 0, 0x3FF0000000000000, 0x7FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x7FF8000000000000,
+    # NaN factor: NaN: nan
+    1, 1, 0x7FF8000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x7FF8000000000000,
+    # zero denominator: NaN: nan
+    1, 1, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x3FF0000000000000, 0x0000000000000000, 0x3FF0000000000000, 0x3FF0000000000000, 0x3FF0000000000000,
+    0x7FF8000000000000,
+};
+
+fn _t_mono_values() {
+    test_group("cr_mono_values (ADR 0002 #27, #28)");
+    var bad = 0;
+    var bad_fast = 0;
+    var k = 0;
+    while (k < 36) {
+        var row = &_T_MONO + 104 * k;
+        var nn = load64(row);
+        var nd = load64(row + 8);
+        var want = load64(row + 96);
+        var r: f64 = _km_cr_mono(row + 16, nn, row + 64, nd);
+        var a: f64 = _km_cr_mono_acc(row + 16, nn, row + 64, nd);
+        if (ulp_bits_match(_km_bits(r), want) != 1 || ulp_bits_match(_km_bits(a), want) != 1) {
+            bad = bad + 1;
+            ulp_print_pair(_km_bits(r), want);
+        }
+        var f, ok = _km_cr_mono_fast(row + 16, nn, row + 64, nd);
+        if (ok == 1 && ulp_bits_match(_km_bits(f), want) != 1) { bad_fast = bad_fast + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "the monomial and its exact path: every case correctly rounded");
+    assert_eq(bad_fast, 0, "the fast path, where it answers, agrees");
+    # the shapes the modules call are the general monomial
+    var y: f64 = 3002399751580331.0;        # 3y = 2^53 + 1
+    var m3: f64 = _km_cr_mul3(3.0, y, 1.0);
+    assert_eq(_km_bits(m3), 0x4340000000000000, "_km_cr_mul3(3, y, 1) = 2^53: the tie to even");
+    var md: f64 = _km_cr_mul_div(y, 3.0, 2.0);
+    assert_eq(_km_bits(md), 0x4330000000000000, "_km_cr_mul_div(y, 3, 2) = 2^52: the tie to even");
+    var dmax: f64 = 0x7FEFFFFFFFFFFFFF;
+    var d2: f64 = _km_cr_div2(4184.0, 1000.0, dmax);
+    assert_eq(_km_bits(d2), 0x0010BC6A7EF9DB23, "_km_cr_div2(4184, 1000, DBL_MAX) = 2.33·10⁻³⁰⁸ (Rust's 0)");
+    var big: f64 = 0x7E37E43C8800759C;      # 1e300
+    var zp: f64 = _km_cr_mul3_div(big, big, 0.0, 1.0);
+    assert_eq(_km_bits(zp), 0, "_km_cr_mul3_div(1e300, 1e300, 0, 1) = +0 (Rust's ∞·0 = NaN)");
+    var nz: f64 = -0.0;
+    var zn: f64 = _km_cr_mul3_div(big, big, nz, 1.0);
+    assert_eq(_km_bits(zn), 0x8000000000000000, "… with −0: −0");
+    var r5: f64 = _km_cr_mul5(2.0, 0.1, 8.314462618, 1000.0, 298.15);
+    var w5: f64 = 0x411E42BD9FA738EA;
+    assert_eq(_km_bits(r5), _km_bits(w5), "_km_cr_mul5: osmotic_pressure(2, 0.1, 298.15)'s i·M·R·1000·T");
+    # the exact path's capacity: six factors of 53-bit odd significands (318 bits) are outside it (NaN)
+    var cap: f64[6];
+    var j = 0;
+    while (j < 6) {
+        store64(&cap + 8 * j, 0x3FFFFFFFFFFFFFFF);  # (2^53 − 1)·2^-52
+        j = j + 1;
+    }
+    var cn: f64 = _km_cr_mono_acc(&cap, 6, 0, 0);
+    assert_eq(_km_is_nan(cn), 1, "past the exact path's 253-bit capacity: NaN");
+    var cf, cfo = _km_cr_mono_fast(&cap, 6, 0, 0);
+    var cw: f64 = 0x404FFFFFFFFFFFFA;       # RN(((2^53 − 1)/2^52)^6)
+    assert(cfo == 1 && _km_bits(cf) == _km_bits(cw), "the fast path answers six factors (its test passes)");
+    var many: f64[7];
+    var mn, mno = _km_cr_mono_fast(&many, 7, 0, 0);
+    assert(mno == 1 && _km_is_nan(mn) == 1, "more than six numerator factors: NaN");
+}
+
+# The exact sign of a sum of doubles (Shewchuk's Grow-Expansion) and the tie resolution on hand-made cases.
+fn _t_mono_sign_and_tie() {
+    test_group("cr_mono_sign_and_tie (ADR 0002 #27, #28)");
+    var t: f64[4];
+    var e100: f64 = 0x39B0000000000000;     # 2^-100
+    var sub1: f64 = from_bits(1);           # 2^-1074
+    var mone: f64 = -1.0;
+    store64(&t, 1.0);
+    store64(&t + 8, mone);
+    assert_eq(_km_exp_sign(&t, 2), 0, "1 − 1 = 0");
+    store64(&t + 16, e100);
+    assert_eq(_km_exp_sign(&t, 3), 1, "1 − 1 + 2^-100 > 0");
+    var me: f64 = -e100;
+    store64(&t + 16, me);
+    assert_eq(_km_exp_sign(&t, 3), 0 - 1, "1 − 1 − 2^-100 < 0");
+    store64(&t, e100);
+    store64(&t + 8, 1.0);
+    store64(&t + 16, mone);
+    store64(&t + 24, sub1);
+    assert_eq(_km_exp_sign(&t, 4), 1, "2^-100 + 1 − 1 + 2^-1074 > 0");
+    var nsub: f64 = -sub1;
+    store64(&t, nsub);
+    store64(&t + 8, 1.0);
+    store64(&t + 16, mone);
+    assert_eq(_km_exp_sign(&t, 3), 0 - 1, "−2^-1074 + 1 − 1 < 0");
+    assert_eq(_km_exp_sign(&t, 0), 0, "the empty sum");
+    # F = 1.5·s_y = 3y·2^-52 = 2 + 2^-52 with 3y = 2^53 + 1 (s_y = y·2^-51): exactly the midpoint of 2 and its successor
+    var sn: f64[3];
+    var sd: f64[2];
+    var sy: f64 = 0x3FF5555555555556;       # y·2^-51 = 1.3333333333333335
+    store64(&sn, 1.5);
+    store64(&sn + 8, sy);
+    var z1: f64 = 2.0;
+    var zb = _km_bits(z1) + 1;
+    var z2: f64 = zb;
+    var tie: f64 = _km_mono_tie(&sn, 2, &sd, 0, z1, z2);
+    assert_eq(_km_bits(tie), _km_bits(z1), "F = 2 + 2^-52, the midpoint of 2 and its successor: the even one, 2");
+    var one: f64 = 1.0;
+    var ob = _km_bits(one) - 1;
+    var zl: f64 = ob;
+    var t2: f64 = _km_mono_tie(&sn, 0, &sd, 0, zl, one);
+    assert_eq(_km_bits(t2), _km_bits(one), "N = 1 against pred(1) and 1: above their midpoint, 1");
+    # (a_h + a_l)·b: exact here
+    var h, l = _km_dd_mul_d(3.0, 0.0, 1.5);
+    assert(h == 4.5 && l == 0.0, "_km_dd_mul_d(3, 0, 1.5) = 4.5");
+}
+
+# The monomial against its exact path on 20,000 seeded shapes and factors (at most four of 53 bits a side, so inside the
+# exact path's capacity), both signs, subnormals and the range ends included; and the fast path wherever it answers.
+fn _t_mono_agrees() {
+    test_group("cr_mono_agrees (ADR 0002 #27, #28)");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var answered = 0;
+    var nb: f64[4];
+    var db: f64[4];
+    var k = 0;
+    while (k < 20000) {
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var nn = (st >> 3) % 5;
+        var nd = (st >> 9) % 5;
+        var j = 0;
+        while (j < nn + nd) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            var x: f64 = ux_rand(st, k % 3);
+            if (x != x || x - x != 0.0 || x == 0.0) { x = 1.25; }
+            if (j < nn) { store64(&nb + 8 * j, x); } else { store64(&db + 8 * (j - nn), x); }
+            j = j + 1;
+        }
+        var r: f64 = _km_cr_mono(&nb, nn, &db, nd);
+        var a: f64 = _km_cr_mono_acc(&nb, nn, &db, nd);
+        if (_km_bits(r) != _km_bits(a)) { bad = bad + 1; }
+        var f, ok = _km_cr_mono_fast(&nb, nn, &db, nd);
+        if (ok == 1) {
+            answered = answered + 1;
+            if (_km_bits(f) != _km_bits(a)) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "the monomial, its fast path and its exact path agree on 20,000 seeded arguments");
+    assert(answered > 10000, "the fast path answers most of them");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_special_values();
@@ -1614,6 +1911,9 @@ fn main() {
     _t_ux_ieee();
     _t_bn_ratio_values();
     _t_bn_ratio_agrees();
+    _t_mono_values();
+    _t_mono_sign_and_tie();
+    _t_mono_agrees();
     return assert_summary();
 }
 

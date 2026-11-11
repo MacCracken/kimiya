@@ -4034,6 +4034,146 @@ print(f"stoichiometry: ADR 0002 #24–#26 hard rows: percent_yield {len(py_ties)
       f"{py_ovf} at the overflow end, {py_unf} where Rust underflows to 0; theoretical_yield_moles {ty_mc}; "
       f"limiting_reagent {lim_cov}; empirical_formula {edge_rows} (row, k) exactly 1/10 off")
 
+# ── 19. The overflow audit's B1 (ADR 0002 #27, #28): thermo's, phase's and kinetics' rationals ──────────────────────────
+# Every row of the ten functions is recomputed from the port's semantics, independently of the generator and the port:
+# - the monomials (#27: heat_transfer, specific_heat_from_calorimetry, boiling_point_elevation, freezing_point_depression,
+#   osmotic_pressure; #28: zero_order_half_life, steady_state_intermediate, pre_equilibrium_rate): the exact rational
+#   (Fraction; R as its double, Rust's 1000 and 2 exact) rounded once (rn_frac), its sign the xor of the factors' signs, a
+#   zero factor that signed zero; heat_transfer's and the colligative functions' non-finite inputs keep Rust's expression;
+# - #28's second_order_concentration and michaelis_menten: Rust's sequence on mpfr_ref.UX (53 bits at MPFR's widest
+#   exponent range, nothing over- or underflowing), the final division rounded once into binary64 (ux_div_final).
+# Rust's validation is the port's (the replicas above decide the Err rows, which carry no note). Every row: noted exactly
+# where the port's value differs from the oracle's (by its bits; NaN is one value), the note naming it bit for bit, so
+# every unnoted row's port value is the oracle's. For the two unbounded-exponent functions, no row whose f64 chain stays
+# in the normal range is noted (Rust's bits); zero_order_half_life is noted only where 2·k overflows (elsewhere Rust's
+# one division of exact operands is the correctly rounded value). The hard rows are counted: 53-bit midpoints, subnormal
+# results and their ties, and Rust's 0, ±∞ or NaN where the value is representable (and NaN where it is out of range:
+# the correctly rounded ±∞ or 0, the policy's).
+B1_HOW = {
+    "thermo::heat_transfer": (27, "the correctly rounded m·c·ΔT"),
+    "thermo::specific_heat_from_calorimetry": (27, "the correctly rounded q/(m·ΔT)"),
+    "phase::boiling_point_elevation": (27, "the correctly rounded K·m·i"),
+    "phase::freezing_point_depression": (27, "the correctly rounded K·m·i"),
+    "phase::osmotic_pressure": (27, "the correctly rounded i·M·R·1000·T"),
+    "kinetics::zero_order_half_life": (28, "the correctly rounded [A]₀/(2k)"),
+    "kinetics::steady_state_intermediate": (28, "the correctly rounded k₁·[A]/k₂"),
+    "kinetics::pre_equilibrium_rate": (28, "the correctly rounded k₂·k₁·[A]/k₋₁"),
+    "kinetics::second_order_concentration": (28, "Rust's sequence evaluated with an unbounded exponent (the final division "
+                                             "rounded once)"),
+    "kinetics::michaelis_menten": (28, "Rust's sequence evaluated with an unbounded exponent (the final division rounded "
+                                   "once)"),
+}
+def b1_mono(num, den):
+    """RN(Π num / Π den), rounded once: the sign the xor of the factors' signs, a zero factor that signed zero."""
+    neg = sum(1 for v in num + den if math.copysign(1.0, v) < 0) % 2 == 1
+    if any(v == 0.0 for v in num): return -0.0 if neg else 0.0
+    q = Fraction(1)
+    for v in num: q *= Fraction(v)
+    for v in den: q /= Fraction(v)
+    r = rn_frac(q if q > 0 else -q)
+    return -r if neg else r
+def b1_ux_second(c0, k, t):
+    with MPFR.unbounded():
+        one = MPFR.UX(1.0)
+        return MPFR.ux_div_final(one, one / MPFR.UX(c0) + MPFR.UX(k) * MPFR.UX(t))
+def b1_ux_mm(v, km, s_):
+    with MPFR.unbounded():
+        return MPFR.ux_div_final(MPFR.UX(v) * MPFR.UX(s_), MPFR.UX(km) + MPFR.UX(s_))
+def b1_factors(fn, a):
+    """A monomial's (numerator, denominator) factor lists, in the port's order."""
+    if fn == "thermo::specific_heat_from_calorimetry": return [a[0]], [a[1], a[2]]
+    if fn == "phase::osmotic_pressure": return [a[0], a[1], R_GAS, 1000.0, a[2]], []
+    if fn == "kinetics::zero_order_half_life": return [a[0]], [2.0, a[1]]
+    if fn == "kinetics::steady_state_intermediate": return [a[0], a[1]], [a[2]]
+    if fn == "kinetics::pre_equilibrium_rate": return [a[2], a[0], a[3]], [a[1]]
+    return list(a), []
+def b1_port(fn, a):
+    rust = RULES[fn][1]
+    if fn in ("thermo::heat_transfer", "phase::boiling_point_elevation", "phase::freezing_point_depression"):
+        return b1_mono(list(a), []) if all(math.isfinite(v) for v in a) else a[0] * a[1] * a[2]
+    r = rust([("f", v, f2b(v)) for v in a])
+    if isinstance(r, Err): return r
+    if fn == "kinetics::second_order_concentration": return b1_ux_second(*a)
+    if fn == "kinetics::michaelis_menten": return b1_ux_mm(*a)
+    return b1_mono(*b1_factors(fn, a))
+# Rust's f64 chains of the two unbounded-exponent functions, traced (OOR as #20's): an operation's result non-finite, a
+# nonzero subnormal, or 0 from nonzero factors leaves the normal range. The final division's own range does not count:
+# it is rounded once into binary64 in both.
+def b1_in_range(fn, a):
+    OOR[0] = False
+    if fn == "kinetics::second_order_concentration":
+        c0, k, t = a
+        ta(_t_chk(dv(1.0, c0), 1.0, c0), tm(k, t))
+    else:
+        v, km, s_ = a
+        tm(v, s_)
+        ta(km, s_)
+    return not OOR[0]
+B1_RE = re.compile(r"\[ADR 0002 #(2[78]): the port returns (.+) = (\S+) \(f:([0-9a-f]{16})\)\]$")
+b1_n = {fn: [0, 0, 0, 0] for fn in B1_HOW}          # Ok rows, noted, in range (the #20-style), qualitative
+b1_cov = {"53-bit midpoint": 0, "subnormal result": 0, "subnormal tie": 0, "Rust 0, ±∞ or NaN, the value representable": 0,
+          "Rust's special differs, the value out of range": 0}
+def b1_midpoint(q):
+    """1 if the exact positive rational q is a midpoint of binary64's grid (53-bit or subnormal), else 0."""
+    if q <= 0: return False
+    e = q.numerator.bit_length() - q.denominator.bit_length()
+    if q < Fraction(2) ** e: e -= 1                # q in [2^e, 2^(e + 1))
+    u = q / Fraction(2) ** (max(e, -1022) - 53)    # in units of half the ulp (or of the subnormal grid's)
+    return u.denominator == 1 and u.numerator % 2 == 1
+for mod_ in ("thermo", "phase", "kinetics"):
+    for fn, cls, ins, outs, where in R.get(mod_, []):
+        if fn not in B1_HOW: continue
+        adr, how = B1_HOW[fn]
+        a = fl(ins)
+        port = b1_port(fn, a)
+        note = NOTES.get(where, "")
+        noted = f"[ADR 0002 #{adr}:" in note
+        pt = out_toks(port)
+        differs = not toks_equal(pt, outs)
+        check(noted == differs, f"{where}: {fn}{tuple(a)}: the port's {pt} vs the oracle's {outs}: the #{adr} note is "
+              f"{'missing' if differs else 'stray'}")
+        if isinstance(port, Err): continue
+        b1_n[fn][0] += 1
+        if noted:
+            b1_n[fn][1] += 1
+            mm_ = B1_RE.search(note)
+            check(mm_ is not None and int(mm_.group(1)) == adr and mm_.group(2) == how and int(mm_.group(4), 16) == f2b(port)
+                  and same_bits(float(mm_.group(3)), port), f"{where}: the #{adr} note does not name {how} = {port!r}")
+        if fn in ("kinetics::second_order_concentration", "kinetics::michaelis_menten"):
+            inr = b1_in_range(fn, a)
+            b1_n[fn][2] += inr
+            check(not (inr and noted), f"{where}: {fn}{tuple(a)}: Rust's chain stays in the normal range, so its bits are "
+                  f"the port's, but the row is noted")
+        if fn == "kinetics::zero_order_half_life" and 2.0 * a[1] < math.inf:
+            check(not noted, f"{where}: zero_order_half_life{tuple(a)} noted where 2k is finite")
+        o = outs[0][1] if outs[0][0] == "f" else None
+        if o is not None and (o == 0.0 or not math.isfinite(o)) and not same_bits(o, port):
+            if math.isfinite(port) and (port != 0.0 or any(v == 0.0 for v in a)):
+                b1_n[fn][3] += 1                   # the value is representable: a nonzero double, or an exact 0
+                b1_cov["Rust 0, ±∞ or NaN, the value representable"] += 1
+            else:
+                b1_cov["Rust's special differs, the value out of range"] += 1
+        if fn in ("kinetics::second_order_concentration", "kinetics::michaelis_menten") or not all(math.isfinite(v) for v in a):
+            continue
+        num, den = b1_factors(fn, a)
+        if any(v == 0.0 for v in num): continue
+        q = Fraction(1)
+        for v in num: q *= abs(Fraction(v))
+        for v in den: q /= abs(Fraction(v))
+        if q < Fraction(2) ** -1022:
+            b1_cov["subnormal result"] += 1
+            b1_cov["subnormal tie"] += b1_midpoint(q)
+        elif b1_midpoint(q):
+            b1_cov["53-bit midpoint"] += 1
+for fn, (ok_, nt, inr, ql) in b1_n.items():
+    extra = f", {inr} with Rust's chain in the normal range (all unnoted, Rust's bits)" if fn in (
+        "kinetics::second_order_concentration", "kinetics::michaelis_menten") else ""
+    print(f"{fn.split('::')[0]}: ADR 0002 #{B1_HOW[fn][0]}: {fn.split('::')[1]}: {nt} of {ok_} Ok rows noted with the port's "
+          f"value ({ql} where Rust's is 0, ±∞ or NaN and the value representable){extra}")
+    check(nt > 0 and ql > 0, f"{fn}: no noted row, or no qualitative edge row")
+print(f"ADR 0002 #27, #28 hard rows: {b1_cov}")
+check(all(v > 0 for k, v in b1_cov.items() if "out of range" not in k), f"B1: a hard-row class has no golden row: {b1_cov}")
+
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
              "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy", "stoichiometry"}
 check(set(tsvs) == VALIDATED, f"golden modules with no section here: {sorted(set(tsvs) - VALIDATED)}; "

@@ -3,8 +3,9 @@
 # out-of-u32 phase-rule counts. `lookup_antoine(..).unwrap()` is a non-zero handle, read with
 # antoine_data_coeffs. One Rust test changes with ADR 0002 #4: antoine_pole_and_non_finite_give_nan
 # asserts NaN where the port returns Err (each case is Err here, and "just above the pole" lies
-# outside water's fitted range, so it is Err too). The golden corpus separately checks every
-# function over its grid (tests/parity.tcyr).
+# outside water's fitted range, so it is Err too). A Cyrius-only group checks ADR 0002 #27 (the overflow
+# audit's B1: the colligative products rounded once); no Rust test changes with it (each compares within a
+# tolerance). The golden corpus separately checks every function over its grid (tests/parity.tcyr).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -439,6 +440,44 @@ fn _t_cyrius_handles_and_counts() {
     assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT), "phases = 2^32 + 1 (not 1)");
 }
 
+# The f64 whose bit pattern is `bits` (store64, so no hex literal is read as an integer).
+#must_use
+fn fbits(bits): f64 {
+    var x: f64 = 0.0;
+    store64(&x, bits);
+    return x;
+}
+
+# ADR 0002 #27: K·m·i and i·M·R·1000·T rounded once, where Rust rounds two or four times: an ordinary input where Rust
+# is an ulp off, a subnormal result Rust's chain loses, a partial product past DBL_MAX, the signed zeros, Rust's
+# expression for a non-finite input.
+fn _t_cyrius_adr27_rounded_once() {
+    test_group("cyrius_adr27_rounded_once");
+    var b1: f64 = boiling_point_elevation(1.22, 2.5, 1.9);
+    assert_eq(_km_bits(b1), 0x40172E147AE147AE, "1.22·2.5·1.9 = 5.795 (Rust's 5.794999999999999)");
+    var f1: f64 = freezing_point_depression(1.22, 2.5, 1.9);
+    assert_eq(_km_bits(f1), 0x40172E147AE147AE, "freezing: the same product");
+    var big: f64 = fbits(0x7E37E43C8800759C);       # 1e300
+    var b2: f64 = boiling_point_elevation(big, big, 0.0);
+    assert_eq(_km_bits(b2), 0, "1e300·1e300·0 = +0 (Rust's NaN)");
+    var mz: f64 = -0.0;
+    var f2: f64 = freezing_point_depression(big, big, mz);
+    assert_eq(_km_bits(f2), 0x8000000000000000, "1e300·1e300·(−0) = −0");
+    var inf: f64 = 1.0 / 0.0;
+    var b3: f64 = boiling_point_elevation(inf, 0.0, 1.0);
+    assert_eq(ulp_is_nan(_km_bits(b3)), 1, "∞·0·1: Rust's NaN");
+    var t1, v1 = osmotic_pressure(2.0, 0.1, 298.15);
+    assert(is_ok(t1) == 1 && v1 == 0x411E42BD9FA738EA, "2·0.1·R·1000·298.15 rounded once (Rust's one ulp below)");
+    var sub: f64 = fbits(1);                        # 2^-1074
+    var t2, v2 = osmotic_pressure(sub, 0.1, 298.15);
+    assert(is_ok(t2) == 1 && v2 == 0x000000000003C858, "i = 2^-1074: 1.22·10⁻³¹⁸ (Rust's 0)");
+    var t3, v3 = osmotic_pressure(2.0, mz, 298.15);
+    assert(is_ok(t3) == 1 && v3 == 0x8000000000000000, "M = −0: −0, Rust's");
+    var t4, v4 = osmotic_pressure(big, 10000000000.0, 0.00000000000000000001);
+    var w4: f64 = fbits(0x7CF4D458B641F6B3);       # 8.314462618e293
+    assert(is_ok(t4) == 1 && v4 == _km_bits(w4), "1e300·1e10·R·1000·1e-20: i·M overflows in Rust (∞)");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_raoult_basic();
@@ -474,6 +513,7 @@ fn main() {
     _t_phase_rule_large_counts();
     _t_cyrius_antoine_result();
     _t_cyrius_handles_and_counts();
+    _t_cyrius_adr27_rounded_once();
     return assert_summary();
 }
 

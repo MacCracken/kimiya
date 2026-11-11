@@ -13,6 +13,10 @@
 //!   exp's whole range (Ea = −x·R·T); and **on purpose the rows where the exp result is subnormal or 0 and is
 //!   then multiplied by a prefactor** (A = 10¹³ … DBL_MAX with x between −745.2 and −708, Eyring at low T, [A]₀
 //!   up to 10³⁰⁸ with k·t in that range, Z·p), and exp's overflow (A·∞, and 0·∞ or ∞·0 → NaN, as Rust gives it).
+//! - ADR 0002 #28 (the overflow audit's B1): `second_order_concentration`, `zero_order_half_life`,
+//!   `steady_state_intermediate`, `pre_equilibrium_rate` and `michaelis_menten` rows are noted where the port's value
+//!   (the correctly rounded monomial, or Rust's sequence with an unbounded exponent; `audit.rs`) differs from Rust's,
+//!   and `audit::emit_kinetics` appends their edge rows with their own seed.
 //! - Class C, `exp_m1` and `powf`: `nth_order_half_life` — orders on a fine grid around 1 (the 10⁻¹² tolerance
 //!   and the ulps either side of it, from both sides), integer and fractional orders out to ±300, [A]₀ and k over
 //!   many decades, the extreme-order overflow and underflow Err rows, **rows where [A]₀^(n−1) is subnormal and the
@@ -23,15 +27,14 @@
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::grids::{Rng, decades, pow2};
 use crate::m_reaction::{edges, res};
 use crate::tsv::{Class, Module, err, f};
 use kimiya::element::GAS_CONSTANT;
 use kimiya::kinetics::{
     arrhenius_rate, collision_theory_rate, eyring_rate, eyring_rate_from_activation, first_order_concentration,
-    half_life_first_order, lineweaver_burk, michaelis_menten, nth_order_half_life, pre_equilibrium_rate,
-    second_order_concentration, steady_state_intermediate, steady_state_rate, zero_order_concentration,
-    zero_order_half_life,
+    half_life_first_order, lineweaver_burk, nth_order_half_life, steady_state_rate, zero_order_concentration,
 };
 
 /// `x` moved `d` ulps (up for d > 0).
@@ -246,10 +249,7 @@ pub fn emit() -> Module {
     }
 
     // ── second_order_concentration ──
-    let soc = |m: &mut Module, c0: f64, k: f64, t: f64| {
-        let out = res(second_order_concentration(bb(c0), bb(k), bb(t)));
-        m.row("kinetics::second_order_concentration", Class::B, &[f(c0), f(k), f(t)], &[out]);
-    };
+    let soc = audit::second;
     for x in edges() {
         soc(&mut m, x, 0.1, 10.0);
         soc(&mut m, 1.0, x, 10.0);
@@ -328,10 +328,7 @@ pub fn emit() -> Module {
     }
 
     // ── zero_order_half_life ──
-    let zhl = |m: &mut Module, c0: f64, k: f64| {
-        let out = res(zero_order_half_life(bb(c0), bb(k)));
-        m.row("kinetics::zero_order_half_life", Class::B, &[f(c0), f(k)], &[out]);
-    };
+    let zhl = audit::zero_half;
     for x in edges() {
         zhl(&mut m, x, 0.1);
         zhl(&mut m, 1.0, x);
@@ -466,10 +463,7 @@ pub fn emit() -> Module {
     }
 
     // ── steady_state_intermediate, steady_state_rate ──
-    let ssi = |m: &mut Module, k1: f64, a: f64, k2: f64| {
-        let out = res(steady_state_intermediate(bb(k1), bb(a), bb(k2)));
-        m.row("kinetics::steady_state_intermediate", Class::B, &[f(k1), f(a), f(k2)], &[out]);
-    };
+    let ssi = audit::steady;
     for x in edges() {
         ssi(&mut m, x, 1.0, 1.0);
         ssi(&mut m, 0.1, x, 1.0);
@@ -513,10 +507,7 @@ pub fn emit() -> Module {
     }
 
     // ── pre_equilibrium_rate ──
-    let pre = |m: &mut Module, kf: f64, kr: f64, ks: f64, a: f64| {
-        let out = res(pre_equilibrium_rate(bb(kf), bb(kr), bb(ks), bb(a)));
-        m.row("kinetics::pre_equilibrium_rate", Class::B, &[f(kf), f(kr), f(ks), f(a)], &[out]);
-    };
+    let pre = audit::pre;
     for x in edges() {
         pre(&mut m, x, 2.0, 0.1, 1.0);
         pre(&mut m, 10.0, x, 0.1, 1.0);
@@ -547,10 +538,7 @@ pub fn emit() -> Module {
     }
 
     // ── michaelis_menten, lineweaver_burk ──
-    let mm = |m: &mut Module, v: f64, km: f64, s: f64| {
-        let out = res(michaelis_menten(bb(v), bb(km), bb(s)));
-        m.row("kinetics::michaelis_menten", Class::B, &[f(v), f(km), f(s)], &[out]);
-    };
+    let mm = audit::mm;
     for x in edges() {
         mm(&mut m, x, 5.0, 10.0);
         mm(&mut m, 100.0, x, 10.0);
@@ -796,5 +784,6 @@ pub fn emit() -> Module {
         let t = rng.uniform(200.0, 3000.0);
         eya(&mut m, dh, ds, t);
     }
+    audit::emit_kinetics(&mut m);
     m
 }

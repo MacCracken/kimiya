@@ -4,7 +4,10 @@
 //! - Class B (+ − × ÷ only, expected 0 ulp): `raoult_pressure`, `raoult_total_binary`,
 //!   `henry_pressure`, `henry_solubility`, `boiling_point_elevation`, `freezing_point_depression`,
 //!   `osmotic_pressure`. Each argument over the validation edges (the mole fraction also at 0, 1
-//!   and one ulp outside), the others typical; the Rust tests' values; a seeded sweep.
+//!   and one ulp outside), the others typical; the Rust tests' values; a seeded sweep. ADR 0002 #27 (the
+//!   overflow audit's B1): the colligative and osmotic rows are noted where the port's correctly rounded K·m·i or
+//!   i·M·R·1000·T differs from Rust's value (`audit.rs`), and `audit::emit_phase` appends their edge rows (partial
+//!   products past DBL_MAX or below 2⁻¹⁰²², midpoints, subnormal results) with their own seed.
 //! - Class C: `clausius_clapeyron` (one `exp`) over the edges, the Rust tests' values, exp's
 //!   overflow and underflow, and a seeded sweep, plus (ADR 0006 item 6, M3c-3) the hard rows where the exp
 //!   result is subnormal and P₁ scales it back into the normal range; `antoine_pressure_mmhg` /
@@ -27,6 +30,7 @@
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::grids::{EXP_SUBNORMAL_X, Rng, subnormal_prefactors};
 use crate::m_reaction::{edges, res};
 use crate::t_phase::fields;
@@ -35,9 +39,8 @@ use kimiya::element::GAS_CONSTANT;
 use kimiya::phase::{
     ANTOINE_DATA, AntoineCoeffs, KB_BENZENE, KB_CHLOROFORM, KB_ETHANOL, KB_WATER, KF_BENZENE,
     KF_CAMPHOR, KF_CYCLOHEXANE, KF_WATER, antoine_pressure_mmhg, antoine_pressure_pa,
-    boiling_point_elevation, clausius_clapeyron, freezing_point_depression, henry_pressure,
-    henry_solubility, lookup_antoine, osmotic_pressure, phase_rule, raoult_pressure,
-    raoult_total_binary,
+    clausius_clapeyron, henry_pressure, henry_solubility, lookup_antoine, phase_rule,
+    raoult_pressure, raoult_total_binary,
 };
 
 /// The mole-fraction probes: the edges, both ends of [0, 1] and one ulp outside each.
@@ -184,12 +187,7 @@ pub fn emit() -> Module {
         KF_CYCLOHEXANE,
         KF_CAMPHOR,
     ];
-    let coll = |m: &mut Module, k: f64, mol: f64, i: f64| {
-        let bp = boiling_point_elevation(bb(k), bb(mol), bb(i));
-        m.row("phase::boiling_point_elevation", Class::B, &[f(k), f(mol), f(i)], &[f(bp)]);
-        let fp = freezing_point_depression(bb(k), bb(mol), bb(i));
-        m.row("phase::freezing_point_depression", Class::B, &[f(k), f(mol), f(i)], &[f(fp)]);
-    };
+    let coll = audit::colligative;
     for k in consts {
         for (mol, i) in [(1.0, 2.0), (1.0, 1.0), (0.1, 3.0), (2.5, 1.9)] {
             coll(&mut m, k, mol, i);
@@ -208,10 +206,7 @@ pub fn emit() -> Module {
     }
 
     // ── osmotic pressure ──
-    let osm = |m: &mut Module, i: f64, c: f64, t: f64| {
-        let out = res(osmotic_pressure(bb(i), bb(c), bb(t)));
-        m.row("phase::osmotic_pressure", Class::B, &[f(i), f(c), f(t)], &[out]);
-    };
+    let osm = audit::osmotic;
     for x in edges() {
         osm(&mut m, x, 0.1, 298.15);
         osm(&mut m, 2.0, x, 298.15);
@@ -403,5 +398,6 @@ pub fn emit() -> Module {
         let p = u32::try_from(rng.int(0, 25)).unwrap_or(0);
         rule(&mut m, c, p);
     }
+    audit::emit_phase(&mut m);
     m
 }

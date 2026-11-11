@@ -1372,6 +1372,76 @@ glibc-matching.**
 === parity summary: 18 modules, 0 failing | rows: 336584 ok, 0 failed, 0 measured, 0 pending, 32153 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
 ```
 
+## 21. The overflow audit's B1: thermo's, phase's and kinetics' rationals, ADR 0002 #27 and #28 (2026-11-10)
+
+The user's decisions (ADR 0002's B1 addition quotes them): the library-wide audit of intermediate over- and underflow
+(2026-11-09), and "Round once" for formulas that are a single product or quotient of inputs (2026-11-10); a formula with
+a sum inside gets #20's edge fix. B1 is the survey's F1 (#27: `heat_transfer`, `specific_heat_from_calorimetry`,
+`boiling_point_elevation`, `freezing_point_depression`, `osmotic_pressure`, each rounded once) and F4 (#28:
+`zero_order_half_life`, `steady_state_intermediate`, `pre_equilibrium_rate` rounded once, `second_order_concentration`
+and `michaelis_menten` with an unbounded exponent). Rust's checks, Err codes and order are kept. The corpus keeps the
+oracle's values; the rows where the port's value differs carry it in their note, and the harness maps and counts them per
+function. `scripts/oracle/src/audit.rs` appends each module's B1 edge rows with its own seed: thermo 1,107 → 1,644,
+phase 3,646 → 4,174, kinetics 30,146 → 31,210 (2,129 rows).
+
+| Function | Class | Rows | Oracle Ok | Oracle Err | Noted (port ≠ oracle) | of the rows before B1 | ulp of the rest |
+|---|---|---|---|---|---|---|---|
+| `thermo::heat_transfer` | B | 762 | 762 | 0 | 151 (#27) | 88 of 359 | 0 |
+| `thermo::specific_heat_from_calorimetry` | B | 508 | 474 | 34 | 171 (#27) | 90 of 374 | 0 |
+| `phase::boiling_point_elevation` | B | 356 | 356 | 0 | 82 (#27) | 33 of 186 | 0 |
+| `phase::freezing_point_depression` | B | 356 | 356 | 0 | 82 (#27) | 33 of 186 | 0 |
+| `phase::osmotic_pressure` | B | 395 | 367 | 28 | 196 (#27) | 74 of 207 | 0 |
+| `kinetics::second_order_concentration` | B | 1,300 | 1,265 | 35 | 89 (#28, unbounded) | 4 of 987 | 0 |
+| `kinetics::zero_order_half_life` | B | 389 | 354 | 35 | 90 (#28) | 2 of 262 | 0 |
+| `kinetics::steady_state_intermediate` | B | 513 | 482 | 31 | 118 (#28) | 52 of 264 | 0 |
+| `kinetics::pre_equilibrium_rate` | B | 471 | 430 | 41 | 179 (#28) | 69 of 283 | 0 |
+| `kinetics::michaelis_menten` | B | 557 | 521 | 36 | 160 (#28, unbounded) | 5 of 370 | 0 |
+
+- **The noted rows** are read by `_par_got_noted` (the Result functions) and `_par_got_noted_f` (the three f64 ones):
+  the port's value must be the note's bit for bit, and the row is accepted under ADR 2 even within class B's 2 ulp. Every
+  other row of the ten is the port's value and the oracle's at once (0 ulp). Of the rows that existed before B1, the
+  monomials change on a quarter to a third of their ordinary rows (the decision's "about a quarter … by 1–2 ulp") and at
+  their edges; the two unbounded-exponent functions only at the edges (4 and 5 rows, the survey's).
+- **The proofs** (`validate.py` §19). Each row's port value recomputed independently — the monomials with `Fraction`, the
+  two others through `mpfr_ref.UX` — and each note proven to sit exactly where it differs from the oracle's, naming it;
+  no row whose f64 chain stays normal is noted for `second_order_concentration` (1,003 rows) or `michaelis_menten` (328):
+  Rust's bits; `zero_order_half_life` is noted only where 2k overflows. The hard rows: 785 where Rust's value is 0, ±∞ or NaN and the port's representable (59 `heat_transfer`, 49
+  `specific_heat_from_calorimetry`, 47 + 47 colligative, 69 `osmotic_pressure`, 86 `second_order_concentration`, 90
+  `zero_order_half_life`, 66 `steady_state_intermediate`, 112 `pre_equilibrium_rate`, 160 `michaelis_menten`), 323
+  midpoints of the 53-bit grid, 551 subnormal results with 133 of the subnormal grid's ties; no row where Rust's NaN
+  stands for an out-of-range value (none is possible in these functions: their NaNs from finite inputs are 0·∞ with an
+  exact zero factor, or ∞/∞ of a value below Vmax).
+- **`cr_verify.py`**: `mono` (430,010 arguments: every shape to four factors a side and five or six with short ones, both
+  signs, zeros, results at the range ends, the 53-bit midpoints of the 3/0, 2/1, 3/1 and 2/2 shapes, the subnormal grid's
+  ties, the domain's NaNs), `monotie` (240,000: the exact sign decision with F below, beside and exactly at the
+  midpoint), and the ten functions — `heat`, `boil`, `frz` 281,000 each, `shc` 200,010, `osm` 200,008, `zhl` 185,006,
+  `ssi` 220,007, `pre` 220,008, `soc` 200,010, `mm` 200,008 — the public function, the fast path where it answers and
+  the slow path forced, against `Fraction` and `mpfr_ref.UX`: 0 mismatches, the same bits and flags on x86_64 ELF,
+  x86_64 PE and aarch64 (a NaN word counted as one value: for a non-finite input `heat_transfer` and the colligative pair
+  keep Rust's (m·c)·ΔT, whose ∞·0 is the hardware's default NaN, negative on x86_64 and positive on aarch64, as Rust's own
+  result is; 552 such words in each of the three families). The monomial's fast path declines only for possibly subnormal results and near-midpoints past
+  its tie shapes (32,807 of `mono`'s arguments, mostly the range-end section); the #20-style fast paths decline on the
+  edge sections (`soc` 68,916, `mm` 73,148, none on the typical sections).
+
+Tests: `tests/mathx.tcyr`'s `cr_mono_values`, `cr_mono_sign_and_tie` and `cr_mono_agrees`; `tests/thermo.tcyr`'s and
+`tests/phase.tcyr`'s `cyrius_adr27_rounded_once`, `tests/kinetics.tcyr`'s `cyrius_adr28`; no Rust test changes.
+
+**Cost** (`tests/kimiya.bcyr`, before → after, the same host; `docs/benchmarks-rust-v-cyrius.md`'s B1 section):
+`thermo/heat_transfer` 5.4 → 65 ns (Rust 0.95), `specific_heat_from_calorimetry` 18 → 86, `boiling_point_elevation`
+6.1 → 66, `freezing_point_depression` 6.4 → 67, `osmotic_pressure` 20 → 139, `zero_order_half_life` 16 → 16,
+`steady_state_intermediate` 21 → 88, `pre_equilibrium_rate` 27 → 125, `second_order_concentration` 23 → 33,
+`kinetics/michaelis_menten` 17 → 24 (Rust 2.92); the other paths `heat_transfer_tie` 365 ns, `osmotic_pressure_subnormal`
+4.04 µs, `second_order_concentration_edge` 230 ns, `michaelis_menten_edge` 126 ns; stoichiometry unchanged within noise
+(`percent_yield` 81 → 82, `theoretical_yield_moles` 115 → 115, `percent_composition_glucose` 278 → 266, the tie 136 → 132,
+`percent_yield_subnormal` 2.19 → 1.62 µs).
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **18 modules, 0 failing; 337,395 ok, 0 failed, 0 measured,
+0 pending, 33,471 accepted (809 under ADR 6; under ADR 2 as §20 plus 682 #27 and 636 #28 rows), 0 glibc-matching.**
+
+```text
+=== parity summary: 18 modules, 0 failing | rows: 337395 ok, 0 failed, 0 measured, 0 pending, 33471 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
+```
+
 ## How to reproduce
 
 ```sh

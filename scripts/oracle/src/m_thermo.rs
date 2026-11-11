@@ -11,16 +11,18 @@
 //! - `thermo::specific_heat_from_calorimetry` (q / (m·ΔT), `Result`): the edges per argument,
 //!   |ΔT| at the hisab `EPSILON_F64` = 10⁻¹² threshold and one ulp either side, both signs, the Rust
 //!   tests' values and a seeded sweep.
+//! - ADR 0002 #27 (the overflow audit's B1): `heat_transfer` and `specific_heat_from_calorimetry` rows are noted where
+//!   the port's correctly rounded m·c·ΔT or q/(m·ΔT) differs from Rust's value (`audit.rs`), and `audit::emit_thermo`
+//!   appends their edge rows (partial products past DBL_MAX or below 2⁻¹⁰²², 0 against an overflow, midpoints and
+//!   subnormal ties) with their own seed.
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::grids::Rng;
-use crate::m_reaction::{edges, res};
+use crate::m_reaction::edges;
 use crate::tsv::{Class, Module, Tok, f};
-use kimiya::thermo::{
-    WATER_SPECIFIC_HEAT, enthalpy_from_formation, heat_transfer, hess_law,
-    specific_heat_from_calorimetry,
-};
+use kimiya::thermo::{WATER_SPECIFIC_HEAT, enthalpy_from_formation, hess_law};
 
 fn seq(xs: &[f64]) -> Vec<Tok> {
     let mut v = vec![Tok::V(xs.len())];
@@ -35,10 +37,7 @@ fn slice(rng: &mut Rng, lo: i64, hi: i64) -> Vec<f64> {
 
 pub fn emit() -> Module {
     let mut m = Module::new("thermo");
-    let heat = |m: &mut Module, ma: f64, c: f64, dt: f64| {
-        let q = heat_transfer(bb(ma), bb(c), bb(dt));
-        m.row("thermo::heat_transfer", Class::B, &[f(ma), f(c), f(dt)], &[f(q)]);
-    };
+    let heat = audit::heat;
     for x in edges() {
         heat(&mut m, x, WATER_SPECIFIC_HEAT, 10.0);
         heat(&mut m, 100.0, x, 10.0);
@@ -108,10 +107,7 @@ pub fn emit() -> Module {
         m.row("thermo::enthalpy_from_formation", Class::B, &ins, &[f(dh)]);
     }
 
-    let cal = |m: &mut Module, e: f64, ma: f64, dt: f64| {
-        let out = res(specific_heat_from_calorimetry(bb(e), bb(ma), bb(dt)));
-        m.row("thermo::specific_heat_from_calorimetry", Class::B, &[f(e), f(ma), f(dt)], &[out]);
-    };
+    let cal = audit::calorimetry;
     for x in edges() {
         cal(&mut m, 4184.0, x, 1.0);
         cal(&mut m, x, 1000.0, 1.0);
@@ -143,5 +139,6 @@ pub fn emit() -> Module {
         let dt = rng.signed_log_uniform(-3.0, 3.0);
         cal(&mut m, e, ma, dt);
     }
+    audit::emit_thermo(&mut m);
     m
 }

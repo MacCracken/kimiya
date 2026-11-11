@@ -88,9 +88,26 @@ type for average oxidation states, no separate extrapolating Antoine function. I
   the exact rational rounded once (−R exactly at n = Z; no cancellation of 1/n₁² − 1/n₂² or E₂ − E₁ for close large n);
   `reduced_mass` → the correctly rounded m₁·m₂/(m₁ + m₂) for every pair (m/2 exactly; no over- or underflow) — done in the
   Cyrius API (M4e-3, ADR 0002 #21 and #22, the user's decisions)
-- [ ] after M4: the library-wide audit of intermediate over- and underflow of products and quotients of inputs, each edge
-  fixed as #20 (the user's decision; the `_km_ux_*` helpers and M4e-3's `_km_cr_ratio` exist; `state.md` lists the
-  first candidates, `reduced_mass` no longer among them)
+- [ ] after M4: the library-wide audit of intermediate over- and underflow of products and quotients of inputs (the user's
+  decisions of 2026-11-09, "Library-wide audit", and 2026-11-10, "Round once": a single product or quotient rounds once,
+  a sum inside gets #20's edge fix; one ADR 0002 row per family; `state.md` has the survey's sixteen families and the
+  batches B1 … B12)
+  - [x] B1 — F1 (thermo's calorimetry, phase's colligative products: `heat_transfer`, `specific_heat_from_calorimetry`,
+    `boiling_point_elevation`, `freezing_point_depression`, `osmotic_pressure` rounded once) and F4 (kinetics:
+    `zero_order_half_life`, `steady_state_intermediate`, `pre_equilibrium_rate` rounded once; `second_order_concentration`,
+    `michaelis_menten` with an unbounded exponent) — done in the Cyrius API (ADR 0002 #27, #28; M4f-2's `_km_cr_mul_div`
+    generalised to `src/mathx.cyr`'s correctly rounded monomial `_km_cr_mono`)
+  - [ ] B2 — F3, solution and electrochemistry (dilution, conductivity, Faraday's laws, Nernst)
+  - [ ] B3 — F5, spectroscopy products (Beer–Lambert, √(k/μ), the rotor, the moment of inertia)
+  - [ ] B4 — F6, potentials, Born–Landé, binding energy per nucleon (folding #17 and #18)
+  - [ ] B5 — F2, gas laws (ideal gas, density, van der Waals, Peng–Robinson and Redlich–Kwong pressure)
+  - [ ] B6 — F7 and F8, sums with cancellation and the Shomate polynomial
+  - [ ] B7 — F9, exp and exp10 arguments
+  - [ ] B8 — the FFT magnitudes, the flame's sign test, `find_peaks` if wanted
+  - [ ] B9 — F15, an exact `balance_equation`
+  - [ ] B10 — F10's unbounded exponentials and the exponential × prefactor functions
+  - [ ] B11 — F11 and F12 (`nth_order_half_life`'s pow, `henderson_hasselbalch`'s log10)
+  - [ ] B12 — the iterative functions, per the user's answers
 - [ ] *additive* — `fitting::fit_beer_lambert` → also return the intercept
 - [ ] *additive* — `spectroscopy::rydberg_wavelength` → nuclear-mass parameter for the reduced-mass correction
 - [ ] `integration::soorat::MolecularStructure::from_molecule` → `Result`

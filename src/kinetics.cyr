@@ -22,6 +22,16 @@
 #   inline (port plan §6.4): LN_2 by its bits, 0x3FE62E42FEFA39EF, as src/mathx.cyr writes ln 2's high part. Both
 #   are pinned by golden rows (half_life_first_order(1) is LN_2 exactly; orders at 1 ± 10⁻¹² and the ulps
 #   either side) and by tests/kinetics.tcyr.
+# - ADR 0002 #28 (the overflow audit's B1; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide audit"
+#   and "round once"): an intermediate product, quotient or sum of inputs can over- or underflow although the result is
+#   representable (zero_order_half_life(DBL_MAX, DBL_MAX) is 0 in Rust, 1/2 here; michaelis_menten(100, DBL_MAX,
+#   DBL_MAX) is ∞/∞ = NaN in Rust, 50 here). Where the whole formula is one product or quotient — [A]₀/(2k),
+#   k₁·[A]/k₂, k₂·(k₁/k₋₁)·[A] — the port returns the exact value rounded once (src/mathx.cyr's correctly rounded
+#   monomial; [A]₀/(2k) is Rust's own correctly rounded division wherever 2k is finite). The two with a sum inside,
+#   1/(1/[A]₀ + k·t) and Vmax·[S]/(Km + [S]), get ADR 0002 #20's semantics: Rust's operation sequence evaluated with an
+#   unbounded exponent (src/mathx.cyr's _km_ux_*), the final division rounded once into binary64, behind a cheap test
+#   that proves Rust's chain stayed in the normal range, so every such input keeps Rust's bits. Rust's checks, Err codes
+#   and order are kept.
 # - lineweaver_burk's (slope, intercept) tuple becomes the caller's buffer of two f64 (16 bytes,
 #   `var lb[16];`), as peng_robinson_z_roots's Vec: Ok(2), the count written, with the slope at out and the
 #   intercept at out + 8; on Err the buffer is untouched.
@@ -68,15 +78,56 @@ fn first_order_concentration(initial: f64, rate_constant: f64, time: f64): f64 {
 # The concentration remaining after second-order decay, 1/[A] = 1/[A]₀ + k·t, in mol/L (in (0, [A]₀]), from
 # [A]₀ in mol/L, k in L·mol⁻¹·s⁻¹ and t in s. Ok([A]); Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ is not positive
 # and finite; Err(KM_ERR_INVALID_INPUT) if k or t is negative or not finite (k·t ≤ −1/[A]₀ would give an infinite
-# or negative concentration). Mirrors `kinetics::second_order_concentration`.
+# or negative concentration). ADR 0002 #28: Rust's 1/(1/[A]₀ + k·t) evaluated with an unbounded exponent, the final
+# division rounded once (Rust's bits wherever its chain stays in the normal range). Mirrors
+# `kinetics::second_order_concentration`, with ADR 0002 #28.
 #must_use
 fn second_order_concentration(initial: f64, rate_constant: f64, time: f64): Result {
     if (_km_is_positive(initial) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
     if (_km_is_non_negative(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(time) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var inv: f64 = (1.0 / initial) + (rate_constant * time);
+    var c, ok = _km_second_order_fast(initial, rate_constant, time);
+    if (ok == 1) { return Ok(c); }
+    var u: f64 = _km_second_order_ux(initial, rate_constant, time);
+    return Ok(u);
+}
+
+# second_order_concentration's fast path, for its validated inputs: (Rust's 1/(1/[A]₀ + k·t), 1) while that chain
+# provably is the unbounded-exponent one (ADR 0002 #28, #20's semantics), or (0, 0). The test: 1/[A]₀ and a nonzero
+# k·t in [2⁻¹⁰²¹, DBL_MAX] (a result that large is the 53-bit rounding of an exact value above 2⁻¹⁰²², in the normal
+# range, where binary64's rounding is the 53-bit one; a finite one is not past it), k·t = 0 only from a zero factor
+# (exact), and the sum of the two non-negative terms finite (at least 2⁻¹⁰²¹: its rounding is the 53-bit one). The
+# final 1/sum is then one IEEE division of the same operand, rounded once in both.
+#must_use
+fn _km_second_order_fast(initial: f64, rate_constant: f64, time: f64): (f64, i64) {
+    var a: f64 = 1.0 / initial;
+    var b: f64 = rate_constant * time;
+    var inv: f64 = a + b;
     var c: f64 = 1.0 / inv;
-    return Ok(c);
+    var lo: f64 = 0x0020000000000000;       # 2⁻¹⁰²¹
+    var hi: f64 = 0x7FEFFFFFFFFFFFFF;       # DBL_MAX
+    var bok = 0;
+    if (b >= lo && b <= hi) { bok = 1; }
+    if (b == 0.0 && (rate_constant == 0.0 || time == 0.0)) { bok = 1; }
+    if (a >= lo && a <= hi && bok == 1 && inv <= hi) { return (c, 1); }
+    return (0.0, 0);
+}
+
+# second_order_concentration with an unbounded exponent (ADR 0002 #28), for its validated inputs: Rust's
+# 1/(1/[A]₀ + k·t) with every operation rounded to 53 bits and nothing over- or underflowing (src/mathx.cyr's _km_ux_*),
+# the final division rounded once into binary64 (_km_ux_div_f64: its subnormal grid, or ±∞ past DBL_MAX).
+#must_use
+fn _km_second_order_ux(initial: f64, rate_constant: f64, time: f64): f64 {
+    var one: f64 = 1.0;
+    var os, oe = _km_ux_from(one);
+    var cs, ce = _km_ux_from(initial);
+    var as1, ae = _km_ux_div(os, oe, cs, ce);
+    var ks, ke = _km_ux_from(rate_constant);
+    var ts, te = _km_ux_from(time);
+    var bs, be = _km_ux_mul(ks, ke, ts, te);
+    var ss, se = _km_ux_add(as1, ae, bs, be);
+    var c: f64 = _km_ux_div_f64(os, oe, ss, se);
+    return c;
 }
 
 # The zero-order concentration [A] = [A]₀ − k·t in mol/L, from [A]₀ in mol/L, k in mol·L⁻¹·s⁻¹ and t in s, or
@@ -92,13 +143,22 @@ fn zero_order_concentration(initial: f64, rate_constant: f64, time: f64): f64 {
 
 # The zero-order half-life t½ = [A]₀/(2k) in s, from [A]₀ in mol/L and k in mol·L⁻¹·s⁻¹. Ok(t½);
 # Err(KM_ERR_INVALID_INPUT) if k is not positive and finite; Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ is not
-# positive and finite (k checked first). Mirrors `kinetics::zero_order_half_life`.
+# positive and finite (k checked first). ADR 0002 #28: the correctly rounded [A]₀/(2k) — Rust's own division wherever
+# 2k is finite (2k is then exact, and one IEEE division of exact operands rounds the exact quotient once, subnormal
+# results included), and the correctly rounded monomial past it (k ≥ 2¹⁰²³, where Rust's 2k = ∞ gives 0). Mirrors
+# `kinetics::zero_order_half_life`, with ADR 0002 #28.
 #must_use
 fn zero_order_half_life(initial: f64, rate_constant: f64): Result {
     if (_km_is_positive(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(initial) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
-    var t: f64 = initial / (2.0 * rate_constant);
-    return Ok(t);
+    var d: f64 = 2.0 * rate_constant;
+    if (d < _KM_INF) {
+        var t: f64 = initial / d;
+        return Ok(t);
+    }
+    var two: f64 = 2.0;
+    var r: f64 = _km_cr_div2(initial, two, rate_constant);
+    return Ok(r);
 }
 
 # The general nth-order half-life t½ = (2^(n−1) − 1) / ((n − 1)·k·[A]₀^(n−1)) in s, for any finite order n ≠ 1,
@@ -131,13 +191,14 @@ fn nth_order_half_life(initial: f64, rate_constant: f64, order: f64): Result {
 # (k₂ ≫ k₁). From the first-order rate constants k₁, k₂ in s⁻¹ and [A] in mol/L. Ok([B]_ss);
 # Err(KM_ERR_INVALID_INPUT) if k₂ is not positive and finite or k₁ is negative or not finite;
 # Err(KM_ERR_INVALID_CONCENTRATION) if [A] is negative or not finite. Mirrors
-# `kinetics::steady_state_intermediate`.
+# `kinetics::steady_state_intermediate`. ADR 0002 #28: the correctly rounded k₁·[A]/k₂, where Rust's (k₁·[A])/k₂ rounds
+# twice; a zero k₁ or [A] gives Rust's signed zero.
 #must_use
 fn steady_state_intermediate(k1: f64, concentration_a: f64, k2: f64): Result {
     if (_km_is_positive(k2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(k1) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(concentration_a) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
-    var b: f64 = (k1 * concentration_a) / k2;
+    var b: f64 = _km_cr_mul_div(k1, concentration_a, k2);
     return Ok(b);
 }
 
@@ -155,13 +216,15 @@ fn steady_state_rate(k_slow: f64, concentration: f64): f64 {
 # mol·L⁻¹·s⁻¹, from the fast equilibrium's k₁ (`k_forward`) and k₋₁ (`k_reverse`, same units), k₂ (`k_slow`,
 # s⁻¹) and [A] in mol/L. Ok(rate); Err(KM_ERR_INVALID_INPUT) if k₋₁ is not positive and finite or k₁ or k₂ is
 # negative or not finite; Err(KM_ERR_INVALID_CONCENTRATION) if [A] is negative or not finite. Mirrors
-# `kinetics::pre_equilibrium_rate`.
+# `kinetics::pre_equilibrium_rate`. ADR 0002 #28: the correctly rounded k₂·k₁·[A]/k₋₁, where Rust's
+# (k₂·(k₁/k₋₁))·[A] rounds three times (and is 0·∞ = NaN where k₁/k₋₁ or the product overflows and a factor is 0: the
+# value is that 0); a zero factor gives its signed zero.
 #must_use
 fn pre_equilibrium_rate(k_forward: f64, k_reverse: f64, k_slow: f64, concentration_a: f64): Result {
     if (_km_is_positive(k_reverse) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(k_forward) != 1 || _km_is_non_negative(k_slow) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(concentration_a) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
-    var rate: f64 = (k_slow * (k_forward / k_reverse)) * concentration_a;
+    var rate: f64 = _km_cr_mul3_div(k_slow, k_forward, concentration_a, k_reverse);
     return Ok(rate);
 }
 
@@ -170,15 +233,51 @@ fn pre_equilibrium_rate(k_forward: f64, k_reverse: f64, k_slow: f64, concentrati
 # The Michaelis–Menten rate v = Vmax·[S]/(Km + [S]), from the maximum rate Vmax in mol·L⁻¹·s⁻¹, the Michaelis
 # constant Km (the substrate concentration at half Vmax) in mol/L and the substrate concentration [S] in mol/L.
 # Ok(v) in the units of Vmax; Err(KM_ERR_INVALID_INPUT) if Vmax or Km is not positive and finite (Vmax checked
-# first); Err(KM_ERR_INVALID_CONCENTRATION) if [S] is negative or not finite. Mirrors
-# `kinetics::michaelis_menten`.
+# first); Err(KM_ERR_INVALID_CONCENTRATION) if [S] is negative or not finite. ADR 0002 #28: Rust's
+# (Vmax·[S])/(Km + [S]) evaluated with an unbounded exponent, the final division rounded once (Rust's bits wherever
+# its chain stays in the normal range). Mirrors `kinetics::michaelis_menten`, with ADR 0002 #28.
 #must_use
 fn michaelis_menten(v_max: f64, km: f64, substrate: f64): Result {
     if (_km_is_positive(v_max) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(km) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(substrate) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
-    var v: f64 = (v_max * substrate) / (km + substrate);
-    return Ok(v);
+    var v, ok = _km_michaelis_menten_fast(v_max, km, substrate);
+    if (ok == 1) { return Ok(v); }
+    var u: f64 = _km_michaelis_menten_ux(v_max, km, substrate);
+    return Ok(u);
+}
+
+# michaelis_menten's fast path, for its validated inputs: (Rust's (Vmax·[S])/(Km + [S]), 1) while that chain provably is
+# the unbounded-exponent one (ADR 0002 #28, #20's semantics), or (0, 0). The test: Vmax·[S] in [2⁻¹⁰²¹, DBL_MAX] (the
+# 53-bit rounding of an exact value in the normal range), or 0 from [S] = ±0 (exact); and Km + [S] finite (a sum of two
+# non-negative doubles: below 2⁻¹⁰²¹ it is exact, above it the 53-bit rounding). The final quotient is then one IEEE
+# division of the same operands, rounded once in both.
+#must_use
+fn _km_michaelis_menten_fast(v_max: f64, km: f64, substrate: f64): (f64, i64) {
+    var p: f64 = v_max * substrate;
+    var d: f64 = km + substrate;
+    var v: f64 = p / d;
+    var lo: f64 = 0x0020000000000000;       # 2⁻¹⁰²¹
+    var hi: f64 = 0x7FEFFFFFFFFFFFFF;       # DBL_MAX
+    var pok = 0;
+    if (p >= lo && p <= hi) { pok = 1; }
+    if (substrate == 0.0) { pok = 1; }
+    if (pok == 1 && d <= hi) { return (v, 1); }
+    return (0.0, 0);
+}
+
+# michaelis_menten with an unbounded exponent (ADR 0002 #28), for its validated inputs: Rust's (Vmax·[S])/(Km + [S])
+# with every operation rounded to 53 bits and nothing over- or underflowing (src/mathx.cyr's _km_ux_*), the final
+# division rounded once into binary64 (_km_ux_div_f64: its subnormal grid, or ±∞ past DBL_MAX).
+#must_use
+fn _km_michaelis_menten_ux(v_max: f64, km: f64, substrate: f64): f64 {
+    var vs, ve = _km_ux_from(v_max);
+    var ks, ke = _km_ux_from(km);
+    var ss, se = _km_ux_from(substrate);
+    var ps, pe = _km_ux_mul(vs, ve, ss, se);
+    var ds, de = _km_ux_add(ks, ke, ss, se);
+    var v: f64 = _km_ux_div_f64(ps, pe, ds, de);
+    return v;
 }
 
 # The Lineweaver–Burk linearisation 1/v = (Km/Vmax)·(1/[S]) + 1/Vmax: the plot's slope Km/Vmax (s) and intercept

@@ -1,7 +1,9 @@
 # thermo.tcyr — the tests of rust-old/src/thermo.rs, ported one for one (each test_group is the
-# Rust test's name), plus a Cyrius-only test of the slice convention and the zero-ΔT threshold.
-# A Rust `&[f64]` is a pointer and a count here. The golden corpus separately checks every
-# function bit for bit (tests/parity.tcyr: class B, 0 ulp).
+# Rust test's name), plus Cyrius-only tests of the slice convention and the zero-ΔT threshold, and of
+# ADR 0002 #27 (the overflow audit's B1: heat_transfer and specific_heat_from_calorimetry rounded
+# once). A Rust `&[f64]` is a pointer and a count here. No Rust test changes with #27 (each compares
+# within a tolerance). The golden corpus separately checks every function bit for bit
+# (tests/parity.tcyr: class B, 0 ulp, the #27 rows mapped to the port's value).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -132,6 +134,84 @@ fn _t_cyrius_slices_and_threshold() {
     assert(is_err_result(t4) == 1 && v4 == KM_ERR_INVALID_INPUT, "negative mass is InvalidInput");
 }
 
+# The f64 whose bit pattern is `bits` (store64, so no hex literal is read as an integer).
+#must_use
+fn fbits(bits): f64 {
+    var x: f64 = 0.0;
+    store64(&x, bits);
+    return x;
+}
+
+# ADR 0002 #27: the correctly rounded m·c·ΔT and q/(m·ΔT) where Rust rounds twice, its partial products past either
+# end of the range, the signed zeros, Rust's expression for a non-finite input, a midpoint, and the public function
+# against the monomial's exact path on 5,000 seeded triples.
+fn _t_cyrius_adr27_rounded_once() {
+    test_group("cyrius_adr27_rounded_once");
+    var q1: f64 = heat_transfer(100.0, 4.184, -300.0);
+    assert_eq(_km_bits(q1), 0xC0FEA50000000000, "100·4.184·(−300) = −125520 (Rust's −125520.00000000001)");
+    var big: f64 = fbits(0x7E37E43C8800759C);       # 1e300
+    var nbig: f64 = -big;
+    var q2: f64 = heat_transfer(big, big, 0.0);
+    assert_eq(_km_bits(q2), 0, "1e300·1e300·0 = +0 (Rust's ∞·0 = NaN)");
+    var q3: f64 = heat_transfer(big, nbig, 0.0);
+    assert_eq(_km_bits(q3), 0x8000000000000000, "1e300·(−1e300)·0 = −0");
+    var e200: f64 = fbits(0x6974E718D7D7625A);      # 1e200
+    var em200: f64 = fbits(0x16687E92154EF7AC);     # 1e-200
+    var q4: f64 = heat_transfer(e200, e200, em200);
+    assert_eq(_km_bits(q4), 0x6974E718D7D7625A, "1e200·1e200·1e-200 = 1e200 (Rust's ∞)");
+    var inf: f64 = 1.0 / 0.0;
+    var tiny: f64 = fbits(0x01A56E1FC2F8F359);      # 1e-300
+    var q5: f64 = heat_transfer(inf, 0.0, 1.0);
+    assert_eq(ulp_is_nan(_km_bits(q5)), 1, "∞·0·1: Rust's NaN (a non-finite input keeps Rust's expression)");
+    var q6: f64 = heat_transfer(tiny, tiny, inf);
+    assert_eq(ulp_is_nan(_km_bits(q6)), 1, "1e-300·1e-300·∞: Rust's 0·∞ = NaN");
+    var q7: f64 = heat_transfer(inf, 2.0, -3.0);
+    assert_eq(_km_bits(q7), 0xFFF0000000000000, "∞·2·(−3) = −∞, Rust's");
+    var y: f64 = 3002399751580331.0;                # 3y = 2^53 + 1
+    var q8: f64 = heat_transfer(3.0, y, 1.0);
+    assert_eq(_km_bits(q8), 0x4340000000000000, "3·y·1 = 2^53 + 1, a tie: 2^53 (even)");
+    var dmax: f64 = fbits(0x7FEFFFFFFFFFFFFF);
+    var t1, v1 = specific_heat_from_calorimetry(4184.0, 1000.0, dmax);
+    assert(is_ok(t1) == 1 && v1 == 0x0010BC6A7EF9DB23, "4184/(1000·DBL_MAX) = 2.33·10⁻³⁰⁸ (Rust's 0)");
+    var mz: f64 = -0.0;
+    var t2, v2 = specific_heat_from_calorimetry(mz, 100.0, 1.0);
+    assert(is_ok(t2) == 1 && v2 == 0x8000000000000000, "q = −0: −0");
+    var t3, v3 = specific_heat_from_calorimetry(0.0, 100.0, -1.0);
+    assert(is_ok(t3) == 1 && v3 == 0x8000000000000000, "q = +0, ΔT < 0: −0");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var nb: f64[3];
+    var k = 0;
+    while (k < 5000) {
+        var j = 0;
+        while (j < 3) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            var b = 0x3000000000000000 + ((st >> 3) % 0x1C00000000000000);
+            b = b | (st & 0x8000000000000000);
+            store64(&nb + 8 * j, b);
+            j = j + 1;
+        }
+        var m: f64 = load64(&nb);
+        var c: f64 = load64(&nb + 8);
+        var dt: f64 = load64(&nb + 16);
+        var h: f64 = heat_transfer(m, c, dt);
+        var a: f64 = _km_cr_mono_acc(&nb, 3, 0, 0);
+        if (_km_bits(h) != _km_bits(a)) { bad = bad + 1; }
+        var tc, vc = specific_heat_from_calorimetry(m, c, dt);
+        if (is_ok(tc) == 1) {
+            var den: f64[2];
+            store64(&den, c);
+            store64(&den + 8, dt);
+            var ac: f64 = _km_cr_mono_acc(&nb, 1, &den, 2);
+            if (vc != _km_bits(ac)) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "heat_transfer and specific_heat_from_calorimetry = the exact path on 5,000 seeded triples");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_heat_1kg_water_1c();
@@ -145,6 +225,7 @@ fn main() {
     _t_zero_delta_t_calorimetry_is_error();
     _t_nan_calorimetry_is_error();
     _t_cyrius_slices_and_threshold();
+    _t_cyrius_adr27_rounded_once();
     return assert_summary();
 }
 

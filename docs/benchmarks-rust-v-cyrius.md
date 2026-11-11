@@ -380,3 +380,47 @@ for `percent_yield` and not kept. Midpoints, common with integer coefficients (6
 theoretical yields), cost 133 rather than 115 ns: the exact resolution stays in the fast path, so only subnormal operands
 and results near the range ends reach `_km_cr_ratio`. The empirical formula's exact test is a 36-bit restoring division
 on 8-limb integers (about 3.5 µs a test); it runs only for knife-edge inputs, within 2⁻⁵⁰ of n ± 1/10.
+
+## The overflow audit's B1 (2026-11-10)
+
+ADR 0002 #27 and #28: thermo's calorimetry and phase's colligative products rounded once, kinetics' monomials rounded
+once, `second_order_concentration` and `michaelis_menten` with an unbounded exponent behind a range test (Rust's chain in
+range), on `src/mathx.cyr`'s correctly rounded monomial (M4f-2's `_km_cr_mul_div` generalised; a straight-line fast path
+per shape). Before: the full `cyrius bench` on the code before B1, with B1's new benches added first; after: a trimmed
+copy of `tests/kimiya.bcyr` with only these benches (it reproduces the full run's numbers), the same host, back to back.
+Two benches have a Rust counterpart; the rest are Cyrius-only.
+
+| Bench | Body | Rust | Before | After |
+|---|---|---|---|---|
+| `thermo/heat_transfer` | `heat_transfer(1000, 4.184, 10)`: RN(m·c·ΔT) by `_km_mul3_fast` (two TwoProducts, the rounding test, the scale) | 0.95 ns | 5.4 ns | 65 ns |
+| `thermo/specific_heat_from_calorimetry` | (4184 J, 1000 g, 1 K): three guards, RN(q/(m·ΔT)) by `_km_div2_fast` | — | 18 ns | 86 ns |
+| `phase/boiling_point_elevation` | (0.512, 1, 2): RN(K·m·i) | — | 6.1 ns | 66 ns |
+| `phase/freezing_point_depression` | (1.86, 0.5, 2): RN(K·m·i) | — | 6.4 ns | 67 ns |
+| `phase/osmotic_pressure` | (2, 0.1 M, 298.15 K): three guards, RN(i·M·R·1000·T) by `_km_mul5_fast` (four double-double products) | — | 20 ns | 139 ns |
+| `kinetics/zero_order_half_life` | (1, 0.1): two guards, Rust's division (2k finite, so already correctly rounded) | — | 16 ns | 16 ns |
+| `kinetics/steady_state_intermediate` | (0.1, 1, 10): three guards, RN(k₁·[A]/k₂) by `_km_mul_div_fast` | — | 21 ns | 88 ns |
+| `kinetics/pre_equilibrium_rate` | (10, 2, 0.1, 1): four guards, RN(k₂·k₁·[A]/k₋₁) by `_km_mul3_div_fast` | — | 27 ns | 125 ns |
+| `kinetics/second_order_concentration` | (1, 0.1, 10): three guards, Rust's chain and its range test (`_km_second_order_fast`) | — | 23 ns | 33 ns |
+| `kinetics/michaelis_menten` | (100, 5, 10): three guards, Rust's chain and its range test (`_km_michaelis_menten_fast`) | 2.92 ns | 17 ns | 24 ns |
+| `thermo/heat_transfer_tie` | 3·y·1 with 3y = 2⁵³ + 1, a midpoint: `_km_mul3_fast`'s test fails, `_km_cr_mono` resolves it (`_km_mono_tie`) | — | 9.6 ns | 365 ns |
+| `phase/osmotic_pressure_subnormal` | i = 2⁻¹⁰⁷⁴: a subnormal result, the exact path (five factors' integer product, `_km_cr_ratio`) | — | 26 ns | 4.04 µs |
+| `kinetics/second_order_concentration_edge` | (1, DBL_MAX, 10): k·t overflows, the unbounded-exponent slow path | — | 24 ns | 230 ns |
+| `kinetics/michaelis_menten_edge` | (100, DBL_MAX, DBL_MAX): ∞/∞ in Rust, the slow path | — | 22 ns | 126 ns |
+| `stoichiometry/percent_yield` | 8 of 10: `_km_cr_mul_div`, now `src/mathx.cyr`'s (M4f-2's fast path, both signs) | — | 81 ns | 82 ns |
+| `stoichiometry/theoretical_yield_moles` | (3, 2) over (2, 1), × 2 | — | 115 ns | 115 ns |
+| `stoichiometry/percent_composition_glucose` | three RN(mass·count·100/mw) | — | 278 ns | 266 ns |
+| `stoichiometry/theoretical_yield_moles_tie` | y·3/2 with 3y = 2⁵³ + 1: `_km_mul_div_tie` | — | 136 ns | 132 ns |
+| `stoichiometry/percent_yield_subnormal` | 100·3·2⁻¹⁰⁷⁴/200: the exact path (now `_km_cr_mono_acc`, odd significands) | — | 2.19 µs | 1.62 µs |
+| `stoichiometry/limiting_reagent` | (unchanged code) | — | 34 ns | 34 ns |
+
+The rounded-once functions cost 65–139 ns where Rust's two to four operations took 6–27: the decision's "roughly 5×
+slower (e.g. ~15 → ~80 ns)", more for the unvalidated products whose Rust body is two multiplies, and for osmotic
+pressure's five factors. **One design measured and not kept**: every shape through the general `_km_cr_mono` (its factor
+tables and loops) cost `heat_transfer` 148 ns, `specific_heat_from_calorimetry` 110, the colligative pair 107–108,
+`osmotic_pressure` 200, `steady_state_intermediate` 115, `pre_equilibrium_rate` 138, and moved stoichiometry's
+`percent_yield` to 108, `theoretical_yield_moles` 141, `percent_composition_glucose` 422 and the tie to 262 ns; the
+straight-line fast paths per shape (`_km_mul_div_fast`, `_km_mul3_fast`, `_km_div2_fast`, `_km_mul3_div_fast`,
+`_km_mul5_fast`) bring them to the numbers above, with stoichiometry back at M4f-2's. Reading a double's bits with
+`load64(&x)` instead of a call to `_km_bits` saved 4–15 ns a call; inlining `_km_dd_mul_d`'s TwoProduct about 1. The
+#20-style functions pay 7–10 ns for their range test, a function call (`_km_*_fast`, shared with the tests and
+`cr_verify.py`).
