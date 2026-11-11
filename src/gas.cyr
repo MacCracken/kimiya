@@ -22,6 +22,18 @@
 #   rows are compared exactly against the corrected oracle (docs/development/port-parity.md §10). cbrt is
 #   ganita_f64_cbrt, correctly rounded as the oracle's (Rust's compiler-builtins) is on every golden argument;
 #   f64_clamp is lib/math.cyr's.
+# - ADR 0002 #31 (the overflow audit's B3; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide audit" and
+#   "round once"): ideal_gas_pressure's and ideal_gas_volume's ((n·R)·T)/x and gas_density's (P·M)/(R·T) are each one
+#   product or quotient of inputs and R's double, so the port returns the exact value rounded once (src/mathx.cyr's
+#   correctly rounded monomial: _km_cr_mul3_div, _km_cr_mul2_div2), where Rust rounds three times (1–2 ulp off on about
+#   a quarter of inputs) and a partial product that over- or underflows gives ±∞ or 0 although the value is
+#   representable. van_der_waals_pressure, peng_robinson_pressure and redlich_kwong_pressure have sums inside, so they
+#   get ADR 0002 #20's semantics: Rust's chain where it provably stays in the normal range (a range test per operation:
+#   Rust's bits), otherwise Rust's operation sequence with an unbounded exponent (src/mathx.cyr's _km_ux_*), the V ≤ n·b
+#   or V ≤ b test on the unbounded co-volume and the final subtraction rounded once into binary64 (_km_vdw_ux,
+#   _km_pr_pressure_ux, _km_rk_pressure_ux; Tc^2.5 exactly rescaled, _km_rk_tc25_ux). The Peng–Robinson Z, roots and
+#   fugacity keep _km_pr_coefficients, Rust's chain (the audit's later batches review them). Rust's checks, Err codes
+#   and order are kept.
 
 include "lib/math.cyr"
 include "lib/ganita.cyr"
@@ -187,25 +199,32 @@ fn _km_pr_physical_roots(cap_a: f64, cap_b: f64, out): i64 {
 
 # Ideal gas law P = nRT/V in Pa, from n in mol, T in K and V in m³. Ok(P),
 # Err(KM_ERR_INVALID_INPUT) if n is not finite or V is not positive and finite, or
-# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite. Mirrors `gas::ideal_gas_pressure`.
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite. ADR 0002 #31: the correctly rounded n·R·T/V (R as
+# its double; n = ±0 gives that signed zero), where Rust's ((n·R)·T)/V rounds three times and n·R·T can over- or
+# underflow. Mirrors `gas::ideal_gas_pressure`, with ADR 0002 #31.
 #must_use
 fn ideal_gas_pressure(moles: f64, temperature_k: f64, volume_m3: f64): Result {
     if (_km_is_finite(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_positive(volume_m3) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var p: f64 = ((moles * KM_GAS_CONSTANT) * temperature_k) / volume_m3;
+    var r: f64 = KM_GAS_CONSTANT;
+    var p: f64 = _km_cr_mul3_div(moles, r, temperature_k, volume_m3);
     return Ok(p);
 }
 
 # Ideal gas law V = nRT/P in m³, from n in mol, T in K and P in Pa. Ok(V),
 # Err(KM_ERR_INVALID_INPUT) if n is not finite or P is not positive and finite, or
-# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite. Mirrors `gas::ideal_gas_volume`.
+# Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite. ADR 0002 #31: the correctly rounded n·R·T/P (R as
+# its double; n = ±0 gives that signed zero), where Rust's ((n·R)·T)/P rounds three times and n·R·T can over- or
+# underflow (ideal_gas_volume(DBL_MAX, 300, 101325) is ∞ in Rust, 4.43·10³⁰⁶ here). Mirrors `gas::ideal_gas_volume`,
+# with ADR 0002 #31.
 #must_use
 fn ideal_gas_volume(moles: f64, temperature_k: f64, pressure_pa: f64): Result {
     if (_km_is_finite(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_positive(pressure_pa) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var v: f64 = ((moles * KM_GAS_CONSTANT) * temperature_k) / pressure_pa;
+    var r: f64 = KM_GAS_CONSTANT;
+    var v: f64 = _km_cr_mul3_div(moles, r, temperature_k, pressure_pa);
     return Ok(v);
 }
 
@@ -213,7 +232,10 @@ fn ideal_gas_volume(moles: f64, temperature_k: f64, pressure_pa: f64): Result {
 # V (m³), the attraction constant a (Pa·m⁶/mol²; 1 L²·bar/mol² = 0.1 Pa·m⁶/mol²) and the excluded
 # volume b (m³/mol; 1 L/mol = 10⁻³ m³/mol). Ok(P), Err(KM_ERR_INVALID_TEMPERATURE) if T is not
 # positive and finite, or Err(KM_ERR_INVALID_INPUT) if n is not finite, a or b is negative or
-# non-finite, V is not positive and finite, or V ≤ n·b. Mirrors `gas::van_der_waals_pressure`.
+# non-finite, V is not positive and finite, or V ≤ n·b. ADR 0002 #31 (#20's semantics: the formula has a difference
+# inside): Rust's (((n·R)·T)/(V − n·b)) − ((a·(n/V))·(n/V)) where its chain stays in the normal range (Rust's bits),
+# otherwise the same sequence with an unbounded exponent, the V ≤ n·b test on the unbounded n·b and the final
+# subtraction rounded once (_km_vdw_ux). Mirrors `gas::van_der_waals_pressure`, with ADR 0002 #31.
 #must_use
 fn van_der_waals_pressure(moles: f64, temperature_k: f64, volume_m3: f64, a: f64, b: f64): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
@@ -222,11 +244,85 @@ fn van_der_waals_pressure(moles: f64, temperature_k: f64, volume_m3: f64, a: f64
         return Err(KM_ERR_INVALID_INPUT);
     }
     if (_km_is_positive(volume_m3) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var nb: f64 = moles * b;
-    if (volume_m3 <= nb) { return Err(KM_ERR_INVALID_INPUT); }
-    var n_over_v: f64 = moles / volume_m3;
-    var p: f64 = (((moles * KM_GAS_CONSTANT) * temperature_k) / (volume_m3 - nb)) - ((a * n_over_v) * n_over_v);
+    var p, e, ok = _km_vdw_fast(moles, temperature_k, volume_m3, a, b);
+    if (ok != 1) {
+        var p2, e2 = _km_vdw_ux(moles, temperature_k, volume_m3, a, b);
+        p = p2;
+        e = e2;
+    }
+    if (e != KM_ERR_NONE) { return Err(e); }
     return Ok(p);
+}
+
+# van_der_waals_pressure's fast path, for its validated inputs: (P, KM_ERR_NONE, 1) or (0, the Err, 1) while Rust's
+# chain provably is the unbounded-exponent one (ADR 0002 #31), (0, 0, 0) otherwise. Inside the region n, a, b = 0 or of
+# magnitude in [2⁻⁶⁰, 2⁶⁰] and T, V in [2⁻⁶⁰, 2⁶⁰] every intermediate is provably normal or an exact zero (n·b is 0 or
+# within 2^±120, n·R·T 0 or in [2⁻¹¹⁷, 2¹²⁴], V − n·b in [2⁻¹⁷², 2¹²¹] (V > n·b: ulp-close values subtract exactly), the
+# quotient 0 or in [2⁻¹⁷⁷, 2²⁹⁶], n/V within 2^±120, a·(n/V) and its product with n/V 0 or within 2^±300), so the tests
+# below are skipped. Outside it: n·b normal or exact (a zero factor), or +∞ (then V ≤ n·b in both evaluations: the
+# unbounded n·b is past DBL_MAX ≥ V), so V ≤ n·b decides alike; then n·R, n·R·T, n/V, a·(n/V), its product with n/V and
+# the quotient term each normal or an exact zero (n = 0, or a = 0), and V − n·b finite (a difference of two doubles is
+# exact where it is subnormal). The final subtraction of two doubles is then rounded once in both evaluations.
+#must_use
+fn _km_vdw_fast(n: f64, t: f64, v: f64, a: f64, b: f64): (f64, i64, i64) {
+    var lo = 0x3C30000000000000;                # 2⁻⁶⁰
+    var hi = 0x43B0000000000000;                # 2⁶⁰
+    var m = 0x7FFFFFFFFFFFFFFF;
+    var bn = load64(&n) & m;
+    var bt = load64(&t);
+    var bv = load64(&v);
+    var ba = load64(&a);
+    var bbv = load64(&b);
+    var inbox = 1;
+    if (bt < lo || bt > hi || bv < lo || bv > hi) { inbox = 0; }
+    if (bn != 0 && (bn < lo || bn > hi)) { inbox = 0; }
+    if (ba != 0 && (ba < lo || ba > hi)) { inbox = 0; }
+    if (bbv != 0 && (bbv < lo || bbv > hi)) { inbox = 0; }
+    var nb: f64 = n * b;
+    var exact = 0;
+    if (n == 0.0 || b == 0.0) { exact = 1; }
+    if (inbox != 1 && _km_ux_normal(nb) != 1 && exact != 1 && nb != _KM_INF) { return (0.0, 0, 0); }
+    if (v <= nb) { return (0.0, KM_ERR_INVALID_INPUT, 1); }
+    var nr: f64 = n * KM_GAS_CONSTANT;
+    var nrt: f64 = nr * t;
+    var den: f64 = v - nb;
+    var t1: f64 = nrt / den;
+    var nv: f64 = n / v;
+    var an: f64 = a * nv;
+    var t2: f64 = an * nv;
+    if (inbox != 1 && n != 0.0) {
+        var ok1 = _km_ux_normal(nr) + _km_ux_normal(nrt) + _km_ux_normal(t1) + _km_ux_normal(nv);
+        if (ok1 != 4 || den == _KM_INF) { return (0.0, 0, 0); }
+        if (a != 0.0 && (_km_ux_normal(an) != 1 || _km_ux_normal(t2) != 1)) { return (0.0, 0, 0); }
+    }
+    var p: f64 = t1 - t2;
+    return (p, KM_ERR_NONE, 1);
+}
+
+# van_der_waals_pressure with an unbounded exponent (ADR 0002 #31), for its validated inputs: (P, KM_ERR_NONE) or
+# (0, KM_ERR_INVALID_INPUT) where V ≤ n·b on the unbounded n·b; Rust's (((n·R)·T)/(V − n·b)) − ((a·(n/V))·(n/V)) with
+# every operation rounded to 53 bits and nothing over- or underflowing (src/mathx.cyr's _km_ux_*), the final
+# subtraction rounded once into binary64 (_km_ux_sub_f64).
+#must_use
+fn _km_vdw_ux(n: f64, t: f64, v: f64, a: f64, b: f64): (f64, i64) {
+    var ns, ne = _km_ux_from(n);
+    var bs, be = _km_ux_from(b);
+    var nbs, nbe = _km_ux_mul(ns, ne, bs, be);
+    var vs, ve = _km_ux_from(v);
+    if (_km_ux_le(vs, ve, nbs, nbe) == 1) { return (0.0, KM_ERR_INVALID_INPUT); }
+    var r: f64 = KM_GAS_CONSTANT;
+    var rs, re = _km_ux_from(r);
+    var ts, te = _km_ux_from(t);
+    var q1s, q1e = _km_ux_mul(ns, ne, rs, re);
+    var q2s, q2e = _km_ux_mul(q1s, q1e, ts, te);
+    var ds, de = _km_ux_sub(vs, ve, nbs, nbe);
+    var t1s, t1e = _km_ux_div(q2s, q2e, ds, de);
+    var nvs, nve = _km_ux_div(ns, ne, vs, ve);
+    var as1, ae = _km_ux_from(a);
+    var ans, ane = _km_ux_mul(as1, ae, nvs, nve);
+    var t2s, t2e = _km_ux_mul(ans, ane, nvs, nve);
+    var p: f64 = _km_ux_sub_f64(t1s, t1e, t2s, t2e);
+    return (p, KM_ERR_NONE);
 }
 
 # Dalton's law: the partial pressure, total pressure × mole fraction, in the total's unit. Mirrors
@@ -239,13 +335,17 @@ fn partial_pressure(total_pressure: f64, mole_fraction: f64): f64 {
 
 # Gas density ρ = PM/(RT) in kg/m³, from P in Pa, the molar mass M in kg/mol and T in K. Ok(ρ),
 # Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite, or Err(KM_ERR_INVALID_INPUT) if P
-# is negative or non-finite or M is not positive and finite. Mirrors `gas::gas_density`.
+# is negative or non-finite or M is not positive and finite. ADR 0002 #31: the correctly rounded P·M/(R·T) (R as its
+# double; P = ±0 gives that signed zero), where Rust's (P·M)/(R·T) rounds three times and R·T overflows for T past
+# 2.16·10³⁰⁷ (gas_density(101325, 0.029, DBL_MAX) is 0 in Rust, 1.97·10⁻³⁰⁶ here). Mirrors `gas::gas_density`, with
+# ADR 0002 #31.
 #must_use
 fn gas_density(pressure_pa: f64, molar_mass_kg: f64, temperature_k: f64): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_non_negative(pressure_pa) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(molar_mass_kg) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var rho: f64 = (pressure_pa * molar_mass_kg) / (KM_GAS_CONSTANT * temperature_k);
+    var r: f64 = KM_GAS_CONSTANT;
+    var rho: f64 = _km_cr_mul2_div2(pressure_pa, molar_mass_kg, r, temperature_k);
     return Ok(rho);
 }
 
@@ -255,19 +355,170 @@ fn gas_density(pressure_pa: f64, molar_mass_kg: f64, temperature_k: f64): Result
 # and acentric factor (`params`), T in K and the molar volume V in m³/mol. Ok(P),
 # Err(KM_ERR_INVALID_TEMPERATURE) if T or Tc is not positive and finite, or
 # Err(KM_ERR_INVALID_INPUT) if Pc is not positive and finite, ω is not finite, or V is non-finite or
-# not greater than b. Mirrors `gas::peng_robinson_pressure`.
+# not greater than b. ADR 0002 #31 (#20's semantics: sums inside): Rust's chain (pr_coefficients' a·α and b, then
+# RT/(V − b) − a·α/(V² + 2bV − b²)) where it stays in the normal range (Rust's bits), otherwise the same sequence with
+# an unbounded exponent, the V ≤ b test on the unbounded b and the final subtraction rounded once (_km_pr_pressure_ux):
+# a subnormal Tc (Rust's T/Tc = ∞ and a·α = 0·∞ = NaN), V·V past DBL_MAX (Rust's term₂ = 0, the wrong sign), Tc·Tc
+# or ω² past it. Mirrors `gas::peng_robinson_pressure`, with ADR 0002 #31.
 #must_use
 fn peng_robinson_pressure(params: KmPengRobinsonParams, temperature_k: f64, molar_volume: f64): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     var e = _km_pr_validate(params);
     if (e != KM_ERR_NONE) { return Err(e); }
-    var a_alpha, b = _km_pr_coefficients(params, temperature_k);
-    if (_km_is_finite(molar_volume) != 1 || molar_volume <= b) { return Err(KM_ERR_INVALID_INPUT); }
-    var v: f64 = molar_volume;
-    var term1: f64 = (KM_GAS_CONSTANT * temperature_k) / (v - b);
-    var term2: f64 = a_alpha / (((v * v) + ((2.0 * b) * v)) - (b * b));
-    var p: f64 = term1 - term2;
+    if (_km_is_finite(molar_volume) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var tc: f64 = params.tc;
+    var pc: f64 = params.pc;
+    var omega: f64 = params.omega;
+    var p, e2, ok = _km_pr_pressure_fast(tc, pc, omega, temperature_k, molar_volume);
+    if (ok != 1) {
+        var p2, e3 = _km_pr_pressure_ux(tc, pc, omega, temperature_k, molar_volume);
+        p = p2;
+        e2 = e3;
+    }
+    if (e2 != KM_ERR_NONE) { return Err(e2); }
     return Ok(p);
+}
+
+# peng_robinson_pressure's fast path, for validated inputs and a finite V: (P, KM_ERR_NONE, 1) or (0, the Err, 1) while
+# Rust's chain provably is the unbounded-exponent one (ADR 0002 #31), (0, 0, 0) otherwise. Rust's operations in Rust's
+# order (pr_coefficients transcribed); inside _km_pr_box's region every one is proven normal, outside it each product,
+# quotient or square is checked normal (_km_ux_normal) or an exact zero (a zero factor) and each sum finite (a subnormal
+# sum of two doubles is exact); √(T/Tc) of a correct operand is correct. Then b is the unbounded b, so V ≤ b decides
+# alike, and the final subtraction of two doubles is rounded once in both evaluations.
+#must_use
+fn _km_pr_pressure_fast(tc: f64, pc: f64, omega: f64, t: f64, v: f64): (f64, i64, i64) {
+    var r: f64 = KM_GAS_CONSTANT;
+    var c3: f64 = ((0.45724 * r) * r) * tc;
+    var c4: f64 = c3 * tc;
+    var a: f64 = c4 / pc;
+    var d2: f64 = (0.07780 * r) * tc;
+    var b: f64 = d2 / pc;
+    var k1: f64 = 1.54226 * omega;
+    var k3: f64 = 0.26992 * omega;
+    var k4: f64 = k3 * omega;
+    var kappa: f64 = (0.37464 + k1) - k4;
+    var tr: f64 = t / tc;
+    var sq: f64 = f64_sqrt(tr);
+    var s1: f64 = 1.0 - sq;
+    var s2: f64 = kappa * s1;
+    var u: f64 = 1.0 + s2;
+    var alpha: f64 = _km_powi(u, 2);
+    var aa: f64 = a * alpha;
+    var inbox = _km_pr_box(tc, pc, omega, t, v);
+    if (inbox != 1) {
+        var n1 = _km_ux_normal(c3) + _km_ux_normal(c4) + _km_ux_normal(a) + _km_ux_normal(d2) + _km_ux_normal(b);
+        if (n1 != 5) { return (0.0, 0, 0); }
+        if (omega != 0.0 && _km_ux_normal(k1) + _km_ux_normal(k3) + _km_ux_normal(k4) != 3) { return (0.0, 0, 0); }
+        var dk: f64 = kappa - kappa;
+        if (_km_ux_normal(tr) != 1 || dk != 0.0) { return (0.0, 0, 0); }
+        if (kappa != 0.0 && s1 != 0.0 && _km_ux_normal(s2) != 1) { return (0.0, 0, 0); }
+        if (u != 0.0 && _km_ux_normal(alpha) != 1) { return (0.0, 0, 0); }
+        if (alpha != 0.0 && _km_ux_normal(aa) != 1) { return (0.0, 0, 0); }
+    }
+    if (v <= b) { return (0.0, KM_ERR_INVALID_INPUT, 1); }
+    var rt: f64 = r * t;
+    var vb: f64 = v - b;
+    var t1: f64 = rt / vb;
+    var vv: f64 = v * v;
+    var b2: f64 = 2.0 * b;
+    var b2v: f64 = b2 * v;
+    var sm: f64 = vv + b2v;
+    var bb: f64 = b * b;
+    var den: f64 = sm - bb;
+    var t2: f64 = aa / den;
+    if (inbox != 1) {
+        var n2 = _km_ux_normal(rt) + _km_ux_normal(t1) + _km_ux_normal(vv) + _km_ux_normal(b2) + _km_ux_normal(b2v);
+        if (n2 != 5 || _km_ux_normal(bb) != 1 || sm == _KM_INF || vb == _KM_INF) { return (0.0, 0, 0); }
+        if (aa != 0.0 && _km_ux_normal(t2) != 1) { return (0.0, 0, 0); }
+    }
+    var p: f64 = t1 - t2;
+    return (p, KM_ERR_NONE, 1);
+}
+
+# 1 if every intermediate of peng_robinson_pressure's chain is provably normal or an exact zero, by the inputs alone
+# (the fast path then skips its per-operation tests; ADR 0002 #31): Tc, Pc, T, V in [2⁻⁶⁰, 2⁶⁰] and ω = 0 or |ω| in
+# [2⁻⁶⁰, 2⁶⁰]. Then a = 0.45724R²Tc²/Pc is in [2⁻¹⁷⁵, 2¹⁸⁵] and b = 0.0778RTc/Pc in [2⁻¹²¹, 2¹²⁰]; 1.54226ω, 0.26992ω
+# and 0.26992ω² are 0 or within 2^±122, so κ is finite, and 0 or at least 2⁻¹⁷⁴ (a nonzero sum of these doubles is a
+# multiple of the smallest ulp, 2⁻¹⁷⁴); T/Tc is in [2⁻¹²⁰, 2¹²⁰], 1 − √(T/Tc) 0 or at least 2⁻⁵³ (√(T/Tc) in [2⁻⁶⁰,
+# 2⁶⁰]; near 1 the difference is exact), so κ·(1 − √) is 0 or in [2⁻²²⁷, 2¹⁸¹]; u = 1 + κ(1 − √) is 0 or at least 2⁻⁵³,
+# α = u² 0 or in [2⁻¹⁰⁶, 2³⁶³], a·α 0 or in [2⁻²⁸¹, 2⁵⁴⁸]; RT is in [2⁻⁵⁷, 2⁶⁴], V − b (V > b) at least 2⁻¹⁷³ (ulp-close
+# values subtract exactly), RT/(V − b) in [2⁻¹⁷⁸, 2²³⁷]; V², 2b, 2bV and b² within 2^±242, the denominator V² + 2bV − b²
+# above 2b²·(1 − 2⁻⁵⁰) ≥ 2⁻²⁴³ and below 2¹²², a·α over it 0 or in [2⁻⁴⁰⁴, 2⁷⁹¹]: far inside [2⁻¹⁰²¹, DBL_MAX]. Every
+# physical state is inside.
+#must_use
+fn _km_pr_box(tc: f64, pc: f64, omega: f64, t: f64, v: f64): i64 {
+    var lo = 0x3C30000000000000;                # 2⁻⁶⁰
+    var hi = 0x43B0000000000000;                # 2⁶⁰
+    var a1 = load64(&tc);
+    var a2 = load64(&pc);
+    var a3 = load64(&t);
+    var a4 = load64(&v);
+    var a5 = load64(&omega) & 0x7FFFFFFFFFFFFFFF;
+    if (a1 < lo || a1 > hi || a2 < lo || a2 > hi || a3 < lo || a3 > hi || a4 < lo || a4 > hi) { return 0; }
+    if (a5 != 0 && (a5 < lo || a5 > hi)) { return 0; }
+    return 1;
+}
+
+# peng_robinson_pressure with an unbounded exponent (ADR 0002 #31), for validated inputs and a finite V: (P,
+# KM_ERR_NONE) or (0, KM_ERR_INVALID_INPUT) where V ≤ b on the unbounded b; Rust's pr_coefficients and RT/(V − b) −
+# a·α/(V² + 2bV − b²) with every operation rounded to 53 bits and nothing over- or underflowing (src/mathx.cyr's
+# _km_ux_*; α = u·u, as Rust's powi(2)), the final subtraction rounded once into binary64 (_km_ux_sub_f64).
+#must_use
+fn _km_pr_pressure_ux(tc: f64, pc: f64, omega: f64, t: f64, v: f64): (f64, i64) {
+    var r: f64 = KM_GAS_CONSTANT;
+    var rs, re = _km_ux_from(r);
+    var tcs, tce = _km_ux_from(tc);
+    var pcs, pce = _km_ux_from(pc);
+    var c0: f64 = 0.45724;
+    var cs, ce = _km_ux_from(c0);
+    var c1s, c1e = _km_ux_mul(cs, ce, rs, re);
+    var c2s, c2e = _km_ux_mul(c1s, c1e, rs, re);
+    var c3s, c3e = _km_ux_mul(c2s, c2e, tcs, tce);
+    var c4s, c4e = _km_ux_mul(c3s, c3e, tcs, tce);
+    var as1, ae = _km_ux_div(c4s, c4e, pcs, pce);
+    var d0: f64 = 0.07780;
+    var ds, de = _km_ux_from(d0);
+    var d1s, d1e = _km_ux_mul(ds, de, rs, re);
+    var d2s, d2e = _km_ux_mul(d1s, d1e, tcs, tce);
+    var bs, be = _km_ux_div(d2s, d2e, pcs, pce);
+    var vs, ve = _km_ux_from(v);
+    if (_km_ux_le(vs, ve, bs, be) == 1) { return (0.0, KM_ERR_INVALID_INPUT); }
+    var os, oe = _km_ux_from(omega);
+    var e1: f64 = 1.54226;
+    var e1s, e1e = _km_ux_from(e1);
+    var k1s, k1e = _km_ux_mul(e1s, e1e, os, oe);
+    var e0: f64 = 0.37464;
+    var e0s, e0e = _km_ux_from(e0);
+    var k2s, k2e = _km_ux_add(e0s, e0e, k1s, k1e);
+    var e3: f64 = 0.26992;
+    var e3s, e3e = _km_ux_from(e3);
+    var k3s, k3e = _km_ux_mul(e3s, e3e, os, oe);
+    var k4s, k4e = _km_ux_mul(k3s, k3e, os, oe);
+    var kas, kae = _km_ux_sub(k2s, k2e, k4s, k4e);
+    var ts, te = _km_ux_from(t);
+    var trs, tre = _km_ux_div(ts, te, tcs, tce);
+    var sqs, sqe = _km_ux_sqrt(trs, tre);
+    var one: f64 = 1.0;
+    var ones, onee = _km_ux_from(one);
+    var s1s, s1e = _km_ux_sub(ones, onee, sqs, sqe);
+    var s2s, s2e = _km_ux_mul(kas, kae, s1s, s1e);
+    var us, ue = _km_ux_add(ones, onee, s2s, s2e);
+    var als, ale = _km_ux_mul(us, ue, us, ue);
+    var aas, aae = _km_ux_mul(as1, ae, als, ale);
+    var rts, rte = _km_ux_mul(rs, re, ts, te);
+    var vbs, vbe = _km_ux_sub(vs, ve, bs, be);
+    var t1s, t1e = _km_ux_div(rts, rte, vbs, vbe);
+    var vvs, vve = _km_ux_mul(vs, ve, vs, ve);
+    var two: f64 = 2.0;
+    var twos, twoe = _km_ux_from(two);
+    var b2s, b2e = _km_ux_mul(twos, twoe, bs, be);
+    var bvs, bve = _km_ux_mul(b2s, b2e, vs, ve);
+    var sms, sme = _km_ux_add(vvs, vve, bvs, bve);
+    var bbs, bbe = _km_ux_mul(bs, be, bs, be);
+    var dns, dne = _km_ux_sub(sms, sme, bbs, bbe);
+    var t2s, t2e = _km_ux_div(aas, aae, dns, dne);
+    var p: f64 = _km_ux_sub_f64(t1s, t1e, t2s, t2e);
+    return (p, KM_ERR_NONE);
 }
 
 # All physical Peng–Robinson compressibility-factor roots, ascending: the cubic
@@ -349,22 +600,129 @@ fn fugacity_pr(params: KmPengRobinsonParams, temperature_k: f64, pressure_pa: f6
 # Tc (K) and pressure Pc (Pa), T in K and the molar volume V in m³/mol. Ok(P),
 # Err(KM_ERR_INVALID_TEMPERATURE) if T or Tc is not positive and finite, or
 # Err(KM_ERR_INVALID_INPUT) if Pc is not positive and finite or V is non-finite or not greater
-# than b. Mirrors `gas::redlich_kwong_pressure`.
+# than b. ADR 0002 #31 (#20's semantics: a difference inside): Rust's chain where it stays in the normal range (Rust's
+# bits), otherwise the same sequence with an unbounded exponent, the V ≤ b test on the unbounded b and the final
+# subtraction rounded once (_km_rk_pressure_ux): Tc^2.5 past DBL_MAX for Tc above about 1.3·10¹²³ while a = 0.42748·R²·
+# Tc^2.5/Pc is finite (Rust's −∞), (√T·V)·(V + b) past it, the products' underflow. Tc^2.5 with an unbounded exponent is
+# RN₅₃(Tc^2.5), exactly _km_cr_pow(s, 2.5)·2^(5j) for Tc = s·2^(2j), s in [1, 4) (_km_rk_tc25_ux). Mirrors
+# `gas::redlich_kwong_pressure`, with ADR 0002 #31.
 #must_use
 fn redlich_kwong_pressure(tc: f64, pc: f64, temperature_k: f64, molar_volume: f64): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_positive(tc) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_positive(pc) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var tc25: f64 = _km_cr_pow(tc, 2.5);
-    var a: f64 = (((0.42748 * KM_GAS_CONSTANT) * KM_GAS_CONSTANT) * tc25) / pc;
-    var b: f64 = ((0.08664 * KM_GAS_CONSTANT) * tc) / pc;
-    if (_km_is_finite(molar_volume) != 1 || molar_volume <= b) { return Err(KM_ERR_INVALID_INPUT); }
-    var v: f64 = molar_volume;
-    var term1: f64 = (KM_GAS_CONSTANT * temperature_k) / (v - b);
-    var st: f64 = f64_sqrt(temperature_k);
-    var term2: f64 = a / ((st * v) * (v + b));
-    var p: f64 = term1 - term2;
+    if (_km_is_finite(molar_volume) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var p, e, ok = _km_rk_pressure_fast(tc, pc, temperature_k, molar_volume);
+    if (ok != 1) {
+        var p2, e2 = _km_rk_pressure_ux(tc, pc, temperature_k, molar_volume);
+        p = p2;
+        e = e2;
+    }
+    if (e != KM_ERR_NONE) { return Err(e); }
     return Ok(p);
+}
+
+# redlich_kwong_pressure's fast path, for validated inputs and a finite V: (P, KM_ERR_NONE, 1) or (0, the Err, 1) while
+# Rust's chain provably is the unbounded-exponent one (ADR 0002 #31), (0, 0, 0) otherwise. Inside the region Tc, Pc, T,
+# V in [2⁻⁶⁰, 2⁶⁰] every intermediate is provably normal (Tc^2.5 within 2^±150, a in [2⁻²⁰⁶, 2²¹⁵], b in [2⁻¹²¹, 2¹²⁰],
+# RT in [2⁻⁵⁷, 2⁶⁴], V − b at least 2⁻¹⁷³ (V > b: ulp-close values subtract exactly), RT/(V − b) in [2⁻¹¹⁷, 2²³⁷], √T·V
+# within 2^±90, (√T·V)·(V + b) in [2⁻¹⁵⁰, 2²¹¹], a over it in [2⁻⁴¹⁷, 2³⁶⁵]), so the tests are skipped. Outside it:
+# Tc^2.5 (the correctly rounded _km_cr_pow, RN₅₃(Tc^2.5) wherever it is normal) and every product and quotient normal
+# (_km_ux_normal), the sums V − b and V + b finite (a subnormal sum of two doubles is exact), √T of a correct operand
+# correct. b is then the unbounded b, so V ≤ b decides alike, and the final subtraction of two doubles is rounded once
+# in both evaluations.
+#must_use
+fn _km_rk_pressure_fast(tc: f64, pc: f64, t: f64, v: f64): (f64, i64, i64) {
+    var lo = 0x3C30000000000000;                # 2⁻⁶⁰
+    var hi = 0x43B0000000000000;                # 2⁶⁰
+    var b1 = load64(&tc);
+    var b2 = load64(&pc);
+    var b3 = load64(&t);
+    var b4 = load64(&v);
+    var inbox = 1;
+    if (b1 < lo || b1 > hi || b2 < lo || b2 > hi || b3 < lo || b3 > hi || b4 < lo || b4 > hi) { inbox = 0; }
+    var r: f64 = KM_GAS_CONSTANT;
+    var tc25: f64 = _km_cr_pow(tc, 2.5);
+    var c3: f64 = ((0.42748 * r) * r) * tc25;
+    var a: f64 = c3 / pc;
+    var d2: f64 = (0.08664 * r) * tc;
+    var b: f64 = d2 / pc;
+    if (inbox != 1) {
+        var n1 = _km_ux_normal(tc25) + _km_ux_normal(c3) + _km_ux_normal(a) + _km_ux_normal(d2) + _km_ux_normal(b);
+        if (n1 != 5) { return (0.0, 0, 0); }
+    }
+    if (v <= b) { return (0.0, KM_ERR_INVALID_INPUT, 1); }
+    var rt: f64 = r * t;
+    var vb: f64 = v - b;
+    var t1: f64 = rt / vb;
+    var st: f64 = f64_sqrt(t);
+    var sv: f64 = st * v;
+    var vpb: f64 = v + b;
+    var den: f64 = sv * vpb;
+    var t2: f64 = a / den;
+    if (inbox != 1) {
+        var n2 = _km_ux_normal(rt) + _km_ux_normal(t1) + _km_ux_normal(sv) + _km_ux_normal(den) + _km_ux_normal(t2);
+        if (n2 != 5 || vb == _KM_INF || vpb == _KM_INF) { return (0.0, 0, 0); }
+    }
+    var p: f64 = t1 - t2;
+    return (p, KM_ERR_NONE, 1);
+}
+
+# Tc^2.5 with an unbounded exponent (ADR 0002 #31): RN₅₃(Tc^2.5) as an (s, e) pair, for a positive finite Tc. With
+# Tc = s·2^(2j), s in [1, 4) (Tc's (significand, exponent) pair, the significand doubled for an odd exponent: exact),
+# Tc^2.5 = s^2.5·2^(5j) exactly, s^2.5 lies in [1, 32), inside binary64's normal range, where the correctly rounded
+# _km_cr_pow(s, 2.5) is the 53-bit rounding of s^2.5, and 53-bit rounding commutes with scaling by 2^(5j) when the
+# exponent is unbounded: so RN₅₃(Tc^2.5) = _km_cr_pow(s, 2.5)·2^(5j), the pair (its significand, its exponent + 5j).
+#must_use
+fn _km_rk_tc25_ux(tc: f64): (f64, i64) {
+    var s0, e0 = _km_ux_from(tc);
+    var s: f64 = s0;
+    var j = e0 / 2;
+    if ((e0 & 1) != 0) {
+        s = s0 * 2.0;
+        j = (e0 - 1) / 2;
+    }
+    var pw: f64 = _km_cr_pow(s, 2.5);
+    var ps, pe = _km_ux_from(pw);
+    return (ps, pe + 5 * j);
+}
+
+# redlich_kwong_pressure with an unbounded exponent (ADR 0002 #31), for validated inputs and a finite V: (P,
+# KM_ERR_NONE) or (0, KM_ERR_INVALID_INPUT) where V ≤ b on the unbounded b; Rust's a = (((0.42748·R)·R)·Tc^2.5)/Pc, b =
+# ((0.08664·R)·Tc)/Pc and RT/(V − b) − a/((√T·V)·(V + b)) with every operation rounded to 53 bits and nothing over- or
+# underflowing (src/mathx.cyr's _km_ux_*; Tc^2.5 by _km_rk_tc25_ux), the final subtraction rounded once into binary64
+# (_km_ux_sub_f64).
+#must_use
+fn _km_rk_pressure_ux(tc: f64, pc: f64, t: f64, v: f64): (f64, i64) {
+    var r: f64 = KM_GAS_CONSTANT;
+    var rs, re = _km_ux_from(r);
+    var tcs, tce = _km_ux_from(tc);
+    var pcs, pce = _km_ux_from(pc);
+    var c0: f64 = 0.42748;
+    var cs, ce = _km_ux_from(c0);
+    var c1s, c1e = _km_ux_mul(cs, ce, rs, re);
+    var c2s, c2e = _km_ux_mul(c1s, c1e, rs, re);
+    var ws, we = _km_rk_tc25_ux(tc);
+    var c3s, c3e = _km_ux_mul(c2s, c2e, ws, we);
+    var as1, ae = _km_ux_div(c3s, c3e, pcs, pce);
+    var d0: f64 = 0.08664;
+    var ds, de = _km_ux_from(d0);
+    var d1s, d1e = _km_ux_mul(ds, de, rs, re);
+    var d2s, d2e = _km_ux_mul(d1s, d1e, tcs, tce);
+    var bs, be = _km_ux_div(d2s, d2e, pcs, pce);
+    var vs, ve = _km_ux_from(v);
+    if (_km_ux_le(vs, ve, bs, be) == 1) { return (0.0, KM_ERR_INVALID_INPUT); }
+    var ts, te = _km_ux_from(t);
+    var rts, rte = _km_ux_mul(rs, re, ts, te);
+    var vbs, vbe = _km_ux_sub(vs, ve, bs, be);
+    var t1s, t1e = _km_ux_div(rts, rte, vbs, vbe);
+    var sts, ste = _km_ux_sqrt(ts, te);
+    var svs, sve = _km_ux_mul(sts, ste, vs, ve);
+    var vps, vpe = _km_ux_add(vs, ve, bs, be);
+    var dns, dne = _km_ux_mul(svs, sve, vps, vpe);
+    var t2s, t2e = _km_ux_div(as1, ae, dns, dne);
+    var p: f64 = _km_ux_sub_f64(t1s, t1e, t2s, t2e);
+    return (p, KM_ERR_NONE);
 }
 
 # Joule–Thomson coefficient of an ideal gas: always 0.0 K/Pa. A real gas's needs the derivatives of

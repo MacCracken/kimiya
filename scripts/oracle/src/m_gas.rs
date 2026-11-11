@@ -21,19 +21,24 @@
 //! 10⁶ around it, a seeded sweep, every validation edge for T, P and each parameter (ω = 5 and −0.5
 //! are accepted), and overflow (P up to 10²⁰ Pa and DBL_MAX, T = 10⁻³⁰⁰ K). Then (ADR 0006 item 6, M3c-3)
 //! the hard fugacity rows: states a few kelvin above 0 where φ = exp(ln φ) is subnormal and φ·P is normal.
+//!
+//! - ADR 0002 #31 (the overflow audit's B3): `ideal_gas_pressure`, `ideal_gas_volume` and `gas_density` rows are noted
+//!   where the port's correctly rounded monomial differs from Rust's value, `van_der_waals_pressure`,
+//!   `peng_robinson_pressure` and `redlich_kwong_pressure` rows where the port's unbounded-exponent evaluation does (its
+//!   value, or its Err where the co-volume test on the unbounded co-volume refuses) (`audit.rs`), and
+//!   `audit::emit_gas`'s edge rows are appended with their own seed.
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::grids::Rng;
 use crate::m_reaction::{edges, res};
 use crate::t_gas::PRESETS;
 use crate::tsv::{Class, Module, Tok, err, f};
 use kimiya::element::GAS_CONSTANT;
 use kimiya::gas::{
-    PR_CO2, PR_METHANE, PR_NITROGEN, PR_WATER, PengRobinsonParams, fugacity_coefficient_pr, fugacity_pr, gas_density,
-    ideal_gas_pressure, ideal_gas_volume, joule_thomson_ideal, partial_pressure,
-    peng_robinson_pressure, peng_robinson_z, peng_robinson_z_roots, redlich_kwong_pressure,
-    van_der_waals_pressure,
+    PR_CO2, PR_METHANE, PR_NITROGEN, PR_WATER, PengRobinsonParams, fugacity_coefficient_pr, fugacity_pr,
+    joule_thomson_ideal, partial_pressure, peng_robinson_z, peng_robinson_z_roots,
 };
 
 fn params(p: &PengRobinsonParams) -> Vec<Tok> {
@@ -100,14 +105,8 @@ pub fn emit() -> Module {
     );
 
     // ── ideal gas ──
-    let igp = |m: &mut Module, n: f64, t: f64, v: f64| {
-        let out = res(ideal_gas_pressure(bb(n), bb(t), bb(v)));
-        m.row("gas::ideal_gas_pressure", Class::B, &[f(n), f(t), f(v)], &[out]);
-    };
-    let igv = |m: &mut Module, n: f64, t: f64, p: f64| {
-        let out = res(ideal_gas_volume(bb(n), bb(t), bb(p)));
-        m.row("gas::ideal_gas_volume", Class::B, &[f(n), f(t), f(p)], &[out]);
-    };
+    let igp = audit::igp;
+    let igv = audit::igv;
     for x in edges() {
         igp(&mut m, x, 300.0, 0.025);
         igp(&mut m, 1.0, x, 0.025);
@@ -127,15 +126,7 @@ pub fn emit() -> Module {
     }
 
     // ── van der Waals ──
-    let vdw = |m: &mut Module, n: f64, t: f64, v: f64, a: f64, b: f64| {
-        let out = res(van_der_waals_pressure(bb(n), bb(t), bb(v), bb(a), bb(b)));
-        m.row(
-            "gas::van_der_waals_pressure",
-            Class::B,
-            &[f(n), f(t), f(v), f(a), f(b)],
-            &[out],
-        );
-    };
+    let vdw = audit::vdw;
     for x in edges() {
         vdw(&mut m, x, 300.0, 0.025, 0.1, 1e-5);
         vdw(&mut m, 1.0, x, 0.025, 0.1, 1e-5);
@@ -179,10 +170,7 @@ pub fn emit() -> Module {
         let pp = partial_pressure(bb(p), bb(x));
         m.row("gas::partial_pressure", Class::B, &[f(p), f(x)], &[f(pp)]);
     }
-    let dens = |m: &mut Module, p: f64, mm: f64, t: f64| {
-        let out = res(gas_density(bb(p), bb(mm), bb(t)));
-        m.row("gas::gas_density", Class::B, &[f(p), f(mm), f(t)], &[out]);
-    };
+    let dens = audit::dens;
     for x in edges() {
         dens(&mut m, x, 0.029, 300.0);
         dens(&mut m, 101_325.0, x, 300.0);
@@ -196,12 +184,7 @@ pub fn emit() -> Module {
     }
 
     // ── Peng–Robinson pressure ──
-    let prp = |m: &mut Module, p: &PengRobinsonParams, t: f64, v: f64| {
-        let mut ins = params(p);
-        ins.extend([f(t), f(v)]);
-        let out = res(peng_robinson_pressure(bb(p), bb(t), bb(v)));
-        m.row("gas::peng_robinson_pressure", Class::B, &ins, &[out]);
-    };
+    let prp = audit::prp;
     for (_, p) in &PRESETS {
         let b = 0.07780 * GAS_CONSTANT * p.tc / p.pc; // the co-volume, as pr_coefficients forms it
         for tr in [0.5, 0.9, 1.0, 1.5, 3.0] {
@@ -310,15 +293,7 @@ pub fn emit() -> Module {
     }
 
     // ── Redlich–Kwong ──
-    let rk = |m: &mut Module, tc: f64, pc: f64, t: f64, v: f64| {
-        let out = res(redlich_kwong_pressure(bb(tc), bb(pc), bb(t), bb(v)));
-        m.row(
-            "gas::redlich_kwong_pressure",
-            Class::C,
-            &[f(tc), f(pc), f(t), f(v)],
-            &[out],
-        );
-    };
+    let rk = audit::rk;
     for (_, p) in &PRESETS {
         let b = 0.08664 * GAS_CONSTANT * p.tc / p.pc; // the co-volume, as redlich_kwong_pressure forms it
         for tr in [0.5, 0.9, 1.0, 1.5, 3.0] {
@@ -342,5 +317,6 @@ pub fn emit() -> Module {
         let b = 0.08664 * GAS_CONSTANT * p.tc / p.pc;
         rk(&mut m, p.tc, p.pc, t, b * (1.0 + rng.log_uniform(-3.0, 5.0)));
     }
+    audit::emit_gas(&mut m);
     m
 }

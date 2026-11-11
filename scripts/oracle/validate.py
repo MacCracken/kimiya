@@ -79,8 +79,9 @@ and no Python packages. Usage, from the repo root:
    #13 / #14 / #15's notes proven exactly (since M4d #13's correctly rounded N₀/2ⁿ by MPFR's scaled_exp2 and a 60-digit
    2⁻ᶠ).
 16. potential.tsv (M4d), every row recomputed from rust-old/src/potential.rs (glibc's exp, atan2 and exp2), ADR 0002
-   #16's correctly rounded σ·2^(1/6) proven with exact sixth powers, #17's RN(4·ε·d) and #18's RN(μ/(2·D_e)) with
-   Fraction, Rust's forms proven equal to them where they don't overflow, and both private tolerances pinned to the ulp;
+   #16's correctly rounded σ·2^(1/6) proven with exact sixth powers, Rust's (4·ε)·d proven RN(4·ε·d) where 4·ε is finite
+   (#17 and #18 folded into the overflow audit's #32 since B3, proven with it in §21), and both private tolerances pinned
+   to the ulp;
    since M4e-2, ADR 0002 #20: distance_3d, bond_angle and dihedral_angle evaluated through MPFR at an unbounded exponent
    (mpfr_ref.UX, mpfr_ref.potential_*) on every row with finite coordinates — each #20 note is that value, each unnoted
    row's expected result equals it, no row whose f64 chain stays in the normal range is noted — and their scale
@@ -2767,59 +2768,20 @@ for ins, outs, where in prows.get("potential::lj_equilibrium_distance", []):
         n16 += 1
 check(f2b(MPFR.cr("exp2", 1.0 / 6.0)) == 0x3FF1F59AC3C7D6C0 == f2b(1.122462048309373),
       "Rust's 2.0.powf(1.0 / 6.0) = CR(2^RN(1/6)) is not RN(2^(1/6)) = 0x3FF1F59AC3C7D6C0")
-# #17: (ε·d)·4 where Rust's 4·ε overflows; Rust's (4·ε)·d is RN(4·ε·d) wherever 4·ε is finite (4·ε exact).
-P17_HOW = "(ε·d)·4, the correctly rounded 4·ε·d for Rust's d = (σ/r)¹² − (σ/r)⁶"
-n17, edge17 = 0, 0
+# #17 and #18 (M4d's (ε·d)·4 and (μ·½)/D_e past 4·ε's and 2·D_e's overflow) are folded into ADR 0002 #32 (the overflow
+# audit's B3): every lennard_jones and morse_width_parameter row is proven in §21, #17's rows bit for bit there. What
+# stays here is M4d's arithmetic fact behind them: Rust's (4·ε)·d is RN(4·ε·d) wherever 4·ε is finite and d is Rust's.
+n17 = 0
 for ins, outs, where in prows.get("potential::lennard_jones", []):
     e_, sg, r = fl(ins)
-    noted = "[ADR 0002 #17:" in NOTES.get(where, "")
-    if outs[0][0] != "f":
-        check(not noted, f"{where}: an ADR 0002 #17 note on an Err row")
-        continue
+    if outs[0][0] != "f" or e_ >= 2.0 ** 1022: continue
     sr = dv(sg, r)
     sr6 = sr * sr * sr * sr * sr * sr
     d = sr6 * sr6 - sr6
-    exact = math.nan if not math.isfinite(d) or not math.isfinite(e_) else rn_frac(4 * Fraction(e_) * Fraction(d))
-    if e_ < 2.0 ** 1022:
-        check(not noted, f"{where}: an ADR 0002 #17 note where 4·ε is finite")
-        if math.isfinite(d):
-            check(same_bits(outs[0][1], exact), f"{where}: Rust's (4·ε)·d is not RN(4·ε·d)")
-        continue
-    edge17 += 1
-    port = e_ * d * 4.0
-    if math.isfinite(d):
-        check(same_bits(port, exact), f"{where}: (ε·d)·4 = {port!r} is not RN(4·ε·d) = {exact!r}")
-    differs = not same_bits(port, outs[0][1])
-    check(noted == differs, f"{where}: lennard_jones{tuple(fl(ins))}: port {port!r}, oracle {outs[0][1]!r}: the #17 note "
-          f"is {'missing' if differs else 'stray'}")
-    if noted:
-        nv = note_val(where, "ADR 0002 #17", P17_HOW)
-        check(nv is not None and same_bits(nv, port), f"{where}: the ADR 0002 #17 note does not name {port!r}")
+    if math.isfinite(d) and math.isfinite(e_):
+        check(same_bits(outs[0][1], rn_frac(4 * Fraction(e_) * Fraction(d))), f"{where}: Rust's (4·ε)·d is not RN(4·ε·d)")
         n17 += 1
-# #18: (μ·½)/D_e where Rust's 2·D_e overflows; Rust's μ/(2·D_e) is RN(μ/(2·D_e)) wherever 2·D_e is finite.
-P18_HOW = "ω·√((μ·½)/D_e), with the correctly rounded μ/(2·D_e)"
-n18, edge18 = 0, 0
-for ins, outs, where in prows.get("potential::morse_width_parameter", []):
-    w, mu, d = fl(ins)
-    noted = "[ADR 0002 #18:" in NOTES.get(where, "")
-    if outs[0][0] != "f":
-        check(not noted, f"{where}: an ADR 0002 #18 note on an Err row")
-        continue
-    q = rn_frac(Fraction(mu) / (2 * Fraction(d)))
-    if d < 2.0 ** 1023:
-        check(not noted and same_bits(dv(mu, 2.0 * d), q), f"{where}: Rust's μ/(2·D_e) is not RN(μ/(2·D_e)), or noted")
-        continue
-    edge18 += 1
-    check(same_bits((mu * 0.5) / d, q), f"{where}: (μ·½)/D_e is not RN(μ/(2·D_e)) = {q!r}")
-    port = w * r_sqrt(q)
-    differs = not same_bits(port, outs[0][1])
-    check(noted == differs, f"{where}: morse_width_parameter{tuple(fl(ins))}: port {port!r}, oracle {outs[0][1]!r}: the "
-          f"#18 note is {'missing' if differs else 'stray'}")
-    if noted:
-        nv = note_val(where, "ADR 0002 #18", P18_HOW)
-        check(nv is not None and same_bits(nv, port), f"{where}: the ADR 0002 #18 note does not name {port!r}")
-        n18 += 1
-# seeded exact sweeps beyond the corpus: #16's σ over every binade, #18's (μ·½)/D_e over its region
+# seeded exact sweeps beyond the corpus: #16's σ over every binade
 _rp = random.Random(0x9016)
 sw16 = 0
 for _ in range(20000):
@@ -2828,17 +2790,11 @@ for _ in range(20000):
     rust = x * 1.122462048309373
     sw16 += not same_bits(v, rust)
     check(abs(ulp_dist(f2b(v), f2b(rust))) <= 1, f"#16 sweep: RN(σ·2^(1/6)) {v!r} is not within an ulp of Rust's {rust!r}")
-for _ in range(20000):
-    d = 2.0 ** 1023 * _rp.uniform(1.0, 2.0)
-    mu = b2f(_rp.randrange(1, 0x7FEFFFFFFFFFFFFF))
-    check(same_bits((mu * 0.5) / d, rn_frac(Fraction(mu) / (2 * Fraction(d)))), f"#18 sweep: μ = {mu!r}, D = {d!r}")
 print(f"potential rows checked: {sum(len(v) for v in prows.values())} ({', '.join(f'{k} {len(v)}' for k, v in prows.items())})")
 print(f"potential: ADR 0002 #16: {n16} lj_equilibrium_distance rows noted with the correctly rounded σ·2^(1/6) (of "
       f"{n16_rows} finite nonzero σ; Rust's σ·RN(2^(1/6)) is correctly rounded on {rust16}), proven exactly (2·σ⁶ against "
-      f"each midpoint's sixth power), and Rust's value differs on {sw16} of 20,000 seeded σ (always by one ulp); #17: "
-      f"{n17} of {edge17} lennard_jones Ok rows with ε ≥ 2¹⁰²² noted with RN(4·ε·d), which Rust's (4·ε)·d is on every "
-      f"other finite row; #18: {n18} of {edge18} morse_width_parameter Ok rows with D_e ≥ 2¹⁰²³ noted, (μ·½)/D_e proven "
-      f"RN(μ/(2·D_e)) there and on 20,000 seeded pairs")
+      f"each midpoint's sixth power), and Rust's value differs on {sw16} of 20,000 seeded σ (always by one ulp); Rust's "
+      f"(4·ε)·d is RN(4·ε·d) on all {n17} finite lennard_jones rows with ε < 2¹⁰²² (#17 and #18 are folded into #32: §21)")
 # ADR 0002 #20 (M4e-2): distance_3d, bond_angle and dihedral_angle are Rust's sequence evaluated in binary64 with an
 # unbounded exponent range (every operation rounded to 53 bits, nothing over- or underflowing), the final √ or atan2
 # rounded once into binary64. The evaluator is MPFR's (mpfr_ref.UX: 53 bits at MPFR's widest exponent range; the final
@@ -4379,6 +4335,374 @@ print(f"ADR 0002 #30: {b2_mpfr[0]} vibrational_frequency rows checked against MP
       f"ADR 0002 #29: {b2_mpfr[1]} nernst_potential rows where glibc's ln is not correctly rounded")
 check(all(v > 0 for k, v in b2_cov.items() if "out of range" not in k), f"B2: a hard-row class has no golden row: {b2_cov}")
 check(b2_mpfr[1] == 0, "B2: a nernst_potential row whose glibc ln misrounds (its note, from glibc's ln, is not the port's)")
+
+# ── 21. The overflow audit's B3 (ADR 0002 #31, #32): gas's, potential's, inorganic's and nuclear's functions ─────────────
+# Every row of the twelve functions is recomputed from the port's semantics, independently of the generator and the port:
+# - the monomials (#31: ideal_gas_pressure, ideal_gas_volume, gas_density; #32: coulomb, coulomb_force): the exact rational
+#   (Fraction; R and k_e as their doubles) rounded once (b1_mono), the unvalidated charges' non-finite values keeping
+#   Rust's expression;
+# - #32's morse_width_parameter: RN(ω·√(μ/(2·D_e))) of the exact value, by Python's integer square root (b3_sqrt_frac,
+#   exact, ties to even: the value can be a midpoint) and again by MPFR (mpfr_ref.ux_mul_sqrt_div_final, a 320-bit
+#   quotient: exact where it is dyadic, else at least 2^-162 from every boundary's square);
+# - the #20-style ones (#31: van_der_waals_pressure, peng_robinson_pressure, redlich_kwong_pressure; #32: lennard_jones,
+#   born_lande_lattice_energy, binding_energy_per_nucleon): Rust's sequence on mpfr_ref.UX (53 bits, MPFR's widest
+#   exponent range), Redlich–Kwong's Tc^2.5 by MPFR's own pow at 53 bits there (UX.pow: not the port's rescaling), the
+#   co-volume tests V ≤ n·b and V ≤ b on the UX values, the final operation rounded once into binary64.
+# Rust's validation is replicated here (Err rows that both refuse carry no note). Every row: noted exactly where the
+# port's result differs from the oracle's (by its bits, NaN one value; an Err against a value), the note naming the port's
+# value bit for bit, or its Err (`= Err(InvalidInput) (E:InvalidInput)`), so every unnoted row's port result is the
+# oracle's. For the #20-style functions no row whose f64 chain stays in the normal range is noted (Rust's bits): the
+# tracers below replay Rust's chain, and a product, quotient or root leaves the range when it is not finite, is 0 from
+# nonzero operands, or is nonzero and at most 2⁻¹⁰²² in magnitude (2⁻¹⁰²² itself included: a value just below it
+# rounds there at the subnormal grid but not at 53 bits), a sum when it is not finite (a subnormal sum of two doubles is
+# exact); the final operation's own range does not count (it is rounded once in both). The folds are proven: #17's
+# (ε·d)·4 is the port's value on every lennard_jones row with ε ≥ 2¹⁰²² whose d chain is normal (bit-identical), and
+# the #18 rows (D_e ≥ 2¹⁰²³) are counted by whether #18's ω·√(RN(μ/(2·D_e))) is the new correctly rounded value.
+# Redlich–Kwong's exact rescale is checked on every row: RN₅₃(Tc^2.5) = RN(s^2.5)·2^(5j) for Tc = s·2^(2j), s in [1, 4)
+# (MPFR's pow both sides). The hard rows are counted.
+B3_SUB = "Rust's sequence evaluated with an unbounded exponent (the final subtraction rounded once)"
+B3_MUL = "Rust's sequence evaluated with an unbounded exponent (the final product rounded once)"
+B3_DIV = "Rust's sequence evaluated with an unbounded exponent (the final division rounded once)"
+B3_HOW = {
+    "gas::ideal_gas_pressure": (31, "the correctly rounded n·R·T/V"),
+    "gas::ideal_gas_volume": (31, "the correctly rounded n·R·T/P"),
+    "gas::gas_density": (31, "the correctly rounded P·M/(R·T)"),
+    "gas::van_der_waals_pressure": (31, B3_SUB),
+    "gas::peng_robinson_pressure": (31, B3_SUB),
+    "gas::redlich_kwong_pressure": (31, B3_SUB),
+    "potential::lennard_jones": (32, B3_MUL),
+    "potential::morse_width_parameter": (32, "the correctly rounded ω·√(μ/(2·D_e))"),
+    "potential::coulomb": (32, "the correctly rounded k_e·q₁·q₂/r"),
+    "potential::coulomb_force": (32, "the correctly rounded k_e·q₁·q₂/(r·r)"),
+    "inorganic::born_lande_lattice_energy": (32, B3_MUL),
+    "nuclear::binding_energy_per_nucleon": (32, B3_DIV),
+}
+def p_pow25_glibc(x):
+    """The platform libm's pow(x, 2.5) (glibc's on the corpus's platform: the oracle's tc.powf(2.5))."""
+    try: return math.pow(x, 2.5)
+    except OverflowError: return math.inf
+B3_UX = ("gas::van_der_waals_pressure", "gas::peng_robinson_pressure", "gas::redlich_kwong_pressure",
+         "potential::lennard_jones", "inorganic::born_lande_lattice_energy", "nuclear::binding_energy_per_nucleon")
+INVT = Err("InvalidTemperature")
+def b3_sqrt_frac(q):
+    """RN(√q) for a positive Fraction q, exactly (ties to even): Q = ⌊N·2^s/D⌋ with at least 120 bits and an even
+    exponent, R = ⌊√Q⌋, and RN((2R + sticky)·2^-(s/2 + 1)) by CPython's correctly rounded int true division (a tie only
+    with sticky = 0, when √q is the exact midpoint)."""
+    n, d = q.numerator, q.denominator
+    s = 121 + d.bit_length() - n.bit_length()
+    if s % 2: s += 1
+    quo, rem = divmod(n << s, d) if s >= 0 else divmod(n, d << -s)
+    r = math.isqrt(quo)
+    st = 1 if (r * r != quo or rem) else 0
+    return rn_frac(Fraction(2 * r + st) * Fraction(2) ** (-(s // 2) - 1))
+def b3_width(w, mu, d): return b3_sqrt_frac(Fraction(w) ** 2 * Fraction(mu) / (2 * Fraction(d)))
+def b3_valid(fn, a):
+    """Rust's validation, in Rust's order (None: it passes; the co-volume tests are the port functions')."""
+    if fn in ("gas::ideal_gas_pressure", "gas::ideal_gas_volume"):
+        if not is_finite(a[0]): return INVALID
+        if not is_positive(a[1]): return INVT
+        return None if is_positive(a[2]) else INVALID
+    if fn == "gas::gas_density":
+        if not is_positive(a[2]): return INVT
+        return None if is_non_negative(a[0]) and is_positive(a[1]) else INVALID
+    if fn == "gas::van_der_waals_pressure":
+        if not is_positive(a[1]): return INVT
+        ok = is_finite(a[0]) and is_non_negative(a[3]) and is_non_negative(a[4]) and is_positive(a[2])
+        return None if ok else INVALID
+    if fn == "gas::peng_robinson_pressure":
+        if not is_positive(a[3]) or not is_positive(a[0]): return INVT
+        return None if is_positive(a[1]) and is_finite(a[2]) and is_finite(a[4]) else INVALID
+    if fn == "gas::redlich_kwong_pressure":
+        if not is_positive(a[2]) or not is_positive(a[0]): return INVT
+        return None if is_positive(a[1]) and is_finite(a[3]) else INVALID
+    if fn == "potential::lennard_jones":
+        return None if all(is_positive(v) for v in a) else INVALID
+    if fn == "potential::morse_width_parameter":
+        return None if all(is_positive(v) for v in a) else INVALID
+    if fn in ("potential::coulomb", "potential::coulomb_force"):
+        return None if is_positive(a[2]) else INVALID
+    if fn == "inorganic::born_lande_lattice_energy":
+        mm, zc, za, r0, n = a
+        ok = is_positive(r0) and is_finite(n) and n > 1.0 and is_positive(mm) and zc != 0 and za != 0
+        return None if ok else INVALID
+    z, n, m = a                                          # binding_energy_per_nucleon
+    return None if z + n <= 0xFFFFFFFF and z + n != 0 and is_positive(m) else INVALID
+U = MPFR.UX
+def b3_pr_coef(tc, pc, om, t):
+    """Rust's pr_coefficients on UX: (a·α, b)."""
+    r, tcu, pcu = U(R_GAS), U(tc), U(pc)
+    a = U(0.45724) * r * r * tcu * tcu / pcu
+    b = U(0.07780) * r * tcu / pcu
+    o = U(om)
+    kappa = (U(0.37464) + U(1.54226) * o) - U(0.26992) * o * o
+    u = U(1.0) + kappa * (U(1.0) - (U(t) / tcu).sqrt())
+    return a * (u * u), b
+def b3_port(fn, a):
+    e = b3_valid(fn, a)
+    if e is not None: return e
+    if fn in ("gas::ideal_gas_pressure", "gas::ideal_gas_volume"): return b1_mono([a[0], R_GAS, a[1]], [a[2]])
+    if fn == "gas::gas_density": return b1_mono([a[0], a[1]], [R_GAS, a[2]])
+    if fn in ("potential::coulomb", "potential::coulomb_force"):
+        q1, q2, r = a
+        den = [r] if fn == "potential::coulomb" else [r, r]
+        if not (is_finite(q1) and is_finite(q2)): return dv(KE_POT * q1 * q2, r if len(den) == 1 else r * r)
+        return b1_mono([KE_POT, q1, q2], den)
+    if fn == "potential::morse_width_parameter": return b3_width(*a)
+    with MPFR.unbounded():
+        if fn == "gas::van_der_waals_pressure":
+            n, t, v, aa, b = a
+            nb = U(n) * U(b)
+            if U(v) <= nb: return INVALID
+            nv = U(n) / U(v)
+            return MPFR.ux_sub_final(U(n) * U(R_GAS) * U(t) / (U(v) - nb), U(aa) * nv * nv)
+        if fn == "gas::peng_robinson_pressure":
+            tc, pc, om, t, v = a
+            aal, b = b3_pr_coef(tc, pc, om, t)
+            if U(v) <= b: return INVALID
+            vu = U(v)
+            den = (vu * vu + U(2.0) * b * vu) - b * b
+            return MPFR.ux_sub_final(U(R_GAS) * U(t) / (vu - b), aal / den)
+        if fn == "gas::redlich_kwong_pressure":
+            tc, pc, t, v = a
+            r, tcu, pcu = U(R_GAS), U(tc), U(pc)
+            aa = U(0.42748) * r * r * tcu.pow(2.5) / pcu
+            b = U(0.08664) * r * tcu / pcu
+            if U(v) <= b: return INVALID
+            vu = U(v)
+            return MPFR.ux_sub_final(r * U(t) / (vu - b), aa / (U(t).sqrt() * vu * (vu + b)))
+        if fn == "potential::lennard_jones":
+            e_, s, r = a
+            sr = U(s) / U(r)
+            sr6 = sr * sr * sr * sr * sr * sr
+            return MPFR.ux_mul_final(U(4.0) * U(e_), sr6 * sr6 - sr6)
+        if fn == "inorganic::born_lande_lattice_energy":
+            mm, zc, za, r0, n = a
+            u = U(-KE) * U(NA) * U(mm) * U(float(zc)) * U(float(za)) * U(QE) * U(QE) / U(r0)
+            return MPFR.ux_mul_final(u, U(1.0) - U(1.0) / U(n))
+        z, n, m = a
+        md = U(float(z)) * U(M_H) + U(float(n)) * U(M_N) - U(m)
+        return MPFR.ux_div_final(md * U(AMU_MEV), U(float(z + n)))
+# Rust's f64 chains of the #20-style functions, traced (B3's strict range: OOR[0] set as the section comment says).
+def t3m(r, *fs):
+    if not math.isfinite(r) or (r == 0.0 and fs and all(x != 0.0 for x in fs)) or (r != 0.0 and abs(r) <= 2.0 ** -1022):
+        OOR[0] = True
+    return r
+def t3a(r):
+    if not math.isfinite(r): OOR[0] = True
+    return r
+def b3_in_range(fn, a):
+    """True when Rust's f64 chain of the row (validated) stays in the normal range, so Rust's bits are the port's."""
+    OOR[0] = False
+    if fn == "gas::van_der_waals_pressure":
+        n, t, v, aa, b = a
+        nb = t3m(n * b, n, b)
+        nr = t3m(n * R_GAS, n, R_GAS)
+        nrt = t3m(nr * t, nr, t)
+        t3m(dv(nrt, t3a(v - nb)), nrt)
+        nv = t3m(dv(n, v), n)
+        an = t3m(aa * nv, aa, nv)
+        t3m(an * nv, an, nv)
+        return not OOR[0]
+    if fn == "gas::peng_robinson_pressure":
+        tc, pc, om, t, v = a
+        r = R_GAS
+        c4 = t3m(t3m(0.45724 * r * r * tc, tc) * tc, tc)
+        aa = t3m(dv(c4, pc), c4)
+        b = t3m(dv(t3m(0.07780 * r * tc, tc), pc), tc)
+        k1 = t3m(1.54226 * om, om)
+        k4 = t3m(t3m(0.26992 * om, om) * om, om)
+        kappa = t3a(t3a(0.37464 + k1) - k4)
+        tr = t3m(dv(t, tc), t)
+        s1 = t3a(1.0 - math.sqrt(tr))
+        s2 = t3m(kappa * s1, kappa, s1)
+        u = t3a(1.0 + s2)
+        al = t3m(u * u, u)
+        aal = t3m(aa * al, aa, al)
+        if not OOR[0] and v <= b: return True             # the Err: decided on a b that is the unbounded one
+        t3m(dv(t3m(r * t, t), t3a(v - b)), t)
+        vv = t3m(v * v, v)
+        b2v = t3m(t3m(2.0 * b, b) * v, b, v)
+        den = t3a(t3a(vv + b2v) - t3m(b * b, b))
+        t3m(dv(aal, den), aal)
+        return not OOR[0]
+    if fn == "gas::redlich_kwong_pressure":
+        tc, pc, t, v = a
+        r = R_GAS
+        aa = t3m(dv(t3m(0.42748 * r * r * t3m(MPFR.pow(tc, 2.5), tc), tc), pc), tc)
+        b = t3m(dv(t3m(0.08664 * r * tc, tc), pc), tc)
+        if not OOR[0] and v <= b: return True
+        t3m(dv(t3m(r * t, t), t3a(v - b)), t)
+        t3m(dv(aa, t3m(t3m(math.sqrt(t) * v, v) * t3a(v + b), v)), aa)
+        return not OOR[0]
+    if fn == "potential::lennard_jones":
+        e_, s, r = a
+        sr = t3m(dv(s, r), s)
+        p = sr
+        for _ in range(5): p = t3m(p * sr, p)
+        t3a(t3m(p * p, p) - p)
+        t3m(4.0 * e_, e_)                                 # Rust's 4·ε (#17's overflow)
+        return not OOR[0]
+    if fn == "inorganic::born_lande_lattice_energy":
+        mm, zc, za, r0, n = a
+        u = -KE * NA
+        for f_ in (mm, float(zc), float(za), QE, QE): u = t3m(u * f_, u)
+        t3m(dv(u, r0), u)
+        t3a(1.0 - t3m(dv(1.0, n), 1.0))
+        return not OOR[0]
+    z, n, m = a
+    md = t3a(t3a(t3m(float(z) * M_H, float(z)) + t3m(float(n) * M_N, float(n))) - m)
+    t3m(md * AMU_MEV, md)
+    return not OOR[0]
+B3_RE = re.compile(r"\[ADR 0002 #(31|32): the port returns (.+) = (\S+) \((f|E):([0-9A-Za-z]+)\)\]$")
+b3_n = {fn: [0, 0, 0, 0, 0] for fn in B3_HOW}        # rows (non-Err for either), noted, in range, qualitative, Err flips
+b3_cov = {"53-bit midpoint": 0, "subnormal result": 0, "subnormal tie": 0, "Rust 0, ±∞ or NaN, the value representable": 0,
+          "Rust's special differs, the value out of range": 0, "Rust's NaN, the value ±∞": 0,
+          "the port's Err, Rust's value (co-volume)": 0, "the port's value, Rust's Err (co-volume)": 0,
+          "√ exact": 0, "√ a midpoint (tie)": 0, "√: μ/(2·D_e) past DBL_MAX": 0, "√: μ/(2·D_e) below 2⁻¹⁰⁷⁴": 0,
+          "√: a subnormal operand": 0, "√: subnormal result": 0, "√ within 2⁻⁹⁸ of a 53-bit midpoint": 0,
+          "Tc^2.5 past either end": 0}
+b3_fold = {"#17 rows (ε ≥ 2¹⁰²²)": 0, "#17 rows with d normal (proven: (ε·d)·4 the port's)": 0,
+           "#17's (ε·d)·4 the port's": 0, "#17's (ε·d)·4 the port's, Rust's differs (#17's notes)": 0,
+           "#17's (ε·d)·4 not the port's (d out of range)": 0,
+           "#18 rows (D_e ≥ 2¹⁰²³)": 0, "#18 notes: the value kept": 0, "#18 notes: one ulp off": 0,
+           "#18 notes: further off": 0, "#18's value Rust's 0, the new one representable": 0,
+           "Tc^2.5 rescale checked": 0, "RK rows whose glibc pow(Tc, 2.5) misrounds": 0, "√ checked against MPFR": 0}
+for mod_ in ("gas", "potential", "inorganic", "nuclear"):
+    for fn, cls, ins, outs, where in R.get(mod_, []):
+        if fn not in B3_HOW: continue
+        adr, how = B3_HOW[fn]
+        a = fl(ins)
+        port = b3_port(fn, a)
+        note = NOTES.get(where, "")
+        noted = f"[ADR 0002 #{adr}:" in note
+        pt = out_toks(port)
+        differs = not toks_equal(pt, outs)
+        check(noted == differs, f"{where}: {fn}{tuple(a)}: the port's {pt} vs the oracle's {outs}: the #{adr} note is "
+              f"{'missing' if differs else 'stray'}")
+        oerr = outs[0][0] == "E"
+        if isinstance(port, Err) and oerr: continue
+        b3_n[fn][0] += 1
+        if noted:
+            b3_n[fn][1] += 1
+            mm_ = B3_RE.search(note)
+            if isinstance(port, Err):
+                ok_ = mm_ is not None and mm_.group(3) == "Err(InvalidInput)" and mm_.group(4) == "E" and mm_.group(5) == \
+                    "InvalidInput"
+            else:
+                ok_ = mm_ is not None and mm_.group(4) == "f" and int(mm_.group(5), 16) == f2b(port) and same_bits(
+                    float(mm_.group(3)), port)
+            check(ok_ and int(mm_.group(1)) == adr and mm_.group(2) == how, f"{where}: the #{adr} note does not name "
+                  f"{how} = {port!r}")
+        if isinstance(port, Err) or oerr:
+            b3_n[fn][4] += 1
+            b3_cov["the port's Err, Rust's value (co-volume)" if isinstance(port, Err) else
+                   "the port's value, Rust's Err (co-volume)"] += 1
+            check(fn in ("gas::van_der_waals_pressure", "gas::peng_robinson_pressure", "gas::redlich_kwong_pressure"),
+                  f"{where}: {fn}: an Err of only one side outside the co-volume tests")
+            continue
+        if fn in B3_UX:
+            inr = b3_in_range(fn, a)
+            b3_n[fn][2] += inr
+            check(not (inr and noted), f"{where}: {fn}{tuple(a)}: Rust's chain stays in the normal range, so its bits are "
+                  f"the port's, but the row is noted")
+        o = outs[0][1]
+        if (o == 0.0 or not math.isfinite(o)) and not same_bits(o, port):
+            zero_in = any(isinstance(v, float) and v == 0.0 for v in a)
+            if math.isnan(o) and math.isinf(port): b3_cov["Rust's NaN, the value ±∞"] += 1
+            elif math.isfinite(port) and (port != 0.0 or zero_in):
+                b3_n[fn][3] += 1
+                b3_cov["Rust 0, ±∞ or NaN, the value representable"] += 1
+            else:
+                b3_cov["Rust's special differs, the value out of range"] += 1
+        if fn == "potential::lennard_jones" and a[0] >= 2.0 ** 1022:
+            b3_fold["#17 rows (ε ≥ 2¹⁰²²)"] += 1
+            e_, s, r = a
+            sr = dv(s, r)
+            p6 = sr * sr * sr * sr * sr * sr
+            d = p6 * p6 - p6
+            OOR[0] = False
+            p = t3m(sr, s)
+            for _ in range(5): p = t3m(p * sr, p)
+            t3a(t3m(p * p, p) - p)
+            old17 = e_ * d * 4.0
+            if not OOR[0]:
+                b3_fold["#17 rows with d normal (proven: (ε·d)·4 the port's)"] += 1
+                check(same_bits(old17, port), f"{where}: #17's (ε·d)·4 = {old17!r} is not the port's {port!r} although "
+                      f"Rust's d is normal")
+            if same_bits(old17, port):
+                b3_fold["#17's (ε·d)·4 the port's"] += 1
+                b3_fold["#17's (ε·d)·4 the port's, Rust's differs (#17's notes)"] += not same_bits(old17, o)
+            else:
+                b3_fold["#17's (ε·d)·4 not the port's (d out of range)"] += 1
+        if fn == "potential::morse_width_parameter":
+            w, mu, d = a
+            wm = MPFR.ux_mul_sqrt_div_final(U(w), U(mu), U(2.0) * U(d))
+            check(same_bits(wm, port), f"{where}: MPFR's ω·√(μ/(2·D_e)) {wm!r} vs the integer root's {port!r}")
+            b3_fold["√ checked against MPFR"] += 1
+            if d >= 2.0 ** 1023:
+                b3_fold["#18 rows (D_e ≥ 2¹⁰²³)"] += 1
+                old18 = w * r_sqrt(rn_frac(Fraction(mu) / (2 * Fraction(d))))
+                if same_bits(old18, o):
+                    b3_fold["#18's value Rust's 0, the new one representable"] += not same_bits(port, o)
+                else:
+                    k = abs(ulp_dist(f2b(old18), f2b(port))) if math.isfinite(old18) and math.isfinite(port) else 99
+                    b3_fold["#18 notes: the value kept" if k == 0 else "#18 notes: one ulp off" if k == 1 else
+                            "#18 notes: further off"] += 1
+            q = Fraction(w) ** 2 * Fraction(mu) / (2 * Fraction(d))
+            if math.isfinite(port) and Fraction(port) ** 2 == q: b3_cov["√ exact"] += 1
+            if q / Fraction(w) ** 2 > Fraction(DMAX_V): b3_cov["√: μ/(2·D_e) past DBL_MAX"] += 1
+            if q / Fraction(w) ** 2 < Fraction(2) ** -1074: b3_cov["√: μ/(2·D_e) below 2⁻¹⁰⁷⁴"] += 1
+            if min(w, mu, d) < 2.0 ** -1022: b3_cov["√: a subnormal operand"] += 1
+            if port < 2.0 ** -1022: b3_cov["√: subnormal result"] += 1
+            if 0.0 < port < math.inf:
+                h = Fraction(math.ulp(port)) / 2 if port >= 2.0 ** -1022 else Fraction(2) ** -1075
+                for dd in (h, -h):
+                    mid = Fraction(port) + dd
+                    if mid * mid == q: b3_cov["√ a midpoint (tie)"] += 1
+                    elif port >= 2.0 ** -1022 and abs(q / (mid * mid) - 1) < Fraction(1, 1 << 97):
+                        b3_cov["√ within 2⁻⁹⁸ of a 53-bit midpoint"] += 1
+            continue
+        if fn == "gas::redlich_kwong_pressure":
+            tc = a[0]
+            m_, ex = math.frexp(tc)                       # tc = m·2^ex, m in [½, 1)
+            ex -= 1
+            s_, j = (m_ * 2.0, ex // 2) if ex % 2 == 0 else (m_ * 4.0, (ex - 1) // 2)
+            with MPFR.unbounded():
+                lhs = U(tc).pow(2.5)
+                rhs = MPFR.ux_scaled(MPFR.pow(s_, 2.5), 5 * j)
+            check(1.0 <= s_ < 4.0 and lhs.cmp(rhs) == 0, f"{where}: RN₅₃(Tc^2.5) is not RN(s^2.5)·2^(5j) for Tc = {tc!r}")
+            b3_fold["Tc^2.5 rescale checked"] += 1
+            b3_fold["RK rows whose glibc pow(Tc, 2.5) misrounds"] += not same_bits(p_pow25_glibc(tc), MPFR.pow(tc, 2.5))
+            if not (2.0 ** -1021 <= MPFR.pow(tc, 2.5) < math.inf): b3_cov["Tc^2.5 past either end"] += 1
+        if fn in ("gas::ideal_gas_pressure", "gas::ideal_gas_volume", "gas::gas_density", "potential::coulomb",
+                  "potential::coulomb_force"):
+            if fn.startswith("potential::") and not all(is_finite(v) for v in a): continue
+            if fn in ("gas::ideal_gas_pressure", "gas::ideal_gas_volume"): num, den = [a[0], R_GAS, a[1]], [a[2]]
+            elif fn == "gas::gas_density": num, den = [a[0], a[1]], [R_GAS, a[2]]
+            else: num, den = [KE_POT, a[0], a[1]], [a[2]] if fn == "potential::coulomb" else [a[2], a[2]]
+            if any(v == 0.0 for v in num): continue
+            q = Fraction(1)
+            for v in num: q *= abs(Fraction(v))
+            for v in den: q /= abs(Fraction(v))
+            if q < Fraction(2) ** -1022:
+                b3_cov["subnormal result"] += 1
+                b3_cov["subnormal tie"] += b1_midpoint(q)
+            elif b1_midpoint(q):
+                b3_cov["53-bit midpoint"] += 1
+for fn, (ok_, nt, inr, ql, fl_) in b3_n.items():
+    extra = f", {inr} with Rust's chain in the normal range (all unnoted, Rust's bits)" if fn in B3_UX else ""
+    extra += f", {fl_} where the co-volume test decides otherwise than Rust's" if fl_ else ""
+    print(f"{fn.split('::')[0]}: ADR 0002 #{B3_HOW[fn][0]}: {fn.split('::')[1]}: {nt} of {ok_} rows noted with the port's "
+          f"result ({ql} where Rust's is 0, ±∞ or NaN and the value representable){extra}")
+    check(nt > 0, f"{fn}: no noted row")
+print(f"ADR 0002 #31, #32 hard rows: {b3_cov}")
+print(f"ADR 0002 #32's folds and checks: {b3_fold}")
+check(all(v > 0 for k, v in b3_cov.items() if "out of range" not in k), f"B3: a hard-row class has no golden row: {b3_cov}")
+check(b3_fold["#17's (ε·d)·4 the port's, Rust's differs (#17's notes)"] >= 180, f"B3: fewer #17 rows than M4d's 180: "
+      f"{b3_fold}")
+check(sum(b3_fold[k] for k in b3_fold if k.startswith("#18 notes")) == 181, f"B3: M4d's #18 rows are not 181: {b3_fold}")
+check(b3_fold["RK rows whose glibc pow(Tc, 2.5) misrounds"] == 0, "B3: a redlich_kwong_pressure row whose glibc pow "
+      "misrounds (its note, against glibc's oracle, would not be against the corrected one)")
 
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
              "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy", "stoichiometry"}

@@ -672,6 +672,47 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     `cyrius_adr29` and `tests/spectroscopy.tcyr`'s ADR 0002 #30 group (the survey's edges, a 1-ulp in-range case per
     function, HCl's ω, 5,000 seeded inputs against the exact or slow paths); no Rust test changes; Cyrius-only benches
     for the ten functions without a Rust bench and four edge benches
+- **The library-wide overflow audit, B3** ([ADR 0002 #31 and #32](docs/adr/0002-port-api-divergences.md), B1's decisions
+  unchanged; port plan §6.4 "Decided in the overflow audit's B3"; the behaviour changes are under *Breaking*):
+  - **mathx** — the correctly rounded `_km_cr_mul_sqrt_ratio(w, x, y, e)` = RN(w·√((x/y)·2^e)): B2's double-double root
+    times w with a rounding test (`_km_mul_sqrt_ratio_fast`, within 9.8u²) and an exact integer root on `_km_bn_*`
+    (`_km_mul_sqrt_ratio_acc`), which rounds the midpoints the value can be (3w·2^k) to even; `_km_ux_normal`, the
+    #20-style range test (|x| in [2⁻¹⁰²¹, DBL_MAX])
+  - **gas** — `ideal_gas_pressure`, `ideal_gas_volume` and `gas_density` rounded once; `van_der_waals_pressure`,
+    `peng_robinson_pressure` and `redlich_kwong_pressure` under #20's semantics, Rust's chain behind a range test
+    (`_km_vdw_fast`, `_km_pr_pressure_fast`, `_km_rk_pressure_fast`) and an unbounded-exponent slow path with the
+    co-volume test on the unbounded co-volume (`_km_vdw_ux`, `_km_pr_pressure_ux`, `_km_rk_pressure_ux`; Tc^2.5 exactly
+    rescaled, `_km_rk_tc25_ux`) (#31)
+  - **potential** — `coulomb` and `coulomb_force` rounded once; `morse_width_parameter` the correctly rounded
+    ω·√(μ/(2·D_e)); `lennard_jones` under #20's semantics (`_km_lj_fast`, `_km_lj_ux`); M4d's #17 and #18 folded in (#32)
+  - **inorganic** — `born_lande_lattice_energy` under #20's semantics (`_km_born_lande_fast`, `_km_born_lande_ux`) (#32)
+  - **nuclear** — `binding_energy_per_nucleon` under #20's semantics (`_km_bea_ux` past Δm·931.494…'s overflow) (#32)
+  - generator: `scripts/oracle/src/audit.rs`'s B3 (the port's values independently: `exact::cr_monomial`, the new
+    `exact::cr_sqrt_monomial`, `Ux::mul_f64` and `Ux::pow25` (Tc^2.5 by an integer square root); Rust's validation
+    replicated and asserted, the co-volume tests the only allowed difference; the notes, `(E:InvalidInput)` where the
+    port refuses; each module's B3 edge rows appended with their own seed: gas +1,680, potential +1,703, inorganic +254,
+    nuclear +167); `m_potential.rs`'s #17 and #18 notes become #32's
+  - golden modules `gas` 22,773, `potential` 33,464, `inorganic` 15,416, `nuclear` 54,224 rows; the oracle's values kept,
+    5,339 rows noted with the port's result — #31: 146 `ideal_gas_pressure`, 148 `ideal_gas_volume`, 222 `gas_density`,
+    206 `van_der_waals_pressure`, 201 `peng_robinson_pressure`, 234 `redlich_kwong_pressure` (98 of them the port's
+    Err); #32: 582 `lennard_jones`, 1,860 `morse_width_parameter`, 730 `coulomb`, 679 `coulomb_force`, 175
+    `born_lande_lattice_energy`, 156 `binding_energy_per_nucleon`; the harness maps and counts them per function (the new
+    `_par_got_noted_r` for a noted Err), #17's and #18's regions among #32's
+  - `validate.py` §21: every row of the twelve functions recomputed (`Fraction`; `math.isqrt` and MPFR's √ of a 320-bit
+    quotient for the Morse width; `mpfr_ref.UX` with MPFR's own pow for Tc^2.5), each note proven, no in-range row of the
+    six #20-style functions noted, #17 kept bit for bit and #18's rows counted, Tc^2.5's rescale checked on every row,
+    glibc's pow(Tc, 2.5) correctly rounded on every Redlich–Kwong row, the hard rows counted; §16's #17 / #18 checks fold
+    into it; `mpfr_ref.py` gains `UX.pow` and `ux_mul_sqrt_div_final`, with self-checks
+  - `cr_verify.py`: `wsqrt` and the twelve functions (`igp`, `igv`, `dens`, `vdw`, `prp`, `rkp`, `lj`, `width`, `coul`,
+    `force`, `lande`, `bea`: the public function, the fast path, the slow path forced, the midpoints and co-volume flips
+    included) on x86_64 ELF, x86_64 PE and aarch64
+  - tests: `tests/mathx.tcyr` `b3_values` (the root's ties at both grids, the Morse width's edges, the domain,
+    `_km_ux_normal`'s edges) and `b3_agrees` (20,000 seeded arguments against the exact path); `tests/gas.tcyr`
+    `cyrius_adr31`, `tests/potential.tcyr` `cyrius_adr32` (and `cyrius_exact_overflow_edges` updated for the fold: the
+    Morse width at D_e = DBL_MAX and μ = 2⁻¹⁰⁷⁴ is now correctly rounded), `tests/inorganic.tcyr`
+    `cyrius_adr32_born_lande`, `tests/nuclear.tcyr` `cyrius_adr32_bea` (the survey's edges, 1-ulp in-range cases, the
+    co-volume flips, 5,000 seeded inputs against the slow paths); no Rust test changes; Cyrius-only benches for the nine
+    functions without a Rust bench and eight edge and tie benches
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -757,13 +798,13 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #17)
 - **potential** — `lennard_jones(ε, σ, r)` for ε ≥ 2¹⁰²² J returns (ε·d)·4, the correctly rounded 4·ε·d for the same
   d = (σ/r)¹² − (σ/r)⁶, where 1.2's (4·ε)·d overflowed: ±∞, or NaN at r = σ (`lennard_jones(DBL_MAX, 1, 1)` is 0, 1.2
-  NaN). Every other value is 1.2's, bit for bit.
+  NaN). Every other value is 1.2's, bit for bit. (Folded into #32 by the overflow audit's B3, with the same values.)
   *Migration:* none for physical well depths.
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #18)
 - **potential** — `morse_width_parameter(ω, μ, D_e)` for D_e ≥ 2¹⁰²³ J computes μ/(2·D_e) as (μ·½)/D_e, the correctly rounded
   value, where 1.2's 2·D_e overflowed and gave a = 0 (`morse_width_parameter(4, 1, 2¹⁰²³)` is 2⁻⁵¹⁰). Every other value is
-  1.2's, bit for bit.
+  1.2's, bit for bit. (Folded into #32 by the overflow audit's B3, which rounds the whole Morse width once: see there.)
   *Migration:* none for physical well depths.
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #19)
@@ -901,6 +942,43 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   order are 1.2's.
   *Migration:* none for code that compares with a tolerance; code that tested 1.2's NaN for a zero concentration against
   an overflowing ε·l gets 0.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #31)
+- **gas** — `ideal_gas_pressure`, `ideal_gas_volume` and `gas_density` return the exact quotient rounded once —
+  RN(n·R·T/V), RN(n·R·T/P), RN(P·M/(R·T)) with R as `KM_GAS_CONSTANT`'s double — where 1.2 rounded three times: about a
+  third of ordinary results move by one ulp (air at STP, `gas_density(101325, 0.029, 273.15)`, is 1.2938359687824854,
+  1.2's …852), and the range ends are right (`ideal_gas_volume(DBL_MAX, 300, 101325)` 4.43·10³⁰⁶, 1.2's +∞;
+  `gas_density(101325, 0.029, DBL_MAX)` 1.97·10⁻³⁰⁶, 1.2's 0). `van_der_waals_pressure`, `peng_robinson_pressure` and
+  `redlich_kwong_pressure` evaluate 1.2's operation sequence with an unbounded exponent, the final subtraction rounded
+  once: every input whose 1.2 chain stays in the normal range keeps its bits (every physical state), and the edges are
+  right (`peng_robinson_pressure` with Tc = 2⁻¹⁰²² 99,773.55 Pa, 1.2's NaN; at V = 2·10¹⁵⁴ with Tc = 10¹⁵⁰ −1.49·10⁻⁷,
+  1.2's +1.25·10⁻¹⁵¹; `redlich_kwong_pressure(1e130, 1e300, 300, 1)` −1.71·10²⁵, 1.2's −∞). The co-volume tests V ≤ n·b
+  and V ≤ b are decided on the unbounded co-volume, so a state whose 1.2 co-volume rounded at the subnormal grid (or a
+  subnormal Tc's rounding scaled back up by a tiny Pc) can be the port's Ok where 1.2 refused, or the reverse; every
+  other error and the order of the checks are 1.2's.
+  *Migration:* none for code that compares with a tolerance or stays within the normal range.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #32)
+- **potential** — `coulomb` and `coulomb_force` return the exact quotient rounded once (RN(k·q₁·q₂/r), RN(k·q₁·q₂/(r·r)),
+  k as `KM_COULOMB_CONSTANT`'s double), where 1.2 rounded three or four times: a fraction of ordinary results move by one
+  ulp, and the range ends are right (`coulomb_force(5e-324, 1.602176634e-19, 1e-10)` 7.11·10⁻³¹³, 1.2's 0;
+  `coulomb_force(e, −e, 1e-160)` −2.31·10²⁹², 1.2's −∞); a non-finite charge gives 1.2's IEEE result.
+  `morse_width_parameter` returns the correctly rounded ω·√(μ/(2·D_e)), where 1.2 rounded the quotient, its √ and the
+  product (a third of ordinary results move by one ulp; `morse_width_parameter(5.634e14, DBL_MAX, 7.399e-19)` is
+  6.21·10¹⁷⁷, 1.2's +∞; `(5.634e14, 1.6267e-27, 1e300)` 1.61·10⁻¹⁴⁹, 1.2's 0); since #18 is folded in, its D_e ≥ 2¹⁰²³
+  values are now correctly rounded too (`morse_width_parameter(1, 2⁻¹⁰⁷⁴, 2¹⁰²³)` is 2⁻¹⁰⁴⁹ where #18 gave 0, and 53 of
+  #18's 181 golden values move, 42 by one ulp). `lennard_jones` evaluates 1.2's sequence with an unbounded exponent and
+  the final product rounded once (#17's (ε·d)·4 folded in, the same values): every input whose 1.2 chain stays in the
+  normal range keeps its bits, and the edges are right (`lennard_jones(1e-300, 1, 1.72e-26)` 5.83·10⁹, 1.2's +∞; past
+  σ/r = 2^170.7 the value or +∞, 1.2's ∞ − ∞ = NaN; below σ/r = 2^-179 with a huge ε a negative value or −0, 1.2's +0).
+- **inorganic** — `born_lande_lattice_energy` evaluates 1.2's sequence with an unbounded exponent, the final product
+  rounded once: physical salts keep their bits (the (1 − 1/n) factor is 1.2's), and the edges are right
+  (`born_lande_lattice_energy(DBL_MAX, 1, 1, DBL_MAX, DBL_MAX)` −1.39·10⁻⁴, 1.2's −∞; a subnormal M −2.13·10⁻³¹⁸, 1.2's
+  −0).
+- **nuclear** — `binding_energy_per_nucleon` likewise, the final division rounded once: every mass below about
+  1.93·10³⁰⁵ u keeps its bits, and past it A ≥ 932 brings the value back (`binding_energy_per_nucleon(1000, 1000, DBL_MAX)`
+  −8.37·10³⁰⁷, 1.2's −∞). The errors and their order are 1.2's throughout.
+  *Migration:* none for code that compares with a tolerance or stays within the normal range.
 
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
@@ -1046,6 +1124,20 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   unbounded-exponent slow path), `vibrational_frequency_edge` 19 → 88 ns (k/μ past DBL_MAX: the √ fast path),
   `vibrational_frequency_subnormal` 26 → 883 ns (a subnormal μ: the exact root), `faraday_mass_ratio_tie` 33 → 402 ns (a
   midpoint, `_km_mono_tie`). Inlining the √ fast path's two TwoProducts was measured (87 → 86 ns) and not kept
+- The overflow audit's B3, ADR 0002 #31 and #32 (Cyrius before → after, the same host, back to back):
+  `gas/ideal_gas_pressure` 18 → 119 ns (Rust 2.18), `nuclear/binding_energy_per_nucleon_fe56` 28 → 29 ns (Rust 2.02),
+  `potential/lennard_jones` 36 → 39 ns; Cyrius-only `ideal_gas_volume` 20 → 119, `gas_density` 20 → 108,
+  `van_der_waals_pressure` 35 → 55, `peng_robinson_pressure` 78 → 100, `redlich_kwong_pressure` 182 → 187, `coulomb`
+  16 → 126, `coulomb_force` 18 → 145, `morse_width_parameter` 33 → 135, `born_lande_lattice_energy` 46 → 50; the slow
+  paths `van_der_waals_pressure_edge` 36 → 260 ns, `peng_robinson_pressure_edge` 115 → 618 ns,
+  `redlich_kwong_pressure_edge` 134 → 584 ns, `lennard_jones_edge` 46 → 208 ns, `born_lande_lattice_energy_edge`
+  66 → 287 ns, `binding_energy_per_nucleon_edge` 39 → 117 ns, and the Morse width's exact root
+  (`morse_width_parameter_subnormal` 42 ns → 1.27 µs, `morse_width_parameter_tie` 35 ns → 1.27 µs). A region test on the
+  inputs (Tc, Pc, T, V within 2^±60: every intermediate provably normal) lets the equations of state and Born–Landé skip
+  their per-operation range tests on physical states: Peng–Robinson 147 → 100 ns, van der Waals 73 → 55, Redlich–Kwong
+  217 → 187, Born–Landé 67 → 50; inlining `_km_ux_normal`'s bit test was measured (147 → 156 ns) and not kept. B3's
+  seventeen benches run 100,000 × 20 calls in `tests/kimiya.bcyr`: at 1,000,000 × 20 the file passed `cyrius bench`'s
+  default 300 s deadline (255 s before B3, 279 s now)
 
 ## [1.2.0] - 2026-11-08
 

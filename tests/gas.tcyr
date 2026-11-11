@@ -1,9 +1,11 @@
 # gas.tcyr — the tests of rust-old/src/gas.rs, ported one for one (each test_group is the Rust test's
 # name), plus Cyrius-only tests of the roots buffer and presets and of the correctly rounded
-# primitives the Peng–Robinson and Redlich–Kwong functions use (ADR 0005). Rust's private
-# cubic_real_roots and pr_dimensionless are _km_cubic_real_roots and _km_pr_dimensionless here
-# (one namespace). peng_robinson_z_roots fills a caller's buffer of three f64 and returns Ok(n). The
-# golden corpus separately checks every function over its grid (tests/parity.tcyr).
+# primitives the Peng–Robinson and Redlich–Kwong functions use (ADR 0005), and of ADR 0002 #31 (the overflow audit's
+# B3: the ideal gas law and gas density rounded once, the three equations of state with an unbounded exponent). Rust's
+# private cubic_real_roots and pr_dimensionless are _km_cubic_real_roots and _km_pr_dimensionless here (one namespace).
+# peng_robinson_z_roots fills a caller's buffer of three f64 and returns Ok(n). ADR 0002 #31 changes none of the Rust
+# tests (each compares within a tolerance, or an Err). The golden corpus separately checks every function over its grid
+# (tests/parity.tcyr).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -642,6 +644,108 @@ fn _t_cyrius_correctly_rounded_primitives() {
     assert_bits_eq(r12, 0x7FF0000000000000, "DBL_MAX^2.5 = +inf");
 }
 
+# ADR 0002 #31 (the overflow audit's B3): the ideal gas law and gas_density rounded once (ordinary inputs where Rust's
+# three roundings miss, Rust's ∞ and 0 where the value is representable), van der Waals, Peng–Robinson and Redlich–Kwong
+# under #20's semantics (Rust's NaN, ±∞ and the wrong sign where the value is representable, the co-volume test on the
+# unbounded co-volume in both directions, Tc^2.5 rescaled past DBL_MAX and at a tie); expected values MPFR's
+# (scripts/oracle/mpfr_ref.py) or Fraction's; then the fast paths against the unbounded slow paths on 5,000 seeded
+# in-range states.
+fn _t_cyrius_adr31() {
+    test_group("cyrius_adr31 (rounded once, unbounded exponent)");
+    var dmax: f64 = from_bits(0x7FEFFFFFFFFFFFFF);
+    var t1, v1 = ideal_gas_pressure(5.7820177604881975, 202.62283791778043, 0.2175130706633843);
+    assert(is_ok(t1) == 1 && v1 == 0x40E5DDEB68749D1B, "n·R·T/V rounded once (Rust's ((n·R)·T)/V one ulp below)");
+    var t2, v2 = ideal_gas_volume(dmax, 300.0, 101325.0);
+    assert(is_ok(t2) == 1 && v2 == 0x7F993540FC72D440, "V = DBL_MAX·R·300/101325 = 4.43·10³⁰⁶ (Rust's n·R·T = ∞)");
+    var t3, v3 = ideal_gas_pressure(9.0, 1.0, 1.0);
+    assert(is_ok(t3) == 1 && v3 == 0x4052B521665947BC, "9R: a midpoint (R's odd part has 51 bits), to even");
+    var t4, v4 = gas_density(101325.0, 0.029, dmax);
+    assert(is_ok(t4) == 1 && v4 == 0x00761694A9EEC45A, "T = DBL_MAX: 1.97·10⁻³⁰⁶ (Rust's R·T = ∞ gives 0)");
+    var t5, v5 = gas_density(101325.0, 0.029, 273.15);
+    assert(is_ok(t5) == 1 && v5 == 0x3FF4B38D5844F2B2, "air at STP rounded once (Rust's one ulp below)");
+    var e306: f64 = from_bits(0x7F76C8E5CA239029);      # 1e306
+    var e300: f64 = from_bits(0x7E37E43C8800759C);      # 1e300
+    var t6, v6 = van_der_waals_pressure(e306, 300.0, e300, 0.0, 0.0000000001);
+    assert(is_ok(t6) == 1 && v6 == 0x41E2960CAA872E78, "n·R·T past DBL_MAX: 2.49·10⁹ (Rust +∞)");
+    var t7, v7 = van_der_waals_pressure(e300, 0.00000000000000000001, 0.0000000001, 0.0, 0.0);
+    assert(is_ok(t7) == 1 && v7 == 0x7C555452A626DFF2, "n/V = ∞, a = 0: 8.31·10²⁹⁰ (Rust's 0·∞ = NaN)");
+    var t8, v8 = van_der_waals_pressure(from_bits(3), 300.0, from_bits(1), 0.0, 0.2);
+    assert(is_ok(t8) == 1 && v8 == 0x40D244E29DF33010, "V = 2⁻¹⁰⁷⁴ > n·b = 0.6·2⁻¹⁰⁷⁴: Ok (Rust's n·b is V: Err)");
+    var ne300: f64 = -e300;
+    var t9, v9 = van_der_waals_pressure(ne300, 300.0, e300, 0.0, 10000000000.0);
+    assert(is_ok(t9) == 1 && v9 == 0xBE90BD3DCC956009, "V − n·b past DBL_MAX: −2.49·10⁻⁷ (Rust −0)");
+    var t10, v10 = van_der_waals_pressure(1.0, 300.0, 0.001, 0.364, 0.00004267);
+    assert(is_ok(t10) == 1 && v10 == 0x414119F61479129F, "CO₂ in 1 L: Rust's bits (the fast path)");
+    var pr1 = with_field(KM_PR_NITROGEN, 0, from_bits(0x0010000000000000));
+    var t11, v11 = peng_robinson_pressure(pr1, 300.0, 0.025);
+    assert(is_ok(t11) == 1 && v11 == 0x40F85BD8D2999568, "Tc = 2⁻¹⁰²²: T/Tc = ∞, a·α = 0: 99773.55 Pa (Rust NaN)");
+    var e150: f64 = from_bits(0x5F138D352E5096AF);      # 1e150
+    var pr2 = KmPengRobinsonParams { tc: e150, pc: 1.0, omega: 0.0 };
+    var v154: f64 = from_bits(0x5FF7DDDF6B095FF1);      # 2e154
+    var t12, v12 = peng_robinson_pressure(pr2, 300.0, v154);
+    assert(is_ok(t12) == 1 && v12 == 0xBE840A69A98AAD14, "V·V past DBL_MAX: −1.49·10⁻⁷ (Rust's term₂ 0: +1.25·10⁻¹⁵¹)");
+    var e200: f64 = from_bits(0x6974E718D7D7625A);      # 1e200
+    var pr3 = with_field(KM_PR_NITROGEN, 2, e200);
+    var t13, v13 = peng_robinson_pressure(pr3, 126.2, 0.025);
+    assert(is_ok(t13) == 1 && v13 == 0x40E465DEB6432FBE, "ω = 10²⁰⁰ at T = Tc: κ·0 = 0 (Rust's −∞·0 = NaN)");
+    var t14, v14 = peng_robinson_pressure(KM_PR_NITROGEN, 300.0, 0.025);
+    assert(is_ok(t14) == 1 && v14 == 0x40F8592C107EF45D, "N₂ at 300 K: Rust's bits (the fast path)");
+    var pr4 = KmPengRobinsonParams { tc: from_bits(0x4604), pc: 654.0305822367905, omega: 0.0377 };
+    var t15, v15 = peng_robinson_pressure(pr4, 300.0, from_bits(0x12));
+    assert(is_ok(t15) == 1 && v15 == 0x7FF0000000000000, "V above the unbounded b, at Rust's rounded b: +∞ (Rust Err)");
+    var e130: f64 = from_bits(0x5AECDA62055B2D9E);      # 1e130
+    var t16, v16 = redlich_kwong_pressure(e130, e300, 300.0, 1.0);
+    assert(is_ok(t16) == 1 && v16 == 0xC52C39EE82DCB826, "Tc^2.5 past DBL_MAX: −1.71·10²⁵ (Rust −∞)");
+    var tcm: f64 = from_bits(0x1A82669080000000);      # (1553/1024)²·2⁻⁶⁰⁰: Tc^2.5 = 1553⁵·2⁻¹⁵⁵⁰, a tie
+    var t17, v17 = redlich_kwong_pressure(tcm, from_bits(0x0170000000000000), 300.0, from_bits(0x591A82A6E3C3EB98));
+    assert(is_ok(t17) == 1 && v17 == 0x277F5CF231BA0340, "Tc^2.5 below 2⁻¹⁰²², rescaled exactly at a 53-bit tie");
+    var pc18: f64 = 0.0000000000000017763568394002505;
+    var t18, v18 = redlich_kwong_pressure(from_bits(3), pc18, 300.0, from_bits(0x0004527B0F5F6B96));
+    assert(is_err_code(t18, v18, KM_ERR_INVALID_INPUT) == 1, "V ≤ the unbounded b: Err (Rust's rounded b: NaN)");
+    var t19, v19 = redlich_kwong_pressure(126.2, 3394000.0, 300.0, 0.025);
+    assert(is_ok(t19) == 1 && v19 == 0x40F8598D02C66EE0, "N₂ at 300 K: Rust's bits (the fast path)");
+    var ws, we = _km_rk_tc25_ux(e130);
+    var wt: f64 = _km_ux_mul_f64(ws, we, 1.0, 0 - 300);
+    assert(we > 1023 && _km_bits(wt) == 0x70A8B40A4EEC437D, "(10¹³⁰)^2.5 = 10³²⁵ unbounded, RN₅₃ (MPFR's): ×2⁻³⁰⁰");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var fast = 0;
+    var k = 0;
+    while (k < 5000) {
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var u1: f64 = f64_from((st >> 11) % 1000000) / 1000000.0;
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var u2: f64 = f64_from((st >> 11) % 1000000) / 1000000.0;
+        var n: f64 = 0.1 + 10.0 * u1;
+        var t: f64 = 100.0 + 2000.0 * u2;
+        var b: f64 = 0.00001 + 0.0002 * u1;
+        var v: f64 = (n * b) * (1.5 + 100.0 * u2);
+        var a: f64 = 4.0 * u2;
+        var pf, ef, of = _km_vdw_fast(n, t, v, a, b);
+        var pu, eu = _km_vdw_ux(n, t, v, a, b);
+        if (of == 1) { fast = fast + 1; }
+        if (of != 1 || ef != eu || _km_bits(pf) != _km_bits(pu)) { bad = bad + 1; }
+        var tc: f64 = 5.0 + 700.0 * u1;
+        var pc: f64 = 100000.0 + 25000000.0 * u2;
+        var om: f64 = u2 - 0.3;
+        var bp: f64 = (0.0778 * KM_GAS_CONSTANT * tc) / pc;
+        var vp: f64 = bp * (1.01 + 1000.0 * u1);
+        var qf, qe, qo = _km_pr_pressure_fast(tc, pc, om, t, vp);
+        var qu, qeu = _km_pr_pressure_ux(tc, pc, om, t, vp);
+        if (qo != 1 || qe != qeu || _km_bits(qf) != _km_bits(qu)) { bad = bad + 1; }
+        var rf, re, ro = _km_rk_pressure_fast(tc, pc, t, vp);
+        var ru, reu = _km_rk_pressure_ux(tc, pc, t, vp);
+        if (ro != 1 || re != reu || _km_bits(rf) != _km_bits(ru)) { bad = bad + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "the three equations of state: fast path = unbounded slow path on 5,000 in-range states");
+    assert_eq(fast, 5000, "… and the fast path takes every one");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_ideal_gas_stp_volume();
@@ -685,6 +789,7 @@ fn main() {
     _t_rk_rejects_nan_inputs();
     _t_cyrius_presets_and_roots();
     _t_cyrius_correctly_rounded_primitives();
+    _t_cyrius_adr31();
     return assert_summary();
 }
 

@@ -1,9 +1,10 @@
 """Verify the correctly rounded exp, exp10, expm1, ln, log10, pow, sin, cos, atan2, acos, x·2^y and 1/(100·x) of
 src/mathx.cyr against MPFR (ADR 0006), and its unbounded-exponent final operations with potential's geometry (ADR 0002
 #20); and the exact rationals of spectroscopy (#21, #22), stoichiometry (#24 ... #26) and the overflow audit's B1 (#27,
-#28: the correctly rounded monomial, thermo's, phase's and kinetics' rationals) and B2 (#29, #30: solution's,
-electrochemistry's and spectroscopy's, and the correctly rounded square root of a quotient) against Fraction, exact
-integer square roots and MPFR.
+#28: the correctly rounded monomial, thermo's, phase's and kinetics' rationals), B2 (#29, #30: solution's,
+electrochemistry's and spectroscopy's, and the correctly rounded square root of a quotient) and B3 (#31, #32: gas's,
+potential's, inorganic's and nuclear's, and the correctly rounded w·√(x/y·2^e)) against Fraction, exact integer square
+roots and MPFR.
 
 For each primitive it generates seeded arguments (deterministic: random.Random with fixed seeds), builds
 a probe program that calls the Cyrius function on every argument, runs it on each target, and compares
@@ -90,6 +91,16 @@ its shape's fast path, the monomial's exact path forced; reference Fraction), vi
 paths) and nernst (nernst_potential: the public function, its Rust-chain fast path where the range test passes, the
 unbounded-exponent slow path forced; reference mpfr_ref.UX with MPFR's log and ux_sub_final), each on binade-uniform,
 typical, past-the-range, midpoint, subnormal and Err arguments.
+The overflow audit's B3 (ADR 0002 #31, #32) adds wsqrt (_km_cr_mul_sqrt_ratio = RN(w·sqrt((x/y)·2^e)): every binade of
+each, e over [-4, 4] and far, x/y past either end, results past DBL_MAX and subnormal, exact roots, the 53-bit midpoints
+3w·2^k (x/y = 9·4^k) and the subnormal grid's ties, roots within ulps of a midpoint, the domain; the fast path and
+_km_mul_sqrt_ratio_acc forced; reference an exact integer square root) and the twelve functions: igp, igv, dens, coul,
+force (ideal_gas_pressure, ideal_gas_volume, gas_density, coulomb, coulomb_force: the public function, its shape's fast
+path, the monomial's exact path forced; reference Fraction), width (morse_width_parameter: the root's two paths) and
+vdw, prp, rkp, lj, lande, bea (van_der_waals_pressure, peng_robinson_pressure, redlich_kwong_pressure, lennard_jones,
+born_lande_lattice_energy, binding_energy_per_nucleon: the public function, its Rust-chain fast path where the range
+test passes, the unbounded-exponent slow path forced on every argument; reference mpfr_ref.UX, Tc^2.5 by UX.pow), each
+on binade-uniform, typical, past-the-range, co-volume (V near n·b or b), midpoint, subnormal and Err arguments.
 Through each function's _km_cr_<f>_fast entry it reports the fast path's fallback rate per region, and
 checks the fast path's result equals the function's wherever its test passes. It checks that the three
 targets give identical bits and flags.
@@ -104,7 +115,8 @@ Usage, from the repo root:
                                                            # rmass muldiv pyield tyield pcomp limit empir mono
                                                            # heat shc boil frz osm zhl ssi pre soc mm monotie
                                                            # sqrtdiv dil cond fmass fcharge fratio nernst abs
-                                                           # conc vib rotor rot moment)
+                                                           # conc vib rotor rot moment wsqrt igp igv dens
+                                                           # vdw prp rkp lj width coul force lande bea)
     python3 -I scripts/oracle/cr_verify.py --work DIR      # probe sources and binaries in DIR
                                                            # (default build/cr-verify, gitignored)
 Exit status 1 on any mismatch or cross-target difference, 2 on a build or run failure.
@@ -1519,12 +1531,15 @@ def stoich_checks(work, targets, which):
 AUDIT = [(33, "mono"), (34, "heat"), (35, "shc"), (36, "boil"), (37, "frz"), (38, "osm"), (39, "zhl"), (40, "ssi"),
          (41, "pre"), (42, "soc"), (43, "mm"), (44, "monotie"),
          (45, "sqrtdiv"), (46, "dil"), (47, "cond"), (48, "fmass"), (49, "fcharge"), (50, "fratio"), (51, "nernst"),
-         (52, "abs"), (53, "conc"), (54, "vib"), (55, "rotor"), (56, "rot"), (57, "moment")]
+         (52, "abs"), (53, "conc"), (54, "vib"), (55, "rotor"), (56, "rot"), (57, "moment"),
+         (58, "wsqrt"), (59, "igp"), (60, "igv"), (61, "dens"), (62, "vdw"), (63, "prp"), (64, "rkp"), (65, "lj"),
+         (66, "width"), (67, "coul"), (68, "force"), (69, "lande"), (70, "bea")]
 AUDIT_NAMES = tuple(name for _, name in AUDIT)
 AUDIT2_NAMES = ("sqrtdiv", "dil", "cond", "fmass", "fcharge", "fratio", "nernst", "abs", "conc", "vib", "rotor", "rot",
                 "moment")
 ARITY.update({33: 12, 34: 3, 35: 3, 36: 3, 37: 3, 38: 3, 39: 2, 40: 3, 41: 4, 42: 3, 43: 3, 44: 8})
 ARITY.update({45: 2, 46: 3, 47: 2, 48: 3, 49: 3, 50: 5, 51: 4, 52: 3, 53: 3, 54: 2, 55: 2, 56: 1, 57: 2})
+ARITY.update({58: 4, 59: 3, 60: 3, 61: 3, 62: 5, 63: 5, 64: 4, 65: 3, 66: 3, 67: 3, 68: 3, 69: 5, 70: 3})
 F_CONST = _const("src/constants.cyr", "KM_FARADAY")
 H_CONST = _const("src/constants.cyr", "KM_PLANCK")
 R_GAS = _const("src/constants.cyr", "KM_GAS_CONSTANT")
@@ -1642,6 +1657,8 @@ def ref_audit(name, a):
     """The reference word of ids 33 … 44 (NANW for an Err)."""
     if name in AUDIT2_NAMES:
         return ref_audit2(name, a)
+    if name in AUDIT3_NAMES:
+        return ref_audit3(name, a)
     fin = all(math.isfinite(v) for v in a if isinstance(v, float))
     if name == "mono":
         nn, nd = a[0], a[1]
@@ -2276,15 +2293,481 @@ def args_rot(rng):
     return [("binade-uniform", rand), ("typical", typical), ("8π²·I subnormal", edge), ("Err and ends", bad)]
 
 
+# ── The overflow audit's B3 (ADR 0002 #31, #32): w·√((x/y)·2^e), the gas laws, the potentials, Born–Landé, BE/A ──────
+# ids 58 … 70: wsqrt (_km_cr_mul_sqrt_ratio(w, x, y, e), e an integer word: the public helper, its fast path and flag;
+# mode 1 _km_mul_sqrt_ratio_acc), igp, igv, dens, coul, force (ideal_gas_pressure, ideal_gas_volume, gas_density, coulomb,
+# coulomb_force: the public function, its shape's straight-line fast path and flag, mode 1 the monomial's exact path at
+# its factors), width (morse_width_parameter: _km_mul_sqrt_ratio_fast, mode 1 the exact root), vdw, prp, rkp, lj, lande,
+# bea (van_der_waals_pressure, peng_robinson_pressure, redlich_kwong_pressure, lennard_jones, born_lande_lattice_energy,
+# binding_energy_per_nucleon: the public function, the Rust-chain fast path where its range test passes and the flag,
+# mode 1 the unbounded-exponent slow path forced). A charge or a count is an integer word. References: Fraction (the
+# monomials), Python's integer square root (the roots, ties included), mpfr_ref.UX with MPFR's pow at 53 bits and the
+# final operations (the #20-style ones). An Err (validation, or the co-volume test) is the NaN word in both slots.
+K_CONST = _const("src/constants.cyr", "KM_COULOMB_CONSTANT")
+NA_CONST = _const("src/constants.cyr", "KM_AVOGADRO")
+QE_CONST = _const("src/constants.cyr", "KM_ELEMENTARY_CHARGE")
+AMU_CONST = _const("src/constants.cyr", "KM_AMU_MEV")
+MH_CONST = _const("src/constants.cyr", "KM_HYDROGEN_ATOM_MASS_U")
+MN_CONST = _const("src/constants.cyr", "KM_NEUTRON_MASS_U")
+AUDIT3_NAMES = ("wsqrt", "igp", "igv", "dens", "vdw", "prp", "rkp", "lj", "width", "coul", "force", "lande", "bea")
+
+
+def sqrt_frac_ref(q):
+    """RN(√q) for a positive Fraction q, exactly, ties to even (B3's wsqrt and width): Q = ⌊N·2^s/D⌋ of at least 120 bits
+    and an even exponent, R = ⌊√Q⌋, RN((2R + sticky)·2^-(s/2 + 1)) by CPython's correctly rounded int division."""
+    n, d = q.numerator, q.denominator
+    s = 121 + d.bit_length() - n.bit_length()
+    if s % 2:
+        s += 1
+    quo, rem = divmod(n << s, d) if s >= 0 else divmod(n, d << -s)
+    r = math.isqrt(quo)
+    st = 1 if (r * r != quo or rem) else 0
+    return rn(Fraction(2 * r + st) * Fraction(2) ** (-(s // 2) - 1))
+
+
+def _nn(x):
+    return math.isfinite(x) and x >= 0
+
+
+def ref_audit3(name, a):
+    """The reference word of ids 58 … 70 (NANW for an Err or outside a helper's domain)."""
+    UX = mpfr_ref.UX
+    if name == "wsqrt":
+        w, x, y, e = a
+        if not (_pos(w) and _pos(x) and _pos(y)):
+            return NANW
+        return bits(sqrt_frac_ref(Fraction(w) ** 2 * Fraction(x) / Fraction(y) * Fraction(2) ** e))
+    if name in ("igp", "igv"):
+        n, t, v = a
+        if not (math.isfinite(n) and _pos(t) and _pos(v)):
+            return NANW
+        return bits(mono_ref([n, R_GAS, t], [v]))
+    if name == "dens":
+        p, mm, t = a
+        if not (_pos(t) and _nn(p) and _pos(mm)):
+            return NANW
+        return bits(mono_ref([p, mm], [R_GAS, t]))
+    if name in ("coul", "force"):
+        q1, q2, r = a
+        if not _pos(r):
+            return NANW
+        den = [r] if name == "coul" else [r, r]
+        if not (math.isfinite(q1) and math.isfinite(q2)):
+            return bits(_ieee_div(K_CONST * q1 * q2, r if name == "coul" else r * r))
+        return bits(mono_ref([K_CONST, q1, q2], den))
+    if name == "width":
+        w, mu, d = a
+        if not (_pos(w) and _pos(mu) and _pos(d)):
+            return NANW
+        return bits(sqrt_frac_ref(Fraction(w) ** 2 * Fraction(mu) / (2 * Fraction(d))))
+    with mpfr_ref.unbounded():
+        if name == "vdw":
+            n, t, v, aa, b = a
+            if not (_pos(t) and math.isfinite(n) and _nn(aa) and _nn(b) and _pos(v)):
+                return NANW
+            nb = UX(n) * UX(b)
+            if UX(v) <= nb:
+                return NANW
+            nv = UX(n) / UX(v)
+            return bits(mpfr_ref.ux_sub_final(UX(n) * UX(R_GAS) * UX(t) / (UX(v) - nb), UX(aa) * nv * nv))
+        if name == "prp":
+            tc, pc, om, t, v = a
+            if not (_pos(t) and _pos(tc) and _pos(pc) and math.isfinite(om) and math.isfinite(v)):
+                return NANW
+            r, tcu, pcu = UX(R_GAS), UX(tc), UX(pc)
+            aa = UX(0.45724) * r * r * tcu * tcu / pcu
+            b = UX(0.07780) * r * tcu / pcu
+            if UX(v) <= b:
+                return NANW
+            o = UX(om)
+            kappa = (UX(0.37464) + UX(1.54226) * o) - UX(0.26992) * o * o
+            u = UX(1.0) + kappa * (UX(1.0) - (UX(t) / tcu).sqrt())
+            vu = UX(v)
+            den = (vu * vu + UX(2.0) * b * vu) - b * b
+            return bits(mpfr_ref.ux_sub_final(r * UX(t) / (vu - b), aa * (u * u) / den))
+        if name == "rkp":
+            tc, pc, t, v = a
+            if not (_pos(t) and _pos(tc) and _pos(pc) and math.isfinite(v)):
+                return NANW
+            r, tcu, pcu = UX(R_GAS), UX(tc), UX(pc)
+            aa = UX(0.42748) * r * r * tcu.pow(2.5) / pcu
+            b = UX(0.08664) * r * tcu / pcu
+            if UX(v) <= b:
+                return NANW
+            vu = UX(v)
+            return bits(mpfr_ref.ux_sub_final(r * UX(t) / (vu - b), aa / (UX(t).sqrt() * vu * (vu + b))))
+        if name == "lj":
+            e, s, r = a
+            if not (_pos(e) and _pos(s) and _pos(r)):
+                return NANW
+            sr = UX(s) / UX(r)
+            sr6 = sr * sr * sr * sr * sr * sr
+            return bits(mpfr_ref.ux_mul_final(UX(4.0) * UX(e), sr6 * sr6 - sr6))
+        if name == "lande":
+            mm, zc, za, r0, n = a
+            if not (_pos(r0) and math.isfinite(n) and n > 1.0 and _pos(mm) and 1 <= zc <= U32 and 1 <= za <= U32):
+                return NANW
+            u = UX(-K_CONST) * UX(NA_CONST) * UX(mm) * UX(float(zc)) * UX(float(za)) * UX(QE_CONST) * UX(QE_CONST)
+            return bits(mpfr_ref.ux_mul_final(u / UX(r0), UX(1.0) - UX(1.0) / UX(n)))
+        z, n, m = a                                  # bea
+        if not (0 <= z <= U32 and 0 <= n <= U32 and z + n <= U32 and z + n != 0 and _pos(m)):
+            return NANW
+        md = UX(float(z)) * UX(MH_CONST) + UX(float(n)) * UX(MN_CONST) - UX(m)
+        return bits(mpfr_ref.ux_div_final(md * UX(AMU_CONST), UX(float(z + n))))
+
+
+def args_wsqrt(rng):
+    """(w, x, y, e) for _km_cr_mul_sqrt_ratio: every binade of each, e over [−4, 4] and far, x/y past either end, the
+    result past DBL_MAX and subnormal, exact roots, the midpoints 3w·2^k (w with 3w of 54 bits, x/y = 9·4^k) and the
+    subnormal grid's ties q·2^-1075, roots within ulps of a midpoint, and the domain."""
+    def e_(rng_):
+        return rng_.choice((-1, -1, 0, 1, -2, 2, rng_.randint(-4, 4), rng_.randint(-200, 200)))
+    rand = [(_pp(rng), _pp(rng), _pp(rng), e_(rng)) for _ in range(100_000)]
+    typical = [(_pp(rng, 40, 60), _pp(rng, -95, -80), _pp(rng, -70, -55), -1) for _ in range(60_000)]
+    edge = []
+    for _ in range(60_000):
+        kind = rng.randint(0, 4)
+        if kind == 0:
+            edge.append((_pp(rng, -100, 100), _pp(rng, 512, 1023), _pp(rng, -1022, -512), e_(rng)))
+        elif kind == 1:
+            edge.append((_pp(rng, -100, 600), _pp(rng, -1022, -540), _pp(rng, 538, 1023), e_(rng)))
+        elif kind == 2:
+            edge.append((_pp(rng, -1074, -1023), _pp(rng), _pp(rng), e_(rng)))
+        elif kind == 3:
+            edge.append((_pp(rng), _pp(rng, -1074, -1023), _pp(rng, -1074, 1023), e_(rng)))
+        else:
+            edge.append((_pp(rng, 900, 1023), _pp(rng, 0, 1023), _pp(rng, -1074, 0), e_(rng)))
+    exact, ties = [], []
+    for _ in range(30_000):
+        sq = float(rng.randrange(1, 1 << 26))
+        k = rng.randint(-200, 200)
+        y = _pp(rng, -400, 400)
+        x = sq * sq * 2.0 ** (2 * k) * y
+        if _pos(x) and x / y == sq * sq * 2.0 ** (2 * k):
+            exact.append((_pp(rng, -300, 300), x, y, 0))
+    for _ in range(40_000):
+        if rng.random() < 0.6:
+            k, j = rng.randint(-300, 300), rng.randint(-300, 300)
+            ties.append((_y3(rng) * 2.0 ** rng.randint(-100, 100), 9.0 * 2.0 ** (2 * k), 2.0 ** (2 * j), -1 + 1))
+        else:
+            s = rng.randint(60, 120)
+            q = float(rng.randrange(1, 1 << 41) | 1)
+            ties.append((q * 2.0 ** (-1075 + s), 1.0, 2.0 ** (2 * s), 0))
+    near = []
+    for _ in range(30_000):
+        z = 1.0 + rng.randrange(1 << 52) * 2.0 ** -52
+        mm = Fraction(z) + Fraction(1, 1 << 53)
+        w = 2.0 ** rng.randint(-200, 200)
+        y = _pp(rng, -300, 300)
+        x = rn(mm * mm * Fraction(y))
+        near.append((w, ulps(x, rng.randint(-3, 3)), y, 0))
+    dom = [(0.0, 1.0, 1.0, 0), (1.0, 0.0, 1.0, 0), (1.0, 1.0, 0.0, 0), (-1.0, 1.0, 1.0, 0), (INF, 1.0, 1.0, 0),
+           (1.0, INF, 1.0, 0), (1.0, 1.0, INF, 0), (NAN, 1.0, 1.0, 0), (DMAX, DMAX, fb(1), 0), (fb(1), fb(1), DMAX, 0),
+           (DMAX, 4.0, 1.0, 0), (1.0, 4.0, 1.0, 0)]
+    return [("binade-uniform", rand), ("typical (HCl's Morse width)", typical), ("x/y and the result past the range",
+            edge), ("exact roots", exact), ("midpoints and subnormal ties", ties), ("within ulps of a midpoint", near),
+            ("domain", dom)]
+
+
+def args_ideal(rng):
+    """(n, T, x) for ideal_gas_pressure and ideal_gas_volume."""
+    rand = [(_spp(rng), _pp(rng), _pp(rng)) for _ in range(80_000)]
+    typical = [(_spp(rng, -10, 10), rng.uniform(1.0, 3000.0), _pp(rng, -20, 30)) for _ in range(60_000)]
+    comp = []
+    for _ in range(40_000):
+        if rng.random() < 0.5:
+            n, t = _spp(rng, 520, 1023), _pp(rng, 400, 1023)
+        else:
+            n, t = _spp(rng, -1074, -520), _pp(rng, -1074, -400)
+        e = math.frexp(n)[1] + math.frexp(t)[1]
+        comp.append((n, t, _around(rng, e)))
+    ties = []
+    for _ in range(40_000):
+        if rng.random() < 0.6:
+            q = rng.choice((9.0, 11.0, 13.0, 15.0)) * rng.choice((1.0, -1.0))
+            ties.append((q * 2.0 ** rng.randint(-900, 900), 2.0 ** rng.randint(-60, 60), 2.0 ** rng.randint(-60, 60)))
+        else:
+            qq, d = _sub_tie(rng)
+            ties.append((qq, 1.0, R_GAS * d))
+    bad = [(NAN, 1.0, 1.0), (INF, 1.0, 1.0), (1.0, 0.0, 1.0), (1.0, -1.0, 1.0), (1.0, INF, 1.0), (1.0, 1.0, 0.0),
+           (1.0, 1.0, NAN), (0.0, DMAX, fb(1)), (-0.0, 1e300, 1e-300), (DMAX, DMAX, 1.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("n·R·T past the range", comp),
+            ("midpoints q·R and subnormal ties", ties), ("Err and zeros", bad)]
+
+
+def args_dens(rng):
+    """(P, M, T) for gas_density."""
+    rand = [(_pp(rng), _pp(rng), _pp(rng)) for _ in range(80_000)]
+    typical = [(rng.uniform(0.0, 1e8), rng.uniform(0.002, 0.4), rng.uniform(1.0, 3000.0)) for _ in range(60_000)]
+    edge = []
+    for _ in range(40_000):
+        kind = rng.randint(0, 3)
+        if kind == 0:                               # R·T past DBL_MAX
+            edge.append((_pp(rng, 0, 1023), _pp(rng, -100, 1023), _pp(rng, 1020, 1023)))
+        elif kind == 1:                             # R·T subnormal
+            edge.append((_pp(rng, -1074, -900), _pp(rng, -100, 100), _pp(rng, -1074, -1020)))
+        elif kind == 2:                             # P·M past either end
+            edge.append((_pp(rng, 520, 1023), _pp(rng, 520, 1023), _pp(rng, 0, 1023)))
+        else:
+            edge.append((_pp(rng, -1074, -520), _pp(rng, -1074, -400), _pp(rng, -1074, 0)))
+    ties = []
+    for _ in range(20_000):
+        qq, d = _sub_tie(rng)
+        b = rng.randint(-30, 30)
+        ties.append((qq, R_GAS * 2.0 ** b, d * 2.0 ** b))
+    bad = [(1.0, 1.0, 0.0), (-1.0, 1.0, 1.0), (1.0, 0.0, 1.0), (NAN, 1.0, 1.0), (1.0, 1.0, INF), (-0.0, 1.0, 1.0),
+           (0.0, DMAX, fb(1)), (101325.0, 0.029, DMAX)]
+    return [("binade-uniform", rand), ("typical", typical), ("R·T or P·M past the range", edge), ("subnormal ties", ties),
+            ("Err and zeros", bad)]
+
+
+def args_coul(rng):
+    """(q1, q2, r) for coulomb and coulomb_force."""
+    rand = [(_spp(rng), _spp(rng), _pp(rng)) for _ in range(80_000)]
+    typical = [(_spp(rng, -70, -55), _spp(rng, -70, -55), _pp(rng, -40, -20)) for _ in range(60_000)]
+    edge = []
+    for _ in range(40_000):
+        kind = rng.randint(0, 3)
+        if kind == 0:
+            edge.append((_spp(rng, 500, 1023), _spp(rng, 0, 1023), _pp(rng, 300, 1023)))
+        elif kind == 1:
+            edge.append((_spp(rng, -1074, -500), _spp(rng, -600, -60), _pp(rng, -1074, -300)))
+        elif kind == 2:                             # r·r past DBL_MAX
+            edge.append((_spp(rng, 300, 700), _spp(rng, 300, 700), _pp(rng, 512, 900)))
+        else:                                       # r·r below 2^-1022
+            edge.append((_spp(rng, -700, -300), _spp(rng, -400, -60), _pp(rng, -1074, -512)))
+    ties = []
+    for _ in range(30_000):
+        if rng.random() < 0.6:
+            q = rng.choice((5.0, 7.0)) * rng.choice((1.0, -1.0))
+            ties.append((q * 2.0 ** rng.randint(-600, 600), 2.0 ** rng.randint(-60, 60), 2.0 ** rng.randint(-60, 60)))
+        else:
+            qq, d = _sub_tie(rng)
+            ties.append((qq, 1.0, K_CONST * d))
+    sp = [0.0, -0.0, INF, -INF, NAN, 1.0, fb(1), DMAX, 1e300, -1e-300]
+    specials = [(a, b, c) for a in sp for b in sp for c in (1.0, fb(1), DMAX, 0.0, -1.0, INF, NAN)]
+    return [("binade-uniform", rand), ("typical", typical), ("k·q₁·q₂ or r·r past the range", edge),
+            ("midpoints q·k_e and subnormal ties", ties), ("specials and Err", specials)]
+
+
+def args_width(rng):
+    """(ω, μ, D_e) for morse_width_parameter."""
+    secs = []
+    for tag, sec in args_wsqrt(rng):
+        out = []
+        for w, x, y, e in sec:
+            if e == -1:
+                out.append((w, x, y))
+            elif e == 0 and math.isfinite(y) and y > 0 and y * 0.5 > 0 and (y * 0.5) * 2.0 == y:
+                out.append((w, x, y * 0.5))         # ω·√(x/(2·y/2)) = ω·√(x/y)
+            else:
+                out.append((w, x, y))
+        secs.append((tag, out))
+    return secs
+
+
+def args_vdw(rng):
+    """(n, T, V, a, b) for van_der_waals_pressure."""
+    rand = [(_spp(rng), _pp(rng), _pp(rng), _pp(rng), _pp(rng)) for _ in range(60_000)]
+    typical = []
+    for _ in range(60_000):
+        n, b = _pp(rng, -10, 10), rng.uniform(1e-5, 2e-4)
+        typical.append((n, rng.uniform(100.0, 2000.0), n * b * (1.0 + 10.0 ** rng.uniform(-3, 4)), rng.uniform(0, 4), b))
+    edge = []
+    for _ in range(60_000):
+        kind = rng.randint(0, 4)
+        if kind == 0:                               # n·R·T past DBL_MAX
+            edge.append((_spp(rng, 990, 1023), _pp(rng, 0, 40), _pp(rng, 990, 1023), rng.random(), _pp(rng, -40, -30)))
+        elif kind == 1:                             # n·R·T below 2^-1022, V tiny
+            edge.append((_spp(rng, -1074, -960), _pp(rng, -100, 10), _pp(rng, -1074, -960), _pp(rng, -1074, 0), 0.0))
+        elif kind == 2:                             # n/V and a·(n/V)² past DBL_MAX
+            edge.append((_pp(rng, 800, 1023), _pp(rng, -100, -30), _pp(rng, -330, -130), rng.choice((0.0, _pp(rng, -1074, -1000))), 0.0))
+        elif kind == 3:                             # V − n·b past DBL_MAX
+            edge.append((-_pp(rng, 960, 1023), _pp(rng, 0, 10), _pp(rng, 930, 1023), rng.random(), _pp(rng, 1, 100)))
+        else:                                       # a subnormal n·b against a subnormal V
+            n = fb(rng.randrange(1, 1 << 20))
+            b = rng.random()
+            k = round(n * b / fb(1)) + rng.randint(-3, 3)
+            edge.append((n, 300.0, fb(max(1, k)), 0.0, b))
+    bad = [(1.0, 0.0, 1.0, 0.0, 0.0), (NAN, 1.0, 1.0, 0.0, 0.0), (1.0, 1.0, 1.0, -1.0, 0.0), (1.0, 1.0, 1.0, 0.0, -1.0),
+           (1.0, 1.0, 0.0, 0.0, 0.0), (1.0, 300.0, 0.01, 0.0, 0.01), (1.0, 300.0, 0.001, 0.0, 0.01),
+           (DMAX, DMAX, DMAX, 0.0, 0.0), (fb(3), 300.0, fb(1), 0.0, 0.2)]
+    return [("binade-uniform", rand), ("typical", typical), ("the chain past the range, the co-volume at the grid", edge),
+            ("Err and specials", bad)]
+
+
+def args_prp(rng):
+    """(Tc, Pc, ω, T, V) for peng_robinson_pressure."""
+    def pr_b(tc, pc, c=0.07780):
+        b = c * R_GAS * tc / pc
+        return b if math.isfinite(b) and b > 0 else None
+    rand = []
+    for _ in range(60_000):
+        tc, pc = _pp(rng), _pp(rng)
+        b = pr_b(tc, pc)
+        v = b * (1.0 + 10.0 ** rng.uniform(-3, 8)) if b else _pp(rng)
+        rand.append((tc, pc, rng.choice((rng.uniform(-0.5, 1.0), _spp(rng))), _pp(rng), v))
+    typical = []
+    for _ in range(60_000):
+        tc, pc = rng.uniform(5.0, 700.0), rng.uniform(1e5, 2.5e7)
+        b = pr_b(tc, pc)
+        typical.append((tc, pc, rng.uniform(-0.3, 1.0), tc * rng.uniform(0.3, 10.0), b * (1.0 + 10.0 ** rng.uniform(-3, 5))))
+    edge = []
+    for _ in range(60_000):
+        kind = rng.randint(0, 4)
+        if kind == 0:                               # a subnormal or tiny Tc (T/Tc past DBL_MAX)
+            tc, pc = _pp(rng, -1074, -1000), _pp(rng, -100, 30)
+            b = pr_b(tc, pc)
+            edge.append((tc, pc, rng.uniform(-0.5, 1.0), _pp(rng, -10, 20), (b or fb(1)) * (1.0 + 10.0 ** rng.uniform(-3, 8))))
+        elif kind == 1:                             # V·V past DBL_MAX
+            edge.append((_pp(rng, 400, 600), _pp(rng, -10, 30), rng.uniform(-0.5, 1.0), _pp(rng, 0, 20), _pp(rng, 520, 1000)))
+        elif kind == 2:                             # ω² past DBL_MAX, T = Tc sometimes (κ·0)
+            tc = rng.uniform(5.0, 700.0)
+            edge.append((tc, 3.4e6, _spp(rng, 510, 1023), rng.choice((tc, _pp(rng, -10, 20))), 0.025))
+        elif kind == 3:                             # R·T past DBL_MAX
+            edge.append((126.2, 3.394e6, 0.0377, _pp(rng, 1020, 1023), _pp(rng, 990, 1023)))
+        else:                                       # a subnormal Tc, a tiny Pc: V between Rust's b and the exact one
+            tc, pc = fb(rng.randrange(1, 300)), 2.0 ** -rng.randint(30, 60)
+            b = pr_b(tc, pc)
+            v = ulps(b, rng.randint(-40, 40)) if b else fb(1)
+            edge.append((tc, pc, 0.0377, 300.0, v))
+    bad = [(126.2, 3.394e6, 0.0377, 0.0, 0.025), (0.0, 3.394e6, 0.0377, 300.0, 0.025), (126.2, 0.0, 0.0377, 300.0, 0.025),
+           (126.2, 3.394e6, NAN, 300.0, 0.025), (126.2, 3.394e6, 0.0377, 300.0, INF), (126.2, 3.394e6, 0.0377, 300.0, 1e-6),
+           (fb(1), 3394000.0, 0.0377, 300.0, 0.025)]
+    return [("binade-uniform", rand), ("typical", typical), ("the chain past the range, the co-volume", edge),
+            ("Err and specials", bad)]
+
+
+def args_rkp(rng):
+    """(Tc, Pc, T, V) for redlich_kwong_pressure."""
+    def rk_b(tc, pc):
+        b = 0.08664 * R_GAS * tc / pc
+        return b if math.isfinite(b) and b > 0 else None
+    rand = []
+    for _ in range(60_000):
+        tc, pc = _pp(rng), _pp(rng)
+        b = rk_b(tc, pc)
+        rand.append((tc, pc, _pp(rng), b * (1.0 + 10.0 ** rng.uniform(-3, 8)) if b else _pp(rng)))
+    typical = []
+    for _ in range(60_000):
+        tc, pc = rng.uniform(5.0, 700.0), rng.uniform(1e5, 2.5e7)
+        typical.append((tc, pc, tc * rng.uniform(0.3, 10.0), rk_b(tc, pc) * (1.0 + 10.0 ** rng.uniform(-3, 5))))
+    edge = []
+    for _ in range(60_000):
+        kind = rng.randint(0, 3)
+        if kind == 0:                               # Tc^2.5 past DBL_MAX, a finite
+            e = rng.randint(410, 800)
+            tc = _pp(rng, e, e)
+            pc = _pp(rng, min(1023, int(2.5 * e) - 1020), 1023)
+            b = rk_b(tc, pc) or 1.0
+            edge.append((tc, pc, _pp(rng, -10, 12), b * 2.0 ** rng.randint(1, 600)))
+        elif kind == 1:                             # Tc^2.5 below 2^-1022, a normal
+            e = rng.randint(-1074, -410)
+            tc = _pp(rng, e, e)
+            pc = _pp(rng, max(-1074, int(2.5 * e) + 20), max(-1074, int(2.5 * e) + 1000))
+            b = rk_b(tc, pc)
+            edge.append((tc, pc, _pp(rng, -10, 12), b * 2.0 ** rng.randint(1, 600) if b else _pp(rng)))
+        elif kind == 2:                             # Tc^2.5's ties at the rescale: Tc = t²·4^j, t⁵ of 54 bits
+            t = (rng.randint(776, 890) * 2 + 1) / 1024.0
+            j = rng.choice((rng.randint(-500, -205), rng.randint(205, 500)))
+            tc = t * t * 2.0 ** (2 * j)
+            pc = 2.0 ** (-1000 if j < 0 else 1000)
+            b = rk_b(tc, pc) or 1.0
+            edge.append((tc, pc, 300.0, b * 4.0))
+        else:                                       # a subnormal Tc, a tiny Pc: V around Rust's b
+            tc, pc = fb(rng.randrange(1, 300)), 2.0 ** -rng.randint(30, 60)
+            b = rk_b(tc, pc)
+            edge.append((tc, pc, 300.0, ulps(b, rng.randint(-40, 40)) if b else fb(1)))
+    bad = [(126.2, 3.394e6, 0.0, 0.025), (0.0, 3.394e6, 300.0, 0.025), (126.2, 0.0, 300.0, 0.025),
+           (126.2, 3.394e6, 300.0, NAN), (126.2, 3.394e6, 300.0, 1e-6), (1e130, 1e300, 300.0, 1.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("Tc^2.5 past the range, its ties, the co-volume", edge),
+            ("Err and specials", bad)]
+
+
+def args_lj(rng):
+    """(ε, σ, r) for lennard_jones."""
+    rand = [(_pp(rng), _pp(rng), _pp(rng)) for _ in range(80_000)]
+    typical = []
+    for _ in range(60_000):
+        s = _pp(rng, -40, -25)
+        typical.append((_pp(rng, -80, -60), s, s * rng.uniform(0.5, 100.0)))
+    edge = []
+    for _ in range(60_000):
+        kind = rng.randint(0, 4)
+        s = _pp(rng, -600, 600)
+        if kind == 0:                               # (σ/r)¹² past DBL_MAX, ε tiny
+            edge.append((_pp(rng, -1074, -600), s, s / _pp(rng, 85, 170)))
+        elif kind == 1:                             # σ/r past 2^170.7: Rust's ∞ − ∞
+            edge.append((_pp(rng, -1074, 0), s, s / _pp(rng, 171, 300)))
+        elif kind == 2:                             # (σ/r)⁶ below 2^-1022, ε huge
+            edge.append((_pp(rng, 900, 1023), s, s / _pp(rng, -200, -170)))
+        elif kind == 3:                             # ε ≥ 2^1022 (#17's) with σ/r anywhere
+            edge.append((2.0 ** 1022 * rng.uniform(1.0, 4.0) if rng.random() < 0.9 else DMAX, s, s / _pp(rng, -200, 200)))
+        else:                                       # the final product's subnormal ties: 4ε·2^(6k) = q·2^-1075
+            k = rng.randint(-360, -330)
+            q = rng.randrange(1, 1 << 7) | 1
+            m = -1075 - 6 * k
+            eps = q * 2.0 ** (m - 2) if m - 2 < 1018 else q * 2.0 ** 1010
+            edge.append((eps, 2.0 ** k, 1.0))
+    bad = [(0.0, 1.0, 1.0), (1.0, 0.0, 1.0), (1.0, 1.0, 0.0), (NAN, 1.0, 1.0), (1.0, INF, 1.0), (1.0, 1.0, -1.0),
+           (DMAX, 1.0, 1.0), (fb(1), fb(1), 1.0), (1.0, 1.0, fb(1))]
+    return [("binade-uniform", rand), ("typical", typical), ("the chain past the range, #17's region, ties", edge),
+            ("Err and specials", bad)]
+
+
+def args_lande(rng):
+    """(M, z⁺, z⁻, r₀, n) for born_lande_lattice_energy."""
+    def z(rng_):
+        return rng_.choice((1, 2, 3, 4, rng_.randint(1, 1000), rng_.randint(1, U32), U32))
+    rand = [(_pp(rng), z(rng), z(rng), _pp(rng), 1.0 + _pp(rng)) for _ in range(80_000)]
+    typical = [(rng.uniform(1.6, 2.6), rng.randint(1, 3), rng.randint(1, 3), rng.uniform(1.5e-10, 4e-10),
+                rng.uniform(5.0, 12.0)) for _ in range(60_000)]
+    edge = []
+    for _ in range(60_000):
+        kind = rng.randint(0, 2)
+        if kind == 0:                               # the prefix past DBL_MAX, e² and r₀ bringing it back
+            edge.append((_pp(rng, 900, 1023), z(rng), z(rng), _pp(rng, 800, 1023), rng.uniform(5.0, 12.0)))
+        elif kind == 1:                             # ·e·e below 2^-1022, r₀ tiny
+            edge.append((_pp(rng, -1074, -1000), z(rng), z(rng), _pp(rng, -1074, -960), rng.uniform(5.0, 12.0)))
+        else:                                       # n past 2^1021 or near 1
+            edge.append((_pp(rng), z(rng), z(rng), _pp(rng), rng.choice((_pp(rng, 1000, 1023), 1.0 + 2.0 ** -rng.randint(1, 52)))))
+    bad = [(1.0, 1, 1, 0.0, 8.0), (1.0, 1, 1, 1.0, 1.0), (1.0, 1, 1, 1.0, NAN), (0.0, 1, 1, 1.0, 8.0), (1.0, 0, 1, 1.0, 8.0),
+           (1.0, 1, 1 << 32, 1.0, 8.0), (DMAX, 1, 1, DMAX, DMAX), (fb(1), 1, 1, 2.82e-10, 8.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("the chain past the range, n's ends", edge),
+            ("Err and specials", bad)]
+
+
+def args_bea(rng):
+    """(Z, N, M) for binding_energy_per_nucleon."""
+    rand = [(rng.randint(0, U32), rng.randint(0, U32), _pp(rng)) for _ in range(60_000)]
+    typical = []
+    for _ in range(60_000):
+        zz, nn = rng.randint(1, 118), rng.randint(0, 180)
+        typical.append((zz, nn, (zz + nn) * rng.uniform(0.99, 1.01)))
+    edge = []
+    for _ in range(60_000):
+        zz = rng.randint(0, 1 << 31)
+        nn = rng.randint(1, 1 << 31)
+        if rng.random() < 0.3:
+            zz, nn = rng.randint(0, 600), rng.randint(1, 600)
+        edge.append((zz, nn, _pp(rng, 1013, 1023)))
+    bad = [(0, 0, 1.0), (U32, 1, 1.0), (1 << 31, 1 << 31, 1.0), (26, 30, 0.0), (26, 30, NAN), (26, 30, INF),
+           (1000, 1000, DMAX), (465, 465, DMAX), (466, 466, DMAX)]
+    return [("binade-uniform", rand), ("typical", typical), ("Δm·931.494 past DBL_MAX", edge), ("Err and specials", bad)]
+
+
 def audit_checks(work, targets, which):
-    """Ids 33 … 57 against their exact references on every target, the exact path forced; True if anything failed."""
+    """Ids 33 … 70 against their exact references on every target, the exact path forced; True if anything failed."""
     failed = False
     gens = {"mono": args_mono, "heat": args_mul3, "shc": args_shc, "boil": args_mul3, "frz": args_mul3, "osm": args_osm,
             "zhl": args_zhl, "ssi": args_ssi, "pre": args_pre, "soc": args_soc, "mm": args_mm, "monotie": args_monotie,
             "sqrtdiv": args_sqrtdiv, "dil": args_dil, "cond": args_cond, "fmass": args_fmass, "fcharge": args_fcharge,
             "fratio": args_fratio, "nernst": args_nernst, "abs": args_mul3_30, "conc": args_conc,
             "vib": lambda r: args_sqrtdiv(r, 60_000), "rotor": args_rotor, "rot": args_rot,
-            "moment": lambda r: args_mul3_30(r, True)}
+            "moment": lambda r: args_mul3_30(r, True),
+            "wsqrt": args_wsqrt, "igp": args_ideal, "igv": args_ideal, "dens": args_dens, "vdw": args_vdw,
+            "prp": args_prp, "rkp": args_rkp, "lj": args_lj, "width": args_width, "coul": args_coul, "force": args_coul,
+            "lande": args_lande, "bea": args_bea}
 
     def eq(a, b):
         return a == b or (math.isnan(fb(a)) and math.isnan(fb(b)))
@@ -2396,6 +2879,8 @@ include "src/stoichiometry.cyr"
 include "src/thermo.cyr"
 include "src/phase_data.cyr"
 include "src/phase.cyr"
+include "src/gas_data.cyr"
+include "src/gas.cyr"
 include "src/solution.cyr"
 include "src/electrochemistry_data.cyr"
 include "src/electrochemistry.cyr"
@@ -2436,6 +2921,9 @@ fn arity(fid): i64 {
     if (fid == 51) { return 4; }
     if (fid == 56) { return 1; }
     if (fid >= 46 && fid <= 53) { return 3; }
+    if (fid == 58 || fid == 64) { return 4; }
+    if (fid == 62 || fid == 63 || fid == 69) { return 5; }
+    if (fid >= 59 && fid <= 70) { return 3; }
     return 1;
 }
 
@@ -2829,6 +3317,243 @@ fn run_audit2(fid, mode, a): (i64, i64, i64) {
     return (pw2, _km_bits(ff), fo);
 }
 
+# The overflow audit's B3 (ADR 0002 #31, #32): ids 58 … 70 as result words (cr_verify.py's AUDIT): mode 0 the public
+# function (an Err as the NaN word 0x7FF8000000000001), its fast path and flag (the shape's straight-line monomial path,
+# _km_mul_sqrt_ratio_fast, or the Rust-chain fast path of a #20-style function where its range test passes; for
+# binding_energy_per_nucleon the inline test, Δm·931.494… finite); mode 1 the slow path forced (_km_cr_mono_acc at the
+# factors, _km_mul_sqrt_ratio_acc, the _km_*_ux evaluation). Id 58 is _km_cr_mul_sqrt_ratio itself (its NaN outside the
+# domain in both slots). A charge, a count or wsqrt's e is an integer word. An Err row, and a non-finite charge (Rust's
+# expression), return the public result in both slots and modes.
+#must_use
+fn run_audit3(fid, mode, a): (i64, i64, i64) {
+    var nanw = 0x7FF8000000000001;
+    var x: f64 = load64(a);
+    var y: f64 = load64(a + 8);
+    var z: f64 = load64(a + 16);
+    var w: f64 = load64(a + 24);
+    var u: f64 = load64(a + 32);
+    var rg: f64 = KM_GAS_CONSTANT;
+    var kc: f64 = KM_COULOMB_CONSTANT;
+    if (fid == 58 || fid == 66) {
+        var e = 0 - 1;
+        var pw = 0;
+        if (fid == 58) {
+            e = load64(a + 24);
+            var r58: f64 = _km_cr_mul_sqrt_ratio(x, y, z, e);
+            if (_km_is_nan(r58) == 1) { return (nanw, nanw, 1); }
+            pw = _km_bits(r58);
+        } else {
+            var t66, v66 = morse_width_parameter(x, y, z);
+            if (is_ok(t66) != 1) { return (nanw, nanw, 1); }
+            pw = v66;
+        }
+        if (mode == 1) {
+            var sa: f64 = _km_mul_sqrt_ratio_acc(x, y, z, e);
+            return (_km_bits(sa), _km_bits(sa), 0);
+        }
+        var sf, so = _km_mul_sqrt_ratio_fast(x, y, z, e);
+        return (pw, _km_bits(sf), so);
+    }
+    if (fid >= 62 && fid <= 64) {
+        var tp = 0;
+        var vp = 0;
+        if (fid == 62) {
+            var t62, v62 = van_der_waals_pressure(x, y, z, w, u);
+            tp = t62;
+            vp = v62;
+        } elif (fid == 63) {
+            var pr = KmPengRobinsonParams { tc: x, pc: y, omega: z };
+            var t63, v63 = peng_robinson_pressure(pr, w, u);
+            tp = t63;
+            vp = v63;
+        } else {
+            var t64, v64 = redlich_kwong_pressure(x, y, z, w);
+            tp = t64;
+            vp = v64;
+        }
+        var pubw = nanw;
+        if (is_ok(tp) == 1) { pubw = vp; }
+        # Rust's validation before the co-volume test: an Err there is the public Err in both slots
+        var pre = 1;
+        if (fid == 62) {
+            if (_km_is_positive(y) != 1 || _km_is_finite(x) != 1 || _km_is_non_negative(w) != 1) { pre = 0; }
+            if (_km_is_non_negative(u) != 1 || _km_is_positive(z) != 1) { pre = 0; }
+        } elif (fid == 63) {
+            if (_km_is_positive(w) != 1 || _km_is_positive(x) != 1 || _km_is_positive(y) != 1) { pre = 0; }
+            if (_km_is_finite(z) != 1 || _km_is_finite(u) != 1) { pre = 0; }
+        } else {
+            if (_km_is_positive(z) != 1 || _km_is_positive(x) != 1 || _km_is_positive(y) != 1) { pre = 0; }
+            if (_km_is_finite(w) != 1) { pre = 0; }
+        }
+        if (pre != 1) { return (pubw, pubw, 1); }
+        var sp: f64 = 0.0;
+        var se = 0;
+        if (mode == 1) {
+            if (fid == 62) {
+                var p62, e62 = _km_vdw_ux(x, y, z, w, u);
+                sp = p62;
+                se = e62;
+            } elif (fid == 63) {
+                var p63, e63 = _km_pr_pressure_ux(x, y, z, w, u);
+                sp = p63;
+                se = e63;
+            } else {
+                var p64, e64 = _km_rk_pressure_ux(x, y, z, w);
+                sp = p64;
+                se = e64;
+            }
+            var sw = _km_bits(sp);
+            if (se != KM_ERR_NONE) { sw = nanw; }
+            return (sw, sw, 0);
+        }
+        var fp: f64 = 0.0;
+        var fe = 0;
+        var fo = 0;
+        if (fid == 62) {
+            var q62, f62, o62 = _km_vdw_fast(x, y, z, w, u);
+            fp = q62;
+            fe = f62;
+            fo = o62;
+        } elif (fid == 63) {
+            var q63, f63, o63 = _km_pr_pressure_fast(x, y, z, w, u);
+            fp = q63;
+            fe = f63;
+            fo = o63;
+        } else {
+            var q64, f64e, o64 = _km_rk_pressure_fast(x, y, z, w);
+            fp = q64;
+            fe = f64e;
+            fo = o64;
+        }
+        var fw = _km_bits(fp);
+        if (fe != KM_ERR_NONE) { fw = nanw; }
+        return (pubw, fw, fo);
+    }
+    if (fid == 65) {
+        var t65, v65 = lennard_jones(x, y, z);
+        if (is_ok(t65) != 1) { return (nanw, nanw, 1); }
+        if (mode == 1) {
+            var l65: f64 = _km_lj_ux(x, y, z);
+            return (_km_bits(l65), _km_bits(l65), 0);
+        }
+        var f65, o65 = _km_lj_fast(x, y, z);
+        return (v65, _km_bits(f65), o65);
+    }
+    if (fid == 69) {
+        var zc = load64(a + 8);
+        var za = load64(a + 16);
+        var t69, v69 = born_lande_lattice_energy(x, zc, za, w, u);
+        if (is_ok(t69) != 1) { return (nanw, nanw, 1); }
+        var zcf: f64 = f64_from(zc);
+        var zaf: f64 = f64_from(za);
+        if (mode == 1) {
+            var l69: f64 = _km_born_lande_ux(x, zcf, zaf, w, u);
+            return (_km_bits(l69), _km_bits(l69), 0);
+        }
+        var f69, o69 = _km_born_lande_fast(x, zcf, zaf, w, u);
+        return (v69, _km_bits(f69), o69);
+    }
+    if (fid == 70) {
+        var zz = load64(a);
+        var nn = load64(a + 8);
+        var t70, v70 = binding_energy_per_nucleon(zz, nn, z);
+        if (is_ok(t70) != 1) { return (nanw, nanw, 1); }
+        var zf: f64 = f64_from(zz);
+        var nf: f64 = f64_from(nn);
+        var af: f64 = f64_from(zz + nn);
+        var md: f64 = _km_mass_defect(zf, nf, z);
+        if (mode == 1) {
+            var l70: f64 = _km_bea_ux(md, af);
+            return (_km_bits(l70), _km_bits(l70), 0);
+        }
+        var be: f64 = md * KM_AMU_MEV;
+        var dbe: f64 = be - be;
+        if (dbe == 0.0) {
+            var q70: f64 = be / af;
+            return (v70, _km_bits(q70), 1);
+        }
+        return (v70, 0, 0);
+    }
+    # the monomials: 59 igp, 60 igv, 61 dens, 67 coul, 68 force
+    var nb: f64[4];
+    var db: f64[4];
+    var nm = 3;
+    var nd = 1;
+    var pw2 = 0;
+    var ff: f64 = 0.0;
+    var fo2 = 0;
+    if (fid == 59 || fid == 60) {
+        var t59 = 0;
+        var v59 = 0;
+        if (fid == 59) {
+            var ta, va = ideal_gas_pressure(x, y, z);
+            t59 = ta;
+            v59 = va;
+        } else {
+            var tb, vb = ideal_gas_volume(x, y, z);
+            t59 = tb;
+            v59 = vb;
+        }
+        if (is_ok(t59) != 1) { return (nanw, nanw, 1); }
+        pw2 = v59;
+        store64(&nb, x);
+        store64(&nb + 8, rg);
+        store64(&nb + 16, y);
+        store64(&db, z);
+        var f59, o59 = _km_mul3_div_fast(x, rg, y, z);
+        ff = f59;
+        fo2 = o59;
+    } elif (fid == 61) {
+        var t61, v61 = gas_density(x, y, z);
+        if (is_ok(t61) != 1) { return (nanw, nanw, 1); }
+        pw2 = v61;
+        store64(&nb, x);
+        store64(&nb + 8, y);
+        store64(&db, rg);
+        store64(&db + 8, z);
+        nm = 2;
+        nd = 2;
+        var f61, o61 = _km_mul2_div2_fast(x, y, rg, z);
+        ff = f61;
+        fo2 = o61;
+    } else {
+        var t67 = 0;
+        var v67 = 0;
+        if (fid == 67) {
+            var tc1, vc1 = coulomb(x, y, z);
+            t67 = tc1;
+            v67 = vc1;
+        } else {
+            var tc2, vc2 = coulomb_force(x, y, z);
+            t67 = tc2;
+            v67 = vc2;
+        }
+        if (is_ok(t67) != 1) { return (nanw, nanw, 1); }
+        pw2 = v67;
+        if (_km_is_finite(x) != 1 || _km_is_finite(y) != 1) { return (pw2, pw2, 1); }
+        store64(&nb, kc);
+        store64(&nb + 8, x);
+        store64(&nb + 16, y);
+        store64(&db, z);
+        if (fid == 67) {
+            var f67, o67 = _km_mul3_div_fast(kc, x, y, z);
+            ff = f67;
+            fo2 = o67;
+        } else {
+            store64(&db + 8, z);
+            nd = 2;
+            var f68, o68 = _km_mul3_div2_fast(kc, x, y, z, z);
+            ff = f68;
+            fo2 = o68;
+        }
+    }
+    if (mode == 1) {
+        var aa: f64 = _km_cr_mono_acc(&nb, nm, &db, nd);
+        return (_km_bits(aa), _km_bits(aa), 0);
+    }
+    return (pw2, _km_bits(ff), fo2);
+}
+
 # The overflow audit's B1 (ADR 0002 #27, #28): ids 33 … 44 as result words (cr_verify.py's AUDIT): mode 0 the public
 # function (an Err as the NaN word 0x7FF8000000000001), the fast path's result at the function's factors and its flag
 # (the monomial's _km_cr_mono_fast; for second_order_concentration and michaelis_menten their Rust-chain fast path);
@@ -2838,6 +3563,10 @@ fn run_audit2(fid, mode, a): (i64, i64, i64) {
 #must_use
 fn run_audit(fid, mode, a): (i64, i64, i64) {
     var nanw = 0x7FF8000000000001;
+    if (fid >= 58) {
+        var c0, c1, cf = run_audit3(fid, mode, a);
+        return (c0, c1, cf);
+    }
     if (fid >= 45) {
         var b0, b1, bf = run_audit2(fid, mode, a);
         return (b0, b1, bf);

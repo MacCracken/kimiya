@@ -22,18 +22,23 @@
 //!   of two × charges 1–3 × r₀ 1.5–4 Å, r₀ and M over every tenth decade (overflow to −∞, underflow to −0.0), seeded
 //!   salts; every Err path), `born_haber_lattice_energy` (each argument over the edges, the Rust tests' NaCl cycle,
 //!   ∞ − ∞, seeded cycles).
+//! - ADR 0002 #32 (the overflow audit's B3): `born_lande_lattice_energy` rows are noted where the port's Rust sequence
+//!   with an unbounded exponent (the final product rounded once) differs from Rust's value (`audit.rs`), and
+//!   `audit::emit_inorganic` appends its edge rows (the prefix past DBL_MAX or below 2⁻¹⁰²², brought back by e² and r₀)
+//!   with its own seed.
 //!
 //! Every input goes through `black_box`.
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::grids::{Rng, decades, pow2};
 use crate::m_reaction::{edges, res};
 use crate::tsv::{Class, Module, Tok, b, e, err, f, i, s};
 use kimiya::inorganic::{
     BORN_EXP_AR, BORN_EXP_HE, BORN_EXP_KR, BORN_EXP_NE, BORN_EXP_XE, IONIC_RADII, IonicRadius, Ligand, MADELUNG_CSCL,
     MADELUNG_FLUORITE, MADELUNG_NACL, MADELUNG_RUTILE, MADELUNG_ZNS, born_haber_lattice_energy,
-    born_lande_lattice_energy, cfse_octahedral, delta_tet_from_oct, lookup_ionic_radius, spin_only_moment,
+    cfse_octahedral, delta_tet_from_oct, lookup_ionic_radius, spin_only_moment,
     unpaired_electrons_oct,
 };
 
@@ -76,13 +81,7 @@ fn exact_cfse(v: f64) -> f64 {
 }
 
 fn lande(m: &mut Module, madelung: f64, zc: u32, za: u32, r0: f64, n: f64) {
-    let out = res(born_lande_lattice_energy(bb(madelung), bb(zc), bb(za), bb(r0), bb(n)));
-    m.row(
-        "inorganic::born_lande_lattice_energy",
-        Class::B,
-        &[f(madelung), i(zc), i(za), f(r0), f(n)],
-        &[out],
-    );
+    audit::lande(m, madelung, zc, za, r0, n);
 }
 
 fn haber(m: &mut Module, x: [f64; 5]) {
@@ -281,5 +280,6 @@ pub fn emit() -> Module {
             lookup(&mut m, sym, q);
         }
     }
+    audit::emit_inorganic(&mut m);
     m
 }

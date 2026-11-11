@@ -90,6 +90,7 @@ var _bench_st_x = 0;        # ADR 0002 #24–#26's exact paths: 9 f64 slots (ben
 var _bench_emp2 = 0;        # [(6, 12.011), (8, 17.5989)]: r − 1 within 1/(10·9·10¹⁵) of 1/10
 var _bench_b1 = 0;          # the audit's B1 (ADR 0002 #27, #28): 12 × 4 f64 input slots (bench_audit_b1)
 var _bench_b2 = 0;          # the audit's B2 (ADR 0002 #29, #30): 14 × 5 input words (bench_audit_b2)
+var _bench_b3 = 0;          # the audit's B3 (ADR 0002 #31, #32): 17 × 6 input words (bench_audit_b3)
 
 # element/lookup_by_symbol: `lookup_by_symbol(black_box("Fe"))`, a linear scan to row 26.
 fn bench_lookup_by_symbol(per_batch, batches) {
@@ -1206,6 +1207,81 @@ fn bench_audit_b2(name, which, per_batch, batches) {
     bench_report(b);
 }
 
+# Cyrius-only, the overflow audit's B3 (ADR 0002 #31, #32): gas's, potential's, inorganic's and nuclear's functions
+# without a Rust bench (ideal_gas_pressure, binding_energy_per_nucleon and lennard_jones have theirs above), on typical
+# inputs, then on the edges that take each one's other paths. Six words per bench, a charge or a count as its integer
+# word. which: 0 ideal_gas_volume (1 mol, 273.15 K, 101325 Pa), 1 gas_density (air at STP: 101325 Pa, 0.029 kg/mol,
+# 273.15 K), 2 van_der_waals_pressure (CO₂: 1 mol, 300 K, 1 L, a = 0.364, b = 4.267·10⁻⁵), 3 peng_robinson_pressure
+# (N₂ at 300 K, 0.025 m³/mol), 4 redlich_kwong_pressure (N₂'s Tc and Pc, 300 K, 0.025 m³/mol), 5 coulomb (e, −e at
+# 1 Å), 6 coulomb_force (the same), 7 morse_width_parameter (HCl: 5.634·10¹⁴ rad/s, 1.6267·10⁻²⁷ kg, 7.399·10⁻¹⁹ J),
+# 8 born_lande_lattice_energy (NaCl: 1.748, 1, 1, 2.82 Å, 8); the edges: 9 van_der_waals_pressure_edge (n = 10³⁰⁶:
+# n·R·T overflows, the unbounded-exponent slow path), 10 peng_robinson_pressure_edge (Tc = 2⁻¹⁰²²: T/Tc overflows,
+# Rust's NaN), 11 redlich_kwong_pressure_edge (Tc = 10¹³⁰: Tc^2.5 overflows, the exact rescale), 12
+# lennard_jones_edge (ε = 10⁻³⁰⁰, σ/r = 5.8·10²⁵: (σ/r)¹² overflows), 13 morse_width_parameter_subnormal (1, 2⁻¹⁰⁷⁴,
+# 2¹⁰²³: the exact root), 14 born_lande_lattice_energy_edge (DBL_MAX, 1, 1, DBL_MAX, DBL_MAX: the prefix overflows),
+# 15 binding_energy_per_nucleon_edge (1000, 1000, DBL_MAX: Δm·931.494 overflows), 16 morse_width_parameter_tie
+# (ω = y with 3y = 2⁵³ + 1, μ = 9, D_e = ½: a midpoint the fast test leaves to the exact root). Each runs 100,000 × 20
+# calls, the size of this file's slow rows: at 1,000,000 × 20 the file passes `cyrius bench`'s default deadline of 300 s
+# per bench file (it takes about 255 s without B3's rows).
+fn bench_audit_b3(name, which, per_batch, batches) {
+    var x = _bench_b3 + 48 * which;
+    var a0: f64 = load64(x);
+    var a1: f64 = load64(x + 8);
+    var a2: f64 = load64(x + 16);
+    var a3: f64 = load64(x + 24);
+    var a4: f64 = load64(x + 32);
+    var w0 = load64(x);
+    var w1 = load64(x + 8);
+    var w2 = load64(x + 16);
+    var pr = KmPengRobinsonParams { tc: a0, pc: a1, omega: a2 };
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            if (which == 0) {
+                var t0, v0 = ideal_gas_volume(a0, a1, a2);
+                _bench_sink = v0;
+            } elif (which == 1) {
+                var t1, v1 = gas_density(a0, a1, a2);
+                _bench_sink = v1;
+            } elif (which == 2 || which == 9) {
+                var t2, v2 = van_der_waals_pressure(a0, a1, a2, a3, a4);
+                _bench_sink = v2;
+            } elif (which == 3 || which == 10) {
+                var t3, v3 = peng_robinson_pressure(pr, a3, a4);
+                _bench_sink = v3;
+            } elif (which == 4 || which == 11) {
+                var t4, v4 = redlich_kwong_pressure(a0, a1, a2, a3);
+                _bench_sink = v4;
+            } elif (which == 5) {
+                var t5, v5 = coulomb(a0, a1, a2);
+                _bench_sink = v5;
+            } elif (which == 6) {
+                var t6, v6 = coulomb_force(a0, a1, a2);
+                _bench_sink = v6;
+            } elif (which == 7 || which == 13 || which == 16) {
+                var t7, v7 = morse_width_parameter(a0, a1, a2);
+                _bench_sink = v7;
+            } elif (which == 8 || which == 14) {
+                var t8, v8 = born_lande_lattice_energy(a0, w1, w2, a3, a4);
+                _bench_sink = v8;
+            } elif (which == 12) {
+                var t12, v12 = lennard_jones(a0, a1, a2);
+                _bench_sink = v12;
+            } else {
+                var t15, v15 = binding_energy_per_nucleon(w0, w1, a2);
+                _bench_sink = v15;
+            }
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
 # Runs every bench.
 fn main(): i64 {
     alloc_init();
@@ -1647,6 +1723,95 @@ fn main(): i64 {
     bench_audit_b2("spectroscopy/vibrational_frequency_edge", 11, 1000000, 20);
     bench_audit_b2("spectroscopy/vibrational_frequency_subnormal", 12, 100000, 20);
     bench_audit_b2("electrochemistry/faraday_mass_ratio_tie", 13, 1000000, 20);
+    _bench_b3 = alloc(102 * 8);
+    var b3: f64[102];
+    q = 0;
+    while (q < 102) {
+        b3[q] = 0.0;
+        q = q + 1;
+    }
+    b3[0] = 1.0;                            # 0 ideal_gas_volume
+    b3[1] = 273.15;
+    b3[2] = 101325.0;
+    b3[6] = 101325.0;                       # 1 gas_density
+    b3[7] = 0.029;
+    b3[8] = 273.15;
+    b3[12] = 1.0;                           # 2 van_der_waals_pressure (CO₂)
+    b3[13] = 300.0;
+    b3[14] = 0.001;
+    b3[15] = 0.364;
+    b3[16] = 0.00004267;
+    b3[18] = 126.2;                         # 3 peng_robinson_pressure (N₂)
+    b3[19] = 3394000.0;
+    b3[20] = 0.0377;
+    b3[21] = 300.0;
+    b3[22] = 0.025;
+    b3[24] = 126.2;                         # 4 redlich_kwong_pressure (N₂)
+    b3[25] = 3394000.0;
+    b3[26] = 300.0;
+    b3[27] = 0.025;
+    b3[32] = 0.0000000001;                  # 5 coulomb (e, −e: slots 30, 31 below; r = 1 Å)
+    b3[38] = 0.0000000001;                  # 6 coulomb_force (e, −e: slots 36, 37 below)
+    b3[42] = 563400000000000.0;             # 7 morse_width_parameter (HCl; μ, D_e: slots 43, 44 below)
+    b3[48] = 1.748;                         # 8 born_lande_lattice_energy (NaCl; z⁺ = z⁻ = 1: slots 49, 50; r₀: 51)
+    b3[52] = 8.0;
+    b3[55] = 300.0;                         # 9 van_der_waals_pressure_edge (n = 10³⁰⁶, V = 10³⁰⁰, b = 10⁻¹⁰: below)
+    b3[61] = 3394000.0;                     # 10 peng_robinson_pressure_edge (Tc = 2⁻¹⁰²²: slot 60, below)
+    b3[62] = 0.0377;
+    b3[63] = 300.0;
+    b3[64] = 0.025;
+    b3[68] = 300.0;                         # 11 redlich_kwong_pressure_edge (Tc = 10¹³⁰, Pc = 10³⁰⁰: below)
+    b3[69] = 1.0;
+    b3[73] = 1.0;                           # 12 lennard_jones_edge (ε = 10⁻³⁰⁰, r = 1.7232929428188076·10⁻²⁶: below)
+    b3[78] = 1.0;                           # 13 morse_width_parameter_subnormal (μ = 2⁻¹⁰⁷⁴, D_e = 2¹⁰²³: below)
+    b3[84] = dmax;                          # 14 born_lande_lattice_energy_edge (z⁺ = z⁻ = 1: slots 85, 86)
+    b3[87] = dmax;
+    b3[88] = dmax;
+    b3[92] = dmax;                          # 15 binding_energy_per_nucleon_edge (Z = N = 1000: slots 90, 91)
+    b3[96] = 3002399751580331.0;            # 16 morse_width_parameter_tie: ω·√(9/(2·½)) = 3ω = 2⁵³ + 1
+    b3[97] = 9.0;
+    b3[98] = 0.5;
+    memcpy(_bench_b3, &b3, 102 * 8);
+    store64(_bench_b3 + 8 * 30, 0x3C07A4DA290C1653);     # e = 1.602176634·10⁻¹⁹ C
+    store64(_bench_b3 + 8 * 31, 0xBC07A4DA290C1653);     # −e
+    store64(_bench_b3 + 8 * 36, 0x3C07A4DA290C1653);
+    store64(_bench_b3 + 8 * 37, 0xBC07A4DA290C1653);
+    store64(_bench_b3 + 8 * 43, 0x3A601C2CA997C94D);     # 1.6267·10⁻²⁷ kg
+    store64(_bench_b3 + 8 * 44, 0x3C2B4C286D889BBE);     # 7.399·10⁻¹⁹ J
+    store64(_bench_b3 + 8 * 49, 1);
+    store64(_bench_b3 + 8 * 50, 1);
+    store64(_bench_b3 + 8 * 51, 0x3DF360FF184C93D7);     # 2.82·10⁻¹⁰ m
+    store64(_bench_b3 + 8 * 54, 0x7F76C8E5CA239029);     # 10³⁰⁶
+    store64(_bench_b3 + 8 * 56, 0x7E37E43C8800759C);     # 10³⁰⁰
+    store64(_bench_b3 + 8 * 58, 0x3DDB7CDFD9D7BDBB);     # 10⁻¹⁰
+    store64(_bench_b3 + 8 * 60, 0x0010000000000000);     # 2⁻¹⁰²²
+    store64(_bench_b3 + 8 * 66, 0x5AECDA62055B2D9E);     # 10¹³⁰
+    store64(_bench_b3 + 8 * 67, 0x7E37E43C8800759C);     # 10³⁰⁰
+    store64(_bench_b3 + 8 * 72, 0x01A56E1FC2F8F359);     # 10⁻³⁰⁰
+    store64(_bench_b3 + 8 * 74, 0x3A95555555555555);     # 1.7232929428188076·10⁻²⁶
+    store64(_bench_b3 + 8 * 79, 1);                      # 2⁻¹⁰⁷⁴
+    store64(_bench_b3 + 8 * 80, 0x7FE0000000000000);     # 2¹⁰²³
+    store64(_bench_b3 + 8 * 85, 1);
+    store64(_bench_b3 + 8 * 86, 1);
+    store64(_bench_b3 + 8 * 90, 1000);
+    store64(_bench_b3 + 8 * 91, 1000);
+    bench_audit_b3("gas/ideal_gas_volume", 0, 100000, 20);
+    bench_audit_b3("gas/gas_density", 1, 100000, 20);
+    bench_audit_b3("gas/van_der_waals_pressure", 2, 100000, 20);
+    bench_audit_b3("gas/peng_robinson_pressure", 3, 100000, 20);
+    bench_audit_b3("gas/redlich_kwong_pressure", 4, 100000, 20);
+    bench_audit_b3("potential/coulomb", 5, 100000, 20);
+    bench_audit_b3("potential/coulomb_force", 6, 100000, 20);
+    bench_audit_b3("potential/morse_width_parameter", 7, 100000, 20);
+    bench_audit_b3("inorganic/born_lande_lattice_energy", 8, 100000, 20);
+    bench_audit_b3("gas/van_der_waals_pressure_edge", 9, 100000, 20);
+    bench_audit_b3("gas/peng_robinson_pressure_edge", 10, 100000, 20);
+    bench_audit_b3("gas/redlich_kwong_pressure_edge", 11, 100000, 20);
+    bench_audit_b3("potential/lennard_jones_edge", 12, 100000, 20);
+    bench_audit_b3("potential/morse_width_parameter_subnormal", 13, 100000, 20);
+    bench_audit_b3("inorganic/born_lande_lattice_energy_edge", 14, 100000, 20);
+    bench_audit_b3("nuclear/binding_energy_per_nucleon_edge", 15, 100000, 20);
+    bench_audit_b3("potential/morse_width_parameter_tie", 16, 100000, 20);
     return 0;
 }
 

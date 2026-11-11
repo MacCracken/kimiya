@@ -1517,6 +1517,88 @@ Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **18 modules, 0 faili
 === parity summary: 18 modules, 0 failing | rows: 334992 ok, 0 failed, 0 measured, 0 pending, 38333 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
 ```
 
+## 23. The overflow audit's B3: gas laws, potentials, Born–Landé and binding energy, ADR 0002 #31 and #32 (2026-11-11)
+
+B1's decisions unchanged (ADR 0002's B3 addition): a single product or quotient of inputs and constants, possibly under a
+final square root, rounds once; a formula with a sum inside gets #20's edge fix; Rust's NaN for an out-of-range value
+becomes the correctly rounded ±∞ or 0. B3 is the survey's F2 (#31: `ideal_gas_pressure`, `ideal_gas_volume`,
+`gas_density` rounded once; `van_der_waals_pressure`, `peng_robinson_pressure`, `redlich_kwong_pressure` with an
+unbounded exponent, the co-volume tests on the unbounded co-volume, Tc^2.5 exactly rescaled) and F6 (#32: `coulomb`,
+`coulomb_force` rounded once; `morse_width_parameter` the correctly rounded ω·√(μ/(2·D_e)); `lennard_jones`,
+`born_lande_lattice_energy`, `binding_energy_per_nucleon` with an unbounded exponent), folding M4d's #17 and #18 into
+#32. Rust's checks, Err codes and order are kept. The corpus keeps the oracle's values; the rows where the port's result
+differs carry it in their note (its value, or for the equations of state its Err), and the harness maps and counts them
+per function. `scripts/oracle/src/audit.rs` appends each module's B3 edge rows with its own seed: gas 21,093 → 22,773,
+potential 31,761 → 33,464, inorganic 15,162 → 15,416, nuclear 54,057 → 54,224 (3,804 rows).
+
+| Function | Class | Rows | Oracle Ok | Oracle Err | Noted (port ≠ oracle) | changing, of the rows before B3 | ulp of the rest |
+|---|---|---|---|---|---|---|---|
+| `gas::ideal_gas_pressure` | B | 474 | 451 | 23 | 146 (#31) | 73 of 256 | 0 |
+| `gas::ideal_gas_volume` | B | 393 | 370 | 23 | 148 (#31) | 87 of 255 | 0 |
+| `gas::gas_density` | B | 414 | 386 | 28 | 222 (#31) | 57 of 205 | 0 |
+| `gas::van_der_waals_pressure` | B | 610 | 529 | 81 | 206 (#31, unbounded; 3 a co-volume decision) | 1 of 297 | 0 |
+| `gas::peng_robinson_pressure` | B | 1,003 | 810 | 193 | 201 (#31, unbounded; 93 a co-volume decision) | 3 of 660 | 0 |
+| `gas::redlich_kwong_pressure` | C | 1,082 | 921 | 161 | 234 (#31, unbounded; 82 a co-volume decision) | 0 of 623 | 0 |
+| `potential::lennard_jones` | B | 2,421 | 2,358 | 63 | 582 (#32, unbounded; 244 with ε ≥ 2¹⁰²²) | 100 of 2,105 | 0 |
+| `potential::morse_width_parameter` | B | 5,018 | 4,985 | 33 | 1,860 (#32, √; 340 with D_e ≥ 2¹⁰²³) | 1,552 of 4,509 | 0 |
+| `potential::coulomb` | B | 2,369 | 2,355 | 14 | 730 (#32) | 519 of 1,930 | 0 |
+| `potential::coulomb_force` | B | 2,369 | 2,355 | 14 | 679 (#32) | 437 of 1,930 | 0 |
+| `inorganic::born_lande_lattice_energy` | B | 3,623 | 3,517 | 106 | 175 (#32, unbounded) | 23 of 3,369 | 0 |
+| `nuclear::binding_energy_per_nucleon` | B | 785 | 704 | 81 | 156 (#32, unbounded) | 0 of 618 | 0 |
+
+- **The noted rows** are read by `_par_got_noted` and, for the three equations of state, the new `_par_got_noted_r`
+  (a note's value, or its `(E:InvalidInput)`): the port's result must be the note's bit for bit, and the row is accepted
+  under ADR 2 even within class B's 2 ulp. Of the 1,157 #31 rows, 98 are the port's Err where Rust's rounded co-volume
+  accepts and 80 the port's value where Rust's refuses. Every other row of the twelve is the port's result and the
+  oracle's at once (0 ulp). "Changing" counts the rows that existed before B3 whose expected port value moves: the
+  monomials on a quarter to a third of their ordinary rows and at their edges, the #20-style functions only at their
+  edges (vdW's one subnormal-degraded row, Peng–Robinson's subnormal Tc rows, none of Redlich–Kwong's or the binding
+  energy's), and for `lennard_jones` and `morse_width_parameter` the rows not already mapped by #17 / #18 with the same
+  value: all 180 #17 rows keep theirs (now noted under #32), 128 of #18's 181 do, 42 move by one ulp, 3 by two and 8 by up
+  to 1.3·10¹² ulp (a subnormal μ/(2·D_e) #18 still rounded at the subnormal grid).
+- **The proofs** (`validate.py` §21). Each row's port result recomputed independently — the monomials with `Fraction`,
+  the Morse width with Python's `math.isqrt` and again with MPFR's √ of a 320-bit quotient
+  (`mpfr_ref.ux_mul_sqrt_div_final`), the #20-style functions through `mpfr_ref.UX` with MPFR's own pow for Tc^2.5
+  (`UX.pow`) and the final operations — and each note proven to sit exactly where it differs from the oracle's, naming
+  it; no row whose f64 chain stays in the normal range is noted (285 `van_der_waals_pressure`, 570
+  `peng_robinson_pressure`, 540 `redlich_kwong_pressure`, 1,480 `lennard_jones`, 3,174 `born_lande_lattice_energy`, 544
+  `binding_energy_per_nucleon` rows: Rust's bits); #17's (ε·d)·4 is the port's value on all 366 rows with ε ≥ 2¹⁰²² and a
+  normal d chain; Tc^2.5's rescale is checked on 878 rows; glibc's pow(Tc, 2.5) is correctly rounded on every
+  Redlich–Kwong row (so the notes, made against glibc's oracle, are against the corrected one). The hard rows: 2,085 where
+  Rust's value is 0, ±∞ or NaN and the port's representable, 232 where Rust's NaN is the value ±∞ (`lennard_jones` past
+  σ/r = 2^170.7, the equations of state), 137 where Rust's other special differs from an out-of-range value (+0 for the
+  port's −0), 178 co-volume decisions, 215 midpoints of the 53-bit grid (q·R, q·k_e), 891 subnormal results with 144 of
+  the subnormal grid's ties, 272 Tc^2.5 past either end; for the Morse width 18 exact roots, 122 midpoints (ties to even),
+  153 quotients μ/(2·D_e) past DBL_MAX, 446 below 2⁻¹⁰⁷⁴, 169 subnormal operands, 300 subnormal results and 18 roots within
+  2⁻⁹⁸ of a 53-bit midpoint.
+- **`cr_verify.py`**: `wsqrt` (`_km_cr_mul_sqrt_ratio` on 316,971 arguments: every binade of each operand, e in [−4, 4]
+  and far, x/y and the result past either end, subnormal operands and results, exact roots, its midpoints at both grids,
+  roots within ulps of a midpoint, the domain) and the twelve functions — `igp` 220,010, `igv` 220,010, `dens` 200,008,
+  `vdw` 180,009, `prp` 180,007, `rkp` 180,006, `lj` 200,009, `width` 316,695, `coul` 210,700, `force` 210,700, `lande`
+  200,008, `bea` 180,009 (2,815,142 in all) — the public function, the fast path where it answers and the slow path
+  forced, against `Fraction`, exact integer roots and `mpfr_ref.UX`: 0 mismatches, the same bits and flags on x86_64 ELF,
+  x86_64 PE and aarch64. The fast paths decline on the edge, midpoint and subnormal sections only (none on the typical
+  ones).
+
+Tests: `tests/mathx.tcyr`'s `b3_values` and `b3_agrees`; `tests/gas.tcyr`'s `cyrius_adr31`, `tests/potential.tcyr`'s
+`cyrius_adr32` (and `cyrius_exact_overflow_edges` for the fold), `tests/inorganic.tcyr`'s `cyrius_adr32_born_lande`,
+`tests/nuclear.tcyr`'s `cyrius_adr32_bea`; no Rust test changes.
+
+**Cost** (`tests/kimiya.bcyr`, before → after, the same host; `docs/benchmarks-rust-v-cyrius.md`'s B3 section):
+`gas/ideal_gas_pressure` 18 → 119 ns (Rust 2.18), `nuclear/binding_energy_per_nucleon_fe56` 28 → 29 ns (Rust 2.02),
+`potential/lennard_jones` 36 → 39 ns, `ideal_gas_volume` 20 → 119, `gas_density` 20 → 108, `van_der_waals_pressure`
+35 → 55, `peng_robinson_pressure` 78 → 100, `redlich_kwong_pressure` 182 → 187, `coulomb` 16 → 126, `coulomb_force`
+18 → 145, `morse_width_parameter` 33 → 135, `born_lande_lattice_energy` 46 → 50; the slow paths 117–618 ns, the Morse
+width's exact root 1.27 µs.
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **18 modules, 0 failing; 333,818 ok, 0 failed, 0 measured,
+0 pending, 43,311 accepted (809 under ADR 6; under ADR 2 as §22 plus 1,157 #31 and 4,182 #32 rows, less #17's 180 and
+#18's 181, now among #32's), 0 glibc-matching.**
+
+```text
+=== parity summary: 18 modules, 0 failing | rows: 333818 ok, 0 failed, 0 measured, 0 pending, 43311 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
+```
+
 ## How to reproduce
 
 ```sh

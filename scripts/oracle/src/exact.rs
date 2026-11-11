@@ -1,9 +1,10 @@
-//! Exact integer arithmetic for the exact values ADR 0002 #13, #16, #19 … #22 and #24 … #30 name (M4c … the overflow
-//! audit's B2): binary64 rounding of m·2^e for a mantissa of any size, the two irrational factors the port rounds once,
+//! Exact integer arithmetic for the exact values ADR 0002 #13, #16, #19 … #22 and #24 … #32 name (M4c … the overflow
+//! audit's B3): binary64 rounding of m·2^e for a mantissa of any size, the two irrational factors the port rounds once,
 //! 2⁻ᶠ (N₀/2ⁿ for a fractional n) and 2^(1/6) (σ·2^(1/6)), the rational 1/(100·x) (the wavenumber conversions), binary64
-//! with an unbounded exponent (the geometry, B1's kinetics and B2's Nernst equation), the exact rationals p/q·2^e of the
-//! Bohr model, the Rydberg formula and the reduced mass, the correctly rounded monomials of stoichiometry, B1 and B2,
-//! and B2's correctly rounded √ of a quotient.
+//! with an unbounded exponent (the geometry, B1's kinetics, B2's Nernst equation and B3's gas laws, potentials, lattice
+//! energy and binding energy, with Redlich–Kwong's Tc^2.5), the exact rationals p/q·2^e of the Bohr model, the Rydberg
+//! formula and the reduced mass, the correctly rounded monomials of stoichiometry, B1, B2 and B3, B2's correctly rounded
+//! √ of a quotient and B3's of a monomial (the Morse width).
 //! Integer arithmetic only, independent of the port's double-word and multi-word code (`validate.py` checks every value
 //! again, with `Fraction` and MPFR).
 
@@ -572,6 +573,30 @@ impl Ux {
         self.add_f64(o.neg())
     }
 
+    /// x·y rounded once into binary64 (its subnormal grid, ±∞ past DBL_MAX), with IEEE's signed zeros: ADR 0002 #32 (the
+    /// overflow audit's B3), the Lennard-Jones and Born–Landé final products. The exact product of the two 53-bit
+    /// mantissas (below 2¹⁰⁶), then `round_scaled`.
+    pub fn mul_f64(self, o: Self) -> f64 {
+        let neg = self.neg != o.neg;
+        if self.is_zero() || o.is_zero() {
+            return if neg { -0.0 } else { 0.0 };
+        }
+        round_scaled(u128::from(self.m) * u128::from(o.m), self.e + o.e, neg)
+    }
+
+    /// RN53(x^2.5) for x > 0, at any exponent: ADR 0002 #31 (the overflow audit's B3), Redlich–Kwong's Tc^2.5 with an
+    /// unbounded exponent. x^2.5 = √(x⁵) = √(m⁵·2^(5e)) exactly, by [`sqrt_parts_big`] (⌊√⌋ of a quotient of at least 121
+    /// bits and a sticky bit, at least eight bits below the 53rd) and `round`. Integer arithmetic only, independent of the
+    /// port's rescaled `_km_cr_pow(s, 2.5)` (`validate.py` checks every value again with MPFR's pow at 53 bits and an
+    /// unbounded exponent).
+    pub fn pow25(self) -> Self {
+        assert!(!self.neg && !self.is_zero(), "Ux::pow25 of a value that is not positive");
+        let m = Big::new(u128::from(self.m));
+        let m5 = m.mul(&m).mul(&m).mul(&m).mul(&m);
+        let (mant, h) = sqrt_parts_big(&m5, &Big::new(1), 5 * self.e);
+        Self::round(false, mant, h)
+    }
+
     /// Whether this is exactly the double x (a finite x; zeros by sign too).
     pub fn is(self, x: f64) -> bool {
         x.is_finite() && Self::from_f64(x) == self
@@ -800,6 +825,52 @@ pub fn cr_sqrt_ratio(x: f64, y: f64) -> f64 {
     let r = isqrt(qq);
     let sticky = u128::from(r * r != qq || !rem.is_zero());
     round_scaled((r << 1) | sticky, (ex - ey - k) / 2 - 1, false)
+}
+
+/// (2R + sticky, h − 1) for v = √(p/q·2^e), p ≥ 1, q ≥ 1 integers of any size: Q = ⌊p·2^k/q⌋ of 121 or 122 bits (k of
+/// either sign, e − k even), R = ⌊√Q⌋ (of at least 60 bits; ⌊√⌊z⌋⌋ = ⌊√z⌋), sticky = [R² ≠ Q or the division left a
+/// remainder], h = (e − k)/2: v·2^(1 − h) lies in [2R, 2R + 2), strictly inside when sticky, so a rounding of
+/// (2R + sticky)·2^(h − 1) that drops at least two bits is v's (the overflow audit's B3: the Morse width's √ of a
+/// monomial, Redlich–Kwong's Tc^2.5).
+fn sqrt_parts_big(p: &Big, q: &Big, e: i64) -> (u128, i64) {
+    let mut k = 121 + i64::try_from(q.bits()).unwrap_or(0) - i64::try_from(p.bits()).unwrap_or(0);
+    if (e - k).rem_euclid(2) == 1 {
+        k += 1;
+    }
+    let (num, den) = if k >= 0 {
+        (p.shl(u64::try_from(k).unwrap_or(0)), q.clone())
+    } else {
+        (p.clone(), q.shl(u64::try_from(-k).unwrap_or(0)))
+    };
+    let (quo, rem) = num.divrem(&den);
+    assert!((121..=123).contains(&quo.bits()), "sqrt_parts_big: Q has {} bits", quo.bits());
+    let qq = u128::from(quo.0.first().copied().unwrap_or(0)) | (u128::from(quo.0.get(1).copied().unwrap_or(0)) << 64);
+    let r = isqrt(qq);
+    let sticky = u128::from(r * r != qq || !rem.is_zero());
+    ((r << 1) | sticky, (e - k) / 2 - 1)
+}
+
+/// The overflow audit's B3 (ADR 0002 #32): RN(√(Π num / Π den)) for positive finite doubles, rounded once (nearest, ties
+/// to even: unlike #30's √(x/y) the value can be a midpoint, ω·√(9/(2·½)) = 3ω; subnormal results on the 2⁻¹⁰⁷⁴ grid;
+/// +∞ past DBL_MAX): the Morse width ω·√(μ/(2·D_e)) as √(ω·ω·μ/(2·D_e)). The mantissas' products over each other by
+/// [`sqrt_parts_big`], then `round_scaled` (which drops at least eight bits, so the sticky bit decides every rounding,
+/// an exact midpoint to even). Integer arithmetic only, independent of the port's double-double fast path and its
+/// multi-word root (`validate.py` checks every value again with Python's integers and MPFR).
+pub fn cr_sqrt_monomial(num: &[f64], den: &[f64]) -> f64 {
+    assert!(num.iter().chain(den).all(|v| v.is_finite() && *v > 0.0), "cr_sqrt_monomial({num:?}, {den:?})");
+    let (mut p, mut q, mut e) = (Big::new(1), Big::new(1), 0_i64);
+    for &x in num {
+        let (m, ex) = decompose(x);
+        p = p.mul(&Big::new(u128::from(m)));
+        e += ex;
+    }
+    for &y in den {
+        let (m, ey) = decompose(y);
+        q = q.mul(&Big::new(u128::from(m)));
+        e -= ey;
+    }
+    let (mant, h) = sqrt_parts_big(&p, &q, e);
+    round_scaled(mant, h, false)
 }
 
 /// a·2^ea against b·2^eb, for non-negative integers a and b, exactly.

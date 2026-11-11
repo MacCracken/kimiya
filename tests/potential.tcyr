@@ -1,16 +1,19 @@
 # potential.tcyr — the tests of rust-old/src/potential.rs, ported one for one (each test_group is the Rust test's name;
 # all 33), plus Cyrius-only tests of the pointer arguments (null pointers, the 24-byte point layout), the private
 # helpers' operation order, the typed tolerances on their thresholds, the −π → π mapping, ADR 0002 #16, #17 and #18's
-# exact values, and ADR 0002 #20 (M4e-2): the geometry's unbounded-exponent results against MPFR, its scale invariance
-# bit for bit, and its slow path against the fast one where Rust's chain stays in range. The golden corpus separately
-# checks every function over its grid (tests/parity.tcyr).
+# exact values (since the overflow audit's B3 folded into #32), ADR 0002 #20 (M4e-2): the geometry's unbounded-exponent
+# results against MPFR, its scale invariance bit for bit, and its slow path against the fast one where Rust's chain
+# stays in range, and ADR 0002 #32 (B3): lennard_jones with an unbounded exponent, coulomb and coulomb_force rounded
+# once, the correctly rounded Morse width. The golden corpus separately checks every function over its grid
+# (tests/parity.tcyr).
 #
 # Adapted beyond the port's form (port plan §6.4: `Result::unwrap` is `is_ok` + the payload, a Rust `[f64; 3]` the
 # address of a three-f64 buffer, `x.cos()` / `x.sin()` the correctly rounded _km_cr_cos / _km_cr_sin, `x.to_radians()`
 # Rust's x·(π/180)); no test needed more. `morse_width_parameter_matches_force_constant` calls
 # `spectroscopy::vibrational_frequency` as Rust's does (src/spectroscopy.cyr since M4e; until then its √(k/μ) was
-# computed inline). ADR 0002 #16, #17 and #18 change none of the Rust tests' cases beyond their tolerances (#16 moves
-# Ar's r_min by at most an ulp; #17 and #18 need ε ≥ 2¹⁰²² J or D_e ≥ 2¹⁰²³ J).
+# computed inline). ADR 0002 #16, #17, #18 and #32 change none of the Rust tests' cases beyond their tolerances (#16
+# moves Ar's r_min by at most an ulp; #17 and #18 need ε ≥ 2¹⁰²² J or D_e ≥ 2¹⁰²³ J; #32 keeps every in-range
+# lennard_jones value, and moves HCl's Morse width, Coulomb's energies and forces by at most an ulp).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -571,9 +574,11 @@ fn _t_cyrius_exact_rmin() {
     assert_bits_eq(m, 0xBFF1F59AC3C7D6C0, "the sign is σ's");
 }
 
-# ADR 0002 #17 and #18: where Rust's 4·ε (ε ≥ 2¹⁰²²) or 2·D_e (D_e ≥ 2¹⁰²³) overflows, the port's exact reorder.
+# ADR 0002 #17 and #18: where Rust's 4·ε (ε ≥ 2¹⁰²²) or 2·D_e (D_e ≥ 2¹⁰²³) overflows, M4d's exact reorder; since the
+# overflow audit's B3 both are folded into #32, which keeps #17's (ε·d)·4 bit for bit and makes the whole Morse width
+# correctly rounded (μ/(2·D_e) below 2⁻¹⁰⁷⁴ no longer gives 0).
 fn _t_cyrius_exact_overflow_edges() {
-    test_group("cyrius_exact_overflow_edges (ADR 0002 #17, #18)");
+    test_group("cyrius_exact_overflow_edges (ADR 0002 #17, #18, folded into #32)");
     var big: f64 = 0x7FEFFFFFFFFFFFFF;
     var v0: f64 = lj(big, 1.0, 1.0);
     assert_bits_eq(v0, 0, "ε = DBL_MAX at r = σ: 4·ε·0 = 0 (Rust ∞·0 = NaN)");
@@ -589,10 +594,7 @@ fn _t_cyrius_exact_overflow_edges() {
     assert(v3 == want3, "below 2¹⁰²²: Rust's (4·ε)·d");
     var t4, v4 = morse_width_parameter(1.0, 1.0, big);
     var a4: f64 = ok_f(t4, v4, "morse_width_parameter: Ok");
-    assert(a4 > 0.0, "D_e = DBL_MAX: a > 0 (Rust: μ/∞ = 0, a = 0)");
-    var q: f64 = 0.5 / big;
-    var sq: f64 = f64_sqrt(q);
-    assert(a4 == sq, "… = √(RN(½/DBL_MAX))");
+    assert_bits_eq(a4, 0x1FE6A09E667F3BCD, "D_e = DBL_MAX: √(½/DBL_MAX) rounded once, 5.27·10⁻¹⁵⁵ (Rust: μ/∞ = 0)");
     var d23: f64 = 0x7FE0000000000000;      # 2¹⁰²³
     var t5, v5 = morse_width_parameter(4.0, 1.0, d23);
     var a5: f64 = ok_f(t5, v5, "morse_width_parameter: Ok");
@@ -600,7 +602,93 @@ fn _t_cyrius_exact_overflow_edges() {
     var sub: f64 = from_bits(1);
     var t6, v6 = morse_width_parameter(1.0, sub, d23);
     var a6: f64 = ok_f(t6, v6, "morse_width_parameter: Ok");
-    assert_bits_eq(a6, 0, "μ = 2⁻¹⁰⁷⁴: μ/(2·D_e) < 2⁻²⁰⁹⁷ rounds to 0");
+    assert_bits_eq(a6, 0x0000000002000000, "μ = 2⁻¹⁰⁷⁴: √(2⁻²⁰⁹⁸) = 2⁻¹⁰⁴⁹, subnormal (#18's RN(μ/(2·D_e)) gave 0)");
+}
+
+# ADR 0002 #32 (the overflow audit's B3): lennard_jones under #20's semantics (Rust's chain where it stays in range, the
+# unbounded-exponent sequence and the final product rounded once otherwise), coulomb and coulomb_force rounded once, and
+# morse_width_parameter's correctly rounded ω·√(μ/(2·D_e)); expected values MPFR's (scripts/oracle/mpfr_ref.py) or
+# Fraction's; then the fast paths against the slow ones on 5,000 seeded in-range inputs.
+fn _t_cyrius_adr32() {
+    test_group("cyrius_adr32 (unbounded exponent, rounded once)");
+    var a1: f64 = lj(0.00000000000000000000165, 0.00000000034, 0.00000000038163735642518);
+    assert_bits_eq(a1, 0xBB9F2AE91095DD44, "Ar near r_min: Rust's bits (the fast path)");
+    var e300: f64 = from_bits(0x01A56E1FC2F8F359);      # 1e-300
+    var r26: f64 = from_bits(0x3A95555555555555);       # 1.7232929428188076e-26
+    var a2: f64 = lj(e300, 1.0, r26);
+    assert_bits_eq(a2, 0x41F5B8F903A7CD1A, "(σ/r)¹² past DBL_MAX, ε = 10⁻³⁰⁰: 5.83·10⁹ (Rust +∞)");
+    var s171: f64 = 0x4AA0000000000000;                 # 2¹⁷¹
+    var a3: f64 = lj(from_bits(1), s171, 1.0);
+    assert_bits_eq(a3, 0x7D30000000000000, "σ/r = 2¹⁷¹, ε = 2⁻¹⁰⁷⁴: 2⁹⁸⁰ (Rust ∞ − ∞ = NaN)");
+    var a4: f64 = lj(1.0, s171, 1.0);
+    assert_bits_eq(a4, 0x7FF0000000000000, "σ/r = 2¹⁷¹, ε = 1: +∞, the value (Rust NaN)");
+    var e300b: f64 = from_bits(0x7E37E43C8800759C);     # 1e300
+    var s54: f64 = 0.000000000000000000000000000000000000000000000000000003;
+    var a5: f64 = lj(e300b, s54, 1.0);
+    assert_bits_eq(a5, 0xBBAB8A7493C87F20, "(σ/r)⁶ below 2⁻¹⁰²², ε = 10³⁰⁰: −2.92·10⁻²¹ (Rust 0)");
+    var e1023: f64 = 0x7FE0000000000000;
+    var a6: f64 = lj(e1023, 0x2A10000000000000, 1.0);  # σ/r = 2⁻³⁵⁰
+    assert_bits_eq(a6, 0x8000000000000000, "4·2¹⁰²³·(−2⁻²¹⁰⁰) = −2⁻¹⁰⁷⁵, a tie: −0 (Rust +0)");
+    var e1017: f64 = 0x7F98000000000000;                # 3·2¹⁰¹⁷
+    var a7: f64 = lj(e1017, 0x2A20000000000000, 1.0);  # σ/r = 2⁻³⁴⁹
+    assert_bits_eq(a7, 0x8000000000000002, "−3·2⁻¹⁰⁷⁵, a tie: −2·2⁻¹⁰⁷⁴ (even; Rust +0)");
+    var q: f64 = from_bits(0x3C07A4DA290C1653);         # e = 1.602176634e-19 C
+    var nq: f64 = -q;
+    var t8, v8 = coulomb(q, nq, 0.0000000001);
+    assert(is_ok(t8) == 1 && v8 == 0xBC45476ECF795DAF, "coulomb(e, −e, 1 Å) rounded once");
+    var t9, v9 = coulomb(from_bits(1), q, 0.0000000001);
+    assert(is_ok(t9) == 1 && v9 == 0x000000000000000E, "a subnormal charge: 7·2⁻¹⁰⁷⁴ (Rust's k·q₁·q₂ underflows: 0)");
+    var t10, v10 = coulomb_force(from_bits(1), q, 0.0000000001);
+    assert(is_ok(t10) == 1 && v10 == 0x0000002186DB8781, "coulomb_force: 7.11·10⁻³¹³ (Rust 0)");
+    var r160: f64 = from_bits(0x1EB67E9C127B6E74);      # 1e-160
+    var t11, v11 = coulomb_force(q, nq, r160);
+    assert(is_ok(t11) == 1 && v11 == 0xFCA27EBE0B358CA6, "r·r below 2⁻¹⁰²²: −2.31·10²⁹² (Rust −∞)");
+    var t12, v12 = coulomb(5.0, 1.0, 1.0);
+    assert(is_ok(t12) == 1 && v12 == 0x4224ECFF91E30000, "5·k_e: a midpoint (k_e's odd part has 52 bits), to even");
+    var inf: f64 = 1.0 / 0.0;
+    var t13, v13 = coulomb(inf, 0.0, 1.0);
+    assert(is_ok(t13) == 1 && ulp_is_nan(v13) == 1, "a non-finite charge: Rust's ((k·∞)·0)/1 = NaN, kept");
+    var mu14: f64 = 0.0000000000000000000000000016267;
+    var t14, v14 = morse_width_parameter(563400000000000.0, mu14, 0.0000000000000000007399);
+    assert(is_ok(t14) == 1 && v14 == 0x4211659438F30432, "HCl's a = ω·√(μ/(2·D_e)) rounded once");
+    var dmax: f64 = 0x7FEFFFFFFFFFFFFF;
+    var t15, v15 = morse_width_parameter(563400000000000.0, dmax, 0.0000000000000000007399);
+    assert(is_ok(t15) == 1 && v15 == 0x64D884C2E88F61B2, "μ = DBL_MAX: 6.21·10¹⁷⁷ (Rust's μ/(2·D_e) = ∞)");
+    var t16, v16 = morse_width_parameter(563400000000000.0, 0.0000000000000000000000000016267, e300b);
+    assert(is_ok(t16) == 1 && v16 == 0x210A4C4C7AD8F25C, "D_e = 10³⁰⁰: 1.61·10⁻¹⁴⁹ (Rust's μ/(2·D_e) = 0)");
+    var y: f64 = 3002399751580331.0;                    # 3y = 2⁵³ + 1
+    var t17, v17 = morse_width_parameter(y, 9.0, 0.5);
+    assert(is_ok(t17) == 1 && v17 == 0x4340000000000000, "y·√(9/1) = 2⁵³ + 1, a midpoint: 2⁵³ (to even)");
+    var t18, v18 = morse_width_parameter(dmax, 4.0, 0.5);
+    assert(is_ok(t18) == 1 && v18 == 0x7FF0000000000000, "DBL_MAX·2 is past DBL_MAX: +∞");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var k = 0;
+    while (k < 5000) {
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var eb = 0x3000000000000000 + ((st >> 3) % 0x1C00000000000000);
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var sb = 0x3C00000000000000 + ((st >> 3) % 0x0400000000000000);
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var rb = 0x3C00000000000000 + ((st >> 3) % 0x0400000000000000);
+        var ee: f64 = eb;
+        var ss: f64 = sb;
+        var rr: f64 = rb;
+        var lf, lo = _km_lj_fast(ee, ss, rr);
+        var lu: f64 = _km_lj_ux(ee, ss, rr);
+        if (lo != 1 || _km_bits(lf) != _km_bits(lu)) { bad = bad + 1; }
+        var wf: f64 = _km_cr_mul_sqrt_ratio(ee, ss, rr, 0 - 1);
+        var wa: f64 = _km_mul_sqrt_ratio_acc(ee, ss, rr, 0 - 1);
+        if (_km_bits(wf) != _km_bits(wa)) { bad = bad + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "lennard_jones' fast path = its unbounded slow path, the Morse width = its exact root (5,000)");
 }
 
 # ── ADR 0002 #20 (M4e-2): the geometry with an unbounded exponent ──────────────────────────────────────────────
@@ -917,6 +1005,7 @@ fn main() {
     _t_cyrius_tolerances();
     _t_cyrius_exact_rmin();
     _t_cyrius_exact_overflow_edges();
+    _t_cyrius_adr32();
     _t_cyrius_unbounded_edges();
     _t_cyrius_scale_invariance();
     _t_cyrius_slow_path_agrees();

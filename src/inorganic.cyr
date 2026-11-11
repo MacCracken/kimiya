@@ -9,7 +9,10 @@
 # Every expression keeps Rust's operation order, so every result is bit-identical (classes A and B), but one: the CFSE
 # is computed exactly, (3·e_g − 2·t₂g) / 5 in one correctly rounded division (ADR 0002 #12; the golden rows where Rust's
 # −0.4·t₂g + 0.6·e_g misses it are mapped by the harness and reported as accepted under ADR 2), and Δ_tet is the
-# correctly rounded 4Δ/9 also where Rust's Δ·4 overflows (ADR 0002 #15, mapped the same way).
+# correctly rounded 4Δ/9 also where Rust's Δ·4 overflows (ADR 0002 #15, mapped the same way). ADR 0002 #32 (the overflow
+# audit's B3, #20's semantics): born_lande_lattice_energy is Rust's chain where it stays in the normal range (Rust's
+# bits) and otherwise Rust's sequence with an unbounded exponent, the final product rounded once (mapped the same way);
+# its (1 − 1/n) stays Rust's (M4b's review).
 #
 # - Rust's integers are words here, never wrapped (port plan §6.4). A d-electron or unpaired-electron count (`u8`)
 #   outside 0 ..= 255, an ion charge (`u32`) outside 0 ..= u32::MAX, an ionic-radius charge (`i8`) outside
@@ -137,12 +140,15 @@ fn unpaired_electrons_oct(d_electrons, high_spin): Result {
 # ── lattice energy ──────────────────────────────────────────────────────────────────
 
 # The Born–Landé lattice energy U = −(k_e·N_A·M·z⁺·z⁻·e²) / r₀ · (1 − 1/n) in J/mol (negative = stable), from the
-# Madelung constant M (dimensionless, positive), the cation and anion charge magnitudes z⁺ and z⁻ (Rust u32s, as
-# words; the anion's sign is handled by the formula), the nearest-neighbour distance r₀ in m and the Born exponent n
-# (typically 5–12). Computed in Rust's order, `−k_e · N_A · M · z⁺ · z⁻ · e · e / r₀ · (1 − 1/n)` left to right.
-# Ok(U); Err(KM_ERR_INVALID_INPUT) if r₀ is not positive and finite, n is not finite or ≤ 1, M is not positive and
-# finite, or either charge is 0 or outside 0 ..= u32::MAX (in that order). Mirrors
-# `inorganic::born_lande_lattice_energy`.
+# Madelung constant M (dimensionless, positive), the cation and anion charge magnitudes z⁺ and z⁻ (Rust u32s, as words;
+# the anion's sign is handled by the formula), the nearest-neighbour distance r₀ in m and the Born exponent n (typically
+# 5–12). Computed in Rust's order, `−k_e · N_A · M · z⁺ · z⁻ · e · e / r₀ · (1 − 1/n)` left to right. Ok(U);
+# Err(KM_ERR_INVALID_INPUT) if r₀ is not positive and finite, n is not finite or ≤ 1, M is not positive and finite, or
+# either charge is 0 or outside 0 ..= u32::MAX (in that order). ADR 0002 #32 (the overflow audit's B3, #20's semantics:
+# the factor (1 − 1/n) is a sum, left as Rust's in M4b): Rust's chain where it stays in the normal range (Rust's bits),
+# otherwise the same sequence with an unbounded exponent and the final product rounded once (_km_born_lande_ux): a
+# prefix (−k_e·N_A·M·z⁺·z⁻) past DBL_MAX (M above about 3·10²⁷⁴/(z⁺·z⁻)) or a subnormal M, which e² and /r₀ bring back
+# (Rust: −∞, −0 or a degraded value). Mirrors `inorganic::born_lande_lattice_energy`, with ADR 0002 #32.
 #must_use
 fn born_lande_lattice_energy(madelung: f64, z_cation, z_anion, r0_m: f64, born_exponent: f64): Result {
     if (_km_is_positive(r0_m) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -151,23 +157,78 @@ fn born_lande_lattice_energy(madelung: f64, z_cation, z_anion, r0_m: f64, born_e
     if (z_cation < 1 || z_cation > 0xFFFFFFFF || z_anion < 1 || z_anion > 0xFFFFFFFF) {
         return Err(KM_ERR_INVALID_INPUT);
     }
+    var zc: f64 = f64_from(z_cation);
+    var za: f64 = f64_from(z_anion);
+    var u, ok = _km_born_lande_fast(madelung, zc, za, r0_m, born_exponent);
+    if (ok == 1) { return Ok(u); }
+    var w: f64 = _km_born_lande_ux(madelung, zc, za, r0_m, born_exponent);
+    return Ok(w);
+}
+
+# born_lande_lattice_energy's fast path, for its validated inputs (the charges as exact doubles): (U, 1) while Rust's
+# chain provably is the unbounded-exponent one (ADR 0002 #32), or (0, 0). For M in [2⁻⁶⁰, 2⁶⁰] and r₀ in [2⁻²⁰⁰, 2⁶⁰]
+# every partial product is provably normal (−k_e·N_A·M in [2⁵², 2¹⁷²], times z⁺ and z⁻ (at most 2³² each) below 2²³⁶,
+# times e·e (e ≈ 2^-62.4) in [2⁻⁷⁴, 2¹⁷⁴], over r₀ in [2⁻¹³⁴, 2³¹²]: every physical salt), so the test is skipped;
+# otherwise each partial product and the quotient by r₀ must lie in [2⁻¹⁰²¹, DBL_MAX] (_km_ux_normal; −k_e·N_A is a
+# normal constant). The factor 1 − 1/n is always the unbounded one: 1/n is in (0, 1), and where Rust's 1/n is not normal
+# (n > 2¹⁰²¹) both 1/n are below 2⁻⁵⁴, so both differences round to 1. The final product of two doubles is then rounded
+# once in both evaluations.
+#must_use
+fn _km_born_lande_fast(madelung: f64, zc: f64, za: f64, r0_m: f64, born_exponent: f64): (f64, i64) {
     var ke: f64 = KM_COULOMB_CONSTANT;
     var na: f64 = KM_AVOGADRO;
     var e: f64 = KM_ELEMENTARY_CHARGE;
-    var zc: f64 = f64_from(z_cation);
-    var za: f64 = f64_from(z_anion);
-    var u: f64 = -ke;
-    u = u * na;
-    u = u * madelung;
-    u = u * zc;
-    u = u * za;
-    u = u * e;
-    u = u * e;
-    u = u / r0_m;
+    var u1: f64 = -ke;
+    u1 = u1 * na;
+    var u2: f64 = u1 * madelung;
+    var u3: f64 = u2 * zc;
+    var u4: f64 = u3 * za;
+    var u5: f64 = u4 * e;
+    var u6: f64 = u5 * e;
+    var u7: f64 = u6 / r0_m;
+    var bm = load64(&madelung);
+    var br = load64(&r0_m);
+    if (bm < 0x3C30000000000000 || bm > 0x43B0000000000000 || br < 0x3370000000000000 || br > 0x43B0000000000000) {
+        var n = _km_ux_normal(u2) + _km_ux_normal(u3) + _km_ux_normal(u4) + _km_ux_normal(u5) + _km_ux_normal(u6);
+        if (n != 5 || _km_ux_normal(u7) != 1) { return (0.0, 0); }
+    }
     var inv: f64 = 1.0 / born_exponent;
     var factor: f64 = 1.0 - inv;
-    u = u * factor;
-    return Ok(u);
+    var u: f64 = u7 * factor;
+    return (u, 1);
+}
+
+# born_lande_lattice_energy with an unbounded exponent (ADR 0002 #32), for its validated inputs (the charges as exact
+# doubles): Rust's −k_e · N_A · M · z⁺ · z⁻ · e · e / r₀ · (1 − 1/n) left to right, every operation rounded to 53 bits
+# and nothing over- or underflowing (src/mathx.cyr's _km_ux_*), the final product rounded once into binary64
+# (_km_ux_mul_f64).
+#must_use
+fn _km_born_lande_ux(madelung: f64, zc: f64, za: f64, r0_m: f64, born_exponent: f64): f64 {
+    var ke: f64 = KM_COULOMB_CONSTANT;
+    var na: f64 = KM_AVOGADRO;
+    var e: f64 = KM_ELEMENTARY_CHARGE;
+    var nke: f64 = -ke;
+    var us, ue = _km_ux_from(nke);
+    var ns, ne = _km_ux_from(na);
+    var u1s, u1e = _km_ux_mul(us, ue, ns, ne);
+    var ms, me = _km_ux_from(madelung);
+    var u2s, u2e = _km_ux_mul(u1s, u1e, ms, me);
+    var cs, ce = _km_ux_from(zc);
+    var u3s, u3e = _km_ux_mul(u2s, u2e, cs, ce);
+    var as1, ae = _km_ux_from(za);
+    var u4s, u4e = _km_ux_mul(u3s, u3e, as1, ae);
+    var es, ee = _km_ux_from(e);
+    var u5s, u5e = _km_ux_mul(u4s, u4e, es, ee);
+    var u6s, u6e = _km_ux_mul(u5s, u5e, es, ee);
+    var rs, re = _km_ux_from(r0_m);
+    var u7s, u7e = _km_ux_div(u6s, u6e, rs, re);
+    var one: f64 = 1.0;
+    var os, oe = _km_ux_from(one);
+    var bs, be = _km_ux_from(born_exponent);
+    var is1, ie = _km_ux_div(os, oe, bs, be);
+    var fs, fe = _km_ux_sub(os, oe, is1, ie);
+    var u: f64 = _km_ux_mul_f64(u7s, u7e, fs, fe);
+    return u;
 }
 
 # The Born–Haber lattice energy U = ΔH_f° − ΔH_sub − IE − ΔH_diss/2 − EA in kJ/mol (negative = stable), from the

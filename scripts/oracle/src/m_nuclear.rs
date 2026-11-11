@@ -24,11 +24,16 @@
 //!   N₀·λ₁), 2⁻ⁿ's tie at n = 1075 and its over / underflow; for the chain the equal-λ branch (λ₁ = λ₂ exactly), λ₁ ≈ λ₂
 //!   at relative 10⁻¹⁵ … 10⁻⁶ either side of Rust's 10⁻¹² threshold, and **pairs on the threshold itself** (δ equal to
 //!   fl(10⁻¹²·λ_max), and where 10⁻¹² ± 1 ulp would move the branch), every isotope pair, seeded sweeps.
+//! - ADR 0002 #32 (the overflow audit's B3): `binding_energy_per_nucleon` rows are noted where the port's Rust sequence
+//!   with an unbounded exponent (the final division rounded once) differs from Rust's value (`audit.rs`: none of the
+//!   rows above), and `audit::emit_nuclear` appends its edge rows (Δm·931.494… past DBL_MAX, A bringing it back) with its
+//!   own seed.
 //!
 //! Every input goes through `black_box`; grid inputs use only exact or correctly rounded operations (`grids.rs`).
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::exact::{cr_exp2_frac, decompose, round_scaled};
 use crate::grids::{EXP_SUBNORMAL_X, Rng, decades, pow2, subnormal_prefactors};
 use crate::m_reaction::{edges, res};
@@ -36,7 +41,7 @@ use crate::tsv::{Class, Module, Tok, b, err, f, i, s};
 use kimiya::error::KimiyaError;
 use kimiya::nuclear::{
     ISOTOPES, Isotope, activity, atoms_after_half_lives, atoms_remaining, binding_energy_mev,
-    binding_energy_per_nucleon, decay_chain_two_step, decay_constant, is_secular_equilibrium, lookup_isotope,
+    decay_chain_two_step, decay_constant, is_secular_equilibrium, lookup_isotope,
     mass_defect, q_value, semi_empirical_binding_energy, time_for_fraction,
 };
 
@@ -493,10 +498,7 @@ pub fn emit() -> Module {
     for x in xs {
         bem(&mut m, x);
     }
-    let bea = |m: &mut Module, z: u32, n: u32, mass: f64| {
-        let out = res(binding_energy_per_nucleon(bb(z), bb(n), bb(mass)));
-        m.row("nuclear::binding_energy_per_nucleon", Class::B, &[i(z), i(n), f(mass)], &[out]);
-    };
+    let bea = audit::bea;
     for z in U32S {
         for n in U32S {
             bea(&mut m, z, n, 55.934_936_33);
@@ -851,5 +853,6 @@ pub fn emit() -> Module {
     for sym in &others {
         lookup(&mut m, sym);
     }
+    audit::emit_nuclear(&mut m);
     m
 }

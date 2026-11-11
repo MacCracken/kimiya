@@ -103,8 +103,13 @@ type for average oxidation states, no separate extrapolating Antoine function. I
   - [x] B3 — F5, spectroscopy products (`absorbance`, `concentration_from_absorbance`, `rigid_rotor_energy`,
     `rotational_constant`, `diatomic_moment_of_inertia` rounded once; `vibrational_frequency` the correctly rounded √ of
     the exact k/μ, `src/mathx.cyr`'s new `_km_cr_sqrt_div`) — done with B2, in one batch (ADR 0002 #30)
-  - [ ] B4 — F6, potentials, Born–Landé, binding energy per nucleon (folding #17 and #18)
-  - [ ] B5 — F2, gas laws (ideal gas, density, van der Waals, Peng–Robinson and Redlich–Kwong pressure)
+  - [x] B4 — F6, potentials, Born–Landé, binding energy per nucleon (`coulomb`, `coulomb_force` rounded once;
+    `morse_width_parameter` the correctly rounded ω·√(μ/(2·D_e)), `src/mathx.cyr`'s new `_km_cr_mul_sqrt_ratio`;
+    `lennard_jones`, `born_lande_lattice_energy`, `binding_energy_per_nucleon` with an unbounded exponent; #17 and #18
+    folded in) — done in the Cyrius API (ADR 0002 #32), with B5 in one batch, the audit's B3
+  - [x] B5 — F2, gas laws (`ideal_gas_pressure`, `ideal_gas_volume`, `gas_density` rounded once; van der Waals,
+    Peng–Robinson and Redlich–Kwong pressure with an unbounded exponent, the co-volume tests on the unbounded co-volume,
+    Tc^2.5 exactly rescaled) — done in the Cyrius API (ADR 0002 #31), in the audit's B3
   - [ ] B6 — F7 and F8, sums with cancellation and the Shomate polynomial
   - [ ] B7 — F9, exp and exp10 arguments
   - [ ] B8 — the FFT magnitudes, the flame's sign test, `find_peaks` if wanted

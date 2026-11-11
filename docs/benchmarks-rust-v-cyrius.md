@@ -460,3 +460,54 @@ two TwoProducts was measured (87 → 86 ns) and not kept. `nernst_potential` pay
 takes the same path. The exact root (`vibrational_frequency_subnormal`) is a few multi-word products and comparisons
 after a guess from the fast path's arithmetic, under a microsecond; it serves subnormal operands, possibly subnormal
 results and the rare failed test.
+
+## The overflow audit's B3 (2026-11-11)
+
+ADR 0002 #31 and #32: gas's ideal gas law and density and potential's Coulomb pair rounded once on B1's `_km_cr_mono`
+(B1's and B2's straight-line shapes), the Morse width on the new correctly rounded w·√((x/y)·2^e)
+(`_km_cr_mul_sqrt_ratio`), the three equations of state, Lennard-Jones, Born–Landé and the binding energy per nucleon with
+an unbounded exponent behind range tests (Rust's chain in range). Before: B3's new benches added to `tests/kimiya.bcyr`
+first and run, as a trimmed copy of the bench file (only these benches), on the code before B3 (an export of the
+committed tree); after: the same copy on the code after, the same host, back to back. Three benches have a Rust
+counterpart (`lennard_jones` is M4d's Cyrius-only one); the rest are Cyrius-only.
+
+| Bench | Body | Rust | Before | After |
+|---|---|---|---|---|
+| `gas/ideal_gas_pressure` | (1, 300 K, 0.025 m³): three guards, RN(n·R·T/V) by `_km_mul3_div_fast` | 2.18 ns | 18 ns | 119 ns |
+| `nuclear/binding_energy_per_nucleon_fe56` | Fe-56: the u32 checks, Δm, the inline test (Δm·931.494… finite), one division | 2.02 ns | 28 ns | 29 ns |
+| `potential/lennard_jones` | Ar at r ≈ r_min: Rust's chain and its range test (`_km_lj_fast`) | — | 36 ns | 39 ns |
+| `gas/ideal_gas_volume` | (1, 273.15 K, 101325 Pa): RN(n·R·T/P) by `_km_mul3_div_fast` | — | 20 ns | 119 ns |
+| `gas/gas_density` | air at STP: RN(P·M/(R·T)) by `_km_mul2_div2_fast` | — | 20 ns | 108 ns |
+| `gas/van_der_waals_pressure` | CO₂ in 1 L at 300 K: Rust's chain, the region test (inside it no per-operation test) | — | 35 ns | 55 ns |
+| `gas/peng_robinson_pressure` | N₂ at 300 K, 0.025 m³/mol: `pr_coefficients` and the pressure inline, `_km_pr_box` | — | 78 ns | 100 ns |
+| `gas/redlich_kwong_pressure` | N₂ at 300 K, 0.025 m³/mol: `_km_cr_pow(Tc, 2.5)` and the chain, the region test | — | 182 ns | 187 ns |
+| `potential/coulomb` | (e, −e, 1 Å): RN(k·q₁·q₂/r) by `_km_mul3_div_fast` | — | 16 ns | 126 ns |
+| `potential/coulomb_force` | (e, −e, 1 Å): RN(k·q₁·q₂/(r·r)) by `_km_mul3_div2_fast` | — | 18 ns | 145 ns |
+| `potential/morse_width_parameter` | HCl: RN(ω·√(μ/(2·D_e))) by `_km_mul_sqrt_ratio_fast` | — | 33 ns | 135 ns |
+| `inorganic/born_lande_lattice_energy` | NaCl: Rust's chain, the region test | — | 46 ns | 50 ns |
+| `gas/van_der_waals_pressure_edge` | n = 10³⁰⁶: n·R·T overflows, the unbounded-exponent slow path | — | 36 ns | 260 ns |
+| `gas/peng_robinson_pressure_edge` | Tc = 2⁻¹⁰²²: T/Tc overflows (Rust's NaN), the slow path | — | 115 ns | 618 ns |
+| `gas/redlich_kwong_pressure_edge` | Tc = 10¹³⁰: Tc^2.5 overflows, the exact rescale on the slow path | — | 134 ns | 584 ns |
+| `potential/lennard_jones_edge` | ε = 10⁻³⁰⁰, σ/r = 5.8·10²⁵: (σ/r)¹² overflows, the slow path | — | 46 ns | 208 ns |
+| `potential/morse_width_parameter_subnormal` | (1, 2⁻¹⁰⁷⁴, 2¹⁰²³): a subnormal μ, the exact root | — | 42 ns | 1.27 µs |
+| `inorganic/born_lande_lattice_energy_edge` | (DBL_MAX, 1, 1, DBL_MAX, DBL_MAX): the prefix overflows, the slow path | — | 66 ns | 287 ns |
+| `nuclear/binding_energy_per_nucleon_edge` | (1000, 1000, DBL_MAX): Δm·931.494… overflows, the slow path | — | 39 ns | 117 ns |
+| `potential/morse_width_parameter_tie` | ω = y with 3y = 2⁵³ + 1, μ = 9, D_e = ½: a midpoint, the exact root | — | 35 ns | 1.27 µs |
+
+The rounded-once functions cost 108–145 ns where Rust's three or four operations took 16–20 ns, as B1's and B2's did; the
+Morse width's 135 ns is B2's √ (87 ns) plus the product by ω (a TwoProduct, FastTwoSum and the rounding test). The
+#20-style functions pay 3–22 ns on physical inputs: their range tests first ask whether the inputs lie in a region where
+every intermediate is provably normal (Tc, Pc, T, V within 2^±60; `_km_pr_box` and its inline siblings), and only outside
+it test each operation with `_km_ux_normal`, which took Peng–Robinson from 147 to 100 ns, van der Waals from 73 to 55,
+Redlich–Kwong from 217 to 187 and Born–Landé from 67 to 50; inlining `_km_ux_normal`'s bit test instead was measured
+(147 → 156 ns) and not kept. The slow paths are the unbounded-exponent chains (117–618 ns), and the Morse width's exact
+root (1.27 µs: a few multi-word products and comparisons) serves subnormal operands, possibly subnormal results, its
+midpoints and the rare failed test.
+
+In `tests/kimiya.bcyr` B3's seventeen Cyrius-only benches run 100,000 × 20 calls each (the file's size for its slow
+rows), not 1,000,000 × 20: the file took about 255 s before B3, and B3's rows at the larger size (71 s) took it past
+`cyrius bench`'s default deadline of 300 s per bench file, so it was killed. With them `cyrius bench` takes 279 s on this
+host, and in that full run the rows read 5–10 % above the back-to-back figures above (`ideal_gas_volume` 123 ns,
+`peng_robinson_pressure` 103, `redlich_kwong_pressure` 193, `morse_width_parameter` 140, the edges 122–644 ns, the exact
+root 1.29–1.32 µs). The next batch's benches need the deadline raised (`[test] timeout` in `cyrius.cyml`) or a second
+bench file.

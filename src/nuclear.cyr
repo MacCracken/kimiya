@@ -23,6 +23,11 @@
 #   Rust's 2⁻ⁿ overflows, underflows or is subnormal (M4c's version was faithful for a fractional n; M4d completed it),
 #   and is_secular_equilibrium compares λ_parent < λ_daughter/100 exactly. The golden rows keep the oracle's values;
 #   where the port's differ, the note names them and the harness maps the two (accepted under ADR 2, counted).
+# - ADR 0002 #32 (the overflow audit's B3; the user's decisions of 2026-11-09 and 2026-11-10):
+#   binding_energy_per_nucleon's (Δm·931.494…)/A has a sum of inputs inside (the mass defect), so it gets ADR 0002 #20's
+#   semantics: Rust's chain where Δm·931.494… is finite (Rust's bits), Rust's sequence with an unbounded exponent and
+#   the final division rounded once past it (masses above about 1.93·10³⁰⁵ u, physically meaningless and fixed too),
+#   mapped the same way.
 # - Rust's std::f64::consts::LN_2, its private EQUAL_RATE_REL_TOL (10⁻¹²) and SEMF_* coefficients and the asymmetry
 #   term's 4 are typed formula constants inline (port plan §6.4): LN_2 by its bits, as src/kinetics.cyr writes it. Each
 #   is pinned by golden rows (validate.py perturbs it one ulp, the tolerance also by halving and doubling, and requires
@@ -171,8 +176,11 @@ fn binding_energy_mev(mass_defect_u: f64): f64 {
 
 # The binding energy per nucleon BE/A in MeV, from Z, N (Rust u32s, as words) and the neutral-atom mass in u (see
 # mass_defect). Ok(BE/A); Err(KM_ERR_INVALID_INPUT) if Z or N is outside 0 ..= u32::MAX or A = Z + N overflows u32
-# (Rust's checked_add), then if A = 0, then if the mass is not positive and finite. Mirrors
-# `nuclear::binding_energy_per_nucleon`.
+# (Rust's checked_add), then if A = 0, then if the mass is not positive and finite. ADR 0002 #32 (the overflow audit's
+# B3, #20's semantics: the mass defect Z·m_H + N·m_n − M is a sum of inputs): Rust's (Δm·931.494…)/A where Δm·931.494…
+# is finite (Rust's bits), otherwise the same sequence with an unbounded exponent and the final division rounded once:
+# for masses above about 1.93·10³⁰⁵ u, Rust's −∞ where A ≥ 932 brings the value back (binding_energy_per_nucleon(1000,
+# 1000, DBL_MAX) is −8.37·10³⁰⁷). Mirrors `nuclear::binding_energy_per_nucleon`, with ADR 0002 #32.
 #must_use
 fn binding_energy_per_nucleon(z, n, atomic_mass_u: f64): Result {
     if (_km_is_u32(z) != 1 || _km_is_u32(n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -185,8 +193,30 @@ fn binding_energy_per_nucleon(z, n, atomic_mass_u: f64): Result {
     var md: f64 = _km_mass_defect(zf, nf, atomic_mass_u);
     var be: f64 = md * KM_AMU_MEV;          # binding_energy_mev(md)
     var af: f64 = f64_from(a);
-    var bea: f64 = be / af;
-    return Ok(bea);
+    var dbe: f64 = be - be;
+    if (dbe == 0.0) {
+        var bea: f64 = be / af;
+        return Ok(bea);
+    }
+    var u: f64 = _km_bea_ux(md, af);
+    return Ok(u);
+}
+
+# binding_energy_per_nucleon with an unbounded exponent (ADR 0002 #32), where Rust's Δm·931.494… overflows: the 53-bit
+# product (_km_ux_mul) and the division by A rounded once into binary64 (_km_ux_div_f64). Δm itself is always the
+# unbounded one: Z·m_H and N·m_n are 0 or in [1, 2³³·1.01], their sum is normal, and Δm = s − M (s ≥ 1, M a positive
+# double) is finite, and 0 or at least 2⁻⁵³ in magnitude (both are multiples of the smaller one's ulp, or M < ½ and
+# Δm > ½), so Δm·931.494… never underflows: only its overflow leaves the normal range, and a finite product is the
+# 53-bit one, the fast path's test.
+#must_use
+fn _km_bea_ux(md: f64, af: f64): f64 {
+    var ms, me = _km_ux_from(md);
+    var amu: f64 = KM_AMU_MEV;
+    var cs, ce = _km_ux_from(amu);
+    var bs, be = _km_ux_mul(ms, me, cs, ce);
+    var as1, ae = _km_ux_from(af);
+    var r: f64 = _km_ux_div_f64(bs, be, as1, ae);
+    return r;
 }
 
 # The semi-empirical mass formula (Weizsäcker, the liquid-drop model), the binding energy in MeV of the nucleus with Z

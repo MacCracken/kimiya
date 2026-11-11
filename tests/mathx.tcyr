@@ -1,8 +1,9 @@
 # mathx.tcyr — the correctly rounded exp, exp10, expm1, ln, log10 (M3c-2a), pow (M3c-2b), sin, cos, sincos,
 # atan2 and acos (M4a), x·2^y (M4d) and 1/(100·x) (M4e) of src/mathx.cyr (ADR 0006), the unbounded-exponent
 # arithmetic (M4e-2, ADR 0002 #20), the multi-word integers, RN(p/q·2^e) and the double-double quotient (M4e-3, ADR
-# 0002 #21, #22), the correctly rounded monomial (the overflow audit's B1, ADR 0002 #27, #28), and B2's shapes and the
-# correctly rounded √ of a quotient (ADR 0002 #29, #30).
+# 0002 #21, #22), the correctly rounded monomial (the overflow audit's B1, ADR 0002 #27, #28), B2's shapes and the
+# correctly rounded √ of a quotient (ADR 0002 #29, #30), and B3's correctly rounded w·√((x/y)·2^e) and normal-range test
+# (ADR 0002 #31, #32).
 #
 # Special values, the exact and tie cases, the thresholds, subnormal results (rounded once), the known
 # hardest-to-round arguments (Lefèvre–Muller's binary64 worst cases for exp, ln, sin, cos, arctan and arccos),
@@ -2018,6 +2019,104 @@ fn _t_b2_agrees() {
     assert(answered > 10000, "the root's fast path answers most of them");
 }
 
+# The overflow audit's B3 (ADR 0002 #32): _km_cr_mul_sqrt_ratio on hand cases — its midpoints (ties to even, at the
+# 53-bit and the subnormal grid), the Morse width's edges (μ/(2·D_e) past either end, a subnormal result, the overflow
+# end), the domain — each against Fraction's correctly rounded value, by the public helper and its exact path; and
+# _km_ux_normal at its edges (2⁻¹⁰²² itself is out: its exact value may lie below at 53 bits).
+fn _t_b3_values() {
+    test_group("b3_values (ADR 0002 #31, #32)");
+    var dmax: f64 = from_bits(0x7FEFFFFFFFFFFFFF);
+    var sub1: f64 = from_bits(1);
+    var y: f64 = 3002399751580331.0;                    # 3y = 2⁵³ + 1
+    var a: f64 = _km_cr_mul_sqrt_ratio(y, 9.0, 0.5, 0 - 1);
+    var a2: f64 = _km_mul_sqrt_ratio_acc(y, 9.0, 0.5, 0 - 1);
+    var af, ao = _km_mul_sqrt_ratio_fast(y, 9.0, 0.5, 0 - 1);
+    assert(_km_bits(a) == 0x4340000000000000 && _km_bits(a2) == 0x4340000000000000 && ao == 0,
+        "y·√(9/1) = 2⁵³ + 1, a midpoint: the fast test fails, the exact root ties to even (2⁵³)");
+    var y7: f64 = 3002399751580333.0;                   # 3y = 2⁵³ + 7
+    var b: f64 = _km_cr_mul_sqrt_ratio(y7, 9.0, 1.0, 0);
+    assert_eq(_km_bits(b), 0x4340000000000004, "y·√9 = 2⁵³ + 7, a midpoint: to even (2⁵³ + 8)");
+    var w975: f64 = from_bits(0x0300000000000000);      # 2⁻⁹⁷⁵
+    var p200: f64 = from_bits(0x4C70000000000000);      # 2²⁰⁰
+    var c: f64 = _km_cr_mul_sqrt_ratio(w975, 1.0, p200, 0);
+    assert_eq(_km_bits(c), 0, "2⁻⁹⁷⁵·√(2⁻²⁰⁰) = 2⁻¹⁰⁷⁵, half the smallest subnormal: a tie, to +0");
+    var w3: f64 = w975 * 3.0;
+    var d: f64 = _km_cr_mul_sqrt_ratio(w3, 1.0, p200, 0);
+    assert_eq(_km_bits(d), 2, "3·2⁻¹⁰⁷⁵, a tie of the subnormal grid: to even (2·2⁻¹⁰⁷⁴)");
+    var hw: f64 = 563400000000000.0;
+    var hm: f64 = from_bits(0x3A601C2CA997C94D);        # 1.6267e-27 kg
+    var hd: f64 = from_bits(0x3C2B4C286D889BBE);        # 7.399e-19 J
+    var e: f64 = _km_cr_mul_sqrt_ratio(hw, hm, hd, 0 - 1);
+    assert_eq(_km_bits(e), 0x4211659438F30432, "HCl's Morse width a = ω·√(μ/(2·D_e))");
+    var f: f64 = _km_cr_mul_sqrt_ratio(hw, dmax, hd, 0 - 1);
+    assert_eq(_km_bits(f), 0x64D884C2E88F61B2, "μ = DBL_MAX: 6.21·10¹⁷⁷ (Rust's μ/(2·D_e) = ∞)");
+    var d23: f64 = from_bits(0x7FE0000000000000);       # 2¹⁰²³
+    var g: f64 = _km_cr_mul_sqrt_ratio(1.0, sub1, d23, 0 - 1);
+    assert_eq(_km_bits(g), 0x0000000002000000, "√(2⁻¹⁰⁷⁴/2¹⁰²⁴) = 2⁻¹⁰⁴⁹, subnormal (Rust 0)");
+    var h: f64 = _km_cr_mul_sqrt_ratio(dmax, 4.0, 0.5, 0 - 1);
+    assert_eq(_km_bits(h), 0x7FF0000000000000, "DBL_MAX·2: past DBL_MAX, +∞");
+    var i: f64 = _km_cr_mul_sqrt_ratio(sub1, sub1, dmax, 0 - 1);
+    assert_eq(_km_bits(i), 0, "2⁻¹⁰⁷⁴·√(2⁻¹⁰⁷⁴/(2·DBL_MAX)): below half of 2⁻¹⁰⁷⁴, +0");
+    var j: f64 = _km_cr_mul_sqrt_ratio(1.0, 1.0, dmax, 0 - 1);
+    assert_eq(_km_bits(j), 0x1FE6A09E667F3BCD, "√(½/DBL_MAX) = 5.27·10⁻¹⁵⁵");
+    var k1: f64 = _km_cr_mul_sqrt_ratio(5.0, 4.0, 1.0, 2);
+    assert_eq(_km_bits(k1), 0x4034000000000000, "5·√(4·2²) = 20, exact (e = 2)");
+    var mn: f64 = -1.0;
+    var inf: f64 = 1.0 / 0.0;
+    var m0: f64 = _km_cr_mul_sqrt_ratio(0.0, 1.0, 1.0, 0);
+    var m1: f64 = _km_cr_mul_sqrt_ratio(1.0, mn, 1.0, 0);
+    var m2: f64 = _km_cr_mul_sqrt_ratio(1.0, 1.0, inf, 0);
+    var m3: f64 = _km_mul_sqrt_ratio_acc(inf, 1.0, 1.0, 0);
+    var nans = _km_is_nan(m0) + _km_is_nan(m1) + _km_is_nan(m2) + _km_is_nan(m3);
+    assert_eq(nans, 4, "outside the positive finite domain: NaN");
+    var n1: f64 = from_bits(0x0010000000000000);
+    var n2: f64 = from_bits(0x0010000000000001);
+    var n3: f64 = from_bits(0x0020000000000000);
+    var nn = _km_ux_normal(n1) * 100 + _km_ux_normal(n2) * 10 + _km_ux_normal(n3);
+    assert_eq(nn, 1, "_km_ux_normal: 2⁻¹⁰²² and its successor are out, 2⁻¹⁰²¹ in");
+    var nd = _km_ux_normal(dmax) + _km_ux_normal(inf) + _km_ux_normal(-dmax) + _km_ux_normal(0.0) + _km_ux_normal(sub1);
+    assert_eq(nd, 2, "… ±DBL_MAX in, ∞, 0 and a subnormal out");
+}
+
+# _km_cr_mul_sqrt_ratio against _km_mul_sqrt_ratio_acc on 20,000 seeded positive arguments (subnormals and the range
+# ends included, e in [−3, 3]), and the fast path wherever it answers.
+fn _t_b3_agrees() {
+    test_group("b3_agrees (ADR 0002 #32)");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var answered = 0;
+    var w: f64[3];
+    var k = 0;
+    while (k < 20000) {
+        var j = 0;
+        while (j < 3) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            var x: f64 = ux_rand(st, k % 3);
+            if (x != x || x - x != 0.0 || x == 0.0) { x = 1.25; }
+            var ax: f64 = f64_abs(x);
+            store64(&w + 8 * j, ax);
+            j = j + 1;
+        }
+        var a: f64 = load64(&w);
+        var b: f64 = load64(&w + 8);
+        var c: f64 = load64(&w + 16);
+        var e = (st >> 5) % 7 - 3;
+        var r: f64 = _km_cr_mul_sqrt_ratio(a, b, c, e);
+        var x2: f64 = _km_mul_sqrt_ratio_acc(a, b, c, e);
+        if (_km_bits(r) != _km_bits(x2)) { bad = bad + 1; }
+        var f, o = _km_mul_sqrt_ratio_fast(a, b, c, e);
+        if (o == 1) {
+            answered = answered + 1;
+            if (_km_bits(f) != _km_bits(x2)) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "the root agrees with its exact path on 20,000 seeded arguments");
+    assert(answered > 10000, "the fast path answers most of them");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_special_values();
@@ -2051,6 +2150,8 @@ fn main() {
     _t_mono_agrees();
     _t_b2_values();
     _t_b2_agrees();
+    _t_b3_values();
+    _t_b3_agrees();
     return assert_summary();
 }
 

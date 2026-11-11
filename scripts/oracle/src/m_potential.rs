@@ -4,12 +4,16 @@
 //! Rust's `[f64; 3]` points are flattened into their three `f:` tokens, in argument order (`distance_3d` has 6 input
 //! floats, `bond_angle` 9, `dihedral_angle` 12).
 //! - Class B (+ − × ÷ and √, expected 0 ulp): `lennard_jones` (each argument over the edges, the Rust tests' values,
-//!   r/σ from 0.5 to 100 at Å and metre scale, (σ/r)¹² and (σ/r)⁶ over- and underflowing, seeded; **ADR 0002 #17**: ε ≥
-//!   2¹⁰²², where Rust's 4·ε overflows, the rows noted with the port's (ε·d)·4), `morse_width_parameter` (the edges, the
-//!   Rust tests' HCl values, every decade, seeded; **ADR 0002 #18**: D_e ≥ 2¹⁰²³, where Rust's 2·D_e overflows, noted
-//!   with the port's ω·√((μ·½)/D_e)), `coulomb`, `coulomb_force` (the edges, the Rust tests' charges, every decade of
-//!   r, signed charges, the intermediates' over- and underflow, seeded), `distance_3d` (each coordinate over the edges,
-//!   the Rust tests' points, Å and metre scale, over- and underflowing squares, seeded).
+//!   r/σ from 0.5 to 100 at Å and metre scale, (σ/r)¹² and (σ/r)⁶ over- and underflowing, seeded; ε ≥ 2¹⁰²², where
+//!   Rust's 4·ε overflows: ADR 0002 #17's rows), `morse_width_parameter` (the edges, the Rust tests' HCl values, every
+//!   decade, seeded; D_e ≥ 2¹⁰²³, where Rust's 2·D_e overflows: #18's rows), `coulomb`, `coulomb_force` (the edges, the
+//!   Rust tests' charges, every decade of r, signed charges, the intermediates' over- and underflow, seeded),
+//!   `distance_3d` (each coordinate over the edges, the Rust tests' points, Å and metre scale, over- and underflowing
+//!   squares, seeded). **ADR 0002 #32** (the overflow audit's B3, which folds #17 and #18 in): every `lennard_jones`,
+//!   `morse_width_parameter`, `coulomb` and `coulomb_force` row is noted where the port's value differs from Rust's —
+//!   `lennard_jones` Rust's sequence with an unbounded exponent and the final product rounded once (#17's (ε·d)·4 where
+//!   ε ≥ 2¹⁰²², the same bits), the others rounded once (`audit.rs`) — and `audit::emit_potential` appends their edge
+//!   rows with its own seed.
 //! - Class C (exp, atan2, exp2; bound 0 against the corrected oracle): `lj_equilibrium_distance` (`σ·2.0.powf(1/6)`: σ
 //!   over every binade, subnormals, the overflow end; **ADR 0002 #16**: the rows where the port's correctly rounded
 //!   σ·2^(1/6) differs from Rust's σ·RN(2^(1/6)), noted), `morse` (each argument over the edges, the Rust tests' values,
@@ -33,14 +37,12 @@
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::exact::{Ux, cr_root6_2_mul, ux_atan2_f64};
 use crate::grids::{Rng, decades, pow2};
 use crate::m_reaction::{edges, res};
 use crate::tsv::{Class, Module, Tok, f};
-use kimiya::potential::{
-    bond_angle, coulomb, coulomb_force, dihedral_angle, distance_3d, lennard_jones, lj_equilibrium_distance, morse,
-    morse_width_parameter,
-};
+use kimiya::potential::{bond_angle, dihedral_angle, distance_3d, lj_equilibrium_distance, morse};
 
 type P3 = [f64; 3];
 
@@ -52,44 +54,8 @@ fn scale(p: P3, s: f64) -> P3 {
     [p[0] * s, p[1] * s, p[2] * s]
 }
 
-/// ADR 0002 #17: the port's ε·d·4 where Rust's 4·ε overflows (ε ≥ 2¹⁰²²), d = (σ/r)¹² − (σ/r)⁶ in Rust's operation order;
-/// `None` elsewhere (Rust's `4.0 * epsilon * (sr12 - sr6)` stays).
-fn lj_exact(eps: f64, sigma: f64, r: f64) -> Option<f64> {
-    let ok = |x: f64| x > 0.0 && x.is_finite();
-    if !(ok(eps) && ok(sigma) && ok(r)) || eps < pow2(1022) {
-        return None;
-    }
-    let sr = sigma / r;
-    let sr6 = sr * sr * sr * sr * sr * sr;
-    let sr12 = sr6 * sr6;
-    Some(eps * (sr12 - sr6) * 4.0)
-}
-
-/// ADR 0002 #18: the port's ω·√((μ·½)/D_e) where Rust's 2·D_e overflows (D_e ≥ 2¹⁰²³): (μ·½)/D_e is the correctly rounded
-/// μ/(2·D_e) there (`validate.py` proves it); `None` elsewhere.
-fn width_exact(w: f64, mu: f64, d: f64) -> Option<f64> {
-    let ok = |x: f64| x > 0.0 && x.is_finite();
-    if !(ok(w) && ok(mu) && ok(d)) || d < pow2(1023) {
-        return None;
-    }
-    Some(w * ((mu * 0.5) / d).sqrt())
-}
-
 fn lj(m: &mut Module, eps: f64, sigma: f64, r: f64) {
-    let out = lennard_jones(bb(eps), bb(sigma), bb(r));
-    let name = "potential::lennard_jones";
-    let ins = [f(eps), f(sigma), f(r)];
-    match (out.as_ref().ok(), lj_exact(eps, sigma, r)) {
-        (Some(&v), Some(x)) if v.to_bits() != x.to_bits() && !(v.is_nan() && x.is_nan()) => {
-            let note = format!(
-                "ADR 0002 #17: the port returns (ε·d)·4, the correctly rounded 4·ε·d for Rust's d = (σ/r)¹² − (σ/r)⁶ = \
-                 {x:?} (f:{:016x})",
-                x.to_bits()
-            );
-            m.row_noted(name, Class::B, &ins, &[f(v)], &note);
-        }
-        _ => m.row(name, Class::B, &ins, &[res(out)]),
-    }
+    audit::lj(m, eps, sigma, r);
 }
 
 fn rmin(m: &mut Module, sigma: f64) {
@@ -113,26 +79,11 @@ fn morse_row(m: &mut Module, d: f64, a: f64, re: f64, r: f64) {
 }
 
 fn width(m: &mut Module, w: f64, mu: f64, d: f64) {
-    let out = morse_width_parameter(bb(w), bb(mu), bb(d));
-    let name = "potential::morse_width_parameter";
-    let ins = [f(w), f(mu), f(d)];
-    match (out.as_ref().ok(), width_exact(w, mu, d)) {
-        (Some(&v), Some(x)) if v.to_bits() != x.to_bits() => {
-            let note = format!(
-                "ADR 0002 #18: the port returns ω·√((μ·½)/D_e), with the correctly rounded μ/(2·D_e) = {x:?} (f:{:016x})",
-                x.to_bits()
-            );
-            m.row_noted(name, Class::B, &ins, &[f(v)], &note);
-        }
-        _ => m.row(name, Class::B, &ins, &[res(out)]),
-    }
+    audit::width(m, w, mu, d);
 }
 
 fn coul(m: &mut Module, q1: f64, q2: f64, r: f64) {
-    let v = res(coulomb(bb(q1), bb(q2), bb(r)));
-    m.row("potential::coulomb", Class::B, &[f(q1), f(q2), f(r)], &[v]);
-    let fv = res(coulomb_force(bb(q1), bb(q2), bb(r)));
-    m.row("potential::coulomb_force", Class::B, &[f(q1), f(q2), f(r)], &[fv]);
+    audit::coul(m, q1, q2, r);
 }
 
 // ── ADR 0002 #20: Rust's geometry sequences, on f64 (the replica, checked against the oracle on every row) and with an
@@ -812,6 +763,7 @@ pub fn emit() -> Module {
         dihedral(&mut m, add(b, rpt(&mut rng, s)), b, c, add(c, rpt(&mut rng, s)));
     }
     edges20(&mut m);
+    audit::emit_potential(&mut m);
     m
 }
 

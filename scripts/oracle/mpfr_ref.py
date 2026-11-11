@@ -9,7 +9,8 @@ do that: it misjudges exact ties (it rounds pow(0.5, 1075) = 2^-1075 up instead 
 UX (M4e-2, ADR 0002 #20) is binary64 with an unbounded exponent range: 53-bit MPFR numbers operated on at MPFR's widest
 exponent range, the final operation rounded once into binary64 (ux_*_final), and potential.rs's geometry on them
 (potential_*), the reference for the port's unbounded-exponent helpers and geometry; since the overflow audit's B2 also
-the final subtraction (ux_sub_final) and the √ of a quotient (ux_sqrt_div_final).
+the final subtraction (ux_sub_final) and the √ of a quotient (ux_sqrt_div_final), and since B3 the power x^y at 53 bits
+(UX.pow: Redlich–Kwong's Tc^2.5) and w·√(a/b) rounded once (ux_mul_sqrt_div_final: the Morse width).
 
 No Python package is needed: MPFR (libmpfr.so.6, MPFR 4.x) is called through ctypes. Run
 `python3 -I scripts/oracle/mpfr_ref.py` for the self-checks.
@@ -241,6 +242,15 @@ class UX:
             _m.mpfr_sqrt(r.v, self.v, _RNDN)
         return r
 
+    def pow(self, y):
+        """self^y rounded to 53 bits at MPFR's widest exponent range, y a double (MPFR's correctly rounded pow): the
+        overflow audit's B3, Redlich–Kwong's Tc^2.5 with an unbounded exponent (ADR 0002 #31)."""
+        r = UX()
+        e = UX(y)
+        with unbounded():
+            _m.mpfr_pow(r.v, self.v, e.v, _RNDN)
+        return r
+
     def cmp(self, o):
         """−1, 0 or 1 by exact value (zeros equal)."""
         with unbounded():
@@ -342,6 +352,23 @@ def ux_sqrt_div_final(a, b, prec=256):
     q = _Wide(prec)
     with unbounded():
         _UX_FN["div"](q.v, a.v, b.v, _RNDN)
+    return _final(_m.mpfr_sqrt, q)
+
+
+def ux_mul_sqrt_div_final(w, a, b, prec=320):
+    """w·√(a/b) = √(w·w·a/b) rounded once into binary64 for positive w, a, b (ADR 0002 #32, the overflow audit's B3: the
+    Morse width ω·√(μ/(2·D_e))): w·w·a exactly (at most 159 bits), its quotient by b at `prec` bits, then the square root
+    rounded once (_final). For doubles w, a, b (b may be a double times a power of two) this is RN(w·√(a/b)) itself when
+    prec ≥ 200: with w²a/b = (N/B)·2^E (N, B odd, N < 2^159, B < 2^53), either B divides N and the quotient is exact
+    (its odd part has at most 159 bits), so the root is rounded once exactly, ties to even; or it is not dyadic, so it
+    is no square of a rounding boundary m = M·2^f (M odd, at most 54 bits), and N·2^E − B·M²·2^(2f) is a nonzero
+    multiple of 2^min(E, 2f): the quotient is at least 2^-162 (relative) from every m², its root at least 2^-163 from
+    every m, far beyond the quotient's 2^-prec."""
+    q = _Wide(prec)
+    with unbounded():
+        _UX_FN["mul"](q.v, w.v, w.v, _RNDN)
+        _UX_FN["mul"](q.v, q.v, a.v, _RNDN)
+        _UX_FN["div"](q.v, q.v, b.v, _RNDN)
     return _final(_m.mpfr_sqrt, q)
 
 
@@ -470,6 +497,13 @@ if __name__ == "__main__":
     assert bits(ux_sqrt_div_final(UX(500.0), UX(2.0 ** -1022))) == 0x60265C55827DF1D2       # Rust's (500/2^-1022).sqrt() = ∞
     assert bits(ux_sqrt_div_final(UX(from_bits(1)), UX(from_bits(0x7FEFFFFFFFFFFFFF)))) == 0x2000000
     assert ux_sqrt_div_final(UX(from_bits(0x7FEFFFFFFFFFFFFF)), UX(from_bits(1))) == math.inf
+    # The overflow audit's B3: Tc^2.5 at 53 bits past binary64's range; w·√(a/b) rounded once, its ties to even.
+    assert UX(4.0).pow(2.5).is_f64(32.0) and UX(2.0 ** 500).pow(2.5).cmp(UX(2.0 ** 1000) * UX(2.0 ** 250)) == 0
+    assert bits(ux_mul_sqrt_div_final(UX(3002399751580331.0), UX(9.0), UX(1.0))) == 0x4340000000000000   # 3y = 2^53 + 1
+    assert bits(ux_mul_sqrt_div_final(UX(3002399751580333.0), UX(9.0), UX(1.0))) == 0x4340000000000004   # 2^53 + 7: up
+    assert bits(ux_mul_sqrt_div_final(UX(2.0 ** -975), UX(1.0), UX(2.0 ** 200))) == 0             # 2^-1075: a tie, to 0
+    assert bits(ux_mul_sqrt_div_final(UX(3 * 2.0 ** -975), UX(1.0), UX(2.0 ** 200))) == 2         # 3·2^-1075: to even
+    assert ux_mul_sqrt_div_final(UX(from_bits(0x7FEFFFFFFFFFFFFF)), UX(4.0), UX(1.0)) == math.inf
     rng = __import__("random").Random(20)
     for _ in range(2000):
         a, b = rng.uniform(-1e3, 1e3), rng.uniform(-1e3, 1e3)
@@ -480,4 +514,7 @@ if __name__ == "__main__":
             q = Fraction(a) / Fraction(b)
             r = ux_sqrt_div_final(UX(a), UX(b))
             assert Fraction(r) ** 2 * (1 - Fraction(1, 2 ** 52)) < q < Fraction(r) ** 2 * (1 + Fraction(1, 2 ** 52))
+            assert ux_mul_sqrt_div_final(UX(1.0), UX(a), UX(b)) == r
+            p = Fraction(ux_mul_final(UX(a).pow(2.5), UX(1.0)))
+            assert p * p * (1 - Fraction(1, 2 ** 51)) < Fraction(a) ** 5 < p * p * (1 + Fraction(1, 2 ** 51))
     print(f"mpfr_ref: MPFR {VERSION}, self-checks ok")

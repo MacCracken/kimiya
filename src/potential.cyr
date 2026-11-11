@@ -6,9 +6,10 @@
 # KM_ERR_INVALID_INPUT (Rust's only error here), and reject NaN and ±∞ inputs where Rust does. Every expression keeps
 # Rust's operation order, constant by constant, including the private helpers sub3 / cross / dot3 (_km_sub3,
 # _km_cross, _km_dot3, on scalars: Rust's [f64; 3] by value is three f64 here, and each helper returns its three
-# results as a multi-value return). The arithmetic functions are bit-identical (class B: + − × ÷ and √); morse (exp),
-# bond_angle and dihedral_angle (atan2) are class C on src/mathx.cyr's correctly rounded _km_cr_exp and _km_cr_atan2
-# (ADR 0006), compared exactly against the corrected oracle (docs/development/port-parity.md §14).
+# results as a multi-value return). The arithmetic functions are bit-identical (class B: + − × ÷ and √) but where an
+# ADR 0002 row below says otherwise; morse (exp), bond_angle and dihedral_angle (atan2) are class C on src/mathx.cyr's
+# correctly rounded _km_cr_exp and _km_cr_atan2 (ADR 0006), compared exactly against the corrected oracle
+# (docs/development/port-parity.md §14).
 #
 # - Rust's `[f64; 3]` arguments are pointers to three contiguous f64 (24 bytes, `var p: f64[3];`): distance_3d(p1, p2),
 #   bond_angle(a, b, c), dihedral_angle(a, b, c, d). A null pointer (0) gives NaN from distance_3d and
@@ -24,9 +25,11 @@
 #     two roundings; the port returns the correctly rounded σ·2^(1/6) (src/mathx.cyr's _km_cr_sixth_root2_mul, one
 #     rounding of a triple-double product, proven sufficient by 2^(1/6)'s continued fraction);
 #   - #17, lennard_jones: Rust's (4·ε)·d overflows to ±∞ (or ∞·0 = NaN) for ε ≥ 2¹⁰²² where 4·ε·d is representable;
-#     there the port takes (ε·d)·4, the correctly rounded 4·ε·d (scaling by 4 is exact), Rust's form elsewhere;
-#   - #18, morse_width_parameter: Rust's μ/(2·D_e) is μ/∞ = 0 for D_e ≥ 2¹⁰²³; there the port takes (μ·½)/D_e, the
-#     correctly rounded μ/(2·D_e) (μ·½ is exact, or the quotient rounds to 0 either way), Rust's form elsewhere.
+#     there the port takes (ε·d)·4, the correctly rounded 4·ε·d (scaling by 4 is exact). The overflow audit's B3 folds
+#     it into ADR 0002 #32 (below), which gives the same bits there;
+#   - #18, morse_width_parameter: Rust's μ/(2·D_e) is μ/∞ = 0 for D_e ≥ 2¹⁰²³; M4d took (μ·½)/D_e there, the correctly
+#     rounded μ/(2·D_e). The overflow audit's B3 folds it into ADR 0002 #32 (below): the whole ω·√(μ/(2·D_e)) rounded
+#     once, everywhere.
 #   The golden rows keep the oracle's values; where the port's differ, the note names them and the harness maps the
 #   two (accepted under ADR 2, counted).
 # - ADR 0002 #20 (M4e-2; the user's decision of 2026-11-09, "Yes, prescale"): distance_3d, bond_angle and
@@ -41,10 +44,21 @@
 #   homogeneous, atan2's two arguments have the same degree): bond_angle and dihedral_angle of 2^k times the
 #   coordinates give the same bits for every k with the scaled coordinates exact, and distance_3d scales by exactly
 #   2^k wherever it is normal.
-# - Kept as Rust's (reviewed in M4d, reported to the user; the library-wide audit after M4 revisits each with
-#   src/mathx.cyr's unbounded-exponent helpers): the over- and underflow of (σ/r)⁶ and (σ/r)¹², of k·q₁·q₂ and r·r, and
-#   a subnormal D_e·x in morse: each a chain of rounded operations whose intermediates can leave the normal range where
-#   the result is representable (ADR 0002's policy until then: Rust's sequence is the definition).
+# - ADR 0002 #32 (the overflow audit's B3; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide audit" and
+#   "round once"): coulomb's ((k·q₁)·q₂)/r and coulomb_force's ((k·q₁)·q₂)/(r·r) are each one product or quotient of
+#   inputs and k_e's double, so the port returns the exact value rounded once (src/mathx.cyr's correctly rounded
+#   monomial: _km_cr_mul3_div and _km_cr_mul3_div2), and morse_width_parameter's ω·√(μ/(2·D_e)) the correctly rounded
+#   value of the exact expression (_km_cr_mul_sqrt_ratio), where Rust rounds three or four times and an intermediate
+#   that over- or underflows gives ±∞, 0 or a degraded value although the result is representable
+#   (coulomb_force(5·10⁻³²⁴, e, 1 Å) is 0 in Rust, 7.11·10⁻³¹³ here). lennard_jones' 4ε[(σ/r)¹² − (σ/r)⁶] has a
+#   difference inside, so it gets ADR 0002 #20's semantics: Rust's chain where it stays in the normal range (its bits),
+#   Rust's sequence with an unbounded exponent and the final product rounded once otherwise (σ/r past 2^85.3 or below
+#   2^-179; past 2^170.7 Rust's ∞ − ∞ is NaN where the value is +∞). #17 and #18 are folded in (above). The unvalidated
+#   charges keep Rust's expression where one is not finite. Rust's checks and Err codes are kept.
+# - Kept as Rust's (reviewed in M4d, reported to the user; the overflow audit's later batches revisit morse with
+#   src/mathx.cyr's unbounded-exponent helpers): a subnormal D_e·x in morse, a chain of rounded operations whose
+#   intermediates can leave the normal range where the result is representable (ADR 0002's policy until then: Rust's
+#   sequence is the definition).
 
 # ── private helpers ─────────────────────────────────────────────────────────────────────────────────
 
@@ -268,24 +282,75 @@ fn _km_dihedral_angle_ux(a, b, c, d): Result {
 # The Lennard-Jones 6-12 potential V(r) = 4ε[(σ/r)¹² − (σ/r)⁶], in the unit of ε (J), from the well depth ε, the
 # collision diameter σ and the separation r (any consistent length unit). Ok(V), or Err(KM_ERR_INVALID_INPUT) if ε, σ
 # or r is not positive and finite (checked in that order). (σ/r)⁶ is Rust's five multiplications, (σ/r)¹² its square,
-# then (4·ε)·d; ADR 0002 #17: for ε ≥ 2¹⁰²², where Rust's 4·ε overflows, (ε·d)·4, the correctly rounded 4·ε·d (Rust:
-# ±∞, or NaN at r = σ). Mirrors `potential::lennard_jones`, with ADR 0002 #17.
+# then (4·ε)·d. ADR 0002 #32 (the overflow audit's B3, #20's semantics; it folds #17 in): Rust's chain where it stays in
+# the normal range (Rust's bits; for ε ≥ 2¹⁰²², where Rust's 4·ε overflows, #17's (ε·d)·4, the same correctly rounded
+# 4·ε·d the unbounded chain gives), otherwise Rust's sequence with an unbounded exponent and the final product rounded
+# once (_km_lj_ux): (σ/r)¹² past DBL_MAX while 4·ε·d is finite (Rust: +∞), (σ/r)⁶ below 2⁻¹⁰²² while ε is huge (Rust: 0
+# or a degraded value), and σ/r past 2^170.7, where Rust's ∞ − ∞ is NaN and the value +∞. Mirrors
+# `potential::lennard_jones`, with ADR 0002 #32.
 #must_use
 fn lennard_jones(epsilon: f64, sigma: f64, r: f64): Result {
     if (_km_is_positive(epsilon) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(sigma) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(r) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var v, ok = _km_lj_fast(epsilon, sigma, r);
+    if (ok == 1) { return Ok(v); }
+    var u: f64 = _km_lj_ux(epsilon, sigma, r);
+    return Ok(u);
+}
+
+# lennard_jones' fast path, for its validated inputs: (Rust's 4ε·d, 1) while that chain provably is the
+# unbounded-exponent one (ADR 0002 #32), or (0, 0). The test: σ/r and (σ/r)⁶ in [2⁻¹⁰²¹, DBL_MAX] (a result that large
+# is the 53-bit rounding of an exact value above 2⁻¹⁰²²; the four products between lie between σ/r and (σ/r)⁶, RN being
+# monotone, so they are normal too), and (σ/r)¹² in [2⁻¹⁰²¹, DBL_MAX] or (σ/r)⁶ below 2⁻⁵¹² (then (σ/r)¹² is below
+# 2⁻¹⁰²⁴, far under half an ulp of (σ/r)⁶ in both evaluations, so d = −(σ/r)⁶ in both). d = (σ/r)¹² − (σ/r)⁶ is then
+# the unbounded one (a subnormal difference of two doubles is exact), and the final product is one IEEE multiplication
+# of the unbounded chain's operands, rounded once: (4·ε)·d, with 4·ε exact, for ε < 2¹⁰²²; for ε ≥ 2¹⁰²² (ADR 0002 #17)
+# (ε·d)·4, since ε·d is then never subnormal (|d| ≥ 2⁻¹⁰⁷⁴ or d = 0) and ×4 exact, so it is RN(4·ε·d) as well, ±∞ where
+# 4·RN(ε·d) passes DBL_MAX, as the 53-bit 4·ε·d does.
+#must_use
+fn _km_lj_fast(epsilon: f64, sigma: f64, r: f64): (f64, i64) {
     var sr: f64 = sigma / r;
     var sr6: f64 = ((((sr * sr) * sr) * sr) * sr) * sr;
     var sr12: f64 = sr6 * sr6;
+    var lo = 0x0020000000000000;            # 2⁻¹⁰²¹
+    var hi = 0x7FEFFFFFFFFFFFFF;            # DBL_MAX
+    var b1 = load64(&sr);
+    var b6 = load64(&sr6);
+    var b12 = load64(&sr12);
+    if (b1 < lo || b1 > hi || b6 < lo || b6 > hi) { return (0.0, 0); }
+    if ((b12 < lo || b12 > hi) && b6 >= 0x1FF0000000000000) { return (0.0, 0); }     # 2⁻⁵¹²
     var d: f64 = sr12 - sr6;
     var edge: f64 = 0x7FD0000000000000;    # 2¹⁰²²: from here 4·ε overflows (ADR 0002 #17)
     if (epsilon >= edge) {
         var w: f64 = (epsilon * d) * 4.0;
-        return Ok(w);
+        return (w, 1);
     }
     var v: f64 = (4.0 * epsilon) * d;
-    return Ok(v);
+    return (v, 1);
+}
+
+# lennard_jones with an unbounded exponent (ADR 0002 #32), for its validated inputs: Rust's 4ε·((σ/r)¹² − (σ/r)⁶) with
+# every operation rounded to 53 bits and nothing over- or underflowing (src/mathx.cyr's _km_ux_*; 4·ε is exact), the
+# final product rounded once into binary64 (_km_ux_mul_f64: its subnormal grid, or ±∞ past DBL_MAX).
+#must_use
+fn _km_lj_ux(epsilon: f64, sigma: f64, r: f64): f64 {
+    var ss, se = _km_ux_from(sigma);
+    var rs, re = _km_ux_from(r);
+    var qs, qe = _km_ux_div(ss, se, rs, re);
+    var p2s, p2e = _km_ux_mul(qs, qe, qs, qe);
+    var p3s, p3e = _km_ux_mul(p2s, p2e, qs, qe);
+    var p4s, p4e = _km_ux_mul(p3s, p3e, qs, qe);
+    var p5s, p5e = _km_ux_mul(p4s, p4e, qs, qe);
+    var p6s, p6e = _km_ux_mul(p5s, p5e, qs, qe);
+    var p12s, p12e = _km_ux_mul(p6s, p6e, p6s, p6e);
+    var ds, de = _km_ux_sub(p12s, p12e, p6s, p6e);
+    var four: f64 = 4.0;
+    var fs, fe = _km_ux_from(four);
+    var es, ee = _km_ux_from(epsilon);
+    var gs, ge = _km_ux_mul(fs, fe, es, ee);
+    var v: f64 = _km_ux_mul_f64(gs, ge, ds, de);
+    return v;
 }
 
 # The Lennard-Jones equilibrium distance r_min = 2^(1/6)·σ ≈ 1.122σ, in the unit of σ. ADR 0002 #16: the correctly
@@ -317,48 +382,52 @@ fn morse(d_e: f64, a: f64, r_e: f64, r: f64): Result {
 
 # The Morse width parameter a = ω_e·√(μ/(2·D_e)), in m⁻¹, from the harmonic angular frequency ω_e (rad/s), the reduced
 # mass μ (kg) and the well depth D_e (J). Ok(a), or Err(KM_ERR_INVALID_INPUT) if any parameter is not positive and
-# finite. ADR 0002 #18: for D_e ≥ 2¹⁰²³, where Rust's 2·D_e overflows (μ/∞ = 0), (μ·½)/D_e, the correctly rounded
-# μ/(2·D_e); Rust's form elsewhere. Mirrors `potential::morse_width_parameter`, with ADR 0002 #18.
+# finite. ADR 0002 #32 (the overflow audit's B3; it folds #18 in): the correctly rounded ω·√(μ/(2·D_e)) of the exact
+# value (src/mathx.cyr's _km_cr_mul_sqrt_ratio), where Rust's ω·(μ/(2·D_e)).sqrt() rounds three times (one ulp off on a
+# fraction of inputs) and μ/(2·D_e) over- or underflows (2·D_e itself for D_e ≥ 2¹⁰²³, #18's edge) although a is
+# representable. Mirrors `potential::morse_width_parameter`, with ADR 0002 #32.
 #must_use
 fn morse_width_parameter(omega_e: f64, reduced_mass: f64, d_e: f64): Result {
     if (_km_is_positive(d_e) != 1 || _km_is_positive(reduced_mass) != 1 || _km_is_positive(omega_e) != 1) {
         return Err(KM_ERR_INVALID_INPUT);
     }
-    var q: f64 = 0.0;
-    var edge: f64 = 0x7FE0000000000000;    # 2¹⁰²³: from here 2·D_e overflows (ADR 0002 #18)
-    if (d_e >= edge) {
-        var hm: f64 = reduced_mass * 0.5;
-        q = hm / d_e;
-    } else {
-        var td: f64 = 2.0 * d_e;
-        q = reduced_mass / td;
-    }
-    var sq: f64 = f64_sqrt(q);
-    var w: f64 = omega_e * sq;
+    var w: f64 = _km_cr_mul_sqrt_ratio(omega_e, reduced_mass, d_e, 0 - 1);
     return Ok(w);
 }
 
 # The Coulomb potential energy V(r) = k_e·q₁·q₂/r, in J, of two point charges (C) at a separation r (m). Ok(V), or
-# Err(KM_ERR_INVALID_INPUT) if r is not positive and finite; the charges are not validated. Computed as Rust's
-# ((k_e·q₁)·q₂)/r. Mirrors `potential::coulomb`.
+# Err(KM_ERR_INVALID_INPUT) if r is not positive and finite; the charges are not validated. ADR 0002 #32: the correctly
+# rounded k_e·q₁·q₂/r for finite charges (k_e as its double; a zero charge gives its signed zero), where Rust's
+# ((k_e·q₁)·q₂)/r rounds three times and k_e·q₁·q₂ can over- or underflow; a non-finite charge gives Rust's expression.
+# Mirrors `potential::coulomb`, with ADR 0002 #32.
 #must_use
 fn coulomb(q1: f64, q2: f64, r: f64): Result {
     if (_km_is_positive(r) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var k: f64 = KM_COULOMB_CONSTANT;
-    var v: f64 = ((k * q1) * q2) / r;
-    return Ok(v);
+    if (_km_is_finite(q1) != 1 || _km_is_finite(q2) != 1) {
+        var v: f64 = ((k * q1) * q2) / r;
+        return Ok(v);
+    }
+    var c: f64 = _km_cr_mul3_div(k, q1, q2, r);
+    return Ok(c);
 }
 
 # The Coulomb force F = k_e·q₁·q₂/r², in N (positive: repulsion), of two point charges (C) at a separation r (m).
-# Ok(F), or Err(KM_ERR_INVALID_INPUT) if r is not positive and finite. Computed as Rust's ((k_e·q₁)·q₂)/(r·r).
-# Mirrors `potential::coulomb_force`.
+# Ok(F), or Err(KM_ERR_INVALID_INPUT) if r is not positive and finite. ADR 0002 #32: the correctly rounded
+# k_e·q₁·q₂/(r·r) for finite charges (a zero charge gives its signed zero), where Rust's ((k_e·q₁)·q₂)/(r·r) rounds four
+# times and r·r over- or underflows for r past 1.3·10¹⁵⁴ or below 1.5·10⁻¹⁵⁴; a non-finite charge gives Rust's
+# expression. Mirrors `potential::coulomb_force`, with ADR 0002 #32.
 #must_use
 fn coulomb_force(q1: f64, q2: f64, r: f64): Result {
     if (_km_is_positive(r) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var k: f64 = KM_COULOMB_CONSTANT;
-    var rr: f64 = r * r;
-    var v: f64 = ((k * q1) * q2) / rr;
-    return Ok(v);
+    if (_km_is_finite(q1) != 1 || _km_is_finite(q2) != 1) {
+        var rr: f64 = r * r;
+        var v: f64 = ((k * q1) * q2) / rr;
+        return Ok(v);
+    }
+    var c: f64 = _km_cr_mul3_div2(k, q1, q2, r, r);
+    return Ok(c);
 }
 
 # ── molecular geometry from 3D coordinates ──────────────────────────────────────────────────────────

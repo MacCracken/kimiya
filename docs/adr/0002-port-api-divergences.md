@@ -32,8 +32,8 @@ are compared through the stated mapping:
 | 14 *(2026-11-09, M4c)* | `nuclear::is_secular_equilibrium` tests `λ_p < 0.01·λ_d`: 0.01 is not 1/100 and the product rounds or underflows, so (0.03, 3) is false and (0, 5 × 10⁻³²⁴) false | the exact λ_p < λ_d/100: 100·λ_p against λ_d by an exact double-double (`_km_two_prod` on the significands, the exponents first), Rust's NaN (false), ±∞ and ±0 semantics kept | class A; equal rows plain; the others noted `(i:…)`, mapped and reported by name (208 rows) |
 | 15 *(2026-11-09, M4b's inorganic, decided in M4c)* | `inorganic::delta_tet_from_oct` computes `delta_oct * 4.0 / 9.0`, correctly rounded except where Δ·4 overflows (\|Δ\| ≥ 2¹⁰²², above DBL_MAX/4): ±∞ where 4Δ/9 is finite | there, (Δ/9)·4: one rounded division and an exact ×4 that can't overflow, which is again the correctly rounded 4Δ/9 (4·DBL_MAX/9 ≈ 7.99 × 10³⁰⁷). Rust's form elsewhere | class B; noted `(f:…)`, mapped and reported by name (59 rows) |
 | 16 *(2026-11-09, M4d)* | `potential::lj_equilibrium_distance` computes `sigma * 2.0.powf(1.0 / 6.0)`: the exponent 1/6 is rounded (a simple exact constant misrepresented in binary) and the product rounds again, so r_min = σ·2^(1/6) is one ulp off on about a fifth of all σ (4,117 of 20,000 seeded). (2^RN(1/6) rounds to RN(2^(1/6)), MPFR checks; the misses are the second rounding) | the correctly rounded σ·2^(1/6), rounded once: σ = s·2^e, s·(H + M + L) by `_km_td_mul_d` (2^(1/6) as a triple-double from `mathx_tables.py`'s exact integer root), then `_km_cr_finish` at the final scale; no rounding test is needed, since 2^(1/6)'s continued fraction proves every σ·2^(1/6) at least 2^-55.1 ulp from a rounding boundary, far beyond the product's 2^-102.6. NaN, ±0, ±∞ give σ | class C (Rust's `powf`); equal rows plain; the others noted `(f:…)`, mapped and counted (1,041 rows) |
-| 17 *(2026-11-09, M4d)* | `potential::lennard_jones` computes `4.0 * epsilon * (sr12 - sr6)`, i.e. (4·ε)·d: for ε ≥ 2¹⁰²² the exact 4·ε overflows, so the result is ±∞ (or ∞·0 = NaN at r = σ) where 4·ε·d is representable | there, (ε·d)·4: one rounded product and an exact ×4, which is RN(4·ε·d), the value Rust's (4·ε)·d has wherever 4·ε is finite (4·ε is exact). Rust's form elsewhere | class B; noted `(f:…)`, mapped and counted (180 rows) |
-| 18 *(2026-11-09, M4d)* | `potential::morse_width_parameter` computes `omega_e * (reduced_mass / (2.0 * d_e)).sqrt()`: for D_e ≥ 2¹⁰²³ the exact 2·D_e overflows, μ/∞ = 0 and a = 0 where ω·√(μ/(2·D_e)) is representable | there, (μ·½)/D_e: RN(μ/(2·D_e)) (μ·½ is exact, or μ < 2⁻¹⁰²¹ and the quotient rounds to 0 either way), the value Rust's μ/(2·D_e) has wherever 2·D_e is finite; then Rust's √ and ×ω. Rust's form elsewhere | class B; noted `(f:…)`, mapped and counted (181 rows) |
+| 17 *(2026-11-09, M4d)* | `potential::lennard_jones` computes `4.0 * epsilon * (sr12 - sr6)`, i.e. (4·ε)·d: for ε ≥ 2¹⁰²² the exact 4·ε overflows, so the result is ±∞ (or ∞·0 = NaN at r = σ) where 4·ε·d is representable | there, (ε·d)·4: one rounded product and an exact ×4, which is RN(4·ε·d), the value Rust's (4·ε)·d has wherever 4·ε is finite (4·ε is exact). Rust's form elsewhere | class B; noted `(f:…)`, mapped and counted (180 rows). *Folded into #32 by the overflow audit's B3 (2026-11-11): (ε·d)·4 is #32's unbounded-exponent value wherever Rust's d is normal, so all 180 rows keep their value, now noted under #32* |
+| 18 *(2026-11-09, M4d)* | `potential::morse_width_parameter` computes `omega_e * (reduced_mass / (2.0 * d_e)).sqrt()`: for D_e ≥ 2¹⁰²³ the exact 2·D_e overflows, μ/∞ = 0 and a = 0 where ω·√(μ/(2·D_e)) is representable | there, (μ·½)/D_e: RN(μ/(2·D_e)) (μ·½ is exact, or μ < 2⁻¹⁰²¹ and the quotient rounds to 0 either way), the value Rust's μ/(2·D_e) has wherever 2·D_e is finite; then Rust's √ and ×ω. Rust's form elsewhere | class B; noted `(f:…)`, mapped and counted (181 rows). *Folded into #32 by the overflow audit's B3 (2026-11-11), which rounds the whole ω·√(μ/(2·D_e)) once, everywhere: 128 of the 181 rows keep their value, 42 move by one ulp and 3 by two (√ and ×ω rounding a normal quotient), 8 by up to 1.3·10¹² ulp (a subnormal μ/(2·D_e), degraded before the √); all noted under #32* |
 | 19 *(2026-11-09, M4e)* | `spectroscopy::wavenumber_from_wavelength` and `wavelength_from_wavenumber` compute `0.01 / x` for the exact 1/(100·x) (the cm ↔ m factor 1/100): 0.01 is 1/100 + 2.08·10⁻¹⁹ (relative 2⁻⁵⁵·⁴), and the quotient rounds again, so the result is one ulp from RN(1/(100·x)) on about 14 % of all doubles (2,748 of 20,000 seeded) | RN(1/(100·x)), rounded once: `src/mathx.cyr`'s `_km_cr_hundredth_div` (a double-double residual with 1/100 = H + L and a rounding test, an exact 64-bit long division as its fallback and past 2^±900); the special values Rust's | class B; noted `(f:…)`, mapped and counted (827 rows each) |
 | 20 *(2026-11-09, M4e-2)* | `potential::distance_3d`, `bond_angle` and `dihedral_angle` square raw coordinates: above about 10¹⁵⁴ (10⁷⁷ for the dihedral's fourth powers) or below their reciprocals a square, cross product or dot product overflows or underflows, and the result is an Err, 0, ±∞ or a degraded value where the true distance or angle is representable (`distance_3d` of (DBL_MAX, 0, 0) and the origin is +∞, the gauche dihedral at 2⁷⁰⁰·Å an Err, the angle of (1, 2⁻¹⁰⁶⁰) 0), so the angles, which Rust documents as scale-invariant, are not | Rust's own operation sequence (every subtraction, product, sum, comparison, `max` and the Err checks, in Rust's order) evaluated in IEEE binary64 round-to-nearest-even with an **unbounded exponent range**: every + − × ÷ √ rounds to 53 bits and nothing overflows or underflows. The exception is the **final** operation (`sqrt` for `distance_3d`, `atan2` for the angles), which is correctly rounded to binary64 itself: its subnormal grid, or ±∞. Comparisons and Err branches use the unbounded values; non-finite inputs keep Rust's behaviour. So every row where Rust's chain stays in the normal range is bit-identical to Rust; the angles are exactly scale-invariant (for every k with all scaled coordinates exact, the same bits at 2^k times the coordinates: every check is homogeneous, and `atan2`'s two arguments have the same degree), and `distance_3d` scales by exactly 2^k wherever the result is normal. Rust's chain with a cheap range test, and `src/mathx.cyr`'s `_km_ux_*` helpers where it fails | class B (`distance_3d`) and C (the angles); noted `(f:…)` or `(E:InvalidInput)`, mapped and counted (854, 1,205 and 1,546 rows; 91 of the dihedral's are the port's Err where Rust's rounded threshold says Ok) |
 | 21 *(2026-11-10, M4e-3)* | `spectroscopy::bohr_energy_level` computes ((−R·Z)·Z)/(n·n), `bohr_transition_energy` the difference of two such levels, `rydberg_wavelength` and `SpectralSeries::wavelength` 1/(((R·Z)·Z)·(1/(n₁·n₁) − 1/(n₂·n₂))): three to eight roundings of exact rationals, so −R at Z = n is one ulp off for 86 of the 255 Z, and the levels' difference and 1/n₁² − 1/n₂² cancel for close large n (39 ulp at n = 100, 939 at 10⁴, up to 9.0·10⁷ for the wavelength and 1.8·10⁹ for the transition energy on the corpus, near n = 2³²) | the exact rational with the constant as its double, **rounded once**: −R·Z²/n², R·Z²·(n₂² − n₁²)/(n₁²·n₂²) and n₁²·n₂²/(R·Z²·(n₂² − n₁²)) (R = `KM_RYDBERG_EV`, `KM_RYDBERG`, or Rust's const-evaluated R_H, Z = 1): a double-double fast path with a proven bound and a rounding test (exact operands for n₂ < 2¹³), and the exact slow path `_km_cr_ratio` on multi-word integers, which rounds the 13 exact ties (Z = 255, 2^k·(58,055, 524,544)) to even. Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (3,823 levels, 1,351 transition energies, 1,376 wavelengths, 67 series lines) |
@@ -46,6 +46,8 @@ are compared through the stated mapping:
 | 28 *(2026-11-10, the overflow audit's B1)* | `kinetics::zero_order_half_life` computes [A]₀/(2k), `steady_state_intermediate` (k₁·[A])/k₂, `pre_equilibrium_rate` (k₂·(k₁/k₋₁))·[A], `second_order_concentration` 1/(1/[A]₀ + k·t) and `michaelis_menten` (Vmax·[S])/(Km + [S]): an intermediate over- or underflows where the result is representable (`zero_order_half_life(DBL_MAX, DBL_MAX)` 0, not ½; `second_order_concentration(1, DBL_MAX, 10)` 0, not 5.56·10⁻³¹⁰; `michaelis_menten(100, DBL_MAX, DBL_MAX)` ∞/∞ = NaN, not 50; `pre_equilibrium_rate(1e300, 1, 1e300, 0)` ∞·0 = NaN, not 0), and the monomials' two or three roundings are 1–2 ulp off on a quarter of inputs | the three monomials **rounded once** (#27's helper: RN([A]₀/(2k)) — Rust's own division wherever 2k is finite, where it already is that value —, RN(k₁·[A]/k₂), RN(k₂·k₁·[A]/k₋₁)); the two with a sum inside under **#20's semantics**: Rust's operation sequence with an unbounded exponent (`_km_ux_*`), the final division rounded once into binary64, behind a range test (`_km_second_order_fast`, `_km_michaelis_menten_fast`) that proves Rust's chain stayed normal, so those inputs keep Rust's bits. Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (89 `second_order_concentration`, 90 `zero_order_half_life`, 118 `steady_state_intermediate`, 179 `pre_equilibrium_rate`, 160 `michaelis_menten`: 636) |
 | 29 *(2026-11-10, the overflow audit's B2)* | `solution::dilution` computes (M₁·V₁)/V₂, `solution_conductivity` (Λ·c)/1000, `electrochemistry::faraday_mass_deposited` (Q·M)/(n·F), `faraday_charge_required` ((m·n)·F)/M, `faraday_mass_ratio` (m_A·(M_B/n_B))/(M_A/n_A) and `nernst_potential` E° − ((R·T)/(n·F))·ln Q: the five quotients round two to four times, so about a quarter of results are 1–2 ulp off (`dilution(1.5, 0.2, 0.6)` 0.5000000000000001), and a partial product, an equivalent weight M/n or R·T that over- or underflows gives ±∞, 0, NaN or a degraded value although the value is representable (`faraday_mass_deposited(DBL_MAX, 63.546, 2)` ∞, not 5.92·10³⁰⁴; `solution_conductivity(126.4, DBL_MAX)` ∞, not 2.27·10³⁰⁷; `faraday_mass_ratio(1, 5e-324, 3, 1e-300, 1)` ∞, not 6.07·10²³; `nernst_potential(0.342, 2, DBL_MAX, 0.1)` ∞, not 1.78·10³⁰⁴, and at Q = 1 NaN, not E°) | the five monomials **rounded once** — RN(M₁·V₁/V₂), RN(Λ·c/1000), RN(Q·M/(n·F)), RN(m·n·F/M), RN(m_A·M_B·n_A/(n_B·M_A)), F as `KM_FARADAY`'s double, 1000 and the electron counts exact — by #27's `_km_cr_mono` (two new straight-line shapes, `_km_mul2_div2_fast` and `_km_mul3_div2_fast`); `nernst_potential` under **#20's semantics** with the correctly rounded ln Q (`_km_cr_ln`, ADR 0006) as its primitive: Rust's operation sequence with an unbounded exponent (`_km_ux_*`), the final subtraction rounded once into binary64 (`_km_nernst_ux`), behind a range test (`_km_nernst_fast`) that proves Rust's chain stayed normal, so those inputs keep Rust's bits (every `nernst_potential_25c` input among them). The unvalidated `solution_conductivity` keeps Rust's expression for a non-finite input; Rust's checks, Err codes and order are kept | class B (the monomials) and C (`nernst_potential`); equal rows plain; the others noted `(f:…)`, mapped and counted (94 `dilution`, 148 `solution_conductivity`, 904 `faraday_mass_deposited`, 644 `faraday_charge_required`, 847 `faraday_mass_ratio`, 119 `nernst_potential`: 2,756) |
 | 30 *(2026-11-10, the overflow audit's B2)* | `spectroscopy::absorbance` computes (ε·l)·c, `concentration_from_absorbance` A/(ε·l), `rigid_rotor_energy` ((h·B)·J)·(J + 1), `rotational_constant` h/(((8·π)·π)·I), `diatomic_moment_of_inertia` (μ·r)·r and `vibrational_frequency` (k/μ).sqrt(): two to four roundings of one product or quotient of inputs and constants (one quotient under a √), so a fraction of results are 1–2 ulp off (HCl's ω = √(516/1.6266·10⁻²⁷) is 563228298138879.9, not …880.0; `rotational_constant(1.45e-46)` 57875971594.410576, not …41057), and a partial product or quotient that over- or underflows gives ±∞, 0, NaN or a degraded value although the value is representable (`vibrational_frequency(500, 2⁻¹⁰²²)` ∞, not 1.50·10¹⁵⁵, and `(10⁻³⁰⁰, 10³⁰)` 0, not 10⁻¹⁶⁵; `rigid_rotor_energy(2³² − 1, 10⁻³⁰⁰)` 0, not 1.22·10⁻³¹⁴; `rotational_constant(10⁻³²⁰)` 8.392090·10²⁸⁴, not 8.392109·10²⁸⁴; `absorbance(1e300, 1e300, 0)` NaN, not 0; `concentration_from_absorbance(1e300, 1e200, 1e200)` 0, not 10⁻¹⁰⁰) | the five monomials **rounded once** — RN(ε·l·c), RN(A/(ε·l)), RN(h·B·J·(J + 1)), RN(h/(8·π·π·I)) (h `KM_PLANCK`'s double, π its double each time Rust uses it, 8, J and J + 1 exact), RN(μ·r·r) — by #27's helper (two new straight-line shapes, `_km_mul4_fast` and `_km_div3_fast`); `vibrational_frequency` the **correctly rounded √ of the exact k/μ**, `src/mathx.cyr`'s `_km_cr_sqrt_div`: a double-double fast path (proven within 5.7u², u = 2⁻⁵³) with `_km_dd_div_cr`'s rounding test, and an exact integer square root on `_km_bn_*` (√(k/μ) is never a rounding boundary of binary64, proven), ±∞ only past DBL_MAX. A non-finite unvalidated input (absorbance's, the moment of inertia's, the rotor's B, concentration_from_absorbance's A) keeps Rust's expression; Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (195 `absorbance`, 219 `concentration_from_absorbance`, 706 `vibrational_frequency`, 344 `rigid_rotor_energy`, 524 `rotational_constant`, 118 `diatomic_moment_of_inertia`: 2,106) |
+| 31 *(2026-11-11, the overflow audit's B3)* | `gas::ideal_gas_pressure` and `ideal_gas_volume` compute ((n·R)·T)/V and ((n·R)·T)/P, `gas_density` (P·M)/(R·T), `van_der_waals_pressure` (((n·R)·T)/(V − n·b)) − ((a·(n/V))·(n/V)) after testing V ≤ n·b, `peng_robinson_pressure` RT/(V − b) − a·α/(V² + 2bV − b²) on `pr_coefficients`' a·α and b after testing V ≤ b, `redlich_kwong_pressure` RT/(V − b) − a/((√T·V)·(V + b)) with a = (((0.42748·R)·R)·Tc^2.5)/Pc: the three monomials round three times, so about a quarter of results are 1–2 ulp off, and in all six an intermediate that over- or underflows gives ±∞, 0, NaN, the wrong sign or a degraded value although the value is representable (`ideal_gas_volume(DBL_MAX, 300, 101325)` ∞, not 4.43·10³⁰⁶; `gas_density(101325, 0.029, DBL_MAX)` 0, not 1.97·10⁻³⁰⁶; `peng_robinson_pressure` at Tc = 2⁻¹⁰²² NaN, not 99,773.55 Pa, and at V = 2·10¹⁵⁴ +1.25·10⁻¹⁵¹, not −1.49·10⁻⁷; `redlich_kwong_pressure(10¹³⁰, 10³⁰⁰, 300, 1)` −∞, not −1.71·10²⁵), and the co-volume tests decide on a rounded co-volume (a subnormal n·b or b, or one whose subnormal partial product /Pc scales back up) | the three monomials **rounded once** — RN(n·R·T/V), RN(n·R·T/P), RN(P·M/(R·T)), R as `KM_GAS_CONSTANT`'s double — by #27's `_km_cr_mono` (B1's and B2's shapes `_km_mul3_div_fast`, `_km_mul2_div2_fast`); the three equations of state under **#20's semantics**: Rust's operation sequence (`pr_coefficients`' κ and α = u·u included) with an unbounded exponent (`_km_ux_*`), the co-volume tests on the unbounded co-volume (so the port refuses where Rust's rounded one accepts, and the reverse), the final subtraction rounded once, behind range tests (`_km_vdw_fast`, `_km_pr_pressure_fast`, `_km_rk_pressure_fast`, on the new `_km_ux_normal`) that prove Rust's chain stayed normal, so those inputs keep Rust's bits; Redlich–Kwong's Tc^2.5 with an unbounded exponent is the exact rescale `_km_cr_pow(s, 2.5)·2^(5j)` for Tc = s·2^(2j), s in [1, 4) (`_km_rk_tc25_ux`, proven equal to RN₅₃(Tc^2.5)). The Peng–Robinson Z, roots and fugacity keep Rust's chain (the audit's later batches). Rust's checks, Err codes and order are kept | class B (C for Redlich–Kwong); equal rows plain; the others noted `(f:…)` or, where the port's co-volume test refuses, `(E:InvalidInput)`, mapped and counted (146 `ideal_gas_pressure`, 148 `ideal_gas_volume`, 222 `gas_density`, 206 `van_der_waals_pressure`, 201 `peng_robinson_pressure`, 234 `redlich_kwong_pressure`: 1,157, of which 98 the port's Err and 80 its value where Rust's is the Err) |
+| 32 *(2026-11-11, the overflow audit's B3)* | `potential::lennard_jones` computes (4·ε)·((σ/r)¹² − (σ/r)⁶) (#17's (ε·d)·4 past 4·ε's overflow), `coulomb` ((k·q₁)·q₂)/r, `coulomb_force` ((k·q₁)·q₂)/(r·r), `morse_width_parameter` ω·(μ/(2·D_e)).sqrt() (#18's (μ·½)/D_e past 2·D_e's overflow), `inorganic::born_lande_lattice_energy` −k·N_A·M·z⁺·z⁻·e·e/r₀·(1 − 1/n) left to right, `nuclear::binding_energy_per_nucleon` ((Z·m_H + N·m_n − M)·931.494…)/A: the monomials round three or four times (1–2 ulp off on a fraction of inputs; the Morse width a √ of a rounded quotient, times ω), and an intermediate that over- or underflows gives ±∞, 0, NaN, the wrong zero or a degraded value although the value is representable (`lennard_jones(10⁻³⁰⁰, 1, 1.72·10⁻²⁶)` +∞, not 5.83·10⁹; at σ/r > 2^170.7 ∞ − ∞ = NaN where the value is +∞ or finite; `coulomb_force(5·10⁻³²⁴, e, 10⁻¹⁰)` 0, not 7.11·10⁻³¹³; `morse_width_parameter(5.634·10¹⁴, DBL_MAX, 7.399·10⁻¹⁹)` ∞, not 6.21·10¹⁷⁷; `born_lande_lattice_energy(DBL_MAX, 1, 1, DBL_MAX, DBL_MAX)` −∞, not −1.39·10⁻⁴; `binding_energy_per_nucleon(1000, 1000, DBL_MAX)` −∞, not −8.37·10³⁰⁷) | `coulomb` and `coulomb_force` **rounded once** — RN(k·q₁·q₂/r), RN(k·q₁·q₂/(r·r)), k as `KM_COULOMB_CONSTANT`'s double — by #27's helper (`_km_mul3_div_fast`, `_km_mul3_div2_fast`), a non-finite charge keeping Rust's expression; `morse_width_parameter` the **correctly rounded ω·√(μ/(2·D_e))** of the exact value, `src/mathx.cyr`'s new `_km_cr_mul_sqrt_ratio` (RN(w·√((x/y)·2^e)): #30's proven double-double root times ω with a rounding test, and an exact integer root on `_km_bn_*`, which rounds the midpoints this value can be, 3ω·2^k, to even); `lennard_jones`, `born_lande_lattice_energy` (whose (1 − 1/n) stays Rust's, M4b's review) and `binding_energy_per_nucleon` (whose mass defect is a sum of inputs) under **#20's semantics**: Rust's operation sequence with an unbounded exponent, the final product or division rounded once, behind range tests (`_km_lj_fast`, `_km_born_lande_fast`, Δm·931.494… finite) that prove Rust's chain stayed normal, so those inputs keep Rust's bits. #17 and #18 are folded in: #17's (ε·d)·4 is the unbounded chain's value wherever Rust's d is normal (all 180 of its rows keep their value); #18's ω·√(RN(μ/(2·D_e))) gives way to the correctly rounded value (128 of its 181 rows keep theirs, 53 move: the B3 addition). Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (582 `lennard_jones`, 244 of them with ε ≥ 2¹⁰²²; 1,860 `morse_width_parameter`, 340 with D_e ≥ 2¹⁰²³; 730 `coulomb`; 679 `coulomb_force`; 175 `born_lande_lattice_energy`; 156 `binding_energy_per_nucleon`: 4,182) |
 
 Deferred with their modules (port plan §2.2), and decided when they port: #5 `bridge::*` →
 `Result` and removal of `ionization_to_bond_energy_estimate`; #10 soorat `from_molecule` →
@@ -876,6 +878,182 @@ test), `dilution` 17 → 86, `solution_conductivity` 6 → 72, `faraday_mass_dep
 `rigid_rotor_energy` 14 → 114, `rotational_constant` 18 → 117, `diatomic_moment_of_inertia` 11 → 74; the edges
 `nernst_potential_edge` 202 ns (the unbounded slow path), `vibrational_frequency_edge` 88 ns (k/μ past DBL_MAX: the fast
 path), `vibrational_frequency_subnormal` 883 ns (the exact root), `faraday_mass_ratio_tie` 402 ns (`_km_mono_tie`).
+
+## Addition, 2026-11-11 (audit B3): #31 and #32
+
+**The decisions.** B1's section above quotes the user's decisions verbatim; they apply to B3 unchanged: a formula that is
+one product or quotient of inputs and constants, possibly under a final square root, is rounded once (B2's
+`vibrational_frequency` = RN(√(k/μ)) the precedent for the root); a formula with a sum inside gets #20's edge fix (Rust's
+chain with an unbounded exponent, the final operation rounded once, a fast-path range test so in-range rows keep Rust's
+bits); where Rust gives NaN and the true value is out of range, the correctly rounded ±∞ or 0; meaningless edges are
+fixed too (Tc = 2⁻¹⁰²² K, ω = 10²⁰⁰, atomic masses of 10³⁰⁸ u); every Rust check, Err code and order stays. Unlike B1's and
+B2's, B3's functions have such NaNs: `lennard_jones`' ∞ − ∞ past σ/r = 2^170.7 is +∞ where 4ε·d overflows (and a finite
+value for a tiny ε), and the equations of state's 0·∞ or ∞ − ∞ stand for values that are finite or ±∞ (232 golden rows
+where Rust's NaN is the value ±∞). The unbounded evaluation also gives the correctly signed zero where the value
+underflows: `lennard_jones` with σ/r below 2⁻¹⁷⁹ and a huge ε is −0 (or a negative subnormal), Rust's d = 0 − 0 = +0
+(137 rows where Rust's special differs and the value is out of range). B3 is the survey's families F2 (#31) and F6
+(#32), one row each; the survey's batches B4 and B5.
+
+**The treatment, per function** (each checked against `rust-old/src/`):
+
+| Function | Rust's formula | Treatment | Why |
+|---|---|---|---|
+| `gas::ideal_gas_pressure`, `ideal_gas_volume` | ((n·R)·T)/V, ((n·R)·T)/P | rounded once, RN(n·R·T/x) | one quotient of a product of inputs and R's double |
+| `gas::gas_density` | (P·M)/(R·T) | rounded once, RN(P·M/(R·T)) | one quotient; R·T is a product in the denominator, not a sum |
+| `gas::van_der_waals_pressure` | (((n·R)·T)/(V − n·b)) − ((a·(n/V))·(n/V)), after V ≤ n·b | #20's semantics, the co-volume test on the unbounded n·b | sums inside (V − n·b, the final difference) |
+| `gas::peng_robinson_pressure` | RT/(V − b) − a·α/((V·V + (2b)·V) − b·b) on `pr_coefficients` (κ = (0.37464 + 1.54226ω) − (0.26992ω)ω, α = (1 + κ(1 − √(T/Tc)))², `powi(2)` = u·u), after V ≤ b | #20's semantics, the whole chain (κ and α included), the co-volume test on the unbounded b | sums inside |
+| `gas::redlich_kwong_pressure` | RT/(V − b) − a/((√T·V)·(V + b)), a = (((0.42748·R)·R)·Tc^2.5)/Pc, after V ≤ b | #20's semantics; Tc^2.5 with an unbounded exponent by an exact rescale | sums inside; `powf(2.5)` is the chain's one transcendental (correctly rounded on both sides, ADR 0006) |
+| `potential::lennard_jones` | (4·ε)·((σ/r)¹² − (σ/r)⁶), (σ/r)⁶ five products | #20's semantics, #17 folded in | a difference inside |
+| `potential::coulomb`, `coulomb_force` | ((k·q₁)·q₂)/r, ((k·q₁)·q₂)/(r·r) | rounded once, RN(k·q₁·q₂/r), RN(k·q₁·q₂/(r·r)) | one quotient each (r·r a product in the denominator); the charges are not validated, so a non-finite one keeps Rust's expression (B1's rule) |
+| `potential::morse_width_parameter` | ω·(μ/(2·D_e)).sqrt() | the correctly rounded ω·√(μ/(2·D_e)) of the exact value, #18 folded in | a monomial with a square root: ω·√(μ/(2·D_e)) = √(ω²·μ/(2·D_e)) for ω > 0, rounded once as #30's √(k/μ) |
+| `inorganic::born_lande_lattice_energy` | −k·N_A·M·z⁺·z⁻·e·e/r₀·(1 − 1/n), left to right | #20's semantics | (1 − 1/n) is a sum; M4b left it as Rust's (it misses CR((n − 1)/n) on 332 rows, but no exact value exists to reach), and #20's semantics keep exactly that: in-range rows keep Rust's bits |
+| `nuclear::binding_energy_per_nucleon` | ((Z·m_H + N·m_n − M)·931.494…)/A | #20's semantics | the mass defect is a sum of inputs (M is one), so not a monomial |
+
+The survey listed these under F2 and F6 with the same treatments; `binding_energy_per_nucleon` was the open question (its
+mass defect, Z·m_H + N·m_n − M, is a sum with an input). The Peng–Robinson Z, roots and fugacity share
+`pr_coefficients` and keep Rust's chain (`_km_pr_coefficients`, unchanged; the survey's F16, the audit's later batches).
+
+**#31's and #32's monomials** use #27's `_km_cr_mono` through B1's and B2's straight-line shapes (`_km_cr_mul3_div` for
+the ideal gas law and `coulomb`, `_km_cr_mul2_div2` for `gas_density`, `_km_cr_mul3_div2` for `coulomb_force`); no new
+shape. R's odd significand part has 51 bits and k_e's 52 (B1's comment on `osmotic_pressure` says 53 for R; its
+conclusion, no midpoint there, holds, since 1000's 125 adds 7 bits), so q·R for q = 9 … 15 and 5·k_e, 7·k_e are 53-bit
+midpoints, rows the corpus carries (ties to even, the shapes' failed tests resolved by `_km_mono_tie`).
+
+**#32's square root, the machinery** (`src/mathx.cyr`, "correctly rounded w·√((x/y)·2^e)"):
+`_km_cr_mul_sqrt_ratio(w, x, y, e)` = RN(w·√((x/y)·2^e)) for positive finite doubles and |e| ≤ 2²⁰, rounded once (the
+subnormal grid, +∞ past DBL_MAX); `morse_width_parameter` calls it with e = −1.
+- *midpoints exist*, unlike #30's √(x/y): with w = W·2^a, x = A·2^b, y = B·2^c (W, A, B odd) a boundary M·2^f (M odd) is
+  hit when W²·A = B·M² and the exponents match, e.g. ω = y with 3y of 54 bits, μ = 9, D_e = ½ (v = 3y); so the fast path
+  only ever proves a rounding, and the exact path decides every tie;
+- *the fast path* `_km_mul_sqrt_ratio_fast`, normal operands: #30's `_km_sqrt_div_dd` for √(sₓ/s_y) (within 5.7u²,
+  u = 2⁻⁵³, |d| ≤ 1.52u·y₀, proven there), s_w·y₀ = p_h + p_l by TwoProduct, t = RN(p_l + RN(d·s_w)) (within 4.07u²·p_h
+  of s_w(y₀ + d)), so p_h + t is within 9.8u² of s_w·√F, normalised by FastTwoSum; then `_km_dd_round_ends`' test (ε =
+  2⁻¹⁰⁰·h, its 32u² budget) and `_km_mono_fin`'s exact scale (±∞ past 2¹⁰²³; a possibly subnormal result declines);
+- *the exact path* `_km_mul_sqrt_ratio_acc`, every positive finite operand: v = √(P/B)·2^h with P = W²·A·2⁶ (W, A, B in
+  [2⁵², 2⁵³), A doubled for an odd exponent; P below 2¹⁶⁶), R = ⌊√(P/B)⌋ in [2^54.5, 2⁵⁷) from a guess off the fast
+  path's arithmetic (8·W·(y₀ + d)) corrected by multi-word comparisons (`_km_bn_*`), sticky = [R²·B ≠ P], and
+  `_km_cr_from_int(2R + sticky, h − 1)`: R has at least 55 bits, so every rounding boundary is a multiple of 4 units of
+  2R + sticky, an end point of [2R, 2R + 2), reached only by an exact value (sticky = 0): ties to even.
+The generator's reference is `exact::cr_sqrt_monomial` (an integer square root of a 121-bit quotient of the mantissas'
+products, `round_scaled`), `validate.py`'s Python `math.isqrt` (`b3_sqrt_frac`) and, independently, MPFR's √ of a
+320-bit quotient (`mpfr_ref.ux_mul_sqrt_div_final`: exact where the quotient is dyadic, so a tie is rounded exactly;
+otherwise at least 2⁻¹⁶² from every boundary's square).
+
+**#31's and #32's unbounded-exponent functions** (`src/gas.cyr`, `src/potential.cyr`, `src/inorganic.cyr`,
+`src/nuclear.cyr`), on #20's helpers. Each runs Rust's chain and a range test; only where the test fails, the
+unbounded-exponent evaluation (`_km_vdw_ux`, `_km_pr_pressure_ux`, `_km_rk_pressure_ux`, `_km_lj_ux`,
+`_km_born_lande_ux`, `_km_bea_ux`). The tests rest on `src/mathx.cyr`'s new `_km_ux_normal(x)`, |x| in [2⁻¹⁰²¹, DBL_MAX]:
+an IEEE product, quotient or root that large is the 53-bit rounding of an exact value above 2⁻¹⁰²² (2⁻¹⁰²² itself is
+excluded: a value just below it rounds there at the subnormal grid and below it at 53 bits); a sum of two correct
+doubles needs only to be finite (a subnormal sum is exact); a zero product of an exact zero factor is exact; √ of a
+correct operand is correct. Then every operation is the unbounded chain's, the co-volume test decides alike, and the
+final IEEE operation rounds the same operands once.
+- `_km_vdw_fast`: n·b normal, an exact zero or +∞ (V ≤ +∞ refuses in both: the unbounded n·b is past DBL_MAX ≥ V); then
+  n·R, n·R·T, n/V and the quotient term normal (n ≠ 0), a·(n/V) and its product with n/V normal (a ≠ 0), V − n·b finite.
+- `_km_pr_pressure_fast`: every product and quotient of `pr_coefficients` and the pressure (the a, b and α chains, T/Tc,
+  R·T, V·V, 2b·V, b·b, the two quotients) normal or an exact zero (ω = 0, κ·(1 − √T_r) with a zero factor, u = 0), κ and
+  the sums finite.
+- `_km_rk_pressure_fast`: Tc^2.5 (`_km_cr_pow`, RN₅₃(Tc^2.5) wherever it is normal), a's and b's products and quotients,
+  R·T, the quotient term, √T·V and (√T·V)·(V + b) normal; V − b and V + b finite.
+- `_km_lj_fast`: σ/r and (σ/r)⁶ normal (the four products between lie between them: RN is monotone), and (σ/r)¹² normal
+  or (σ/r)⁶ below 2⁻⁵¹² (then (σ/r)¹² is below 2⁻¹⁰²⁴, far under half an ulp of (σ/r)⁶ in both evaluations, so d = −(σ/r)⁶
+  in both); the final (4·ε)·d, and for ε ≥ 2¹⁰²² #17's (ε·d)·4 (ε·d is never subnormal for a nonzero d, ×4 exact), each
+  RN(4·ε·d).
+- `_km_born_lande_fast`: the five partial products and the quotient by r₀ normal (−k·N_A is a normal constant); the
+  factor 1 − 1/n is always the unbounded one (where Rust's 1/n is not normal, n > 2¹⁰²¹, both 1/n are below 2⁻⁵⁴ and both
+  differences round to 1).
+- `binding_energy_per_nucleon`: Δm·931.494… finite. Δm itself is always the unbounded one (Z·m_H and N·m_n are 0 or in
+  [1, 2³³·1.01], Δm = s − M with s ≥ 1 is 0 or at least 2⁻⁵³ in magnitude), so only the product's overflow (masses above
+  about 1.93·10³⁰⁵ u) leaves the range.
+- **Redlich–Kwong's Tc^2.5** (`_km_rk_tc25_ux`). With Tc = s·2^(2j), s in [1, 4) (Tc's unbounded pair, the significand
+  doubled for an odd exponent: exact), Tc^2.5 = s^2.5·2^(5j) exactly (real arithmetic, s > 0). s^2.5 lies in [1, 32),
+  inside binary64's normal range, where the correctly rounded `_km_cr_pow(s, 2.5)` is RN₅₃(s^2.5) (ADR 0006: exact cases
+  and midpoints decided before its accurate path rounds, the general case within its stated 2⁻¹³⁰). With an unbounded
+  exponent RN₅₃ commutes with scaling by a power of two: RN₅₃(x·2^k) = RN₅₃(x)·2^k for every x > 0 and integer k (53-bit
+  rounding acts on the significand only). So RN₅₃(Tc^2.5) = RN₅₃(s^2.5)·2^(5j) = `_km_cr_pow(s, 2.5)`·2^(5j), the pair
+  (its significand, its exponent + 5j), which is the unbounded chain's value. `validate.py` checks the identity on every
+  golden row with MPFR on both sides (MPFR's pow of Tc at 53 bits and the widest exponent range against MPFR's
+  binary64 pow of s scaled by 2^(5j)), and `cr_verify.py`'s `rkp` family checks the slow path against MPFR's own unbounded
+  pow, its ties (Tc = t²·4^j with t⁵ of 54 bits, past either end) included.
+So `van_der_waals_pressure(10³⁰⁶, 300, 10³⁰⁰, 0, 10⁻¹⁰)` is 2.49·10⁹ (Rust's +∞), `peng_robinson_pressure` with
+Tc = 2⁻¹⁰²² is 99,773.55 Pa (Rust's NaN) and with ω = 10²⁰⁰ at T = Tc 41,775 Pa (Rust's −∞·0 = NaN),
+`lennard_jones(2⁻¹⁰⁷⁴, 2¹⁷¹, 1)` is 2⁹⁸⁰ (Rust's NaN), `born_lande_lattice_energy(2⁻¹⁰⁷⁴, 1, 1, 2.82 Å, 8)` −2.13·10⁻³¹⁸
+(Rust's −0), and a co-volume that Rust rounds at the subnormal grid decides the other way where the exact one does
+(`van_der_waals_pressure(3·2⁻¹⁰⁷⁴, 300, 2⁻¹⁰⁷⁴, 0, 0.2)` is Ok, 18,707.5 Pa, where Rust's n·b rounds up to V: Err; a
+subnormal Tc over a tiny Pc scales the rounding error of (0.07780·R)·Tc back up, so V between Rust's b and the exact one
+is the port's Err where Rust accepts, or the reverse).
+
+**#17 and #18, folded into #32.** #20's semantics subsume M4d's two reorders (the survey's note): the exact 4·ε and 2·D_e
+cannot overflow with an unbounded exponent. #17's rows keep their bits: on every `lennard_jones` row with ε ≥ 2¹⁰²² whose
+d chain is normal, (ε·d)·4 is the unbounded chain's RN(4·ε·d) (`validate.py` proves it on all 366 such rows); its 180 M4d
+rows are noted under #32 with the same values, and the fast path keeps (ε·d)·4 as its own branch. #18 is not
+bit-identical: the Morse width now rounds the whole ω·√(μ/(2·D_e)) once, everywhere (the round-once rule; M4d's
+(μ·½)/D_e only rounded the quotient correctly). Of #18's 181 rows (D_e ≥ 2¹⁰²³), 128 keep their value, 42 move by one ulp
+and 3 by two (Rust's √ and ×ω rounding a correctly rounded normal quotient), and 8 by up to 1.3·10¹² ulp (a subnormal
+μ/(2·D_e), which #18 still rounded at the subnormal grid before the √); 159 more rows with D_e ≥ 2¹⁰²³, where #18 gave
+Rust's 0 (μ/(2·D_e) below 2⁻¹⁰⁷⁵), now carry the representable value (`morse_width_parameter(1, 2⁻¹⁰⁷⁴, 2¹⁰²³)` is
+2⁻¹⁰⁴⁹). Rows #17 and #18 above record the fold; the harness counts #32's rows in the two regions on their own (244 and
+340, B3's edge rows included).
+
+**Golden comparison** (as #27 … #30). The corpus keeps the oracle's values; where the port's result differs the note names
+it: `[ADR 0002 #31: the port returns the correctly rounded n·R·T/V = <x> (f:…)]` (likewise `n·R·T/P`, `P·M/(R·T)`), `[ADR
+0002 #31: the port returns Rust's sequence evaluated with an unbounded exponent (the final subtraction rounded once) = <x>
+(f:…)]` or `… = Err(InvalidInput) (E:InvalidInput)]` (the port's co-volume test refuses), `[ADR 0002 #32: the port returns
+Rust's sequence evaluated with an unbounded exponent (the final product rounded once) = <x> (f:…)]` (`lennard_jones`,
+`born_lande_lattice_energy`; `binding_energy_per_nucleon` the final division), `[ADR 0002 #32: the port returns the
+correctly rounded k_e·q₁·q₂/r = <x> (f:…)]` (likewise `k_e·q₁·q₂/(r·r)`, `ω·√(μ/(2·D_e))`). The generator computes them
+independently of the port (`scripts/oracle/src/audit.rs`: `exact::cr_monomial`, the new `exact::cr_sqrt_monomial`,
+`exact::Ux` with the new `mul_f64` and `pow25` — Tc^2.5 as RN₅₃(√(Tc⁵)) by an integer square root, not the port's
+rescale), with Rust's validation replicated and asserted against the oracle on every row (only the co-volume tests may
+differ), and appends 3,804 edge rows with their own seeds (gas 1,680, potential 1,703, inorganic 254, nuclear 167):
+partial products past DBL_MAX or below 2⁻¹⁰²² with the other factors bringing them back, the true ends, the 53-bit
+midpoints q·R and q·k_e and the subnormal grid's ties, n/V, V − n·b, V·V, Tc·Tc, ω², R·T past DBL_MAX, subnormal Tc,
+κ = −∞ at T = Tc, Tc^2.5 past either end and its ties there, the co-volume on its ulps at the subnormal grid and where a
+subnormal Tc's error is scaled back up, σ/r past 2^85.3 and 2^170.7 and below 2^-179, the final product's subnormal ties,
+the Morse width's quotient past either end, its midpoints 3ω·2^k and subnormal ties and B2's near-midpoint quotients,
+Born–Landé's prefix past DBL_MAX and its subnormal M, n past 2¹⁰²¹, Δm·931.494… past DBL_MAX with A ≥ 932 (and below,
+where the value itself overflows). Tc^2.5's midpoints in range are not in the corpus: glibc's pow, the oracle's,
+misrounds them, which makes them ADR 0006 rows, not B3's (`validate.py` checks that glibc's pow(Tc, 2.5) is correctly
+rounded on every Redlich–Kwong row, so the notes, made against glibc's oracle, are against the corrected one too).
+The harness maps a noted row (`_par_got_noted`, and the new `_par_got_noted_r` for the three equations of state: the
+note's value, or its Err) and counts it per function: **1,157 #31 rows** (146 `ideal_gas_pressure`, 148
+`ideal_gas_volume`, 222 `gas_density`, 206 `van_der_waals_pressure`, 201 `peng_robinson_pressure`, 234
+`redlich_kwong_pressure`; 98 of them the port's Err where Rust's rounded co-volume accepts, 80 the port's value where
+Rust's refuses) and **4,182 #32 rows** (582 `lennard_jones`, 244 with ε ≥ 2¹⁰²²; 1,860 `morse_width_parameter`, 340 with
+D_e ≥ 2¹⁰²³; 730 `coulomb`; 679 `coulomb_force`; 175 `born_lande_lattice_energy`; 156 `binding_energy_per_nucleon`).
+Of the rows that existed before B3, 73 of 256, 87 of 255, 57 of 205, 1 of 297, 3 of 660, 0 of 623, 100 of 2,105 (280
+noted, 180 of them #17's with the same value), 1,552 of 4,509 (1,680 noted, 128 of them #18's with the same value), 519 of
+1,930, 437 of 1,930, 23 of 3,369 and 0 of 618 change (the same order): the monomials' in-range quarter to third (the
+Morse width's three roundings miss on about a third), and the edges; the #20-style functions only at their edges.
+`validate.py` §21 recomputes every row of the twelve functions — the monomials with `Fraction`, the Morse width with
+`math.isqrt` and MPFR, the six others through `mpfr_ref.UX` with MPFR's own pow for Tc^2.5 (the new `UX.pow`), the
+co-volume tests on UX values and `ux_sub_final`, `ux_mul_final`, `ux_div_final` — and proves that a row is noted exactly
+where the port's result differs from the oracle's, the note naming it bit for bit (or its Err), that no row whose f64
+chain stays in the normal range is noted for the six #20-style functions (285, 570, 540, 1,480, 3,174 and 544 rows:
+Rust's bits; its tracers count 2⁻¹⁰²² itself as out of range), the #17 fold and the #18 counts above, the Tc^2.5 rescale
+on the 878 Redlich–Kwong rows it reaches, and counts the hard rows: 2,085 where Rust's value is 0, ±∞ or NaN and
+the port's representable (52, 44, 103, 57, 38, 126, 349, 608, 137, 299, 116, 156 in the order above), 232 where Rust's NaN
+is the value ±∞, 137 where Rust's other special differs from the out-of-range value (a −0 for Rust's +0), 178 co-volume
+decisions the other way (98 + 80), 215 midpoints of the 53-bit grid, 891 subnormal results with 144 of the subnormal grid's
+ties, 272 Tc^2.5 past either end; for the √ 18 exact roots, 122 midpoints (ties), 153 quotients μ/(2·D_e) past DBL_MAX,
+446 below 2⁻¹⁰⁷⁴, 169 subnormal operands, 300 subnormal results and 18 roots within 2⁻⁹⁸ of a 53-bit midpoint.
+`cr_verify.py` checks `wsqrt` (the helper at e in [−4, 4] and far) and the twelve functions' public, fast and forced slow
+paths (`igp`, `igv`, `dens`, `vdw`, `prp`, `rkp`, `lj`, `width`, `coul`, `force`, `lande`, `bea`) against `Fraction`, exact
+integer roots and `mpfr_ref.UX` on x86_64 ELF, x86_64 PE and aarch64 (2,815,142 arguments), the midpoints and the
+co-volume flips included.
+
+**Cost** (`tests/kimiya.bcyr`, before → after, the same host; `docs/benchmarks-rust-v-cyrius.md`'s B3 section):
+`gas/ideal_gas_pressure` 18 → 119 ns (Rust 2.18), `nuclear/binding_energy_per_nucleon_fe56` 28 → 29 ns (Rust 2.02: the
+inline test), `potential/lennard_jones` 36 → 39 ns; Cyrius-only `ideal_gas_volume` 20 → 119, `gas_density` 20 → 108,
+`van_der_waals_pressure` 35 → 55, `peng_robinson_pressure` 78 → 100, `redlich_kwong_pressure` 182 → 187, `coulomb`
+16 → 126, `coulomb_force` 18 → 145, `morse_width_parameter` 33 → 135, `born_lande_lattice_energy` 46 → 50 ns; the slow
+paths `van_der_waals_pressure_edge` 260 ns, `peng_robinson_pressure_edge` 618 ns, `redlich_kwong_pressure_edge` 584 ns,
+`lennard_jones_edge` 208 ns, `born_lande_lattice_energy_edge` 287 ns, `binding_energy_per_nucleon_edge` 117 ns, and the
+Morse width's exact root, `morse_width_parameter_subnormal` 1.27 µs and `morse_width_parameter_tie` 1.27 µs. The #20-style
+range tests first ask whether the inputs lie in a region where every intermediate is provably normal (`_km_pr_box` and
+its inline siblings: Tc, Pc, T, V within 2^±60, every physical state), which halved their cost (Peng–Robinson 147 → 100,
+van der Waals 73 → 55, Redlich–Kwong 217 → 187, Born–Landé 67 → 50 ns); inlining `_km_ux_normal`'s bit test was measured
+(147 → 156 ns) and not kept.
 
 ## Consequences
 

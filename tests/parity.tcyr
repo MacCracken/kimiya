@@ -375,6 +375,25 @@ var _par_adr30_vib = 0;
 var _par_adr30_rotor = 0;
 var _par_adr30_rot = 0;
 var _par_adr30_moment = 0;
+# The overflow audit's B3 (ADR 0002 #31, #32): gas's, potential's, inorganic's and nuclear's rows noted with the port's
+# value (rounded once, or Rust's sequence with an unbounded exponent, whose co-volume test can also give the port's
+# Err), mapped as B1's and counted per function; #32's lennard_jones and morse_width_parameter rows in #17's (ε ≥ 2¹⁰²²)
+# and #18's (D_e ≥ 2¹⁰²³) regions are counted on their own as well.
+var _par_adr31_igp = 0;                      # #31: ideal_gas_pressure, ideal_gas_volume, gas_density,
+var _par_adr31_igv = 0;                      # van_der_waals_pressure, peng_robinson_pressure, redlich_kwong_pressure
+var _par_adr31_dens = 0;
+var _par_adr31_vdw = 0;
+var _par_adr31_pr = 0;
+var _par_adr31_rk = 0;
+var _par_adr31_err = 0;                      # the port's Err where Rust's rounded co-volume accepts (of the three)
+var _par_adr32_lj = 0;                       # #32: lennard_jones, morse_width_parameter, coulomb, coulomb_force,
+var _par_adr32_lj17 = 0;                     # born_lande_lattice_energy, binding_energy_per_nucleon
+var _par_adr32_width = 0;
+var _par_adr32_width18 = 0;
+var _par_adr32_coul = 0;
+var _par_adr32_force = 0;
+var _par_adr32_bl = 0;
+var _par_adr32_bea = 0;
 
 # The got list for an f64-valued function's row whose note may name the port's value under ADR 0002 #`adr` (the C string
 # `tag`): mapped when it does, compared with the oracle as usual otherwise.
@@ -384,6 +403,35 @@ fn _par_got_noted_f(adr, tag, v: f64) {
         return 0;
     }
     _par_got_f(v);
+    return 0;
+}
+
+# The overflow audit's B3 (ADR 0002 #31): the got list for a Result row whose note may name the port's value, `= <x>
+# (f:<bits>)]` (where the oracle's is another value or an Err), or its Err, `= Err(InvalidInput) (E:InvalidInput)]` (the
+# co-volume test on the unbounded co-volume refuses where Rust's rounded one accepts). A noted row's port result must
+# be that one (then mapped, accepted under ADR 2); a row without the note is compared with the oracle as usual.
+fn _par_got_noted_r(adr, tag, t, v) {
+    if (_par_note_has(tag) != 1) {
+        _par_got_res(t, v);
+        return 0;
+    }
+    if (_par_note_has("(E:InvalidInput)]") == 1) {
+        if (is_ok(t) == 1 || v != KM_ERR_INVALID_INPUT) {
+            _par_got_err(0 - 1);    # the note's Err, and the port gave anything else: "Unknown" matches nothing
+            return 0;
+        }
+        _par_got_err(v);
+        _par_mapped = adr;
+        _par_force_map = 1;
+        _par_hist_on = 0;
+        _par_adr31_err = _par_adr31_err + 1;
+        return 0;
+    }
+    if (is_ok(t) != 1) {
+        _par_got_err(0 - 1);
+        return 0;
+    }
+    _par_map_exact(adr, v, 102);
     return 0;
 }
 
@@ -742,7 +790,9 @@ fn _par_got_pr(p: KmPengRobinsonParams) {
 }
 
 # `gas` rows: src/gas.cyr and the generated src/gas_data.cyr. A PengRobinsonParams input is the
-# first three tokens (tc, pc, omega).
+# first three tokens (tc, pc, omega). ADR 0002 #31 (the overflow audit's B3): the ideal gas law's and gas_density's rows
+# noted with the port's correctly rounded value, and the three equations of state's with its unbounded-exponent result
+# (a value, or its Err), are mapped and counted.
 fn _par_gas(fp, fl): i64 {
     if (_par_eq(fp, fl, "gas::PR_WATER") == 1) { _par_got_pr(KM_PR_WATER); return 1; }
     if (_par_eq(fp, fl, "gas::PR_NITROGEN") == 1) { _par_got_pr(KM_PR_NITROGEN); return 1; }
@@ -760,31 +810,41 @@ fn _par_gas(fp, fl): i64 {
     var z: f64 = _par_in(2);
     if (_par_eq(fp, fl, "gas::ideal_gas_pressure") == 1) {
         var t, v = ideal_gas_pressure(x, y, z);
-        _par_got_res(t, v);
+        _par_got_noted(31, "[ADR 0002 #31:", t, v);
+        if (_par_mapped == 31) { _par_adr31_igp = _par_adr31_igp + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "gas::ideal_gas_volume") == 1) {
         var t, v = ideal_gas_volume(x, y, z);
-        _par_got_res(t, v);
+        _par_got_noted(31, "[ADR 0002 #31:", t, v);
+        if (_par_mapped == 31) { _par_adr31_igv = _par_adr31_igv + 1; }
         return 1;
     }
-    if (_par_eq(fp, fl, "gas::gas_density") == 1) { var t, v = gas_density(x, y, z); _par_got_res(t, v); return 1; }
+    if (_par_eq(fp, fl, "gas::gas_density") == 1) {
+        var t, v = gas_density(x, y, z);
+        _par_got_noted(31, "[ADR 0002 #31:", t, v);
+        if (_par_mapped == 31) { _par_adr31_dens = _par_adr31_dens + 1; }
+        return 1;
+    }
     var w: f64 = _par_in(3);
     if (_par_eq(fp, fl, "gas::redlich_kwong_pressure") == 1) {
         var t, v = redlich_kwong_pressure(x, y, z, w);
-        _par_got_res(t, v);
+        _par_got_noted_r(31, "[ADR 0002 #31:", t, v);
+        if (_par_mapped == 31) { _par_adr31_rk = _par_adr31_rk + 1; }
         return 1;
     }
     var u: f64 = _par_in(4);
     if (_par_eq(fp, fl, "gas::van_der_waals_pressure") == 1) {
         var t, v = van_der_waals_pressure(x, y, z, w, u);
-        _par_got_res(t, v);
+        _par_got_noted_r(31, "[ADR 0002 #31:", t, v);
+        if (_par_mapped == 31) { _par_adr31_vdw = _par_adr31_vdw + 1; }
         return 1;
     }
     var p = KmPengRobinsonParams { tc: x, pc: y, omega: z };
     if (_par_eq(fp, fl, "gas::peng_robinson_pressure") == 1) {
         var t, v = peng_robinson_pressure(p, w, u);
-        _par_got_res(t, v);
+        _par_got_noted_r(31, "[ADR 0002 #31:", t, v);
+        if (_par_mapped == 31) { _par_adr31_pr = _par_adr31_pr + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "gas::peng_robinson_z") == 1) {
@@ -1415,7 +1475,8 @@ fn _par_inorganic(fp, fl): i64 {
         var r0: f64 = _par_in(3);
         var n: f64 = _par_in(4);
         var tl, vl = born_lande_lattice_energy(x, _par_in(1), _par_in(2), r0, n);
-        _par_got_res(tl, vl);
+        _par_got_noted(32, "[ADR 0002 #32:", tl, vl);
+        if (_par_mapped == 32) { _par_adr32_bl = _par_adr32_bl + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "inorganic::born_haber_lattice_energy") == 1) {
@@ -1440,8 +1501,6 @@ var _par_adr13 = 0;
 var _par_adr14 = 0;
 var _par_adr15 = 0;
 var _par_adr16 = 0;
-var _par_adr17 = 0;
-var _par_adr18 = 0;
 var _par_adr19 = 0;
 var _par_adr20 = 0;
 var _par_adr21 = 0;
@@ -1512,8 +1571,6 @@ fn _par_map_exact(adr, v, kind) {
     if (adr == 14) { _par_adr14 = _par_adr14 + 1; }
     if (adr == 15) { _par_adr15 = _par_adr15 + 1; }
     if (adr == 16) { _par_adr16 = _par_adr16 + 1; }
-    if (adr == 17) { _par_adr17 = _par_adr17 + 1; }
-    if (adr == 18) { _par_adr18 = _par_adr18 + 1; }
     if (adr == 19) { _par_adr19 = _par_adr19 + 1; }
     if (adr == 20) { _par_adr20 = _par_adr20 + 1; }
     if (adr == 21) { _par_adr21 = _par_adr21 + 1; }
@@ -1650,7 +1707,8 @@ fn _par_nuclear(fp, fl): i64 {
     if (_par_eq(fp, fl, "nuclear::binding_energy_per_nucleon") == 1) {
         var mb: f64 = _par_in(2);
         var tb, vb = binding_energy_per_nucleon(_par_in(0), _par_in(1), mb);
-        _par_got_res(tb, vb);
+        _par_got_noted(32, "[ADR 0002 #32:", tb, vb);
+        if (_par_mapped == 32) { _par_adr32_bea = _par_adr32_bea + 1; }
         return 1;
     }
     var x: f64 = _par_in(0);
@@ -1725,8 +1783,8 @@ fn _par_in_points(k, n, buf): i64 {
     return buf;
 }
 
-# The got list for a row whose note may name the port's exact value under ADR 0002 #`adr` (#16, #17, #18): mapped when
-# it does (_par_map_exact), compared with the oracle as usual otherwise.
+# The got list for a row whose note may name the port's exact value under ADR 0002 #`adr` (#16; the overflow audit's #27
+# … #32): mapped when it does (_par_map_exact), compared with the oracle as usual otherwise.
 fn _par_got_noted(adr, tag, t, v) {
     if (_par_note_has(tag) == 1) {
         if (is_ok(t) != 1) {
@@ -1771,9 +1829,9 @@ fn _par_got_noted20(isres, t, v) {
 }
 
 # `potential` rows: src/potential.cyr. Rust's [f64; 3] points are three f64 tokens each, which the port reads through
-# pointers to three contiguous f64 (port plan §6.4). ADR 0002 #16 (lj_equilibrium_distance), #17 (lennard_jones), #18
-# (morse_width_parameter) and #20 (distance_3d, bond_angle, dihedral_angle): a noted row's port result must be the
-# note's.
+# pointers to three contiguous f64 (port plan §6.4). ADR 0002 #16 (lj_equilibrium_distance), #20 (distance_3d,
+# bond_angle, dihedral_angle) and #32 (the overflow audit's B3: lennard_jones, morse_width_parameter, coulomb,
+# coulomb_force; it folds M4d's #17 and #18 in): a noted row's port result must be the note's.
 fn _par_potential(fp, fl): i64 {
     var pts: f64[12];
     if (_par_eq(fp, fl, "potential::distance_3d") == 1) {
@@ -1808,22 +1866,34 @@ fn _par_potential(fp, fl): i64 {
     var z: f64 = _par_in(2);
     if (_par_eq(fp, fl, "potential::lennard_jones") == 1) {
         var tl, vl = lennard_jones(x, y, z);
-        _par_got_noted(17, "[ADR 0002 #17:", tl, vl);
+        _par_got_noted(32, "[ADR 0002 #32:", tl, vl);
+        if (_par_mapped == 32) {
+            _par_adr32_lj = _par_adr32_lj + 1;
+            var e22: f64 = 0x7FD0000000000000;      # 2¹⁰²²: ADR 0002 #17's region, folded into #32
+            if (x >= e22) { _par_adr32_lj17 = _par_adr32_lj17 + 1; }
+        }
         return 1;
     }
     if (_par_eq(fp, fl, "potential::morse_width_parameter") == 1) {
         var tw, vw = morse_width_parameter(x, y, z);
-        _par_got_noted(18, "[ADR 0002 #18:", tw, vw);
+        _par_got_noted(32, "[ADR 0002 #32:", tw, vw);
+        if (_par_mapped == 32) {
+            _par_adr32_width = _par_adr32_width + 1;
+            var e23: f64 = 0x7FE0000000000000;      # 2¹⁰²³: ADR 0002 #18's region, folded into #32
+            if (z >= e23) { _par_adr32_width18 = _par_adr32_width18 + 1; }
+        }
         return 1;
     }
     if (_par_eq(fp, fl, "potential::coulomb") == 1) {
         var tc, vc = coulomb(x, y, z);
-        _par_got_res(tc, vc);
+        _par_got_noted(32, "[ADR 0002 #32:", tc, vc);
+        if (_par_mapped == 32) { _par_adr32_coul = _par_adr32_coul + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "potential::coulomb_force") == 1) {
         var tf, vf = coulomb_force(x, y, z);
-        _par_got_res(tf, vf);
+        _par_got_noted(32, "[ADR 0002 #32:", tf, vf);
+        if (_par_mapped == 32) { _par_adr32_force = _par_adr32_force + 1; }
         return 1;
     }
     var w: f64 = _par_in(3);
@@ -2531,7 +2601,7 @@ fn _par_accepted(fp, fl, ip, il): i64 {
     # #24 … #26 (M4f-2) stoichiometry's exact value, index or whole result; #27, #28 (the overflow audit's B1) thermo's,
     # phase's and kinetics' rounded-once or unbounded-exponent value; #29, #30 (B2) solution's, electrochemistry's and
     # spectroscopy's.
-    if (_par_mapped >= 13 && _par_mapped <= 30) { return 2; }
+    if (_par_mapped >= 13 && _par_mapped <= 32) { return 2; }
     # ADR 0002 #7 (M4f): an oxidation-state row whose note names the port's exact rational states, or a balancing row
     # whose f64 matrix has no integer counterpart (the oracle's Err(InvalidInput)).
     if (_par_mapped == 7) { return 2; }
@@ -2547,7 +2617,7 @@ fn _par_accepted(fp, fl, ip, il): i64 {
 #must_use
 fn _par_accepted_quiet(adr): i64 {
     if (adr == 2 && _par_mapped == 2) { return 1; }
-    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 30) { return 1; }
+    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 32) { return 1; }
     if (adr == 2 && _par_mapped == 7) { return 1; }
     return 0;
 }
@@ -2561,12 +2631,35 @@ fn _par_accepted_bits(adr): i64 {
 }
 
 # After the phase module: the ADR 0002 #27 (per function) and #4 mapping summaries; after thermo, #27's (per function);
-# after kinetics, #28's (per function); after solution and electrochemistry, #29's (per function); after thermochem,
-# ADR 0002 #1's; after organic, #6's; after inorganic, #12's and #15's; after nuclear, #3's, #13's and #14's; after
-# potential, #16's, #17's, #18's and #20's; after spectroscopy, #19's, #21's (per function), #22's, #23's (per function)
-# and #30's (per function); after stoichiometry, #7's (the oxidation states, the integer matrix) and #24's (per
-# function), #25's and #26's.
+# after kinetics, #28's (per function); after solution and electrochemistry, #29's (per function); after thermochem, ADR
+# 0002 #1's; after gas, #31's (per function); after organic, #6's; after inorganic, #12's, #15's and #32's
+# (born_lande_lattice_energy); after nuclear, #3's, #13's, #14's and #32's (binding_energy_per_nucleon); after
+# potential, #16's, #20's and #32's (per function, #17's and #18's regions among them); after spectroscopy, #19's, #21's
+# (per function), #22's, #23's (per function) and #30's (per function); after stoichiometry, #7's (the oxidation states,
+# the integer matrix) and #24's (per function), #25's and #26's.
 fn _par_module_done(mp, ml) {
+    if (_par_eq(mp, ml, "gas") == 1) {
+        print("  ADR 0002 #31 rounded once, unbounded exponent: ", 49);
+        var n31 = _par_adr31_igp + _par_adr31_igv + _par_adr31_dens + _par_adr31_vdw + _par_adr31_pr;
+        fmt_int(n31 + _par_adr31_rk);
+        print(" rows (ideal_gas_pressure ", 26);
+        fmt_int(_par_adr31_igp);
+        print(", ideal_gas_volume ", 19);
+        fmt_int(_par_adr31_igv);
+        print(", gas_density ", 14);
+        fmt_int(_par_adr31_dens);
+        print(", van_der_waals_pressure ", 25);
+        fmt_int(_par_adr31_vdw);
+        print(", peng_robinson_pressure ", 25);
+        fmt_int(_par_adr31_pr);
+        print(", redlich_kwong_pressure ", 25);
+        fmt_int(_par_adr31_rk);
+        print("; ", 2);
+        fmt_int(_par_adr31_err);
+        print(" of them the port's Err where Rust's rounded co-volume accepts) where the port's rounded-once", 93);
+        println(" or unbounded-exponent result differs from Rust's (accepted, ADR 2, counted, not listed)");
+        return 0;
+    }
     if (_par_eq(mp, ml, "solution") == 1) {
         print("  ADR 0002 #29 rounded once: ", 29);
         fmt_int(_par_adr29_dil + _par_adr29_cond);
@@ -2708,18 +2801,26 @@ fn _par_module_done(mp, ml) {
         fmt_int(_par_adr16);
         print(" lj_equilibrium_distance rows where the port's correctly rounded value differs from Rust's", 90);
         println(" sigma*RN(2^(1/6)) (accepted, ADR 2, counted, not listed)");
-        print("  ADR 0002 #17 exact 4*eps*d: ", 30);
-        fmt_int(_par_adr17);
-        print(" lennard_jones rows where Rust's 4*eps overflows and the port's (eps*d)*4 is the noted value", 92);
-        println(" (accepted, ADR 2, counted, not listed)");
-        print("  ADR 0002 #18 exact mu/(2D): ", 30);
-        fmt_int(_par_adr18);
-        print(" morse_width_parameter rows where Rust's 2*D overflows and the port's (mu/2)/D is the noted value", 97);
-        println(" (accepted, ADR 2, counted, not listed)");
         print("  ADR 0002 #20 unbounded exponent: ", 35);
         fmt_int(_par_adr20);
         print(" distance_3d / bond_angle / dihedral_angle rows where an intermediate of Rust's chain leaves the", 96);
         println(" normal range and the port's result is the noted one (accepted, ADR 2, counted, not listed)");
+        print("  ADR 0002 #32 unbounded exponent, rounded once: ", 49);
+        fmt_int(_par_adr32_lj + _par_adr32_width + _par_adr32_coul + _par_adr32_force);
+        print(" rows (lennard_jones ", 21);
+        fmt_int(_par_adr32_lj);
+        print(", ", 2);
+        fmt_int(_par_adr32_lj17);
+        print(" of them with eps >= 2^1022 (#17's); morse_width_parameter ", 59);
+        fmt_int(_par_adr32_width);
+        print(", ", 2);
+        fmt_int(_par_adr32_width18);
+        print(" of them with D_e >= 2^1023 (#18's); coulomb ", 45);
+        fmt_int(_par_adr32_coul);
+        print(", coulomb_force ", 16);
+        fmt_int(_par_adr32_force);
+        print(") where the port's unbounded-exponent or rounded-once value differs from Rust's", 79);
+        println(" (accepted, ADR 2, counted, not listed)");
         return 0;
     }
     if (_par_eq(mp, ml, "nuclear") == 1) {
@@ -2737,6 +2838,10 @@ fn _par_module_done(mp, ml) {
         fmt_int(_par_adr14);
         print(" is_secular_equilibrium rows where the exact comparison differs from Rust's lp < 0.01*ld", 88);
         println(" (accepted, ADR 2, counted, not listed)");
+        print("  ADR 0002 #32 unbounded exponent: ", 35);
+        fmt_int(_par_adr32_bea);
+        print(" binding_energy_per_nucleon rows where Rust's dm*931.494 overflows and the port's result is the", 95);
+        println(" noted one (accepted, ADR 2, counted, not listed)");
         return 0;
     }
     if (_par_eq(mp, ml, "inorganic") == 1) {
@@ -2750,6 +2855,10 @@ fn _par_module_done(mp, ml) {
         fmt_int(_par_adr15);
         print(" delta_tet_from_oct rows where Rust's D*4 overflows and the port's (D/9)*4 is the noted value", 93);
         println(" (accepted, ADR 2, counted, not listed)");
+        print("  ADR 0002 #32 unbounded exponent: ", 35);
+        fmt_int(_par_adr32_bl);
+        print(" born_lande_lattice_energy rows where an intermediate of Rust's chain leaves the normal range", 93);
+        println(" and the port's result is the noted one (accepted, ADR 2, counted, not listed)");
         return 0;
     }
     if (_par_eq(mp, ml, "organic") == 1) {

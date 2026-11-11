@@ -1,15 +1,17 @@
 # inorganic.tcyr — the tests of rust-old/src/inorganic.rs, ported one for one (each test_group is the Rust test's
 # name; all 30), plus Cyrius-only tests of Rust's integer and bool types as words (out-of-u8 d-electron counts, bool
 # words other than 0 and 1, out-of-u32 ion charges, out-of-i8 radius charges), invalid ligand values and ionic-radius
-# handles, the exact CFSE of ADR 0002 #12, and Δ_tet's correctly rounded 4Δ/9 past Rust's Δ·4 overflow (ADR 0002 #15).
-# The golden corpus separately checks every function over its grid (tests/parity.tcyr).
+# handles, the exact CFSE of ADR 0002 #12, Δ_tet's correctly rounded 4Δ/9 past Rust's Δ·4 overflow (ADR 0002 #15), and
+# Born–Landé with an unbounded exponent (ADR 0002 #32, the overflow audit's B3). The golden corpus separately checks
+# every function over its grid (tests/parity.tcyr).
 #
 # No Rust test needed adapting beyond the port's form (port plan §6.4): `Result::unwrap` is `is_ok` + the payload,
 # `lookup_ionic_radius(..).unwrap()` is a non-zero handle read with the ionic_radius_* accessors, `for r in
 # IONIC_RADII` loops over handles 1 ..= KM_IONIC_RADII_COUNT, a Rust `bool` is 0 / 1, and `Ligand::X.method()` is
 # ligand_<method>(KM_LIGAND_X). ADR 0002 #12 makes the CFSE exact; the Rust CFSE tests' tolerances (1e-10, 1e-12,
 # f64::EPSILON on 0) hold for the exact values as for Rust's, so none changed: cyrius_cfse_exact asserts the exact bits
-# (+0.0 for high-spin d⁵ and d¹⁰). ADR 0002 #15 changes no Rust test (`delta_tet_ratio` is Δ = 10000).
+# (+0.0 for high-spin d⁵ and d¹⁰). ADR 0002 #15 changes no Rust test (`delta_tet_ratio` is Δ = 10000), nor does #32
+# (every Rust Born–Landé case stays in the normal range: Rust's bits).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -595,6 +597,50 @@ fn _t_cyrius_exact_delta_tet() {
     assert(inf == _KM_INF, "+∞ stays +∞");
 }
 
+# ADR 0002 #32 (the overflow audit's B3): born_lande_lattice_energy under #20's semantics — Rust's bits where its chain
+# stays in the normal range (NaCl), the unbounded-exponent sequence with the final product rounded once where the prefix
+# overflows or a tiny M underflows (Rust's −∞ and −0; MPFR's values) — and the fast path against the slow one on 5,000
+# seeded in-range salts.
+fn _t_cyrius_adr32_born_lande() {
+    test_group("cyrius_adr32_born_lande (unbounded exponent)");
+    var dmax: f64 = 0x7FEFFFFFFFFFFFFF;
+    var t1, v1 = born_lande_lattice_energy(1.748, 1, 1, 0.000000000282, 8.0);
+    assert(is_ok(t1) == 1 && v1 == 0xC126FF20D7174120, "NaCl: Rust's bits (the fast path)");
+    var t2, v2 = born_lande_lattice_energy(dmax, 1, 1, dmax, dmax);
+    assert(is_ok(t2) == 1 && v2 == 0xBF2235E67E61CFB9, "M = r₀ = n = DBL_MAX: −1.39·10⁻⁴ (Rust's prefix: −∞)");
+    var sub: f64 = 0.0;
+    store64(&sub, 1);
+    var t3, v3 = born_lande_lattice_energy(sub, 1, 1, 0.000000000282, 8.0);
+    assert(is_ok(t3) == 1 && v3 == 0x80000000000693F6, "M = 2⁻¹⁰⁷⁴: −2.13·10⁻³¹⁸, subnormal, rounded once (Rust −0)");
+    var e300: f64 = 0.0;
+    store64(&e300, 0x7E37E43C8800759C);                 # 1e300
+    var t4, v4 = born_lande_lattice_energy(e300, 1, 1, e300, e300);
+    assert(is_ok(t4) == 1 && v4 == 0xBF2235E67E61CFB9, "M = r₀ = 10³⁰⁰: the same −1.39·10⁻⁴ (Rust −∞)");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var k = 0;
+    while (k < 5000) {
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var u1: f64 = f64_from((st >> 11) % 1000000) / 1000000.0;
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var u2: f64 = f64_from((st >> 11) % 1000000) / 1000000.0;
+        var m: f64 = 1.6 + u1;
+        var zc: f64 = f64_from(1 + (st >> 20) % 4);
+        var za: f64 = f64_from(1 + (st >> 30) % 4);
+        var r0: f64 = (1.5 + 2.5 * u2) * 0.0000000001;
+        var n: f64 = 5.0 + 7.0 * u2;
+        var uf, uo = _km_born_lande_fast(m, zc, za, r0, n);
+        var uu: f64 = _km_born_lande_ux(m, zc, za, r0, n);
+        if (uo != 1 || _km_bits(uf) != _km_bits(uu)) { bad = bad + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "the fast path takes every in-range salt and equals the unbounded slow path (5,000)");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_cfse_d0();
@@ -634,6 +680,7 @@ fn main() {
     _t_cyrius_handles();
     _t_cyrius_cfse_exact();
     _t_cyrius_exact_delta_tet();
+    _t_cyrius_adr32_born_lande();
     return assert_summary();
 }
 

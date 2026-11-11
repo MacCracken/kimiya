@@ -10,7 +10,9 @@
 # semi_empirical_binding_energy a Result, so `semi_empirical_invalid_is_nan` asserts Err(InvalidInput) where Rust
 # asserted NaN, and the three SEMF value tests unwrap the Ok. ADR 0002 #13 and #14 (the exact N₀/2ⁿ where 2⁻ⁿ is not a
 # normal double, the exact λ_p < λ_d/100) change none of the Rust tests' cases: (1000, 2 half-lives), (5e-18, 3.3e-7)
-# and (0.1, 0.2) give Rust's values; the two Cyrius-only groups below pin the cases they change.
+# and (0.1, 0.2) give Rust's values; the two Cyrius-only groups below pin the cases they change. ADR 0002 #32 (the
+# overflow audit's B3: binding_energy_per_nucleon with an unbounded exponent) changes none either (Fe-56 stays in
+# range); a Cyrius-only group pins its edge.
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -771,6 +773,22 @@ fn _t_cyrius_exact_secular() {
     assert_eq(is_secular_equilibrium(-0.000001, 0.0), 1, "λ_p < 0 = λ_d/100");
 }
 
+# ADR 0002 #32 (the overflow audit's B3): binding_energy_per_nucleon under #20's semantics — Rust's bits where
+# Δm·931.494… is finite (Fe-56), the unbounded product and the division rounded once past it (MPFR's values): A ≥ 932
+# brings an atomic mass of DBL_MAX back into range (Rust −∞), A = 930 does not (−∞ in both).
+fn _t_cyrius_adr32_bea() {
+    test_group("cyrius_adr32_bea (unbounded exponent)");
+    var dmax: f64 = 0x7FEFFFFFFFFFFFFF;
+    var t1, v1 = binding_energy_per_nucleon(26, 30, 55.93493633);
+    assert(is_ok(t1) == 1 && v1 == 0x402194A7DB1337C3, "Fe-56: Rust's bits, 8.79 MeV");
+    var t2, v2 = binding_energy_per_nucleon(1000, 1000, dmax);
+    assert(is_ok(t2) == 1 && v2 == 0xFFDDCECCB849F1DC, "M = DBL_MAX, A = 2000: −8.37·10³⁰⁷ (Rust −∞)");
+    var t3, v3 = binding_energy_per_nucleon(466, 466, dmax);
+    assert(is_ok(t3) == 1 && v3 == 0xFFEFFB8DA5DF456E, "A = 932: −1.797·10³⁰⁸, just inside (Rust −∞)");
+    var t4, v4 = binding_energy_per_nucleon(465, 465, dmax);
+    assert(is_ok(t4) == 1 && v4 == 0xFFF0000000000000, "A = 930: the value itself is past −DBL_MAX: −∞, as Rust's");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_decay_constant_c14();
@@ -817,6 +835,7 @@ fn main() {
     _t_cyrius_typed_constants();
     _t_cyrius_exact_half_lives();
     _t_cyrius_exact_secular();
+    _t_cyrius_adr32_bea();
     return assert_summary();
 }
 
