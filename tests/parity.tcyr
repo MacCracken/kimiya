@@ -48,6 +48,7 @@ include "src/solution.cyr"
 include "src/electrochemistry_data.cyr"
 include "src/electrochemistry.cyr"
 include "src/kinetics.cyr"
+include "src/stoichiometry.cyr"
 include "src/organic_data.cyr"
 include "src/organic.cyr"
 include "src/inorganic_data.cyr"
@@ -1453,18 +1454,19 @@ fn _par_map_exact(adr, v, kind) {
 }
 
 # ADR 0002 #23 (M4e-4): a Vec row whose note names the port's whole result, `[ADR 0002 #23: … (<golden tokens>)]` (the
-# isotope table's slices and patterns, from the cited AME2020 / TICE 2009 table: scripts/oracle/README.md). The got
-# list, already the port's result, must be those tokens exactly (a float bit for bit, a length or an integer equal, a
-# name's text equal); then the row is mapped (_par_mapped = adr, accepted under ADR 2, counted) and its comparison with
-# the oracle's outputs is moot. Any other result becomes "Unknown", which matches nothing. Returns 1 when the row is
-# noted.
+# isotope table's slices and patterns, from the cited AME2020 / TICE 2009 table: scripts/oracle/README.md); since M4f
+# also ADR 0002 #7's oxidation-state rows, `[ADR 0002 #7: … (v:n i:z i:p i:q …)]` (the exact rational states), so the
+# note's tag is the C string `tag`. The got list, already the port's result, must be those tokens exactly (a float bit
+# for bit, a length or an integer equal, a name's text equal); then the row is mapped (_par_mapped = adr, accepted
+# under ADR 2, counted) and its comparison with the oracle's outputs is moot. Any other result becomes "Unknown", which
+# matches nothing. Returns 1 when the row is noted.
 var _par_adr23_abund = 0;
 var _par_adr23_pattern = 0;
 var _par_nt_k = 0;                          # the note's token list, _PAR_MAX tokens (allocated on first use)
 var _par_nt_v = 0;
 var _par_nt_l = 0;
-fn _par_map_toks(adr): i64 {
-    if (_par_note_has("[ADR 0002 #23:") != 1) { return 0; }
+fn _par_map_toks(adr, tag): i64 {
+    if (_par_note_has(tag) != 1) { return 0; }
     if (_par_nt_k == 0) {
         _par_nt_k = _par_words(_PAR_MAX);
         _par_nt_v = _par_words(_PAR_MAX);
@@ -1865,7 +1867,7 @@ fn _par_spectroscopy(fp, fl): i64 {
             _par_got_f(load64(ap + 8 * j));
             j = j + 1;
         }
-        _par_map_toks(23);
+        _par_map_toks(23, "[ADR 0002 #23:");
         if (_par_mapped == 23) { _par_adr23_abund = _par_adr23_abund + 1; }
         return 1;
     }
@@ -1887,7 +1889,7 @@ fn _par_spectroscopy(fp, fl): i64 {
                 k = k + 1;
             }
         }
-        _par_map_toks(23);
+        _par_map_toks(23, "[ADR 0002 #23:");
         if (_par_mapped == 23) { _par_adr23_pattern = _par_adr23_pattern + 1; }
         return 1;
     }
@@ -2010,6 +2012,203 @@ fn _par_spectroscopy(fp, fl): i64 {
     return 0;
 }
 
+# ── stoichiometry (M4f) ─────────────────────────────────────────────────────────────
+
+# ADR 0002 #7 (M4f), the integer matrix: a balance_equation row's matrix, Rust's `&[Vec<f64>]` (`v:m`, then each row
+# `v:len` and its `f:` entries), converted entry by entry as Rust accepts it — finite, within 10⁻⁹ of round(v) (halves
+# away from zero) — to that rounded integer, which must be an i64 (|r| < 2⁶³). Such a row is replayed on the port's
+# integer matrix and compared class A (_par_adr7_int, _par_adr7_round of them with a near-integer entry); a row without
+# a counterpart (an entry Rust's test refuses, an integer beyond i64, ragged rows) must be noted `[ADR 0002 #7: no
+# integer-matrix counterpart` and hold the oracle's Err(InvalidInput), its only result: then it is mapped (accepted
+# under ADR 2, counted: _par_adr7_none). The oxidation states: an oracle Ok(n) row is the port's n/1 (every denominator
+# 1, compared as Rust's pairs); a row noted `[ADR 0002 #7:` (the oracle's "non-integer average" Err) must be the note's
+# whole result, (Z, numerator, denominator) per entry (_par_map_toks, _par_adr7_ox).
+var _par_adr7_ox = 0;
+var _par_adr7_int = 0;
+var _par_adr7_round = 0;
+var _par_adr7_none = 0;
+var _par_st_round = 0;                      # set by _par_in_matrix: an entry was a near-integer f64
+
+# The matrix at input token 0 as integers, row-major, into buf (_PAR_MAX words): (1, m, n) when every entry has an
+# integer counterpart (ADR 0002 #7), (0, 0, 0) when one has none or the rows are ragged, (-1, 0, 0) when the tokens
+# are malformed. _par_st_round is 1 when an entry was rounded (Rust's 10⁻⁹ tolerance).
+fn _par_in_matrix(buf): (i64, i64, i64) {
+    _par_st_round = 0;
+    if (_par_in_n < 1 || load64(_par_in_k) != 118) { return (0 - 1, 0, 0); }
+    var m = _par_in(0);
+    var tol: f64 = 0x3E112E0BE826D695;     # 1e-9, Rust's INTEGER_TOLERANCE
+    var lim: f64 = 9223372036854775808.0;  # 2⁶³
+    var n = 0;
+    var t = 1;
+    var w = 0;
+    var none = 0;
+    var i = 0;
+    while (i < m) {
+        if (t >= _par_in_n || load64(_par_in_k + 8 * t) != 118) { return (0 - 1, 0, 0); }
+        var len = _par_in(t);
+        if (i == 0) { n = len; }
+        if (len != n) { none = 1; }
+        var j = 0;
+        while (j < len) {
+            var at = t + 1 + j;
+            if (at >= _par_in_n || load64(_par_in_k + 8 * at) != 102) { return (0 - 1, 0, 0); }
+            var v: f64 = _par_in(at);
+            if (_km_is_finite(v) != 1) {
+                none = 1;
+            } else {
+                var r: f64 = _km_round_half_away(v);
+                var d: f64 = v - r;
+                var ad: f64 = f64_abs(d);
+                var ar: f64 = f64_abs(r);
+                if (ad > tol || ar >= lim) {
+                    none = 1;
+                } elif (none == 0 && w < _PAR_MAX) {
+                    if (ad != 0.0) { _par_st_round = 1; }
+                    store64(buf + 8 * w, f64_to(r));
+                    w = w + 1;
+                }
+            }
+            j = j + 1;
+        }
+        t = t + 1 + len;
+        i = i + 1;
+    }
+    if (t != _par_in_n) { return (0 - 1, 0, 0); }
+    if (none == 1) { return (0, 0, 0); }
+    if (w != m * n) { return (0 - 1, 0, 0); }
+    return (1, m, n);
+}
+
+# `stoichiometry` rows: src/stoichiometry.cyr. balance_equation's matrix is replayed as integers (ADR 0002 #7, above);
+# the species, element and molecule lists are `v:n` and n pairs, read into 16-byte (Z, count) or (Z, f64 bits) records;
+# the two limiting-reagent slices are `v:n` and n floats each; a Vec result is the caller's buffer's count and records
+# (port plan §6.4): the coefficients `v:n i:…`, the oxidation states `v:n i:z i:os …` (Rust's pairs, every
+# denominator 1) or, on a noted row, the port's triples `i:z i:p i:q`.
+fn _par_stoichiometry(fp, fl): i64 {
+    if (_par_spec_alloc() != 1) { return 0 - 1; }
+    if (_par_eq(fp, fl, "stoichiometry::balance_equation") == 1) {
+        var st, bm, bn = _par_in_matrix(_par_spec_in);
+        if (st < 0) { return 0 - 1; }
+        var noted = _par_note_has("[ADR 0002 #7: no integer-matrix counterpart");
+        if (st == 0) {
+            # No integer counterpart: the oracle's Err(InvalidInput) must be the row's output, and the note must say so.
+            var inv = 0;
+            if (_par_want_n == 1 && load64(_par_want_k) == 69) {
+                inv = _par_eq(load64(_par_want_v), load64(_par_want_l), "InvalidInput");
+            }
+            if (noted != 1 || inv != 1) { _par_got_err(0 - 1); return 1; }
+            _par_got_err(KM_ERR_INVALID_INPUT);
+            _par_mapped = 7;
+            _par_force_map = 1;
+            _par_hist_on = 0;
+            _par_adr7_none = _par_adr7_none + 1;
+            return 1;
+        }
+        if (noted == 1) { _par_got_err(0 - 1); return 1; }
+        _par_adr7_int = _par_adr7_int + 1;
+        _par_adr7_round = _par_adr7_round + _par_st_round;
+        var tb, vb = balance_equation(_par_spec_in, bm, bn, _par_spec_out, bn);
+        if (is_err_result(tb) == 1) { _par_got_err(vb); return 1; }
+        _par_got_seq(vb);
+        var kb = 0;
+        while (kb < vb) {
+            _par_got_i(load64(_par_spec_out + 8 * kb));
+            kb = kb + 1;
+        }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "stoichiometry::assign_oxidation_states") == 1) {
+        var na = _par_in(0);
+        if (_par_in_n != 2 + 2 * na) { return 0 - 1; }
+        var k = 0;
+        while (k < 2 * na) {
+            store64(_par_spec_in + 8 * k, _par_in(1 + k));
+            k = k + 1;
+        }
+        var to, vo = assign_oxidation_states(_par_spec_in, na, _par_in(1 + 2 * na), _par_spec_out, na);
+        if (is_err_result(to) == 1) {
+            _par_got_err(vo);
+        } else {
+            var whole = 1;                  # every denominator 1: Rust's pairs
+            k = 0;
+            while (k < vo) {
+                if (load64(_par_spec_out + 24 * k + 16) != 1) { whole = 0; }
+                k = k + 1;
+            }
+            if (_par_note_has("[ADR 0002 #7:") == 1) { whole = 0; }
+            _par_got_seq(vo);
+            k = 0;
+            while (k < vo) {
+                _par_got_i(load64(_par_spec_out + 24 * k));
+                _par_got_i(load64(_par_spec_out + 24 * k + 8));
+                if (whole != 1) { _par_got_i(load64(_par_spec_out + 24 * k + 16)); }
+                k = k + 1;
+            }
+        }
+        _par_map_toks(7, "[ADR 0002 #7:");
+        if (_par_mapped == 7) { _par_adr7_ox = _par_adr7_ox + 1; }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "stoichiometry::limiting_reagent") == 1) {
+        var n1 = _par_in_f64s(0, _par_spec_in);
+        var c1 = _par_spec_in + 8 * (n1 + 1);
+        var n2 = _par_in_f64s(1 + n1, c1);
+        var tl, vl = limiting_reagent(_par_spec_in, n1, c1, n2);
+        if (is_err_result(tl) == 1) { _par_got_err(vl); } else { _par_got_i(vl); }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "stoichiometry::theoretical_yield_moles") == 1) {
+        var n3 = _par_in_f64s(0, _par_spec_in);
+        var c3 = _par_spec_in + 8 * (n3 + 1);
+        var n4 = _par_in_f64s(1 + n3, c3);
+        var p3: f64 = _par_in(2 + n3 + n4);
+        var ty, vy = theoretical_yield_moles(_par_spec_in, n3, c3, n4, p3);
+        _par_got_res(ty, vy);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "stoichiometry::percent_yield") == 1) {
+        var ya: f64 = _par_in(0);
+        var yt: f64 = _par_in(1);
+        var tp, vp = percent_yield(ya, yt);
+        _par_got_res(tp, vp);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "stoichiometry::percent_composition") == 1) {
+        if (_par_in_n < 1 || _par_in_n != 1 + 2 * _par_in(0)) { return 0 - 1; }
+        var mol = _par_molecule_in(0);
+        var tc, vc = percent_composition(mol, _par_spec_out, _PAR_MAX);
+        if (is_err_result(tc) == 1) { _par_got_err(vc); return 1; }
+        _par_got_seq(vc);
+        var kc = 0;
+        while (kc < vc) {
+            _par_got_i(load64(_par_spec_out + 16 * kc));
+            _par_got_f(load64(_par_spec_out + 16 * kc + 8));
+            kc = kc + 1;
+        }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "stoichiometry::empirical_formula") == 1) {
+        var ne = _par_in(0);
+        if (_par_in_n != 1 + 2 * ne) { return 0 - 1; }
+        var ke = 0;
+        while (ke < 2 * ne) {
+            store64(_par_spec_in + 8 * ke, _par_in(1 + ke));
+            ke = ke + 1;
+        }
+        var te, ve = empirical_formula(_par_spec_in, ne, _par_spec_out, ne);
+        if (is_err_result(te) == 1) { _par_got_err(ve); return 1; }
+        _par_got_seq(ve);
+        ke = 0;
+        while (ke < ve) {
+            _par_got_i(load64(_par_spec_out + 16 * ke));
+            _par_got_i(load64(_par_spec_out + 16 * ke + 8));
+            ke = ke + 1;
+        }
+        return 1;
+    }
+    return 0;
+}
+
 # Routes a row to its module's dispatcher. 0 (pending) for a module with none yet.
 fn _par_dispatch(mp, ml, fp, fl): i64 {
     _par_got_n = 0;
@@ -2032,6 +2231,7 @@ fn _par_dispatch(mp, ml, fp, fl): i64 {
     if (_par_eq(mp, ml, "nuclear") == 1) { return _par_nuclear(fp, fl); }
     if (_par_eq(mp, ml, "potential") == 1) { return _par_potential(fp, fl); }
     if (_par_eq(mp, ml, "spectroscopy") == 1) { return _par_spectroscopy(fp, fl); }
+    if (_par_eq(mp, ml, "stoichiometry") == 1) { return _par_stoichiometry(fp, fl); }
     return 0;
 }
 
@@ -2227,17 +2427,21 @@ fn _par_accepted(fp, fl, ip, il): i64 {
     if (_par_mapped == 3) { return 2; }
     # ADR 0002 #13 … #22: a row whose note names the port's exact value, which the port returned; #23 its whole result.
     if (_par_mapped >= 13 && _par_mapped <= 23) { return 2; }
+    # ADR 0002 #7 (M4f): an oxidation-state row whose note names the port's exact rational states, or a balancing row
+    # whose f64 matrix has no integer counterpart (the oracle's Err(InvalidInput)).
+    if (_par_mapped == 7) { return 2; }
     return 0;
 }
 
 # 1 for an ADR whose accepted rows are counted but not printed row by row: ADR 0002 #4's Antoine mapping, #13 … #22's
-# exact-value rows (M4c … M4e-3; about 17,000 rows between them) and #23's isotope rows (M4e-4), each summarised by
-# _par_module_done with its count; the validate.py proofs check every one of them. ADR 0002 #12's CFSE rows (13) and
-# #3's SEMF rows (23) are printed by name.
+# exact-value rows (M4c … M4e-3; about 17,000 rows between them), #23's isotope rows (M4e-4) and #7's oxidation-state
+# and balancing rows (M4f), each summarised by _par_module_done with its count; the validate.py proofs check every one
+# of them. ADR 0002 #12's CFSE rows (13) and #3's SEMF rows (23) are printed by name.
 #must_use
 fn _par_accepted_quiet(adr): i64 {
     if (adr == 2 && _par_mapped == 2) { return 1; }
     if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 23) { return 1; }
+    if (adr == 2 && _par_mapped == 7) { return 1; }
     return 0;
 }
 
@@ -2251,8 +2455,25 @@ fn _par_accepted_bits(adr): i64 {
 
 # After the phase module: the ADR 0002 #4 mapping summary; after thermochem, ADR 0002 #1's; after organic, #6's; after
 # inorganic, #12's and #15's; after nuclear, #3's, #13's and #14's; after potential, #16's, #17's, #18's and #20's;
-# after spectroscopy, #19's, #21's (per function), #22's and #23's (per function).
+# after spectroscopy, #19's, #21's (per function), #22's and #23's (per function); after stoichiometry, #7's (the
+# oxidation states, the integer matrix).
 fn _par_module_done(mp, ml) {
+    if (_par_eq(mp, ml, "stoichiometry") == 1) {
+        print("  ADR 0002 #7 exact oxidation states: ", 38);
+        fmt_int(_par_adr7_ox);
+        print(" assign_oxidation_states rows where the oracle's non-integer-average Err is the port's exact", 92);
+        println(" rational states, as noted (accepted, ADR 2, counted, not listed)");
+        print("  ADR 0002 #7 integer matrix: ", 30);
+        fmt_int(_par_adr7_int);
+        print(" balance_equation rows replayed on the integer matrix (", 55);
+        fmt_int(_par_adr7_round);
+        print(" with a near-integer entry rounded as Rust does), class A; ", 59);
+        fmt_int(_par_adr7_none);
+        print(" with no integer counterpart (a non-integer or non-finite entry, an integer beyond i64,", 87);
+        print(" ragged rows),", 14);
+        println(" the oracle's Err(InvalidInput) (accepted, ADR 2, counted, not listed)");
+        return 0;
+    }
     if (_par_eq(mp, ml, "spectroscopy") == 1) {
         print("  ADR 0002 #19 exact 1/(100x): ", 31);
         fmt_int(_par_adr19);

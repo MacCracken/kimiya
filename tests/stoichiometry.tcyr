@@ -1,0 +1,1194 @@
+# stoichiometry.tcyr — the tests of rust-old/src/stoichiometry.rs, ported one for one (each test_group is the Rust
+# test's name; all 63, in Rust's order; rust-old/tests/integration.rs has none for this module), plus Cyrius-only tests
+# of ADR 0002 #7 (the exact rational oxidation states and their i32 range, the integer matrix and its 2⁵³ bound), the
+# checked i64 and signed 128-bit helpers at their edges, Rust's integer types as words, the caller buffers and slices,
+# the work tables' heap path, and the empirical tolerance to the ulp. The golden corpus separately checks every
+# function over its grid (tests/parity.tcyr).
+#
+# Adapted beyond the port's form (port plan §6.4: `Result::unwrap` is `is_ok` + the payload, a slice a pointer and a
+# count, a Vec result the caller's buffer), for ADR 0002 #7, seven tests:
+# - balance_non_integer_entry_is_error: 1.5, NaN and ∞ have no integer counterpart (the corpus counts those rows);
+#   the test asserts Err(InvalidInput) for the integers Rust's 2⁵³ bound refuses (1e300's counterpart is beyond i64:
+#   i64::MAX and i64::MIN stand in for it).
+# - balance_near_integer_entry_accepted: 2 + 10⁻¹² and −1 − 10⁻¹² are the integers 2 and −1 Rust rounds them to.
+# - oxidation_state_superoxide_is_error, oxidation_state_propane_non_integer_is_error and
+#   oxidation_state_magnetite_non_integer_is_error assert Ok with the exact averages (KO₂'s O −1/2, C₃H₈'s C −8/3,
+#   Fe₃O₄'s Fe +8/3, ADR 0002 #7's reference tests) where Rust asserted Err; oxidation_state_single_element's O₂⁻ is
+#   −1/2, and oxidation_state_huge_count_does_not_panic's (O, u32::MAX)×2 at i32::MIN is −2³⁰/(2³² − 1).
+
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/element_data.cyr"
+include "src/element.cyr"
+include "src/molecule.cyr"
+include "src/stoichiometry.cyr"
+
+alloc_init();
+
+# f64::EPSILON.
+#must_use
+fn eps64(): f64 {
+    var e: f64 = 0.0000000000000002220446049250313;
+    return e;
+}
+
+# |x|.
+#must_use
+fn absf(x: f64): f64 {
+    var a: f64 = f64_abs(x);
+    return a;
+}
+
+# ── balancing helpers ───────────────────────────────────────────────────────────────
+
+var _bal_out: i64[128];
+
+# balance_equation(mat, m, n).unwrap(): the coefficients at the returned buffer.
+#must_use
+fn bal(mat, m, n): i64 {
+    var t, v = balance_equation(mat, m, n, &_bal_out, 128);
+    assert(is_ok(t) == 1 && v == n, "balance_equation: Ok(n)");
+    return &_bal_out;
+}
+
+# The Err code of balance_equation(mat, m, n), or -1 when it is Ok.
+#must_use
+fn bal_err(mat, m, n): i64 {
+    var out[1024];
+    var t, v = balance_equation(mat, m, n, &out, 128);
+    if (is_err_result(t) == 1) { return v; }
+    return 0 - 1;
+}
+
+# 1 if the n coefficients at c equal the n words at want.
+#must_use
+fn same_words(c, want, n): i64 {
+    var k = 0;
+    while (k < n) {
+        if (load64(c + 8 * k) != load64(want + 8 * k)) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# 1 if every row of the m × n matrix times the n coefficients at x is 0 (Rust's `residuals`, exactly in integers:
+# every corpus test's entries are small).
+#must_use
+fn residuals_zero(mat, m, n, x): i64 {
+    var i = 0;
+    while (i < m) {
+        var s = 0;
+        var j = 0;
+        while (j < n) {
+            s = s + load64(mat + 8 * (i * n + j)) * load64(x + 8 * j);
+            j = j + 1;
+        }
+        if (s != 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+var _m_h2o: i64[6] = { 2, 0, -2, 0, 2, -1 };
+var _x_h2o: i64[3] = { 2, 1, 2 };
+var _m_ch4: i64[12] = { 1, 0, -1, 0, 4, 0, 0, -2, 0, 2, -2, -1 };
+var _m_ch4_neg: i64[12] = { -1, 0, 1, 0, -4, 0, 0, 2, 0, -2, 2, 1 };
+var _x_ch4: i64[4] = { 1, 2, 1, 2 };
+var _m_cuso4_a: i64[16] = { 1, 0, 0, -1, 1, 0, -1, 0, 4, 0, -4, 0, 0, 1, -1, 0 };
+var _m_cuso4_b: i64[16] = { 0, 1, -1, 0, 1, 0, 0, -1, 1, 0, -1, 0, 4, 0, -4, 0 };
+var _x_ones4: i64[4] = { 1, 1, 1, 1 };
+var _m_kmno4: i64[30] = { 1, 0, -1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 4, 0, 0, 0, -1, 0, 0, 1, 0, 0, -2, 0, 0, 1, -1, -2, 0,
+    -2 };
+var _x_kmno4: i64[6] = { 2, 16, 2, 2, 8, 5 };
+var _m_nacl: i64[20] = { 1, 0, 0, -1, 1, 0, -1, 0, 0, 1, -1, 0, 0, 1, 0, -1, 0, 3, 0, -3 };
+var _m_mixed: i64[12] = { 1, 0, -1, 0, 4, 0, 0, 2, 0, 2, -2, 1 };
+var _m_two: i64[8] = { 2, 0, -2, -2, 0, 2, -1, -2 };
+var _m_trivial: i64[4] = { 2, 0, 0, -2 };
+var _m_zero: i64[12] = { 2, 0, -2, 0, 0, 2, -1, 0, 0, 0, 0, 1 };
+var _m_u32: i64[2] = { 1, -8589934592 };
+var _m_inter: i64[6] = { 9007199254740991, 1, -1, 1, 9007199254740991, -1 };
+var _m_large: i64[12] = { 9007199254740991, -9007199254740989, 3, -7, 9007199254740987, 5, -9007199254740991, 11, 13,
+    9007199254740985, -17, -9007199254740991 };
+var _m_one: i64[1] = { 1 };
+var _m_bad: i64[2];
+
+# ── oxidation-state helpers ─────────────────────────────────────────────────────────
+
+var _ox_out: i64[96];
+
+# assign_oxidation_states(atoms, n, charge).unwrap(): the (Z, numerator, denominator) records at _ox_out.
+fn ox(atoms, n, charge) {
+    var t, v = assign_oxidation_states(atoms, n, charge, &_ox_out, 32);
+    assert(is_ok(t) == 1 && v == n, "assign_oxidation_states: Ok(n)");
+}
+
+# 1 if assign_oxidation_states(atoms, n, charge) is an Err (its code in *code when code is not 0).
+#must_use
+fn ox_err(atoms, n, charge): i64 {
+    var out[768];
+    var t, v = assign_oxidation_states(atoms, n, charge, &out, 32);
+    if (is_err_result(t) == 1) { return 1; }
+    return 0;
+}
+
+# The Err code of assign_oxidation_states, or -1 when it is Ok.
+#must_use
+fn ox_code(atoms, n, charge): i64 {
+    var out[768];
+    var t, v = assign_oxidation_states(atoms, n, charge, &out, 32);
+    if (is_err_result(t) == 1) { return v; }
+    return 0 - 1;
+}
+
+# 1 if record k of the last ox() is (z, num, den).
+#must_use
+fn ox_is(k, z, num, den): i64 {
+    var rec = &_ox_out + 24 * k;
+    if (load64(rec) == z && load64(rec + 8) == num && load64(rec + 16) == den) { return 1; }
+    return 0;
+}
+
+# The state of element z in the last ox() as an integer (Rust's `os_of`): asserts its denominator is 1.
+#must_use
+fn os_of(n, z): i64 {
+    var k = 0;
+    while (k < n) {
+        var rec = &_ox_out + 24 * k;
+        if (load64(rec) == z) {
+            assert(load64(rec + 16) == 1, "os_of: an integer state");
+            return load64(rec + 8);
+        }
+        k = k + 1;
+    }
+    assert(0 == 1, "os_of: element present");
+    return 0;
+}
+
+var _a_h2o: i64[4] = { 1, 2, 8, 1 };
+var _a_nacl: i64[4] = { 11, 1, 17, 1 };
+var _a_so4: i64[4] = { 16, 1, 8, 4 };
+var _a_mno4: i64[4] = { 25, 1, 8, 4 };
+var _a_kmno4: i64[6] = { 19, 1, 25, 1, 8, 4 };
+var _a_cr2o7: i64[4] = { 24, 2, 8, 7 };
+var _a_nh4: i64[4] = { 7, 1, 1, 4 };
+var _a_co2: i64[4] = { 6, 1, 8, 2 };
+var _a_h2o2: i64[4] = { 1, 2, 8, 2 };
+var _a_na2o2: i64[4] = { 11, 2, 8, 2 };
+var _a_ko2: i64[4] = { 19, 1, 8, 2 };
+var _a_of2: i64[4] = { 8, 1, 9, 2 };
+var _a_nah: i64[4] = { 11, 1, 1, 1 };
+var _a_cah2: i64[4] = { 20, 1, 1, 2 };
+var _a_lialh4: i64[6] = { 3, 1, 13, 1, 1, 4 };
+var _a_o2: i64[2] = { 8, 2 };
+var _a_f2: i64[2] = { 9, 2 };
+var _a_cl: i64[2] = { 17, 1 };
+var _a_c3h8: i64[4] = { 6, 3, 1, 8 };
+var _a_fe3o4: i64[4] = { 26, 3, 8, 4 };
+var _a_c2h6: i64[6] = { 6, 1, 1, 6, 6, 1 };
+var _a_naf: i64[4] = { 11, 1, 9, 1 };
+var _a_oh: i64[4] = { 8, 1, 1, 1 };
+var _a_ho2: i64[4] = { 1, 1, 8, 2 };
+var _a_cn: i64[4] = { 6, 1, 7, 1 };
+var _a_huge1: i64[4] = { 25, 1, 8, 0x80000000 };
+var _a_huge2: i64[4] = { 25, 1, 8, 0xFFFFFFFF };
+var _a_huge3: i64[4] = { 11, 0xFFFFFFFF, 17, 0xFFFFFFFF };
+var _a_huge4: i64[4] = { 8, 0xFFFFFFFF, 8, 0xFFFFFFFF };
+var _a_zero: i64[4] = { 25, 0, 8, 4 };
+var _a_unknown: i64[4] = { 200, 1, 8, 1 };
+
+# ── yield and composition helpers ───────────────────────────────────────────────────
+
+var _f_32: f64[2] = { 3.0, 2.0 };
+var _f_21: f64[2] = { 2.0, 1.0 };
+var _f_101: f64[2] = { 10.0, 1.0 };
+var _f_1: f64[1] = { 1.0 };
+var _f_12: f64[2] = { 1.0, 2.0 };
+var _f_11: f64[2] = { 1.0, 1.0 };
+var _f_50: f64[2] = { 5.0, 0.0 };
+var _f_x: f64[2];
+var _f_y: f64[2];
+
+# limiting_reagent(m, nm, c, nc): the index, or -1 for Err.
+#must_use
+fn lim(m, nm, c, nc): i64 {
+    var t, v = limiting_reagent(m, nm, c, nc);
+    if (is_err_result(t) == 1) { return 0 - 1; }
+    return v;
+}
+
+# 1 if a two-element f64 slice (a, b) at buf.
+fn pair(buf, a: f64, b: f64) {
+    store64(buf, a);
+    store64(buf + 8, b);
+}
+
+# The (Z, mass percent) record k of an element list at buf.
+fn emp(buf, k, z, pct: f64) {
+    store64(buf + 16 * k, z);
+    store64(buf + 16 * k + 8, pct);
+}
+
+var _emp_in[256];
+var _emp_out[256];
+
+# empirical_formula(_emp_in, n).unwrap(): the (Z, count) records at _emp_out.
+fn emp_ok(n) {
+    var t, v = empirical_formula(&_emp_in, n, &_emp_out, 16);
+    assert(is_ok(t) == 1 && v == n, "empirical_formula: Ok(n)");
+}
+
+# The Err code of empirical_formula(_emp_in, n), or -1.
+#must_use
+fn emp_code(n): i64 {
+    var t, v = empirical_formula(&_emp_in, n, &_emp_out, 16);
+    if (is_err_result(t) == 1) { return v; }
+    return 0 - 1;
+}
+
+# The count of element z in the last emp_ok (Rust's `find(|z| …).unwrap().1`).
+#must_use
+fn emp_count(n, z): i64 {
+    var k = 0;
+    while (k < n) {
+        if (load64(&_emp_out + 16 * k) == z) { return load64(&_emp_out + 16 * k + 8); }
+        k = k + 1;
+    }
+    return 0 - 1;
+}
+
+# 1 if record k of the last emp_ok is (z, count).
+#must_use
+fn emp_is(k, z, c): i64 {
+    if (load64(&_emp_out + 16 * k) == z && load64(&_emp_out + 16 * k + 8) == c) { return 1; }
+    return 0;
+}
+
+# ── limiting reagent + yield ────────────────────────────────────────────────────────
+
+fn _t_limiting_reagent_basic() {
+    test_group("limiting_reagent_basic");
+    # 2H₂ + O₂ → 2H₂O, have 3 mol H₂ and 2 mol O₂: H₂ 3/2 = 1.5, O₂ 2/1 = 2.0 → H₂ is limiting
+    assert(lim(&_f_32, 2, &_f_21, 2) == 0, "H₂ limiting");
+}
+
+fn _t_limiting_reagent_second() {
+    test_group("limiting_reagent_second");
+    # H₂: 10/2 = 5.0, O₂: 1/1 = 1.0 → O₂ is limiting
+    assert(lim(&_f_101, 2, &_f_21, 2) == 1, "O₂ limiting");
+}
+
+fn _t_limiting_reagent_empty_is_error() {
+    test_group("limiting_reagent_empty_is_error");
+    assert(lim(&_f_1, 0, &_f_1, 0) < 0, "empty");
+}
+
+fn _t_limiting_reagent_mismatched_is_error() {
+    test_group("limiting_reagent_mismatched_is_error");
+    assert(lim(&_f_1, 1, &_f_12, 2) < 0, "lengths differ");
+}
+
+fn _t_limiting_reagent_nan_inf_are_errors() {
+    test_group("limiting_reagent_nan_inf_are_errors");
+    var nan: f64 = _km_nan();
+    var inf: f64 = _KM_INF;
+    pair(&_f_x, nan, nan);
+    assert(lim(&_f_x, 2, &_f_11, 2) < 0, "NaN moles");
+    pair(&_f_y, nan, 1.0);
+    assert(lim(&_f_11, 2, &_f_y, 2) < 0, "NaN coefficient");
+    pair(&_f_y, 1.0, inf);
+    assert(lim(&_f_11, 2, &_f_y, 2) < 0, "∞ coefficient");
+    pair(&_f_x, inf, 1.0);
+    assert(lim(&_f_x, 2, &_f_11, 2) < 0, "∞ moles");
+    pair(&_f_x, -1.0, 1.0);
+    assert(lim(&_f_x, 2, &_f_11, 2) < 0, "negative moles");
+    pair(&_f_y, 0.0, 1.0);
+    assert(lim(&_f_11, 2, &_f_y, 2) < 0, "zero coefficient");
+}
+
+fn _t_limiting_reagent_zero_moles_is_limiting() {
+    test_group("limiting_reagent_zero_moles_is_limiting");
+    assert(lim(&_f_50, 2, &_f_11, 2) == 1, "0 mol is limiting");
+}
+
+fn _t_theoretical_yield_basic() {
+    test_group("theoretical_yield_basic");
+    # Limiting: H₂ (ratio 1.5), yield = 1.5 × 2 = 3.0 mol H₂O
+    var t, v = theoretical_yield_moles(&_f_32, 2, &_f_21, 2, 2.0);
+    assert(is_ok(t) == 1, "Ok");
+    var y: f64 = v;
+    var d: f64 = absf(y - 3.0);
+    assert(d < eps64(), "3.0 mol");
+}
+
+fn _t_theoretical_yield_nan_inf_are_errors() {
+    test_group("theoretical_yield_nan_inf_are_errors");
+    var nan: f64 = _km_nan();
+    var inf: f64 = _KM_INF;
+    var t1, v1 = theoretical_yield_moles(&_f_32, 2, &_f_21, 2, nan);
+    assert(is_err_result(t1) == 1, "NaN product coefficient");
+    var t2, v2 = theoretical_yield_moles(&_f_32, 2, &_f_21, 2, inf);
+    assert(is_err_result(t2) == 1, "∞ product coefficient");
+    var t3, v3 = theoretical_yield_moles(&_f_32, 2, &_f_21, 2, 0.0);
+    assert(is_err_result(t3) == 1, "0 product coefficient");
+    pair(&_f_x, nan, 2.0);
+    var t4, v4 = theoretical_yield_moles(&_f_x, 2, &_f_21, 2, 2.0);
+    assert(is_err_result(t4) == 1, "NaN moles");
+}
+
+fn _t_percent_yield_nan_inf_are_errors() {
+    test_group("percent_yield_nan_inf_are_errors");
+    var nan: f64 = _km_nan();
+    var inf: f64 = _KM_INF;
+    var t1, v1 = percent_yield(5.0, nan);
+    assert(is_err_result(t1) == 1, "NaN theoretical");
+    var t2, v2 = percent_yield(5.0, inf);
+    assert(is_err_result(t2) == 1, "∞ theoretical");
+    var t3, v3 = percent_yield(nan, 10.0);
+    assert(is_err_result(t3) == 1, "NaN actual");
+    var t4, v4 = percent_yield(inf, 10.0);
+    assert(is_err_result(t4) == 1, "∞ actual");
+    var t5, v5 = percent_yield(-1.0, 10.0);
+    assert(is_err_result(t5) == 1, "negative actual");
+    var t6, v6 = percent_yield(0.0, 10.0);
+    assert(is_ok(t6) == 1, "0 actual: Ok");
+    var p6: f64 = v6;
+    var a6: f64 = absf(p6);
+    assert(a6 < eps64(), "0 %");
+}
+
+fn _t_percent_yield_basic() {
+    test_group("percent_yield_basic");
+    var t, v = percent_yield(8.0, 10.0);
+    assert(is_ok(t) == 1, "Ok");
+    var p: f64 = v;
+    var d: f64 = absf(p - 80.0);
+    assert(d < eps64(), "80 %");
+}
+
+fn _t_percent_yield_over_100() {
+    test_group("percent_yield_over_100");
+    # Possible with impurities
+    var t, v = percent_yield(11.0, 10.0);
+    assert(is_ok(t) == 1, "Ok");
+    var p: f64 = v;
+    var d: f64 = absf(p - 110.0);
+    assert(d < 0.0000000001, "110 %");
+}
+
+fn _t_percent_yield_zero_theoretical_is_error() {
+    test_group("percent_yield_zero_theoretical_is_error");
+    var t, v = percent_yield(5.0, 0.0);
+    assert(is_err_result(t) == 1, "0 theoretical");
+}
+
+fn _t_percent_composition_water() {
+    test_group("percent_composition_water");
+    var water = KmMolecule_water();
+    var out[64];
+    var t, v = percent_composition(water, &out, 4);
+    assert(is_ok(t) == 1 && v == 2, "Ok(2)");
+    # H: 2×1.008/18.015 ≈ 11.19%, O: 15.999/18.015 ≈ 88.81%
+    var h_pct: f64 = 0.0;
+    var o_pct: f64 = 0.0;
+    var k = 0;
+    while (k < v) {
+        var p: f64 = load64(&out + 16 * k + 8);
+        if (load64(&out + 16 * k) == 1) { h_pct = p; }
+        if (load64(&out + 16 * k) == 8) { o_pct = p; }
+        k = k + 1;
+    }
+    var dh: f64 = absf(h_pct - 11.19);
+    assert(dh < 0.1, "H ≈ 11.19 %");
+    var dox: f64 = absf(o_pct - 88.81);
+    assert(dox < 0.1, "O ≈ 88.81 %");
+    var sum: f64 = h_pct + o_pct;
+    var ds: f64 = absf(sum - 100.0);
+    assert(ds < 0.01, "sum ≈ 100 %");
+}
+
+fn _t_empirical_formula_water() {
+    test_group("empirical_formula_water");
+    # H: 11.19%, O: 88.81% → H₂O
+    emp(&_emp_in, 0, 1, 11.19);
+    emp(&_emp_in, 1, 8, 88.81);
+    emp_ok(2);
+    assert(emp_count(2, 1) == 2, "H₂");
+    assert(emp_count(2, 8) == 1, "O");
+}
+
+fn _t_empirical_formula_glucose() {
+    test_group("empirical_formula_glucose");
+    # CH₂O empirical (glucose = C₆H₁₂O₆ → CH₂O)
+    emp(&_emp_in, 0, 6, 40.00);
+    emp(&_emp_in, 1, 1, 6.71);
+    emp(&_emp_in, 2, 8, 53.29);
+    emp_ok(3);
+    assert(emp_is(0, 6, 1) == 1 && emp_is(1, 1, 2) == 1 && emp_is(2, 8, 1) == 1, "[(6, 1), (1, 2), (8, 1)]");
+}
+
+fn _t_empirical_formula_fe2o3_ratio_one_and_a_half() {
+    test_group("empirical_formula_fe2o3_ratio_one_and_a_half");
+    # Fe 69.94 %, O 30.06 % → O/Fe = 1.50 → ×2 → Fe₂O₃
+    emp(&_emp_in, 0, 26, 69.94);
+    emp(&_emp_in, 1, 8, 30.06);
+    emp_ok(2);
+    assert(emp_is(0, 26, 2) == 1 && emp_is(1, 8, 3) == 1, "Fe₂O₃");
+}
+
+fn _t_empirical_formula_fe3o4_ratio_one_and_a_third() {
+    test_group("empirical_formula_fe3o4_ratio_one_and_a_third");
+    # Fe 72.36 %, O 27.64 % → O/Fe = 1.333 → ×3 → Fe₃O₄
+    emp(&_emp_in, 0, 26, 72.36);
+    emp(&_emp_in, 1, 8, 27.64);
+    emp_ok(2);
+    assert(emp_is(0, 26, 3) == 1 && emp_is(1, 8, 4) == 1, "Fe₃O₄");
+}
+
+fn _t_empirical_formula_close_ratio_uses_multiplier_one() {
+    test_group("empirical_formula_close_ratio_uses_multiplier_one");
+    # O/C = 1.08 is within 0.1 of an integer at ×1 → CO. 30 g C = 2.4977 mol; O = 1.08 × that.
+    var o_mass: f64 = 1.08 * 30.0 / 12.011 * 15.999;
+    emp(&_emp_in, 0, 6, 30.0);
+    emp(&_emp_in, 1, 8, o_mass);
+    emp_ok(2);
+    assert(emp_is(0, 6, 1) == 1 && emp_is(1, 8, 1) == 1, "CO");
+}
+
+fn _t_empirical_formula_no_integer_ratio_is_error() {
+    test_group("empirical_formula_no_integer_ratio_is_error");
+    # O/C = 1.43: no multiplier 1..=6 brings it within 0.1 of an integer.
+    var o_mass: f64 = 1.43 * 30.0 / 12.011 * 15.999;
+    emp(&_emp_in, 0, 6, 30.0);
+    emp(&_emp_in, 1, 8, o_mass);
+    assert(emp_code(2) == KM_ERR_COMPUTATION_ERROR, "ComputationError");
+}
+
+fn _t_empirical_formula_nan_inf_are_errors() {
+    test_group("empirical_formula_nan_inf_are_errors");
+    var nan: f64 = _km_nan();
+    var inf: f64 = _KM_INF;
+    emp(&_emp_in, 1, 8, 50.0);
+    emp(&_emp_in, 0, 6, nan);
+    assert(emp_code(2) >= 0, "NaN");
+    emp(&_emp_in, 0, 6, inf);
+    assert(emp_code(2) >= 0, "∞");
+    emp(&_emp_in, 0, 6, 40.0);
+    emp(&_emp_in, 1, 8, -5.0);
+    assert(emp_code(2) >= 0, "negative");
+    # Subnormal mass percent: ratio overflows to infinity.
+    var subw = 0x7E8;                       # 1e-320's bits (a subnormal: below 2⁵², so through an untyped word)
+    var sub: f64 = subw;
+    emp(&_emp_in, 0, 6, sub);
+    emp(&_emp_in, 1, 8, 50.0);
+    assert(emp_code(2) >= 0, "subnormal");
+}
+
+fn _t_empirical_formula_empty_is_error() {
+    test_group("empirical_formula_empty_is_error");
+    assert(emp_code(0) >= 0, "empty");
+}
+
+# ── equation balancing ──────────────────────────────────────────────────────────────
+
+fn _t_balance_h2_o2_water() {
+    test_group("balance_h2_o2_water");
+    # 2H₂ + O₂ → 2H₂O; species [H₂, O₂, H₂O]
+    assert(same_words(bal(&_m_h2o, 2, 3), &_x_h2o, 3) == 1, "[2, 1, 2]");
+}
+
+fn _t_balance_ch4_combustion() {
+    test_group("balance_ch4_combustion");
+    # CH₄ + 2O₂ → CO₂ + 2H₂O
+    var x = bal(&_m_ch4, 3, 4);
+    assert(same_words(x, &_x_ch4, 4) == 1, "[1, 2, 1, 2]");
+    assert(residuals_zero(&_m_ch4, 3, 4, x) == 1, "residuals 0");
+}
+
+fn _t_balance_ch4_combustion_negated_matrix() {
+    test_group("balance_ch4_combustion_negated_matrix");
+    # Products positive, reactants negative: same coefficients.
+    assert(same_words(bal(&_m_ch4_neg, 3, 4), &_x_ch4, 4) == 1, "[1, 2, 1, 2]");
+}
+
+fn _t_balance_cuso4_fe_independent_of_row_order() {
+    test_group("balance_cuso4_fe_independent_of_row_order");
+    # CuSO₄ + Fe → FeSO₄ + Cu; species [CuSO₄, Fe, FeSO₄, Cu]
+    assert(same_words(bal(&_m_cuso4_a, 4, 4), &_x_ones4, 4) == 1, "order a");
+    assert(same_words(bal(&_m_cuso4_b, 4, 4), &_x_ones4, 4) == 1, "order b");
+}
+
+fn _t_balance_kmno4_hcl() {
+    test_group("balance_kmno4_hcl");
+    # 2KMnO₄ + 16HCl → 2KCl + 2MnCl₂ + 8H₂O + 5Cl₂
+    assert(same_words(bal(&_m_kmno4, 5, 6), &_x_kmno4, 6) == 1, "[2, 16, 2, 2, 8, 5]");
+}
+
+fn _t_balance_more_elements_than_species() {
+    test_group("balance_more_elements_than_species");
+    # NaCl + AgNO₃ → AgCl + NaNO₃: 5 element rows, 4 species
+    assert(same_words(bal(&_m_nacl, 5, 4), &_x_ones4, 4) == 1, "[1, 1, 1, 1]");
+}
+
+fn _t_balance_mixed_sign_is_error() {
+    test_group("balance_mixed_sign_is_error");
+    # H₂O column given with the reactant sign: needs x = [1, 2, 1, -2].
+    assert(bal_err(&_m_mixed, 3, 4) >= 0, "mixed sign");
+}
+
+fn _t_balance_two_independent_reactions_is_error() {
+    test_group("balance_two_independent_reactions_is_error");
+    # H₂ + O₂ → H₂O, H₂O₂: nullity 2.
+    assert(bal_err(&_m_two, 2, 4) >= 0, "ambiguous");
+}
+
+fn _t_balance_only_trivial_solution_is_error() {
+    test_group("balance_only_trivial_solution_is_error");
+    # H₂ → O₂ cannot be balanced.
+    assert(bal_err(&_m_trivial, 2, 2) >= 0, "trivial");
+}
+
+fn _t_balance_zero_coefficient_is_error() {
+    test_group("balance_zero_coefficient_is_error");
+    # He takes no part: its coefficient is forced to 0.
+    assert(bal_err(&_m_zero, 3, 4) >= 0, "zero coefficient");
+}
+
+fn _t_balance_non_integer_entry_is_error() {
+    test_group("balance_non_integer_entry_is_error");
+    # ADR 0002 #7: 1.5, NaN and ∞ have no integer counterpart; the integers past Rust's 2⁵³ bound are refused with
+    # Rust's code (1e300's counterpart is beyond i64: i64::MAX and i64::MIN stand in).
+    store64(&_m_bad + 8, 0 - 1);
+    store64(&_m_bad, 9007199254740993);
+    assert(bal_err(&_m_bad, 1, 2) == KM_ERR_INVALID_INPUT, "2⁵³ + 1: InvalidInput");
+    store64(&_m_bad, 0x7FFFFFFFFFFFFFFF);
+    assert(bal_err(&_m_bad, 1, 2) == KM_ERR_INVALID_INPUT, "i64::MAX: InvalidInput");
+    store64(&_m_bad, 0 - 0x7FFFFFFFFFFFFFFF - 1);
+    assert(bal_err(&_m_bad, 1, 2) == KM_ERR_INVALID_INPUT, "i64::MIN: InvalidInput");
+}
+
+fn _t_balance_near_integer_entry_accepted() {
+    test_group("balance_near_integer_entry_accepted");
+    # ADR 0002 #7: 2 + 1e-12 and −1 − 1e-12 are the integers 2 and −1 Rust rounds them to.
+    assert(same_words(bal(&_m_h2o, 2, 3), &_x_h2o, 3) == 1, "[2, 1, 2]");
+}
+
+fn _t_balance_coefficient_overflowing_u32_is_error() {
+    test_group("balance_coefficient_overflowing_u32_is_error");
+    # x = [2³³, 1] does not fit u32.
+    assert(bal_err(&_m_u32, 1, 2) == KM_ERR_COMPUTATION_ERROR, "exceeds u32");
+}
+
+fn _t_balance_intermediate_overflow_is_error() {
+    test_group("balance_intermediate_overflow_is_error");
+    # Elimination needs (2⁵³ − 1)² > i64::MAX: must be Err, not an abort.
+    assert(bal_err(&_m_inter, 2, 3) == KM_ERR_COMPUTATION_ERROR, "overflow");
+}
+
+fn _t_balance_large_entries_do_not_panic() {
+    test_group("balance_large_entries_do_not_panic");
+    var out[64];
+    var t, v = balance_equation(&_m_large, 3, 4, &out, 4);
+    # Whatever the outcome, it must be an Err or a verified balance.
+    if (is_ok(t) == 1) {
+        var k = 0;
+        while (k < 4) {
+            assert(load64(&out + 8 * k) > 0, "positive");
+            k = k + 1;
+        }
+    } else {
+        assert(v == KM_ERR_COMPUTATION_ERROR, "an Err");
+    }
+}
+
+fn _t_balance_empty_is_error() {
+    test_group("balance_empty_is_error");
+    assert(bal_err(&_m_one, 0, 0) == KM_ERR_INVALID_INPUT, "empty");
+}
+
+fn _t_balance_single_species_is_error() {
+    test_group("balance_single_species_is_error");
+    assert(bal_err(&_m_one, 1, 1) == KM_ERR_INVALID_INPUT, "one species");
+}
+
+# ── oxidation states ────────────────────────────────────────────────────────────────
+
+fn _t_oxidation_state_water() {
+    test_group("oxidation_state_water");
+    # H₂O: H = +1, O = -2
+    ox(&_a_h2o, 2, 0);
+    assert(ox_is(0, 1, 1, 1) == 1 && ox_is(1, 8, 0 - 2, 1) == 1, "[(1, 1), (8, -2)]");
+}
+
+fn _t_oxidation_state_nacl() {
+    test_group("oxidation_state_nacl");
+    # NaCl: Na = +1, Cl = -1
+    ox(&_a_nacl, 2, 0);
+    assert(ox_is(0, 11, 1, 1) == 1 && ox_is(1, 17, 0 - 1, 1) == 1, "[(11, 1), (17, -1)]");
+}
+
+fn _t_oxidation_state_sulfate_ion() {
+    test_group("oxidation_state_sulfate_ion");
+    # SO₄²⁻: O = -2, S = +6
+    ox(&_a_so4, 2, 0 - 2);
+    assert(ox_is(0, 16, 6, 1) == 1 && ox_is(1, 8, 0 - 2, 1) == 1, "[(16, 6), (8, -2)]");
+}
+
+fn _t_oxidation_state_permanganate() {
+    test_group("oxidation_state_permanganate");
+    # MnO₄⁻: O = -2, Mn = +7
+    ox(&_a_mno4, 2, 0 - 1);
+    assert(os_of(2, 25) == 7, "Mn +7");
+}
+
+fn _t_oxidation_state_kmno4() {
+    test_group("oxidation_state_kmno4");
+    ox(&_a_kmno4, 3, 0);
+    assert(ox_is(0, 19, 1, 1) == 1 && ox_is(1, 25, 7, 1) == 1 && ox_is(2, 8, 0 - 2, 1) == 1,
+        "[(19, 1), (25, 7), (8, -2)]");
+}
+
+fn _t_oxidation_state_dichromate() {
+    test_group("oxidation_state_dichromate");
+    # Cr₂O₇²⁻: Cr = +6
+    ox(&_a_cr2o7, 2, 0 - 2);
+    assert(ox_is(0, 24, 6, 1) == 1 && ox_is(1, 8, 0 - 2, 1) == 1, "[(24, 6), (8, -2)]");
+}
+
+fn _t_oxidation_state_ammonium() {
+    test_group("oxidation_state_ammonium");
+    # NH₄⁺: N = -3
+    ox(&_a_nh4, 2, 1);
+    assert(ox_is(0, 7, 0 - 3, 1) == 1 && ox_is(1, 1, 1, 1) == 1, "[(7, -3), (1, 1)]");
+}
+
+fn _t_oxidation_state_co2() {
+    test_group("oxidation_state_co2");
+    # CO₂: O = -2, C = +4
+    ox(&_a_co2, 2, 0);
+    assert(os_of(2, 6) == 4, "C +4");
+}
+
+fn _t_oxidation_state_hydrogen_peroxide() {
+    test_group("oxidation_state_hydrogen_peroxide");
+    ox(&_a_h2o2, 2, 0);
+    assert(ox_is(0, 1, 1, 1) == 1 && ox_is(1, 8, 0 - 1, 1) == 1, "[(1, 1), (8, -1)]");
+}
+
+fn _t_oxidation_state_sodium_peroxide() {
+    test_group("oxidation_state_sodium_peroxide");
+    ox(&_a_na2o2, 2, 0);
+    assert(ox_is(0, 11, 1, 1) == 1 && ox_is(1, 8, 0 - 1, 1) == 1, "[(11, 1), (8, -1)]");
+}
+
+fn _t_oxidation_state_superoxide_is_error() {
+    test_group("oxidation_state_superoxide_is_error");
+    # KO₂: O = -1/2 (ADR 0002 #7: the exact average, where Rust refused it as non-integer).
+    ox(&_a_ko2, 2, 0);
+    assert(ox_is(0, 19, 1, 1) == 1 && ox_is(1, 8, 0 - 1, 2) == 1, "[(19, 1), (8, -1/2)]");
+}
+
+fn _t_oxidation_state_oxygen_difluoride() {
+    test_group("oxidation_state_oxygen_difluoride");
+    # OF₂: F = -1, O = +2
+    ox(&_a_of2, 2, 0);
+    assert(ox_is(0, 8, 2, 1) == 1 && ox_is(1, 9, 0 - 1, 1) == 1, "[(8, 2), (9, -1)]");
+}
+
+fn _t_oxidation_state_sodium_hydride() {
+    test_group("oxidation_state_sodium_hydride");
+    ox(&_a_nah, 2, 0);
+    assert(ox_is(0, 11, 1, 1) == 1 && ox_is(1, 1, 0 - 1, 1) == 1, "[(11, 1), (1, -1)]");
+}
+
+fn _t_oxidation_state_calcium_hydride() {
+    test_group("oxidation_state_calcium_hydride");
+    ox(&_a_cah2, 2, 0);
+    assert(ox_is(0, 20, 2, 1) == 1 && ox_is(1, 1, 0 - 1, 1) == 1, "[(20, 2), (1, -1)]");
+}
+
+fn _t_oxidation_state_lithium_aluminium_hydride() {
+    test_group("oxidation_state_lithium_aluminium_hydride");
+    # LiAlH₄: Li +1, Al +3, H -1
+    ox(&_a_lialh4, 3, 0);
+    assert(ox_is(0, 3, 1, 1) == 1 && ox_is(1, 13, 3, 1) == 1 && ox_is(2, 1, 0 - 1, 1) == 1,
+        "[(3, 1), (13, 3), (1, -1)]");
+}
+
+fn _t_oxidation_state_single_element() {
+    test_group("oxidation_state_single_element");
+    ox(&_a_o2, 1, 0);
+    assert(ox_is(0, 8, 0, 1) == 1, "O₂: 0");
+    ox(&_a_f2, 1, 0);
+    assert(ox_is(0, 9, 0, 1) == 1, "F₂: 0");
+    ox(&_a_cl, 1, 0 - 1);
+    assert(ox_is(0, 17, 0 - 1, 1) == 1, "Cl⁻: -1");
+    # Peroxide ion O₂²⁻
+    ox(&_a_o2, 1, 0 - 2);
+    assert(ox_is(0, 8, 0 - 1, 1) == 1, "O₂²⁻: -1");
+    # Superoxide ion O₂⁻: -1/2 (ADR 0002 #7: the exact average)
+    ox(&_a_o2, 1, 0 - 1);
+    assert(ox_is(0, 8, 0 - 1, 2) == 1, "O₂⁻: -1/2");
+}
+
+fn _t_oxidation_state_propane_non_integer_is_error() {
+    test_group("oxidation_state_propane_non_integer_is_error");
+    # C₃H₈: C = -8/3 (ADR 0002 #7's reference test: the exact average, where Rust returned ComputationError)
+    ox(&_a_c3h8, 2, 0);
+    assert(ox_is(0, 6, 0 - 8, 3) == 1 && ox_is(1, 1, 1, 1) == 1, "[(6, -8/3), (1, 1)]");
+}
+
+fn _t_oxidation_state_magnetite_non_integer_is_error() {
+    test_group("oxidation_state_magnetite_non_integer_is_error");
+    # Fe₃O₄: Fe = +8/3 (ADR 0002 #7's reference test)
+    ox(&_a_fe3o4, 2, 0);
+    assert(ox_is(0, 26, 8, 3) == 1 && ox_is(1, 8, 0 - 2, 1) == 1, "[(26, 8/3), (8, -2)]");
+}
+
+fn _t_oxidation_state_repeated_unknown_element_is_merged() {
+    test_group("oxidation_state_repeated_unknown_element_is_merged");
+    # C₂H₆ written with two C entries: C = -3 for both.
+    ox(&_a_c2h6, 3, 0);
+    assert(ox_is(0, 6, 0 - 3, 1) == 1 && ox_is(1, 1, 1, 1) == 1 && ox_is(2, 6, 0 - 3, 1) == 1,
+        "[(6, -3), (1, 1), (6, -3)]");
+}
+
+fn _t_oxidation_state_unbalanced_assigned_is_error() {
+    test_group("oxidation_state_unbalanced_assigned_is_error");
+    # NaF with charge +1: every atom is rule-assigned, no O to re-solve.
+    assert(ox_err(&_a_naf, 2, 1) == 1, "NaF⁺");
+    # "H₂O⁻": re-solving O would give −3, below O's minimum of −2.
+    assert(ox_err(&_a_h2o, 2, 0 - 1) == 1, "H₂O⁻");
+    # H₂O⁺ (radical cation): re-solved O = −1 is within (−2, 0), accepted.
+    ox(&_a_h2o, 2, 1);
+    assert(ox_is(0, 1, 1, 1) == 1 && ox_is(1, 8, 0 - 1, 1) == 1, "H₂O⁺: [(1, 1), (8, -1)]");
+}
+
+fn _t_oxidation_state_hydroxide_and_hydroperoxide() {
+    test_group("oxidation_state_hydroxide_and_hydroperoxide");
+    # OH⁻: O −2, H +1 balances directly.
+    ox(&_a_oh, 2, 0 - 1);
+    assert(ox_is(0, 8, 0 - 2, 1) == 1 && ox_is(1, 1, 1, 1) == 1, "OH⁻");
+    # HO₂⁻ (hydroperoxide): O −1.
+    ox(&_a_ho2, 2, 0 - 1);
+    assert(ox_is(0, 1, 1, 1) == 1 && ox_is(1, 8, 0 - 1, 1) == 1, "HO₂⁻");
+}
+
+fn _t_oxidation_state_two_unknowns_is_error() {
+    test_group("oxidation_state_two_unknowns_is_error");
+    # CN⁻: C and N both unknown.
+    assert(ox_err(&_a_cn, 2, 0 - 1) == 1, "CN⁻");
+}
+
+fn _t_oxidation_state_huge_count_does_not_panic() {
+    test_group("oxidation_state_huge_count_does_not_panic");
+    assert(ox_err(&_a_huge1, 2, 0) == 1, "Mn O_(2³¹): Mn +2³² is outside i32");
+    assert(ox_err(&_a_huge2, 2, 0) == 1, "Mn O_(u32::MAX)");
+    ox(&_a_huge3, 2, 0);
+    assert(ox_is(0, 11, 1, 1) == 1 && ox_is(1, 17, 0 - 1, 1) == 1, "Na Cl at u32::MAX");
+    # ADR 0002 #7: −2³¹ / (2³³ − 2) = −2³⁰ / (2³² − 1), where Rust refused the average.
+    ox(&_a_huge4, 2, _KM_I32_MIN);
+    assert(ox_is(0, 8, 0 - 1073741824, 4294967295) == 1 && ox_is(1, 8, 0 - 1073741824, 4294967295) == 1,
+        "O at i32::MIN");
+}
+
+fn _t_oxidation_state_zero_count_or_unknown_element_is_error() {
+    test_group("oxidation_state_zero_count_or_unknown_element_is_error");
+    assert(ox_err(&_a_zero, 2, 0 - 1) == 1, "zero count");
+    assert(ox_err(&_a_unknown, 2, 0) == 1, "Z = 200");
+}
+
+fn _t_oxidation_state_empty_is_error() {
+    test_group("oxidation_state_empty_is_error");
+    assert(ox_err(&_a_h2o, 0, 0) == 1, "empty");
+}
+
+# ── Cyrius-only ─────────────────────────────────────────────────────────────────────
+
+var _a_ko3: i64[4] = { 19, 1, 8, 3 };
+var _a_cso2: i64[4] = { 55, 1, 8, 2 };
+var _a_range1: i64[4] = { 25, 2, 8, 0x7FFFFFFF };
+var _a_range2: i64[4] = { 7, 2, 1, 0xFFFFFFFF };
+var _a_range3: i64[6] = { 7, 2, 1, 0xFFFFFFFF, 1, 2 };
+var _a_range4: i64[6] = { 25, 3, 8, 0xFFFFFFFF, 8, 1 };
+var _a_range5: i64[4] = { 25, 1, 8, 0x40000000 };
+
+# ADR 0002 #7's rational states: the reference values, the re-solve branch on the rational, and the i32 range applied
+# to the value (an average just inside is Ok, just outside Err(ComputationError), Rust's code for that input).
+fn _t_cyrius_adr7_rational() {
+    test_group("cyrius_adr7_rational");
+    ox(&_a_ko3, 2, 0);
+    assert(ox_is(1, 8, 0 - 1, 3) == 1, "KO₃: the ozonide's O −1/3");
+    ox(&_a_cso2, 2, 0);
+    assert(ox_is(1, 8, 0 - 1, 2) == 1, "CsO₂: −1/2");
+    ox(&_a_o2, 1, 1);
+    assert(ox_is(0, 8, 1, 2) == 1, "O₂⁺: +1/2");
+    ox(&_a_o2, 1, 3);
+    assert(ox_is(0, 8, 3, 2) == 1, "O₂³⁺: +3/2 (single element: no −2 < os < 0 test)");
+    ox(&_a_c3h8, 2, 1);
+    assert(ox_is(0, 6, 0 - 7, 3) == 1, "C₃H₈⁺: −7/3");
+    ox(&_a_fe3o4, 2, 0 - 1);
+    assert(ox_is(0, 26, 7, 3) == 1, "Fe₃O₄⁻: +7/3");
+    # the reduced fraction: C₂H₆ written as C₂ + H₆ in one entry each, an integer −3/1
+    ox(&_a_c2h6, 3, 1);
+    assert(ox_is(0, 6, 0 - 5, 2) == 1 && ox_is(2, 6, 0 - 5, 2) == 1, "C₂H₆⁺: −5/2 on both C entries");
+    # the re-solve branch tests −2 < os < 0 on the rational: H₂O at +1 is −1, at +2 0 (refused), at −1 −3 (refused)
+    assert(ox_code(&_a_h2o, 2, 2) == KM_ERR_COMPUTATION_ERROR, "H₂O²⁺: O 0 is not in (−2, 0)");
+    assert(ox_code(&_a_h2o, 2, 0 - 1) == KM_ERR_COMPUTATION_ERROR, "H₂O⁻: O −3");
+    ox(&_a_h2o2, 2, 1);
+    assert(ox_is(1, 8, 0 - 1, 2) == 1, "H₂O₂⁺: O −1/2");
+    # the i32 range on the value
+    ox(&_a_range1, 2, 0 - 1);
+    assert(ox_is(0, 25, 4294967293, 2) == 1, "Mn (2³² − 3)/2 = 2147483646.5: inside");
+    assert(ox_code(&_a_range1, 2, 1) == KM_ERR_COMPUTATION_ERROR, "Mn (2³² − 1)/2 = 2147483647.5: past i32::MAX");
+    ox(&_a_range2, 2, 0);
+    assert(ox_is(0, 7, 0 - 4294967295, 2) == 1, "N −(2³² − 1)/2 = −2147483647.5: inside");
+    assert(ox_code(&_a_range3, 3, 0) == KM_ERR_COMPUTATION_ERROR, "N −(2³² + 1)/2: past i32::MIN");
+    assert(ox_code(&_a_range4, 3, 0) == KM_ERR_COMPUTATION_ERROR, "Mn 2³³/3: past i32::MAX");
+    ox(&_a_range5, 2, 0 - 1);
+    assert(ox_is(0, 25, 2147483647, 1) == 1, "Mn 2³¹ − 1 = i32::MAX: an integer, inside");
+    assert(ox_code(&_a_range5, 2, 0) == KM_ERR_COMPUTATION_ERROR, "Mn 2³¹: past i32::MAX");
+    # the private helper's own checks
+    var c0, p0, q0 = _km_exact_oxidation_state(5, 0);
+    assert(c0 == KM_ERR_INVALID_INPUT, "den 0: InvalidInput");
+    var c1, p1, q1 = _km_exact_oxidation_state(0 - 0x7FFFFFFFFFFFFFFF - 1, 0 - 1);
+    assert(c1 == KM_ERR_COMPUTATION_ERROR, "i64::MIN by −1: overflow");
+    var c2, p2, q2 = _km_exact_oxidation_state(6, 0 - 4);
+    assert(c2 == 0 && p2 == 0 - 3 && q2 == 2, "6/−4 = −3/2, the denominator positive");
+    var c3, p3, q3 = _km_exact_oxidation_state(0, 7);
+    assert(c3 == 0 && p3 == 0 && q3 == 1, "0/7 = 0/1");
+}
+
+# ADR 0002 #7's integer matrix: Rust's 2⁵³ bound kept (±2⁵³ accepted, one more refused), the buffer and dimension
+# checks, the cap check after Rust's errors with `out` untouched, the heap path past the 512-word matrix table and the
+# 64-word null vector, and the reduced row whose gcd is 2⁶³ (Rust's try_from overflow).
+fn _t_cyrius_integer_matrix() {
+    test_group("cyrius_integer_matrix");
+    store64(&_m_bad, 9007199254740992);
+    store64(&_m_bad + 8, 0 - 9007199254740992);
+    var x = bal(&_m_bad, 1, 2);
+    assert(load64(x) == 1 && load64(x + 8) == 1, "±2⁵³: accepted, [1, 1]");
+    store64(&_m_bad + 8, 0 - 9007199254740993);
+    assert(bal_err(&_m_bad, 1, 2) == KM_ERR_INVALID_INPUT, "−2⁵³ − 1: InvalidInput");
+    assert(bal_err(0, 3, 4) == KM_ERR_INVALID_INPUT, "null matrix");
+    assert(bal_err(&_m_ch4, 0 - 1, 4) == KM_ERR_INVALID_INPUT, "m < 0");
+    assert(bal_err(&_m_ch4, 3, 0 - 4) == KM_ERR_INVALID_INPUT, "n < 0");
+    assert(bal_err(&_m_ch4, 0x4000000000000000, 4) == KM_ERR_INVALID_INPUT, "m·n past any buffer");
+    # cap: after Rust's errors, out untouched
+    var out[64];
+    store64(&out, 77);
+    var t1, v1 = balance_equation(&_m_ch4, 3, 4, &out, 3);
+    assert(is_err_result(t1) == 1 && v1 == KM_ERR_INVALID_INPUT && load64(&out) == 77,
+        "cap 3 < 4: InvalidInput, untouched");
+    var t2, v2 = balance_equation(&_m_ch4, 3, 4, 0, 4);
+    assert(is_err_result(t2) == 1 && v2 == KM_ERR_INVALID_INPUT, "null out");
+    var t3, v3 = balance_equation(&_m_mixed, 3, 4, &out, 0);
+    assert(is_err_result(t3) == 1 && v3 == KM_ERR_COMPUTATION_ERROR, "Rust's error first, before the cap");
+    # the heap tables: a chain of 70 species (69 × 70 cells, a 70-word null vector), x[k] = 1 + k mod 3
+    var n = 70;
+    var heap = alloc(8 * (n - 1) * n);
+    var k = 0;
+    while (k < (n - 1) * n) {
+        store64(heap + 8 * k, 0);
+        k = k + 1;
+    }
+    k = 0;
+    while (k < n - 1) {
+        store64(heap + 8 * (k * n + k), 1 + (k + 1) % 3);
+        store64(heap + 8 * (k * n + k + 1), 0 - (1 + k % 3));
+        k = k + 1;
+    }
+    var hout[1024];
+    var th, vh = balance_equation(heap, n - 1, n, &hout, n);
+    assert(is_ok(th) == 1 && vh == n, "70 species: Ok(70)");
+    var good = 1;
+    k = 0;
+    while (k < n) {
+        if (load64(&hout + 8 * k) != 1 + k % 3) { good = 0; }
+        k = k + 1;
+    }
+    assert(good == 1, "70 species: x[k] = 1 + k mod 3");
+    # the gcd-2⁶³ row: [2³¹, 1, 0], [2³¹, −(2³² − 1), 0] → row 1 becomes [0, −2⁶³, 0]
+    var g[48];
+    store64(&g, 2147483648);
+    store64(&g + 8, 1);
+    store64(&g + 16, 0);
+    store64(&g + 24, 2147483648);
+    store64(&g + 32, 0 - 4294967295);
+    store64(&g + 40, 0);
+    assert(bal_err(&g, 2, 3) == KM_ERR_COMPUTATION_ERROR, "a reduced row of gcd 2⁶³: overflow");
+}
+
+# The checked i64 helpers and the signed 128-bit sum at their edges.
+fn _t_cyrius_checked_arithmetic() {
+    test_group("cyrius_checked_arithmetic");
+    var mx = 0x7FFFFFFFFFFFFFFF;
+    var mn = 0 - mx - 1;
+    var o1, r1 = _km_i64_add_ck(mx, 1);
+    assert(o1 == 0, "MAX + 1 overflows");
+    var o2, r2 = _km_i64_add_ck(mn, 0 - 1);
+    assert(o2 == 0, "MIN − 1 overflows");
+    var o3, r3 = _km_i64_add_ck(mx, mn);
+    assert(o3 == 1 && r3 == 0 - 1, "MAX + MIN = −1");
+    var o4, r4 = _km_i64_sub_ck(mn, 1);
+    assert(o4 == 0, "MIN − 1 overflows (sub)");
+    var o5, r5 = _km_i64_sub_ck(0, mn);
+    assert(o5 == 0, "0 − MIN overflows");
+    var o6, r6 = _km_i64_sub_ck(0 - 1, mn);
+    assert(o6 == 1 && r6 == mx, "−1 − MIN = MAX");
+    var o7, r7 = _km_i64_mul_ck(mn, 0 - 1);
+    assert(o7 == 0, "MIN·(−1) overflows");
+    var o8, r8 = _km_i64_mul_ck(0 - 1, mn);
+    assert(o8 == 0, "(−1)·MIN overflows");
+    var o9, r9 = _km_i64_mul_ck(0x80000000, 0x100000000);
+    assert(o9 == 0, "2³¹·2³² overflows");
+    var o10, r10 = _km_i64_mul_ck(0 - 2147483648, 0x100000000);
+    assert(o10 == 1 && r10 == mn, "−2³¹·2³² = MIN");
+    var o11, r11 = _km_i64_mul_ck(3037000499, 3037000499);
+    assert(o11 == 1 && r11 == 9223372030926249001, "3037000499² fits");
+    var o12, r12 = _km_i64_mul_ck(3037000500, 3037000500);
+    assert(o12 == 0, "3037000500² overflows");
+    var o13, r13 = _km_i64_mul_ck(mn, 1);
+    assert(o13 == 1 && r13 == mn, "MIN·1");
+    var o14, r14 = _km_i64_mul_ck(mn, 0);
+    assert(o14 == 1 && r14 == 0, "MIN·0");
+    var o15, r15 = _km_i64_neg_ck(mn);
+    assert(o15 == 0, "−MIN overflows");
+    var o16, r16 = _km_i64_neg_ck(mx);
+    assert(o16 == 1 && r16 == mn + 1, "−MAX");
+    # gcd over unsigned words to 2⁶³
+    assert(_km_gcd_u64(0, 0) == 0, "gcd(0, 0) = 0");
+    assert(_km_gcd_u64(mn, 0) == mn, "gcd(2⁶³, 0) = 2⁶³");
+    assert(_km_gcd_u64(mn, mn) == mn, "gcd(2⁶³, 2⁶³) = 2⁶³");
+    assert(_km_gcd_u64(mn, 12) == 4, "gcd(2⁶³, 12) = 4");
+    assert(_km_gcd_u64(12, mn) == 4, "gcd(12, 2⁶³) = 4");
+    assert(_km_gcd_u64(mn, 3) == 1, "gcd(2⁶³, 3) = 1");
+    assert(_km_umod(mn, 3) == 2, "2⁶³ mod 3 = 2");
+    assert(_km_umod(5, mn) == 5, "5 mod 2⁶³ = 5");
+    assert(_km_unsigned_abs(mn) == mn, "|MIN| = 2⁶³");
+    # the 128-bit product: v·k for the signs and the largest operands
+    var h1, m1, l1 = _km_i128_mul_u32(9007199254740992, 0xFFFFFFFF);
+    assert(h1 == 0x1FFFFF && m1 == 0xFFE00000 && l1 == 0, "2⁵³·(2³² − 1)");
+    var h2, m2, l2 = _km_i128_mul_u32(0 - 1, 1);
+    assert(h2 == 0 - 1 && m2 == 0xFFFFFFFF && l2 == 0xFFFFFFFF, "−1 as (h, m, l)");
+    var h3, m3, l3 = _km_i128_mul_u32(mn, 0xFFFFFFFF);
+    assert(h3 == 0 - 0x7FFFFFFF - 1 && m3 == 0x80000000 && l3 == 0, "MIN·(2³² − 1) = −2⁹⁵ + 2⁶³");
+    var h4, m4, l4 = _km_i128_mul_u32(0 - 5, 0);
+    assert(h4 == 0 && m4 == 0 && l4 == 0, "−5·0 = 0");
+    # the checked sum: carries, −1 + 1 = 0, the i128 bounds
+    var acc[24];
+    store64(&acc, 0);
+    store64(&acc + 8, 0);
+    store64(&acc + 16, 0);
+    assert(_km_i128_add_ck(&acc, 0 - 1, 0xFFFFFFFF, 0xFFFFFFFF) == 1, "0 + (−1)");
+    assert(_km_i128_add_ck(&acc, 0, 0, 1) == 1, "−1 + 1");
+    assert(load64(&acc) == 0 && load64(&acc + 8) == 0 && load64(&acc + 16) == 0, "= 0, every carry through");
+    store64(&acc, mx);
+    store64(&acc + 8, 0xFFFFFFFF);
+    store64(&acc + 16, 0xFFFFFFFF);
+    assert(_km_i128_add_ck(&acc, 0, 0, 1) == 0, "i128::MAX + 1 overflows");
+    assert(load64(&acc) == mx, "untouched on overflow");
+    store64(&acc, mn);
+    store64(&acc + 8, 0);
+    store64(&acc + 16, 0);
+    assert(_km_i128_add_ck(&acc, 0 - 1, 0xFFFFFFFF, 0xFFFFFFFF) == 0, "i128::MIN − 1 overflows");
+    # h1 + h2 overflowing negatively by one, carried back: −2⁶³ − 1 + carry is −2⁶³ = i128::MIN's high word
+    store64(&acc, 0 - 4611686018427387904);
+    store64(&acc + 8, 0xFFFFFFFF);
+    store64(&acc + 16, 0xFFFFFFFF);
+    assert(_km_i128_add_ck(&acc, 0 - 4611686018427387905, 0, 1) == 1, "−2⁶² − 1 + … = i128::MIN: in range");
+    assert(load64(&acc) == mn && load64(&acc + 8) == 0 && load64(&acc + 16) == 0, "= i128::MIN");
+}
+
+var _a_oot1: i64[4] = { 256, 1, 8, 1 };
+var _a_oot2: i64[4] = { 0 - 1, 1, 8, 1 };
+var _a_oot3: i64[4] = { 6, 0x100000000, 8, 1 };
+var _a_oot4: i64[4] = { 6, 0 - 1, 8, 1 };
+var _a_oot5: i64[4] = { 6, 0, 300, 1 };
+
+# Rust's integer types as words, never wrapped: an atomic number outside 1 ..= 118 (256 is no hydrogen, Rust's u8
+# alias) is Err(InvalidElement); a count outside 1 ..= u32::MAX Err(InvalidInput), checked before the element (Rust's
+# order); a charge outside i32 Err(InvalidInput), first.
+fn _t_cyrius_out_of_type() {
+    test_group("cyrius_out_of_type");
+    assert(ox_code(&_a_oot1, 2, 0) == KM_ERR_INVALID_ELEMENT, "Z = 256");
+    assert(ox_code(&_a_oot2, 2, 0) == KM_ERR_INVALID_ELEMENT, "Z = −1");
+    assert(ox_code(&_a_oot3, 2, 0) == KM_ERR_INVALID_INPUT, "count 2³²");
+    assert(ox_code(&_a_oot4, 2, 0) == KM_ERR_INVALID_INPUT, "count −1");
+    assert(ox_code(&_a_oot5, 2, 0) == KM_ERR_INVALID_INPUT, "count 0 before Z = 300");
+    assert(ox_code(&_a_h2o, 2, 2147483648) == KM_ERR_INVALID_INPUT, "charge 2³¹");
+    assert(ox_code(&_a_h2o, 2, 0 - 2147483649) == KM_ERR_INVALID_INPUT, "charge −2³¹ − 1");
+    assert(ox_code(&_a_unknown, 0, 2147483648) == KM_ERR_INVALID_INPUT, "charge first");
+    assert(ox_code(&_a_o2, 1, 2147483647) == 0 - 1, "O₂ at i32::MAX: Ok (2147483647/2)");
+    emp(&_emp_in, 0, 256, 10.0);
+    emp(&_emp_in, 1, 8, 50.0);
+    assert(emp_code(2) == KM_ERR_INVALID_ELEMENT, "empirical: Z = 256");
+    var nan: f64 = _km_nan();
+    emp(&_emp_in, 0, 6, nan);
+    emp(&_emp_in, 1, 0, 50.0);
+    assert(emp_code(2) == KM_ERR_INVALID_INPUT, "empirical: the NaN percent first, in order");
+    emp(&_emp_in, 0, 0, nan);
+    assert(emp_code(2) == KM_ERR_INVALID_ELEMENT, "empirical: the element before the percent");
+}
+
+# The slices and the caller buffers: negative counts and null pointers, the cap checked after Rust's errors with the
+# buffer untouched, for each function with a Vec result.
+fn _t_cyrius_slices_and_buffers() {
+    test_group("cyrius_slices_and_buffers");
+    assert(lim(&_f_11, 0 - 1, &_f_11, 0 - 1) < 0, "limiting: negative counts");
+    assert(lim(0, 2, &_f_11, 2) < 0, "limiting: null moles");
+    assert(lim(&_f_11, 2, 0, 2) < 0, "limiting: null coefficients");
+    assert(lim(0, 0, 0, 0) < 0, "limiting: empty");
+    var t1, v1 = theoretical_yield_moles(0, 2, &_f_21, 2, 2.0);
+    assert(is_err_result(t1) == 1 && v1 == KM_ERR_INVALID_INPUT, "yield: null moles");
+    var out[96];
+    store64(&out, 55);
+    var t2, v2 = assign_oxidation_states(&_a_kmno4, 3, 0, &out, 2);
+    assert(is_err_result(t2) == 1 && v2 == KM_ERR_INVALID_INPUT && load64(&out) == 55,
+        "oxidation: cap 2 < 3, untouched");
+    var t3, v3 = assign_oxidation_states(&_a_cn, 2, 0 - 1, &out, 0);
+    assert(is_err_result(t3) == 1 && v3 == KM_ERR_COMPUTATION_ERROR, "oxidation: Rust's error before the cap");
+    var t4, v4 = assign_oxidation_states(0, 2, 0, &out, 8);
+    assert(is_err_result(t4) == 1 && v4 == KM_ERR_INVALID_INPUT, "oxidation: null atoms");
+    var t5, v5 = assign_oxidation_states(&_a_h2o, 0 - 1, 0, &out, 8);
+    assert(is_err_result(t5) == 1 && v5 == KM_ERR_INVALID_INPUT, "oxidation: negative count");
+    var t6, v6 = assign_oxidation_states(&_a_h2o, 2, 0, 0, 8);
+    assert(is_err_result(t6) == 1 && v6 == KM_ERR_INVALID_INPUT, "oxidation: null out");
+    var water = KmMolecule_water();
+    var t7, v7 = percent_composition(water, &out, 1);
+    assert(is_err_result(t7) == 1 && v7 == KM_ERR_INVALID_INPUT && load64(&out) == 55,
+        "composition: cap 1 < 2, untouched");
+    var t8, v8 = percent_composition(water, &out, 2);
+    assert(is_ok(t8) == 1 && v8 == 2 && load64(&out) == 1 && load64(&out + 16) == 8, "composition: cap 2 fits");
+    var empty = KmMolecule_new(0, 0);
+    var t9, v9 = percent_composition(empty, &out, 2);
+    assert(is_err_result(t9) == 1 && v9 == KM_ERR_COMPUTATION_ERROR, "composition: no atoms, weight 0");
+    store64(&out, 55);
+    emp(&_emp_in, 0, 1, 11.19);
+    emp(&_emp_in, 1, 8, 88.81);
+    var t10, v10 = empirical_formula(&_emp_in, 2, &out, 1);
+    assert(is_err_result(t10) == 1 && v10 == KM_ERR_INVALID_INPUT && load64(&out) == 55,
+        "empirical: cap 1 < 2, untouched");
+    var t11, v11 = empirical_formula(0, 2, &out, 2);
+    assert(is_err_result(t11) == 1 && v11 == KM_ERR_INVALID_INPUT, "empirical: null elements");
+    var t12, v12 = empirical_formula(&_emp_in, 0 - 2, &out, 2);
+    assert(is_err_result(t12) == 1 && v12 == KM_ERR_INVALID_INPUT, "empirical: negative count");
+    # the heap table past 64 elements: 70 × carbon at 1 %, each count 1
+    var big[1200];
+    var k = 0;
+    while (k < 70) {
+        emp(&big, k, 6, 1.0);
+        k = k + 1;
+    }
+    var bo[1200];
+    var t13, v13 = empirical_formula(&big, 70, &bo, 70);
+    assert(is_ok(t13) == 1 && v13 == 70 && load64(&bo + 8) == 1 && load64(&bo + 16 * 69 + 8) == 1,
+        "empirical: 70 elements");
+}
+
+# EMPIRICAL_TOLERANCE (0.1) to the ulp on _km_empirical_close: 0.1 itself is close (≤), the next double up is not; and
+# the corpus's straddle at ratio 1.1, where the deviations 450359962737049·2⁻⁵² and …050·2⁻⁵² bracket 0.1.
+fn _t_cyrius_empirical_tolerance() {
+    test_group("cyrius_empirical_tolerance");
+    var tol: f64 = 0x3FB999999999999A;      # 0.1
+    var up: f64 = 0x3FB999999999999B;       # 0.1 + 1 ulp
+    var dn: f64 = 0x3FB9999999999999;       # 0.1 − 1 ulp
+    assert(_km_empirical_close(tol) == 1, "0.1: within");
+    assert(_km_empirical_close(up) == 0, "0.1 + 1 ulp: not within");
+    assert(_km_empirical_close(dn) == 1, "0.1 − 1 ulp: within");
+    var ntol: f64 = -tol;
+    var nup: f64 = -up;
+    assert(_km_empirical_close(ntol) == 1 && _km_empirical_close(nup) == 0, "both signs");
+    var a: f64 = 0x3FF1999999999999;        # 1.0999999999999999: deviation 450359962737049·2⁻⁵² < 0.1
+    var b: f64 = 0x3FF199999999999A;        # 1.1: deviation …050·2⁻⁵² > 0.1
+    assert(_km_empirical_close(a) == 1 && _km_empirical_close(b) == 0, "the straddle at 1.1");
+    var c: f64 = 2.5;
+    assert(_km_empirical_close(c) == 0, "2.5 rounds away to 3: 0.5 off");
+    var nan: f64 = _km_nan();
+    assert(_km_empirical_close(nan) == 0, "NaN: not within");
+    # the multiplier search picks the smallest k: O/C = 1.25 → ×4
+    emp(&_emp_in, 0, 6, 12.011);
+    emp(&_emp_in, 1, 8, 19.99875);
+    emp_ok(2);
+    assert(emp_is(0, 6, 4) == 1 && emp_is(1, 8, 5) == 1, "O/C 1.25: C₄O₅");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main() {
+    _t_limiting_reagent_basic();
+    _t_limiting_reagent_second();
+    _t_limiting_reagent_empty_is_error();
+    _t_limiting_reagent_mismatched_is_error();
+    _t_limiting_reagent_nan_inf_are_errors();
+    _t_limiting_reagent_zero_moles_is_limiting();
+    _t_theoretical_yield_basic();
+    _t_theoretical_yield_nan_inf_are_errors();
+    _t_percent_yield_nan_inf_are_errors();
+    _t_percent_yield_basic();
+    _t_percent_yield_over_100();
+    _t_percent_yield_zero_theoretical_is_error();
+    _t_percent_composition_water();
+    _t_empirical_formula_water();
+    _t_empirical_formula_glucose();
+    _t_empirical_formula_fe2o3_ratio_one_and_a_half();
+    _t_empirical_formula_fe3o4_ratio_one_and_a_third();
+    _t_empirical_formula_close_ratio_uses_multiplier_one();
+    _t_empirical_formula_no_integer_ratio_is_error();
+    _t_empirical_formula_nan_inf_are_errors();
+    _t_empirical_formula_empty_is_error();
+    _t_balance_h2_o2_water();
+    _t_balance_ch4_combustion();
+    _t_balance_ch4_combustion_negated_matrix();
+    _t_balance_cuso4_fe_independent_of_row_order();
+    _t_balance_kmno4_hcl();
+    _t_balance_more_elements_than_species();
+    _t_balance_mixed_sign_is_error();
+    _t_balance_two_independent_reactions_is_error();
+    _t_balance_only_trivial_solution_is_error();
+    _t_balance_zero_coefficient_is_error();
+    _t_balance_non_integer_entry_is_error();
+    _t_balance_near_integer_entry_accepted();
+    _t_balance_coefficient_overflowing_u32_is_error();
+    _t_balance_intermediate_overflow_is_error();
+    _t_balance_large_entries_do_not_panic();
+    _t_balance_empty_is_error();
+    _t_balance_single_species_is_error();
+    _t_oxidation_state_water();
+    _t_oxidation_state_nacl();
+    _t_oxidation_state_sulfate_ion();
+    _t_oxidation_state_permanganate();
+    _t_oxidation_state_kmno4();
+    _t_oxidation_state_dichromate();
+    _t_oxidation_state_ammonium();
+    _t_oxidation_state_co2();
+    _t_oxidation_state_hydrogen_peroxide();
+    _t_oxidation_state_sodium_peroxide();
+    _t_oxidation_state_superoxide_is_error();
+    _t_oxidation_state_oxygen_difluoride();
+    _t_oxidation_state_sodium_hydride();
+    _t_oxidation_state_calcium_hydride();
+    _t_oxidation_state_lithium_aluminium_hydride();
+    _t_oxidation_state_single_element();
+    _t_oxidation_state_propane_non_integer_is_error();
+    _t_oxidation_state_magnetite_non_integer_is_error();
+    _t_oxidation_state_repeated_unknown_element_is_merged();
+    _t_oxidation_state_unbalanced_assigned_is_error();
+    _t_oxidation_state_hydroxide_and_hydroperoxide();
+    _t_oxidation_state_two_unknowns_is_error();
+    _t_oxidation_state_huge_count_does_not_panic();
+    _t_oxidation_state_zero_count_or_unknown_element_is_error();
+    _t_oxidation_state_empty_is_error();
+    _t_cyrius_adr7_rational();
+    _t_cyrius_integer_matrix();
+    _t_cyrius_checked_arithmetic();
+    _t_cyrius_out_of_type();
+    _t_cyrius_slices_and_buffers();
+    _t_cyrius_empirical_tolerance();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

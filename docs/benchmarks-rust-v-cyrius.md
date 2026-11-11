@@ -329,3 +329,29 @@ Sulfur's fourth isotope costs in two ways: each step convolves 4 isotopes instea
 pattern and puts each ³⁶S record further from its sorted place, so the insertion sort moves it further (S₈ 2.2×, cystine
 +10 %). Every scratch stays within the 192-record stack tables, so nothing is allocated; the heap path starts past them
 (the corpus's S₃₀₀₀ reaches 1,276 records, 951 with Rust's table).
+
+## M4f stoichiometry (2026-11-10)
+
+ADR 0002 #7's API: `balance_equation` on an integer matrix (Rust's bench matrix as integers), `assign_oxidation_states`
+with rational states. Rust's two stoichiometry benches keep their names and bodies; the others are Cyrius-only. Before →
+after the proven fast paths (an elimination step with four operands below 2³¹ formed directly; each verification row
+summed in i64 first; `reduce_row`'s fold stopping at a gcd of 1; the oxidation sums' checks inline), the same host, back
+to back (a trimmed copy of `tests/kimiya.bcyr` with only these benches):
+
+| Bench | Body | Rust | Before | After |
+|---|---|---|---|---|
+| `stoichiometry/balance_ch4_combustion` | `balance_equation` of CH₄ + 2O₂ → CO₂ + 2H₂O (3 × 4): the entry check, 3 pivots of fraction-free elimination with gcd reductions, the null vector from the lcm of the pivots, the sign and u32 checks, the verification | 233.90 ns | 1.20 µs | 770 ns |
+| `stoichiometry/oxidation_states_kmno4` | `assign_oxidation_states([(19, 1), (25, 1), (8, 4)], 0)`: three lookups, the rules, Mn solved as +7/1, three 24-byte records | 22.38 ns | 156 ns | 122 ns |
+| `stoichiometry/balance_kmno4_hcl` | 2KMnO₄ + 16HCl → … (5 × 6) | — | 3.84 µs | 2.16 µs |
+| `stoichiometry/oxidation_states_fe3o4` | Fe₃O₄: Fe +8/3, the gcd-reduced rational (Rust's Err path) | — | 132 ns | 110 ns |
+| `stoichiometry/limiting_reagent` | (3, 2) mol over the coefficients (2, 1): two guards and a division per reactant | — | 31 ns | 31 ns |
+| `stoichiometry/theoretical_yield_moles` | the same, × 2 | — | 46 ns | 46 ns |
+| `stoichiometry/percent_yield` | 8 of 10 | — | 14 ns | 14 ns |
+| `stoichiometry/percent_composition_glucose` | C₆H₁₂O₆ as a `KmMolecule`: `molecular_weight`, three records | — | 70 ns | 71 ns |
+| `stoichiometry/empirical_formula_glucose` | 40.00 / 6.71 / 53.29 %: the moles, the minimum, the ratios, the multiplier search (k = 1), three records | — | 217 ns | 217 ns |
+
+All bodies are Rust's results (golden `stoichiometry`: 41,435 rows; the float functions 0 ulp). A phase profile of
+`balance_ch4_combustion` (early returns, before the last tweaks): the entry check and copy 74 ns, the elimination about
+385 ns, the null vector 165 ns, the sign / u32 checks and the verification 150 ns — about a nanosecond per operation and
+4 ns per call in this compiler's code, as M4e-3 measured, against Rust's inlined loop. The local work tables are not the
+cost (a 16-word table measured the same as the 512-word one).

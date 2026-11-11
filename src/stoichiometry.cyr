@@ -1,0 +1,868 @@
+# stoichiometry.cyr — stoichiometry: equation balancing, oxidation states, the limiting reagent, yields, percent
+# composition and empirical formulas (port of rust-old/src/stoichiometry.rs).
+#
+# Amounts in mol, masses in g, percentages in %. Element data (atomic masses, categories) are src/element_data.cyr's,
+# read through src/element.cyr's handles; molecules are src/molecule.cyr's KmMolecule. Fallible functions return a
+# value-form Result whose Err payload is a KM_ERR_* code, with Rust's checks, codes and order, and reject NaN and ±∞
+# inputs where Rust does. The float functions keep Rust's operation order, so they are bit-identical (class B:
+# + − × ÷ only); the integer ones are exact (class A).
+#
+# - ADR 0002 #7, balancing: balance_equation takes an integer matrix, flat row-major (entry (i, j) at word i·n + j)
+#   with its dimensions m (element rows) and n (species columns), where Rust takes `&[Vec<f64>]`. Rust's range for an
+#   entry, |v| ≤ 2⁵³ (MAX_COMPOSITION_ENTRY), is kept: a larger one is Err(KM_ERR_INVALID_INPUT), as in Rust (the
+#   port's settled point: every integer Rust accepts is accepted, every one it refuses refused). Rust's
+#   integer-tolerance test (INTEGER_TOLERANCE, 10⁻⁹) and its ragged-row check have no counterpart: an integer matrix
+#   has neither. The elimination is Rust's fraction-free Gauss–Jordan on i64 with checked arithmetic (_km_i64_*_ck,
+#   each Rust overflow Err(KM_ERR_COMPUTATION_ERROR) at the same step), the verification Rust's i128 sums
+#   (_km_i128_*: a signed 128-bit accumulator in three words, Rust's checked_add semantics).
+# - ADR 0002 #7, oxidation states: assign_oxidation_states returns each state as an exact rational, a numerator over a
+#   positive denominator, reduced: Rust's Ok(n) is n/1, and where Rust returns Err "non-integer average oxidation state"
+#   the port returns the average itself (C₃H₈'s C −8/3, Fe₃O₄'s Fe +8/3, KO₂'s O −1/2: the peroxide branch's
+#   −2 < os < 0 test is made on the rational). Rust's i32 range check applies to the value: a rational outside
+#   i32::MIN ..= i32::MAX is Err(KM_ERR_COMPUTATION_ERROR), Rust's code for that input (the port's settled point; such
+#   averages need counts near 2³¹). Every other Err, its code and its order are Rust's.
+# - Rust's integer arguments are words, never wrapped (port plan §6.4): an atomic number outside 1 ..= 118 is
+#   Err(KM_ERR_INVALID_ELEMENT) (never aliased mod 256, M1's rule); a u32 count outside 1 ..= u32::MAX is
+#   Err(KM_ERR_INVALID_INPUT) at Rust's `count == 0` check; an i32 charge outside its range Err(KM_ERR_INVALID_INPUT),
+#   checked first (Rust's type would refuse it at compile time).
+# - Slices are a pointer and a count of records (Rust's `&[(u8, u32)]`: 16 bytes, Z then the count, as
+#   KmMolecule_new's pairs; `&[(u8, f64)]`: Z then the f64 bits); a negative count, or a null pointer with values, is
+#   Err(KM_ERR_INVALID_INPUT). Rust's Vec results go to the caller's buffer `out` of `cap` elements (a negative cap or a
+#   null out holds none): Ok(count), or Err(KM_ERR_INVALID_INPUT) when the result does not fit, checked after Rust's
+#   own errors, with the buffer untouched (port plan §6.4, M4e).
+# - Rust's private MAX_COMPOSITION_ENTRY (2⁵³) and EMPIRICAL_TOLERANCE (0.1) are typed inline (port plan §6.4); the
+#   tolerance is pinned by golden rows on both sides of it and, to the ulp, by tests/stoichiometry.tcyr on
+#   _km_empirical_close. `round` is src/mathx.cyr's _km_round_half_away (Rust's halves away from zero), `f64::min`
+#   _km_min.
+# - Work tables: balance_equation's matrix copy and null vector, and empirical_formula's mole ratios, use function-local
+#   tables (512, 64 and 64 words) and move to the bump allocator (which never frees) only past them; an allocation
+#   failure is Err(KM_ERR_COMPUTATION_ERROR). assign_oxidation_states needs none: each state is a function of the atomic
+#   number once the solved element is known, so the result is written in one pass at the end.
+
+include "lib/alloc.cyr"
+
+# ── checked integer arithmetic ──────────────────────────────────────────────────────
+# Rust's i64 checked_add / _sub / _mul / _neg: (1, the value) when the exact result is an i64, (0, 0) when it
+# overflows. Cyrius's + − × wrap (two's complement), so each tests the wrapped result.
+
+const _KM_I64_MAX = 0x7FFFFFFFFFFFFFFF;
+const _KM_U32_MAX = 0xFFFFFFFF;
+const _KM_I32_MAX = 2147483647;
+const _KM_I32_MIN = 0 - 2147483648;
+
+# a + b, checked: overflow iff both operands' signs differ from the wrapped sum's. Mirrors `i64::checked_add`.
+#must_use
+fn _km_i64_add_ck(a, b): (i64, i64) {
+    var r = a + b;
+    if (((a ^ r) & (b ^ r)) < 0) { return (0, 0); }
+    return (1, r);
+}
+
+# a − b, checked: overflow iff the operands' signs differ and the wrapped difference's differs from a's. Mirrors
+# `i64::checked_sub`.
+#must_use
+fn _km_i64_sub_ck(a, b): (i64, i64) {
+    var r = a - b;
+    if (((a ^ b) & (a ^ r)) < 0) { return (0, 0); }
+    return (1, r);
+}
+
+# a·b, checked: operands below 2³¹ in magnitude can't overflow; otherwise i64::MIN·(−1) is refused and the wrapped
+# product divided back (exact for every other pair, b ≠ 0, and never the trapping MIN / −1). Mirrors
+# `i64::checked_mul`.
+#must_use
+fn _km_i64_mul_ck(a, b): (i64, i64) {
+    if (a < 2147483648 && a > 0 - 2147483648 && b < 2147483648 && b > 0 - 2147483648) { return (1, a * b); }
+    if (a == 0 || b == 0) { return (1, 0); }
+    var mn = 0 - _KM_I64_MAX - 1;
+    if ((a == mn && b == 0 - 1) || (b == mn && a == 0 - 1)) { return (0, 0); }
+    var r = a * b;
+    if (r / b != a) { return (0, 0); }
+    return (1, r);
+}
+
+# −a, checked: only i64::MIN overflows. Mirrors `i64::checked_neg`.
+#must_use
+fn _km_i64_neg_ck(a): (i64, i64) {
+    if (a == 0 - _KM_I64_MAX - 1) { return (0, 0); }
+    return (1, 0 - a);
+}
+
+# |v| as an unsigned 64-bit word: i64::MIN gives 2⁶³, whose pattern is i64::MIN itself. Mirrors `i64::unsigned_abs`.
+#must_use
+fn _km_unsigned_abs(v): i64 {
+    if (v < 0) { return 0 - v; }
+    return v;
+}
+
+# a mod b for unsigned words a, b ≤ 2⁶³ (2⁶³ is the pattern i64::MIN, the largest unsigned_abs), b ≠ 0: the signed
+# remainder of −2⁶³ by b is −(2⁶³ mod b).
+#must_use
+fn _km_umod(a, b): i64 {
+    if (b < 0) {
+        if (a < 0) { return 0; }
+        return a;
+    }
+    if (a < 0) { return 0 - (a % b); }
+    return a % b;
+}
+
+# The greatest common divisor of unsigned words a, b ≤ 2⁶³ by Euclid's algorithm, gcd(0, 0) = 0 (2⁶³ comes back as
+# the pattern i64::MIN). Mirrors Rust's private `gcd_u64`.
+#must_use
+fn _km_gcd_u64(a, b): i64 {
+    var x = a;
+    var y = b;
+    while (y != 0) {
+        var t = _km_umod(x, y);
+        x = y;
+        y = t;
+    }
+    return x;
+}
+
+# Divides the len words at p by the gcd of their magnitudes (no-op for an all-zero row or a gcd of 1): 0, or 1 when the
+# gcd is 2⁶³ (Rust's `i64::try_from(g)` fails: its overflow Err). Mirrors Rust's private `reduce_row`. The fold stops at
+# a gcd of 1 (gcd(1, x) = 1, so the result is the same), and Euclid runs inline on signed words while both are below
+# 2⁶³ (i64::MIN's magnitude, 2⁶³, goes through _km_gcd_u64).
+#must_use
+fn _km_reduce_row(p, len): i64 {
+    var g = 0;
+    var k = 0;
+    while (k < len && g != 1) {
+        var v = load64(p + 8 * k);
+        if (v < 0) { v = 0 - v; }
+        if (v < 0 || g < 0) {
+            g = _km_gcd_u64(g, v);
+        } elif (g == 0 || v == 1) {
+            g = v;                          # gcd(0, v) = v; gcd(g, 1) = 1
+        } else {
+            var y = v;
+            while (y != 0) {
+                var t = g % y;
+                g = y;
+                y = t;
+            }
+        }
+        k = k + 1;
+    }
+    if (g < 0) { return 1; }
+    if (g > 1) {
+        k = 0;
+        while (k < len) {
+            store64(p + 8 * k, load64(p + 8 * k) / g);
+            k = k + 1;
+        }
+    }
+    return 0;
+}
+
+# ── signed 128-bit sums (Rust's i128 in balance_equation's verification) ───────────────
+# A value h·2⁶⁴ + m·2³² + l with h a signed word and 0 ≤ m, l < 2³², which is exactly i128's range when h is an i64.
+# src/mathx.cyr's _km_bn_* integers are unsigned, so a signed sum gets this three-word form; the caller keeps the
+# words in a 24-byte accumulator.
+
+# v·k for a word v and 0 ≤ k < 2³² (Rust's `(v as i128) * i128::from(k)`): exact, below 2⁹⁵ in magnitude, so it never
+# overflows (nor does Rust's checked_mul for these operands). (h, m, l).
+#must_use
+fn _km_i128_mul_u32(v, k): (i64, i64, i64) {
+    var a = _km_unsigned_abs(v);
+    var mask = _KM_U32_MAX;
+    var p0 = (a & mask) * k;                # < 2⁶⁴: a wrapped product with the right unsigned bits
+    var l = p0 & mask;
+    var t = (a >> 32) * k + (p0 >> 32);     # ≤ (2³¹)(2³² − 1) + 2³² − 1 < 2⁶⁴, again as unsigned bits
+    var m = t & mask;
+    var h = t >> 32;
+    if (v >= 0) { return (h, m, l); }
+    # −(h, m, l): the complement plus one, the carry through the limbs
+    var l2 = ((~l) & mask) + 1;
+    var c = l2 >> 32;
+    l2 = l2 & mask;
+    var m2 = ((~m) & mask) + c;
+    c = m2 >> 32;
+    m2 = m2 & mask;
+    var h2 = (~h) + c;
+    return (h2, m2, l2);
+}
+
+# acc ← acc + (h2, m2, l2), checked, for the three-word accumulator at acc (h, m, l: 24 bytes): 1, or 0 with acc
+# untouched when the exact sum leaves i128's range (h outside i64: Rust's checked_add overflow). h + h2 + carry is
+# formed so that a sum of exactly −2¹²⁷ after a negative overflow of h + h2 by one is kept. Mirrors
+# `i128::checked_add`.
+#must_use
+fn _km_i128_add_ck(acc, h2, m2, l2): i64 {
+    var mask = _KM_U32_MAX;
+    var h1 = load64(acc);
+    var l = load64(acc + 16) + l2;
+    var c = l >> 32;
+    l = l & mask;
+    var m = load64(acc + 8) + m2 + c;
+    c = m >> 32;
+    m = m & mask;
+    var s = h1 + h2;
+    var h = 0;
+    if (((h1 ^ s) & (h2 ^ s)) >= 0) {
+        if (c == 1 && s == _KM_I64_MAX) { return 0; }
+        h = s + c;
+    } elif (h1 < 0 && s == _KM_I64_MAX && c == 1) {
+        h = s + 1;                          # h + h2 overflowed: only a negative overflow by exactly one, carried back
+    } else {
+        return 0;
+    }
+    store64(acc, h);
+    store64(acc + 8, m);
+    store64(acc + 16, l);
+    return 1;
+}
+
+# ── equation balancing ──────────────────────────────────────────────────────────────
+
+# The coefficient bound of Rust's private MAX_COMPOSITION_ENTRY: 2⁵³.
+const _KM_MAX_COMPOSITION_ENTRY = 9007199254740992;
+
+# The largest m·n balance_equation takes: 2⁵⁶ words is beyond any address space, so a larger product names no matrix.
+const _KM_BAL_MAX_CELLS = 0x0100000000000000;
+
+# Balances a chemical equation from its composition matrix: m element rows by n species columns, entry (i, j) = the
+# count of element i in species j, at word i·n + j of `matrix` (flat row-major; reactant columns positive, product
+# columns negative, by convention). The smallest positive integer coefficients x with M·x = 0, one per species, go to
+# the caller's buffer `out` of `cap` words: Ok(n). The algorithm is Rust's: exact fraction-free Gauss–Jordan
+# elimination over the integers on the whole matrix (i64, checked, each touched row divided by the gcd of its
+# entries), so the result does not depend on row order; the null space must be one-dimensional, its basis vector
+# (built from the reduced row echelon form with the lcm of the pivots) is reduced, sign-normalised, converted to u32
+# and verified on every original row in i128.
+# Err(KM_ERR_INVALID_INPUT) if m < 1 (an empty matrix), n < 2 (fewer than two species), (matrix, m·n) is no buffer, or
+# an entry exceeds 2⁵³ in magnitude (ADR 0002 #7: Rust's bound, kept); Err(KM_ERR_COMPUTATION_ERROR) if the equation
+# cannot be balanced (only the trivial solution), is ambiguous (a null space of dimension above 1), needs a zero
+# coefficient or coefficients of mixed sign, a coefficient exceeds u32::MAX, the integer arithmetic overflows i64 (or
+# i128 in the verification), or a work table can't be allocated; Err(KM_ERR_INVALID_INPUT) if the n coefficients do not
+# fit in cap (`out` untouched). Mirrors `stoichiometry::balance_equation`, with ADR 0002 #7's integer matrix.
+#must_use
+fn balance_equation(matrix, m, n, out, cap): Result {
+    if (m < 1) { return Err(KM_ERR_INVALID_INPUT); }                   # Rust: empty composition matrix
+    if (n < 2) { return Err(KM_ERR_INVALID_INPUT); }                   # Rust: need at least 2 species
+    if (matrix == 0 || m > _KM_BAL_MAX_CELLS / n) { return Err(KM_ERR_INVALID_INPUT); }
+    var cells = m * n;
+    var k = 0;
+    while (k < cells) {
+        var v = load64(matrix + 8 * k);
+        if (v > _KM_MAX_COMPOSITION_ENTRY || v < 0 - _KM_MAX_COMPOSITION_ENTRY) { return Err(KM_ERR_INVALID_INPUT); }
+        k = k + 1;
+    }
+    # The exact integer copy, row-major, and the null vector: local tables, the heap past them.
+    var ast: i64[512];
+    var xst: i64[64];
+    var a = &ast;
+    var x = &xst;
+    if (cells > 512) {
+        a = alloc(8 * cells);
+        if (a == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    }
+    if (n > 64) {
+        x = alloc(8 * n);
+        if (x == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    }
+    k = 0;
+    while (k < cells) {
+        store64(a + 8 * k, load64(matrix + 8 * k));
+        k = k + 1;
+    }
+
+    # Fraction-free Gauss–Jordan elimination to reduced row echelon form.
+    var rank = 0;
+    var free_col = 0 - 1;
+    var col = 0;
+    while (col < n) {
+        var p = rank;
+        while (p < m && load64(a + 8 * (p * n + col)) == 0) { p = p + 1; }
+        if (p >= m) {
+            # Rust: "equation balancing is ambiguous: more than one independent reaction"
+            if (free_col >= 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            free_col = col;
+        } else {
+            var pr = a + 8 * (rank * n);
+            if (p != rank) {
+                var ps = a + 8 * (p * n);
+                var j = 0;
+                while (j < n) {
+                    var w = load64(ps + 8 * j);
+                    store64(ps + 8 * j, load64(pr + 8 * j));
+                    store64(pr + 8 * j, w);
+                    j = j + 1;
+                }
+            }
+            if (_km_reduce_row(pr, n) != 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            if (load64(pr + 8 * col) < 0) {
+                var jn = 0;
+                while (jn < n) {
+                    var vn = load64(pr + 8 * jn);
+                    if (vn == 0 - _KM_I64_MAX - 1) { return Err(KM_ERR_COMPUTATION_ERROR); }   # checked_neg
+                    store64(pr + 8 * jn, 0 - vn);
+                    jn = jn + 1;
+                }
+            }
+            var pivot = load64(pr + 8 * col);
+            var r = 0;
+            while (r < m) {
+                var rr = a + 8 * (r * n);
+                var factor = load64(rr + 8 * col);
+                if (r != rank && factor != 0) {
+                    # row_r ← pivot·row_r − factor·row_pivot (zeroes column col). Where all four operands are below
+                    # 2³¹ in magnitude, both products are below 2⁶² and their difference below 2⁶³: no check can fail,
+                    # so it is formed directly; otherwise Rust's checked products and difference.
+                    var small = 0;
+                    var lim = 2147483648;
+                    if (pivot < lim && pivot > 0 - lim && factor < lim && factor > 0 - lim) { small = 1; }
+                    var je = 0;
+                    while (je < n) {
+                        var aj = load64(rr + 8 * je);
+                        var pj = load64(pr + 8 * je);
+                        if (small == 1 && aj < lim && aj > 0 - lim && pj < lim && pj > 0 - lim) {
+                            store64(rr + 8 * je, pivot * aj - factor * pj);
+                        } else {
+                            var ok1, lhs = _km_i64_mul_ck(pivot, aj);
+                            if (ok1 != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                            var ok2, rhs = _km_i64_mul_ck(factor, pj);
+                            if (ok2 != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                            var ok3, d = _km_i64_sub_ck(lhs, rhs);
+                            if (ok3 != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                            store64(rr + 8 * je, d);
+                        }
+                        je = je + 1;
+                    }
+                    if (_km_reduce_row(rr, n) != 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                }
+                r = r + 1;
+            }
+            rank = rank + 1;
+        }
+        col = col + 1;
+    }
+    # Rust: "equation cannot be balanced: only the trivial solution exists"
+    if (free_col < 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var f = free_col;
+
+    # The null vector from the RREF: each pivot row k reads a[k][c_k]·x[c_k] + a[k][f]·x[f] = 0, so x[f] is the lcm of
+    # the (positive) pivots and every x[c_k] an integer.
+    var lcm = 1;
+    k = 0;
+    while (k < rank) {
+        var row = a + 8 * (k * n);
+        var c = 0;
+        while (c < n && load64(row + 8 * c) == 0) { c = c + 1; }
+        if (c < n) {
+            var piv = load64(row + 8 * c);
+            var g = _km_gcd_u64(_km_unsigned_abs(lcm), _km_unsigned_abs(piv));
+            if (g < 0) { return Err(KM_ERR_COMPUTATION_ERROR); }        # i64::try_from(2⁶³) fails
+            var okl, nl = _km_i64_mul_ck(lcm / g, piv);
+            if (okl != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            lcm = nl;
+        }
+        k = k + 1;
+    }
+    k = 0;
+    while (k < n) {
+        store64(x + 8 * k, 0);
+        k = k + 1;
+    }
+    store64(x + 8 * f, lcm);
+    k = 0;
+    while (k < rank) {
+        var row2 = a + 8 * (k * n);
+        var c2 = 0;
+        while (c2 < n && load64(row2 + 8 * c2) == 0) { c2 = c2 + 1; }
+        if (c2 < n) {
+            var piv2 = load64(row2 + 8 * c2);
+            # Rust's `lcm / piv` is plain i64 division; its one trapping case (i64::MIN / −1) can't arise with positive
+            # pivots, and is refused here rather than trapped.
+            if (piv2 == 0 - 1 && lcm == 0 - _KM_I64_MAX - 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            var okx, px = _km_i64_mul_ck(load64(row2 + 8 * f), lcm / piv2);
+            if (okx != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            var okg, nx = _km_i64_neg_ck(px);
+            if (okg != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            store64(x + 8 * c2, nx);
+        }
+        k = k + 1;
+    }
+    if (_km_reduce_row(x, n) != 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+
+    # Sign convention: all coefficients must share one sign.
+    var positive = 0;
+    k = 0;
+    while (k < n) {
+        var xk = load64(x + 8 * k);
+        if (xk == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }        # Rust: "balancing produced zero coefficient"
+        k = k + 1;
+    }
+    k = 0;
+    while (k < n) {
+        if (load64(x + 8 * k) > 0) { positive = positive + 1; }
+        k = k + 1;
+    }
+    if (positive == 0) {
+        k = 0;
+        while (k < n) {
+            var okz, nz = _km_i64_neg_ck(load64(x + 8 * k));
+            if (okz != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            store64(x + 8 * k, nz);
+            k = k + 1;
+        }
+    } elif (positive != n) {
+        return Err(KM_ERR_COMPUTATION_ERROR);                           # Rust: "coefficients of mixed sign"
+    }
+    k = 0;
+    while (k < n) {
+        var xu = load64(x + 8 * k);
+        if (xu < 0 || xu > _KM_U32_MAX) { return Err(KM_ERR_COMPUTATION_ERROR); }   # Rust: exceeds u32
+        k = k + 1;
+    }
+
+    # Verify M·x = 0 exactly on every original row, in i128 as Rust does.
+    # Each row first in i64: a term with |entry| < 2³¹ (k < 2³²) is below 2⁶³, and while no partial sum overflows the
+    # i64 sum is the exact one, which Rust's i128 sum equals; a larger entry or an overflowing sum sends the row to the
+    # i128 accumulator, which gives Rust's result (and its checked_add Err) in every case.
+    var acc[24];
+    var i = 0;
+    while (i < m) {
+        var src = matrix + 8 * (i * n);
+        var fast = 1;
+        var s64 = 0;
+        var jf = 0;
+        while (jf < n && fast == 1) {
+            var e = load64(src + 8 * jf);
+            if (e >= 2147483648 || e <= 0 - 2147483648) {
+                fast = 0;
+            } else {
+                var term = e * load64(x + 8 * jf);
+                var ns = s64 + term;
+                if (((s64 ^ ns) & (term ^ ns)) < 0) { fast = 0; }
+                s64 = ns;
+            }
+            jf = jf + 1;
+        }
+        if (fast == 1) {
+            if (s64 != 0) { return Err(KM_ERR_COMPUTATION_ERROR); }   # Rust: "element not conserved"
+        } else {
+            store64(&acc, 0);
+            store64(&acc + 8, 0);
+            store64(&acc + 16, 0);
+            var jv = 0;
+            while (jv < n) {
+                var th, tm, tl = _km_i128_mul_u32(load64(src + 8 * jv), load64(x + 8 * jv));
+                if (_km_i128_add_ck(&acc, th, tm, tl) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                jv = jv + 1;
+            }
+            # Rust: "balancing verification failed: element not conserved"
+            if (load64(&acc) != 0 || load64(&acc + 8) != 0 || load64(&acc + 16) != 0) {
+                return Err(KM_ERR_COMPUTATION_ERROR);
+            }
+        }
+        i = i + 1;
+    }
+    if (out == 0 || cap < n) { return Err(KM_ERR_INVALID_INPUT); }
+    k = 0;
+    while (k < n) {
+        store64(out + 8 * k, load64(x + 8 * k));
+        k = k + 1;
+    }
+    return Ok(n);
+}
+
+# ── oxidation states ────────────────────────────────────────────────────────────────
+
+# 1 if a KmElementCategory value is a metal, for the metal-hydride rule: alkali, alkaline-earth, transition and
+# post-transition metals, lanthanides, actinides. Mirrors Rust's private `is_metal`.
+#must_use
+fn _km_is_metal(category): i64 {
+    match category {
+        KM_ELEMENT_CATEGORY_ALKALI_METAL => { return 1; }
+        KM_ELEMENT_CATEGORY_ALKALINE_EARTH => { return 1; }
+        KM_ELEMENT_CATEGORY_TRANSITION_METAL => { return 1; }
+        KM_ELEMENT_CATEGORY_POST_TRANSITION_METAL => { return 1; }
+        KM_ELEMENT_CATEGORY_LANTHANIDE => { return 1; }
+        KM_ELEMENT_CATEGORY_ACTINIDE => { return 1; }
+        _ => { return 0; }
+    }
+    return 0;
+}
+
+# The rule-assigned oxidation state of element z (category its KmElementCategory value): (1, state), or (0, 0) when it
+# must be solved for. F −1; H −1 in a metal hydride, else +1; O −2 unless fluorine is present; alkali metals +1,
+# alkaline-earth metals +2. Mirrors Rust's private `rule_oxidation_state`.
+#must_use
+fn _km_rule_oxidation_state(z, category, has_fluorine, metal_hydride): (i64, i64) {
+    if (z == 9) { return (1, 0 - 1); }
+    if (z == 1) {
+        if (metal_hydride == 1) { return (1, 0 - 1); }
+        return (1, 1);
+    }
+    if (z == 8) {
+        if (has_fluorine == 1) { return (0, 0); }
+        return (1, 0 - 2);
+    }
+    if (category == KM_ELEMENT_CATEGORY_ALKALI_METAL) { return (1, 1); }
+    if (category == KM_ELEMENT_CATEGORY_ALKALINE_EARTH) { return (1, 2); }
+    return (0, 0);
+}
+
+# The average oxidation state num/den (den > 0 at every call: an atom count) as (0, p, q), p/q reduced with q > 0, or
+# (code, 0, 0). Rust's checks in order: den = 0 → KM_ERR_INVALID_INPUT; checked_rem's overflow (i64::MIN by −1) →
+# KM_ERR_COMPUTATION_ERROR; then, where Rust returns Err "non-integer average oxidation state", ADR 0002 #7's exact
+# rational; a state whose value lies outside i32 → KM_ERR_COMPUTATION_ERROR (Rust's "out of range", applied to the
+# rational's value). Mirrors Rust's private `exact_oxidation_state`.
+#must_use
+fn _km_exact_oxidation_state(num, den): (i64, i64, i64) {
+    if (den == 0) { return (KM_ERR_INVALID_INPUT, 0, 0); }
+    if (num == 0 - _KM_I64_MAX - 1 && den == 0 - 1) { return (KM_ERR_COMPUTATION_ERROR, 0, 0); }
+    if (num % den != 0) {
+        var g = _km_gcd_u64(_km_unsigned_abs(num), _km_unsigned_abs(den));   # ≥ 1 and below 2⁶³: num ≠ 0, den ≠ ±2⁶³
+        var p = num / g;
+        var q = den / g;
+        if (q < 0) {
+            if (q == 0 - _KM_I64_MAX - 1 || p == 0 - _KM_I64_MAX - 1) { return (KM_ERR_COMPUTATION_ERROR, 0, 0); }
+            p = 0 - p;
+            q = 0 - q;
+        }
+        # p/q is not an integer: its floor fl decides the range, p/q > i32::MAX ⟺ fl ≥ i32::MAX, p/q < i32::MIN ⟺
+        # fl < i32::MIN.
+        var fl = p / q;
+        if (p < 0) { fl = fl - 1; }
+        if (fl >= _KM_I32_MAX || fl < _KM_I32_MIN) { return (KM_ERR_COMPUTATION_ERROR, 0, 0); }
+        return (0, p, q);
+    }
+    var s = num / den;
+    if (s < _KM_I32_MIN || s > _KM_I32_MAX) { return (KM_ERR_COMPUTATION_ERROR, 0, 0); }
+    return (0, s, 1);
+}
+
+# Assigns oxidation states by the standard rules. The species is n (atomic number, count) records at `atoms` (16 bytes:
+# Z, then the count; Rust's `&[(u8, u32)]`) with its overall charge (an i32). Each entry's state, in input order (a
+# repeated element gets the same state), goes to the caller's buffer `out` of `cap` 24-byte records (Z, numerator,
+# denominator; ADR 0002 #7: an exact rational, the denominator positive, reduced): Ok(n).
+# Rules: (1) a single-element species gets charge / atom count; (2) F is −1; (3) alkali metals +1, alkaline-earth
+# metals +2; (4) H is +1, except −1 when every other element present is a metal (NaH, CaH₂, LiAlH₄; NaBH₄ and SiH₄ are
+# not recognised); (5) O is −2, except that with F present O is solved from the charge balance (OF₂ → +2), and when
+# every atom is rule-assigned but the charges do not balance, O is re-solved from the balance, accepted strictly
+# between −2 and 0 (peroxides −1, KO₂'s superoxide −1/2, KO₃'s ozonide −1/3); (6) the one remaining element is solved
+# from the balance (an average over inequivalent atoms is its exact rational: C₃H₈ −8/3, Fe₃O₄ +8/3).
+# Err(KM_ERR_INVALID_INPUT) for a charge outside i32 (checked first), an empty species or (atoms, n) no slice; per
+# atom in order, Err(KM_ERR_INVALID_INPUT) for a count outside 1 ..= u32::MAX, then Err(KM_ERR_INVALID_ELEMENT) for an
+# atomic number outside 1 ..= 118; Err(KM_ERR_COMPUTATION_ERROR) if two distinct elements are unknown, if the
+# rule-assigned states cannot balance the charge, on arithmetic overflow, or for a state outside i32;
+# Err(KM_ERR_INVALID_INPUT) if the n records do not fit in cap (`out` untouched). Mirrors
+# `stoichiometry::assign_oxidation_states`, with ADR 0002 #7's rational states.
+#must_use
+fn assign_oxidation_states(atoms, n, overall_charge, out, cap): Result {
+    if (overall_charge < _KM_I32_MIN || overall_charge > _KM_I32_MAX) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n < 0 || (n > 0 && atoms == 0)) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n == 0) { return Err(KM_ERR_INVALID_INPUT); }                  # Rust: need at least one element
+    var first_z = load64(atoms);
+    var charge = overall_charge;
+
+    # Pass 0: validate and collect the facts the rules depend on.
+    var single = 1;
+    var has_fluorine = 0;
+    var others_all_metal = 1;
+    var total_atoms = 0;
+    var k = 0;
+    while (k < n) {
+        var z = load64(atoms + 16 * k);
+        var count = load64(atoms + 16 * k + 8);
+        if (count < 1 || count > _KM_U32_MAX) { return Err(KM_ERR_INVALID_INPUT); }     # Rust: zero atom count
+        var h = element_lookup_by_number(z);
+        if (h == 0) { return Err(KM_ERR_INVALID_ELEMENT); }
+        if (z != first_z) { single = 0; }
+        if (z == 9) { has_fluorine = 1; }
+        if (z != 1 && _km_is_metal(KM_ELEMENT_CATEGORY[h - 1]) != 1) { others_all_metal = 0; }
+        if (total_atoms > _KM_I64_MAX - count) { return Err(KM_ERR_COMPUTATION_ERROR); }   # checked_add, count > 0
+        total_atoms = total_atoms + count;
+        k = k + 1;
+    }
+    var sz = 0 - 1;                         # the element whose state was solved (every one of its entries), or −1
+    var sp = 0;
+    var sq = 1;
+    if (single == 1) {
+        var code0, p0, q0 = _km_exact_oxidation_state(charge, total_atoms);
+        if (code0 != 0) { return Err(code0); }
+        sz = first_z;
+        sp = p0;
+        sq = q0;
+    } else {
+        # ≥ 2 distinct elements, so at least one is not H.
+        var metal_hydride = others_all_metal;
+
+        # Pass 1: rule-based assignment; track the single unknown element.
+        var assigned_sum = 0;
+        var oxygen_count = 0;
+        var uz = 0 - 1;
+        var ucount = 0;
+        k = 0;
+        while (k < n) {
+            var z1 = load64(atoms + 16 * k);
+            var c1 = load64(atoms + 16 * k + 8);
+            var has, os = _km_rule_oxidation_state(z1, KM_ELEMENT_CATEGORY[z1 - 1], has_fluorine, metal_hydride);
+            if (has == 1) {
+                # |os| ≤ 2 and count < 2³², so Rust's checked_mul can't fail: the product is exact.
+                var term = os * c1;
+                var na = assigned_sum + term;
+                if (((assigned_sum ^ na) & (term ^ na)) < 0) { return Err(KM_ERR_COMPUTATION_ERROR); }   # checked_add
+                assigned_sum = na;
+                if (z1 == 8) {
+                    if (oxygen_count > _KM_I64_MAX - c1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                    oxygen_count = oxygen_count + c1;
+                }
+            } elif (uz < 0) {
+                uz = z1;
+                ucount = c1;
+            } elif (uz == z1) {
+                if (ucount > _KM_I64_MAX - c1) { return Err(KM_ERR_COMPUTATION_ERROR); }   # checked_add, c1 > 0
+                ucount = ucount + c1;
+            } else {
+                return Err(KM_ERR_COMPUTATION_ERROR);   # Rust: "multiple unknown oxidation states — underdetermined"
+            }
+            k = k + 1;
+        }
+
+        # Pass 2: solve the unknown, or re-solve O for peroxides.
+        var okr, remaining = _km_i64_sub_ck(charge, assigned_sum);
+        if (okr != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        if (uz >= 0) {
+            var code1, p1, q1 = _km_exact_oxidation_state(remaining, ucount);
+            if (code1 != 0) { return Err(code1); }
+            sz = uz;
+            sp = p1;
+            sq = q1;
+        } elif (remaining != 0) {
+            # Rust: "rule-assigned oxidation states do not balance the overall charge"
+            if (oxygen_count <= 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            # O was given the default −2; re-solve it from the balance (peroxide −1, superoxide −1/2).
+            var okd, o2 = _km_i64_mul_ck(oxygen_count, 0 - 2);
+            if (okd != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            var oke, o_total = _km_i64_add_ck(remaining, o2);
+            if (oke != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            var code2, p2, q2 = _km_exact_oxidation_state(o_total, oxygen_count);
+            if (code2 != 0) { return Err(code2); }
+            # Without F, O can only lie strictly between −2 and 0 here: −2 < p/q < 0 with q > 0 is p < 0 < p + 2q,
+            # formed as (p + q) + q (no overflow: p < 0 < q).
+            var in_range = 0;
+            if (p2 < 0) {
+                var pq = p2 + q2;
+                if (pq > 0 || pq + q2 > 0) { in_range = 1; }
+            }
+            if (in_range != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            sz = 8;
+            sp = p2;
+            sq = q2;
+        }
+    }
+    if (out == 0 || cap < n) { return Err(KM_ERR_INVALID_INPUT); }
+    var hf = has_fluorine;
+    var mh = others_all_metal;
+    k = 0;
+    while (k < n) {
+        var z2 = load64(atoms + 16 * k);
+        var rec = out + 24 * k;
+        store64(rec, z2);
+        if (z2 == sz) {
+            store64(rec + 8, sp);
+            store64(rec + 16, sq);
+        } else {
+            var has2, os2 = _km_rule_oxidation_state(z2, KM_ELEMENT_CATEGORY[z2 - 1], hf, mh);
+            store64(rec + 8, os2);
+            store64(rec + 16, 1);
+        }
+        k = k + 1;
+    }
+    return Ok(n);
+}
+
+# ── limiting reagent and yield ──────────────────────────────────────────────────────
+
+# The index of the limiting reagent: the reactant with the smallest ratio moles / coefficient (the first on a tie,
+# Rust's strict `<`), from the moles available (nm f64 at `moles_available`) and the stoichiometric coefficients (nc
+# f64 at `stoich_coefficients`). Ok(index). Err(KM_ERR_INVALID_INPUT) if either is no slice, the lengths differ, they
+# are empty, or (in reactant order) a moles value is negative or non-finite, or a coefficient not positive and finite.
+# Mirrors `stoichiometry::limiting_reagent`.
+#must_use
+fn limiting_reagent(moles_available, nm, stoich_coefficients, nc): Result {
+    if (nm < 0 || nc < 0 || (nm > 0 && moles_available == 0) || (nc > 0 && stoich_coefficients == 0)) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (nm != nc) { return Err(KM_ERR_INVALID_INPUT); }                # Rust: equal length
+    if (nm == 0) { return Err(KM_ERR_INVALID_INPUT); }                 # Rust: at least one reactant
+    var min_ratio: f64 = _KM_INF;
+    var min_idx = 0;
+    var i = 0;
+    while (i < nm) {
+        var moles: f64 = load64(moles_available + 8 * i);
+        var coeff: f64 = load64(stoich_coefficients + 8 * i);
+        if (_km_is_non_negative(moles) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        if (_km_is_positive(coeff) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        var ratio: f64 = moles / coeff;
+        if (ratio < min_ratio) {
+            min_ratio = ratio;
+            min_idx = i;
+        }
+        i = i + 1;
+    }
+    return Ok(min_idx);
+}
+
+# The theoretical yield of a product in mol: (moles / coefficient of the limiting reagent) × the product's coefficient,
+# in Rust's order. Err(KM_ERR_INVALID_INPUT) if the product coefficient is not positive and finite (checked first), or
+# whatever limiting_reagent returns for the reactant data. Mirrors `stoichiometry::theoretical_yield_moles`.
+#must_use
+fn theoretical_yield_moles(moles_available, nm, stoich_reactants, nr, stoich_product: f64): Result {
+    if (_km_is_positive(stoich_product) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var t, idx = limiting_reagent(moles_available, nm, stoich_reactants, nr);
+    if (is_err_result(t) == 1) { return Err(idx); }
+    # Rust's `get(idx)` can't miss: limiting_reagent returns an index below the common length.
+    var moles: f64 = load64(moles_available + 8 * idx);
+    var coeff: f64 = load64(stoich_reactants + 8 * idx);
+    var y: f64 = moles / coeff * stoich_product;
+    return Ok(y);
+}
+
+# Percent yield, (actual / theoretical) × 100, in %; actual and theoretical in the same unit. Above 100 % is allowed
+# (an impure or wet product). Err(KM_ERR_INVALID_INPUT) if the theoretical yield is not positive and finite (checked
+# first), or the actual yield negative or non-finite. Mirrors `stoichiometry::percent_yield`.
+#must_use
+fn percent_yield(actual: f64, theoretical: f64): Result {
+    if (_km_is_positive(theoretical) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(actual) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var p: f64 = actual / theoretical * 100.0;
+    return Ok(p);
+}
+
+# The mass percent of each atom entry of a molecule, mass × count / molecular weight × 100, in Rust's order: one
+# 16-byte (atomic number, mass percent as f64 bits) record per entry, in entry order, to the caller's buffer `out` of
+# `cap` records: Ok(count). Errors as molecular_weight (Err(KM_ERR_INVALID_ELEMENT) for an atom that names no element;
+# Err(KM_ERR_COMPUTATION_ERROR) for a molecule whose atoms could not be allocated), then Err(KM_ERR_COMPUTATION_ERROR)
+# if the molecular weight is not positive (no atoms, or every count 0); Err(KM_ERR_INVALID_INPUT) if the records do
+# not fit in cap (`out` untouched). Mirrors `stoichiometry::percent_composition`.
+#must_use
+fn percent_composition(molecule: KmMolecule, out, cap): Result {
+    var tw, vw = molecule.molecular_weight();
+    if (is_err_result(tw) == 1) { return Err(vw); }
+    var mw: f64 = vw;
+    if (_km_is_positive(mw) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var na = molecule.atoms_len();
+    # Rust looks each element up again (an Err that can't arise: molecular_weight succeeded on the same atoms).
+    if (out == 0 || cap < na) { return Err(KM_ERR_INVALID_INPUT); }
+    var data = load64(molecule.atoms);      # lib/vec.cyr's layout: { data, len, cap }; 2 words per atom
+    var k = 0;
+    while (k < na) {
+        var z = load64(data + 16 * k);
+        var mass: f64 = KM_ELEMENT_ATOMIC_MASS[z - 1];   # z is an element: molecular_weight checked it
+        var count: f64 = f64_from(load64(data + 16 * k + 8));
+        var frac: f64 = mass * count / mw * 100.0;
+        store64(out + 16 * k, z);
+        store64(out + 16 * k + 8, frac);
+        k = k + 1;
+    }
+    return Ok(na);
+}
+
+# 1 if a scaled mole ratio lies within Rust's private EMPIRICAL_TOLERANCE (0.1) of the nearest integer:
+# |scaled − round(scaled)| ≤ 0.1, round halves away from zero (NaN: 0). The test of Rust's multiplier search.
+#must_use
+fn _km_empirical_close(scaled: f64): i64 {
+    var rnd: f64 = _km_round_half_away(scaled);
+    var d: f64 = scaled - rnd;
+    var ad: f64 = f64_abs(d);
+    if (ad <= 0.1) { return 1; }
+    return 0;
+}
+
+# The empirical formula from mass percentages: n (atomic number, mass percent) records at `elements` (16 bytes: Z, then
+# the f64 bits; Rust's `&[(u8, f64)]`; only the ratios matter, so the percentages need not sum to 100). The moles
+# (percent / atomic mass) are divided by the smallest, then multiplied by the smallest integer k in 1 ..= 6 that brings
+# every ratio within 0.1 of an integer; the rounded counts, one 16-byte (atomic number, count) record per element in
+# input order, go to the caller's buffer `out` of `cap` records: Ok(n). Err(KM_ERR_INVALID_INPUT) for an empty list
+# or (elements, n) no slice; per element in order, Err(KM_ERR_INVALID_ELEMENT) for an atomic number outside 1 ..= 118,
+# then Err(KM_ERR_INVALID_INPUT) for a mass percent not positive and finite; Err(KM_ERR_COMPUTATION_ERROR) if the
+# smallest mole amount underflows to 0, a ratio is not finite, no multiplier in 1 ..= 6 gives integer ratios within
+# 0.1, a count exceeds u32::MAX, or a work table can't be allocated; Err(KM_ERR_INVALID_INPUT) if the n records do not
+# fit in cap (`out` untouched). Mirrors `stoichiometry::empirical_formula`.
+#must_use
+fn empirical_formula(elements, n, out, cap): Result {
+    if (n < 0 || (n > 0 && elements == 0)) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n == 0) { return Err(KM_ERR_INVALID_INPUT); }                  # Rust: need at least one element
+    var mst: f64[64];
+    var moles = &mst;
+    if (n > 64) {
+        moles = alloc(8 * n);
+        if (moles == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    }
+    # Convert mass % to moles (a 100 g sample).
+    var k = 0;
+    while (k < n) {
+        var h = element_lookup_by_number(load64(elements + 16 * k));
+        if (h == 0) { return Err(KM_ERR_INVALID_ELEMENT); }
+        var pct: f64 = load64(elements + 16 * k + 8);
+        if (_km_is_positive(pct) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        var mass: f64 = KM_ELEMENT_ATOMIC_MASS[h - 1];
+        var mol: f64 = pct / mass;
+        store64(moles + 8 * k, mol);
+        k = k + 1;
+    }
+    # Divide by the smallest mole value (Rust's fold from +∞ with f64::min).
+    var min_moles: f64 = _KM_INF;
+    k = 0;
+    while (k < n) {
+        var mk: f64 = load64(moles + 8 * k);
+        min_moles = _km_min(min_moles, mk);
+        k = k + 1;
+    }
+    if (_km_is_positive(min_moles) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    k = 0;
+    while (k < n) {
+        var mr: f64 = load64(moles + 8 * k);
+        var r: f64 = mr / min_moles;
+        store64(moles + 8 * k, r);
+        if (_km_is_finite(r) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        k = k + 1;
+    }
+    # The smallest multiplier that makes every ratio close to an integer.
+    var mult: f64 = 0.0;
+    var found = 0;
+    var kk = 1;
+    while (kk <= 6 && found == 0) {
+        var kf: f64 = f64_from(kk);
+        var all = 1;
+        var j = 0;
+        while (j < n && all == 1) {
+            var rj: f64 = load64(moles + 8 * j);
+            var scaled: f64 = rj * kf;
+            if (_km_empirical_close(scaled) != 1) { all = 0; }
+            j = j + 1;
+        }
+        if (all == 1) {
+            found = 1;
+            mult = kf;
+        }
+        kk = kk + 1;
+    }
+    if (found != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }         # Rust: no multiplier in 1..=6
+    # The counts: Rust's collect stops at the first count above u32::MAX (r ≥ 1 and mult ≥ 1, so each is at least 1).
+    var umax: f64 = 4294967295.0;
+    k = 0;
+    while (k < n) {
+        var rc: f64 = load64(moles + 8 * k);
+        var sc: f64 = rc * mult;
+        var cnt: f64 = _km_round_half_away(sc);
+        if (cnt > umax) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        k = k + 1;
+    }
+    if (out == 0 || cap < n) { return Err(KM_ERR_INVALID_INPUT); }
+    k = 0;
+    while (k < n) {
+        var rw: f64 = load64(moles + 8 * k);
+        var sw: f64 = rw * mult;
+        var cw: f64 = _km_round_half_away(sw);
+        store64(out + 16 * k, load64(elements + 16 * k));
+        store64(out + 16 * k + 8, f64_to(cw));
+        k = k + 1;
+    }
+    return Ok(n);
+}

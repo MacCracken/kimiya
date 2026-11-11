@@ -26,7 +26,7 @@ are compared through the stated mapping:
 | 3 | `nuclear::semi_empirical_binding_energy` → NaN for z > a or a = 0 | `Result` | finite rows class B; oracle NaN ↔ `Err` |
 | 4 | `phase::antoine_pressure_mmhg`, `antoine_pressure_pa` → NaN at the pole, silent extrapolation | `Result`; `Err` outside the coefficient set's `t_min_c..t_max_c`. No extrapolating variant | in-range rows class C; oracle NaN or out-of-range input ↔ `Err` |
 | 6 | `FunctionalGroup::hydrogen_bonding`; `Geometry::TShapedThreeLonePairs` | `functional_group_is_hydrogen_bond_donor` and a new `functional_group_is_hydrogen_bond_acceptor`; `KM_GEOMETRY_T_SHAPED` | donor and geometry rows class A under the new names; acceptor checked by reference tests only |
-| 7 | `assign_oxidation_states` → `i32`, `Err` for average states; `balance_equation(&[Vec<f64>])` | exact rational oxidation state (numerator / positive denominator, reduced); balancing takes an integer matrix | oracle `Ok(n)` ↔ `n/1`; oracle "non-integer average oxidation state" `Err` ↔ `Ok(p/q)`, verified by reference tests (Fe₃O₄ +8/3, C₃H₈ −8/3); balancing class A after converting the oracle's integer-valued f64 inputs |
+| 7 *(realised 2026-11-10, M4f)* | `assign_oxidation_states` → `i32`, `Err` for average states; `balance_equation(&[Vec<f64>])` | exact rational oxidation state (numerator / positive denominator, reduced; a value outside i32 is Rust's Err); balancing takes an integer matrix (flat row-major, Rust's \|entry\| ≤ 2⁵³ kept) | oracle `Ok(n)` ↔ `n/1`; oracle "non-integer average oxidation state" `Err` ↔ `Ok(p/q)`, noted with the port's whole result (9,090 rows, mapped, counted) and verified by reference tests (Fe₃O₄ +8/3, C₃H₈ −8/3); balancing class A after converting the oracle's integer-valued f64 inputs as Rust's test does; the 78 rows with no integer counterpart (non-integer, non-finite, beyond i64, ragged) keep the oracle's Err(InvalidInput), noted and counted |
 | 12 *(2026-11-09)* | `inorganic::cfse_octahedral` computes `t2g · (−0.4) + eg · 0.6`, which misses the exact (3·e_g − 2·t₂g)/5 on 13 of its 22 (d, spin) cases (high-spin d⁵ −2⁻⁵² and d¹⁰ −2⁻⁵¹ instead of 0, d³ −1.2000000000000002) | the exact value: the integer numerator 3·e_g − 2·t₂g converted to f64, then one correctly rounded division by 5 | class A. Where the oracle's value equals the exact one (9 cases), a plain row; elsewhere the golden row keeps the oracle's value, its note names the exact one, and the harness maps the two (q = round(5 × oracle) must be within 10⁻⁹ of it, and the port must return q / 5), reporting each such row by name as accepted under ADR 2 |
 | 13 *(2026-11-09, M4c; completed in M4d)* | `nuclear::atoms_after_half_lives` computes `initial * 2.0.powf(-n)`: where 2⁻ⁿ is not a normal double (n > 1022 or n ≤ −1024) it overflows to ∞, underflows to 0 (n = 1075 is a tie, to 0) or is a subnormal of 52 bits or fewer, so the result is ±∞, 0, NaN or up to 2⁵² ulp off where N₀/2ⁿ is representable (1000 after 1075 half-lives: 0, not 2.47 × 10⁻³²¹; 2¹⁰⁰ after 1,100: 0, not 2⁻¹⁰⁰⁰) | there, N₀/2ⁿ **correctly rounded** (rounded once, subnormal results at the 2⁻¹⁰⁷⁴ grid, ties to even): since M4d `src/mathx.cyr`'s `_km_cr_exp2_scaled(N₀, −n)` for every N₀ and n, 2⁻ᶠ from exp's machinery past 53 bits with a rounding test and a triple-double fallback (M4c's version was faithful for a fractional n with N₀ not a power of two). ±0, ±∞, NaN N₀ give N₀ (scaleB). Rust's form stays elsewhere | class C; equal rows plain; the others keep the oracle's value with the port's in the note (`(f:…)`), which the harness requires bit for bit and reports as accepted under ADR 2, counted (1,810 rows) |
 | 14 *(2026-11-09, M4c)* | `nuclear::is_secular_equilibrium` tests `λ_p < 0.01·λ_d`: 0.01 is not 1/100 and the product rounds or underflows, so (0.03, 3) is false and (0, 5 × 10⁻³²⁴) false | the exact λ_p < λ_d/100: 100·λ_p against λ_d by an exact double-double (`_km_two_prod` on the significands, the exponents first), Rust's NaN (false), ±∞ and ±0 semantics kept | class A; equal rows plain; the others noted `(i:…)`, mapped and reported by name (208 rows) |
@@ -458,6 +458,80 @@ rows with no such element are unchanged). `probe_tables.py` compiles the generat
 (C₆H₁₂N₂O₄S₂) 16.9 → 18.5 µs and `isotope_pattern_s8` 8.4 → 18.8 µs: sulfur's fourth isotope lengthens each step's
 scratch by a third and widens the pattern (offsets 0, 1, 2, 4 instead of 0, 1, 2), so S₈'s steps carry up to 17 peaks
 instead of 15 and its insertion sort moves each ³⁶S record further.
+
+## Addition, 2026-11-10 (M4f): #7 realised
+
+**#7, as planned.** Row #7 has stood since 2026-11-08: `assign_oxidation_states` returns exact rational states, and
+`balance_equation` takes an integer matrix. M4f ports `stoichiometry` with both, and settles the points the row left open
+(each the option closest to Rust's observable behaviour; the port plan's §6.4 "Decided in M4f" lists them too).
+
+**The rational states.** Each entry's state is a record (Z, numerator, denominator), the denominator positive and the
+fraction reduced (`assign_oxidation_states(atoms, n, charge, out, cap)`: n 16-byte (Z, count) records in, n 24-byte
+records out, `Ok(n)`). Rust's algorithm is unchanged — the rules, the single unknown element, the peroxide re-solve and
+its −2 < os < 0 test, every Err, its code and its order — with Rust's private `exact_oxidation_state` returning the
+rational where Rust returned Err "non-integer average oxidation state": C₃H₈'s C −8/3, Fe₃O₄'s Fe +8/3 (the reference
+tests), O₂⁻'s −1/2, and in the re-solve branch KO₂'s O −1/2 and KO₃'s ozonide −1/3, the −2 < p/q < 0 test made on the
+rational (as p < 0 < p + 2q, formed without overflow). An oracle `Ok(n)` is the port's n/1. Settled:
+- **The range is the value's.** Rust's `i32::try_from` refused an integer state outside i32 ("oxidation state out of
+  range", ComputationError); the port applies that bound to the rational's value (p/q outside i32::MIN ..= i32::MAX is
+  Err(ComputationError)), its numerator and denominator are i64 words. Rust's observable result there is
+  Err(ComputationError) either way — its non-integer Err comes first — so these inputs keep Rust's code; they need counts
+  near 2³¹ (Mn₃ O_(2³²) is 2³³/3, past i32::MAX; Mn₂ O_(2³¹ − 1) at charge −1 is 2147483646.5, inside). Below that bound
+  every non-integer Err of Rust's is the port's `Ok(p/q)`.
+- Rust's u8 Z, u32 count and i32 charge are words, never wrapped (port plan §6.4): a Z outside 1 ..= 118 is
+  Err(InvalidElement), a count outside 1 ..= u32::MAX Err(InvalidInput) at Rust's `count == 0` check, a charge outside
+  i32 Err(InvalidInput), checked first.
+
+**The integer matrix.** `balance_equation(matrix, m, n, out, cap)`: m element rows by n species columns, flat row-major
+(entry (i, j) at word i·n + j), the coefficients to the caller's buffer (`Ok(n)`). Rust's fraction-free Gauss–Jordan
+elimination is kept operation for operation: checked i64 products, differences and negations (`_km_i64_*_ck`: Cyrius's
++ − × wrap, so each tests its wrapped result; i64::MIN / −1, which would trap, is refused first), Rust's `reduce_row`
+with its unsigned gcd to 2⁶³ (a row of gcd 2⁶³ is Rust's `try_from` overflow, a corpus row), the null vector from the
+RREF and the lcm of the pivots, the sign convention and the u32 conversion, and the verification of every original row in
+i128 with Rust's `checked_add` semantics. `src/mathx.cyr`'s `_km_bn_*` integers are unsigned, so the i128 sum is a small
+signed helper (`_km_i128_mul_u32`, `_km_i128_add_ck`: h·2⁶⁴ + m·2³² + l with h an i64, exactly i128's range; the edge
+where h₁ + h₂ overflows negatively by one and the carry brings it back to −2¹²⁷ is kept); Rust's i128 `checked_mul`
+cannot fail (|entry| ≤ 2⁵³, k < 2³²), nor the product here (below 2⁹⁵). Every Rust overflow Err is an Err at the same step.
+Proven fast paths change nothing: four operands below 2³¹ make an elimination step overflow-free, and a row whose i64
+sum of entries below 2³¹ never overflows has Rust's i128 sum. Settled:
+- **The entry range is Rust's**: |entry| ≤ 2⁵³ (MAX_COMPOSITION_ENTRY), a larger one Err(InvalidInput). Rust's bound
+  exists because of f64, but keeping it accepts every integer matrix Rust accepts and refuses every one it refuses, and
+  keeps the i64 elimination's overflow points Rust's.
+- **The rows with no counterpart.** Rust's f64 entries within 10⁻⁹ of an integer are that rounded integer (the harness
+  converts them as Rust's test does, so those rows compare class A: 41 rows); a matrix with an entry Rust's test refuses
+  (not within 10⁻⁹ of an integer, or non-finite), an integer beyond i64, or ragged rows has no integer counterpart. Rust
+  returns Err(InvalidInput) for all of them (the generator asserts it). Those rows keep the oracle's output and are noted
+  `[ADR 0002 #7: no integer-matrix counterpart (<why>): …]`; the harness requires both the note and the oracle's
+  Err(InvalidInput), and counts the row as accepted under ADR 2 (78 rows: 55 non-integer, 11 non-finite entries, 7
+  integers beyond i64, 5 ragged). An integer-valued f64 entry past 2⁵³ but within i64 (2⁵³ + 2, 2⁶², 10¹⁸) has a
+  counterpart, which the port refuses with Rust's code: those rows are plain.
+- A null matrix, m < 1, n < 2 or m·n past any buffer is Err(InvalidInput); the cap is checked after Rust's errors, `out`
+  untouched (M4e's rule).
+
+**Golden comparison.** The oxidation rows where the oracle's Err is the non-integer one and the port is Ok carry the
+port's whole result, `[ADR 0002 #7: the port returns the exact average oxidation states (Z, numerator, denominator) [n],
+… (v:n i:z i:p i:q …)]` (#23's whole-result note), from `m_stoichiometry::port_oxidation`, Rust's algorithm on exact
+rationals, which must give the oracle's result on every other row (asserted on every run); the harness compares the
+note's tokens (`_par_map_toks`, now taking the note's tag) and counts the row as accepted under ADR 2: 9,090 rows.
+`validate.py` recomputes every row from Rust's semantics, recomputes the port's states with `Fraction`, and proves each
+note is exactly where Rust's Err is the non-integer one and the port is Ok, its tokens the port's (reduced, q > 0); it
+checks every balancing row by exact linear algebra and every no-counterpart note against its own conversion.
+
+**The other five functions are ported operation for operation, Rust's arithmetic unchanged,** and measured under the
+inexact-formula policy (the user decides; nothing here is fixed). On the golden corpus and seeded grids (the
+measurement script, M4f's report): `percent_yield`'s (a/t)·100 is one ulp from RN(100a/t) on 24 % of the corpus's Ok rows
+(27 % of 200,000 seeded pairs), up to 50 ulp and 0 for a subnormal result (6 corpus rows; 1,656 of 20,000 underflow-edge
+pairs); `theoretical_yield_moles`' (m/c)·p is one ulp from RN(m·p/c) on 15–26 % of seeded triples, and ±∞ or 0 where
+m/c over- or underflows though m·p/c is finite (4,773 and 2,722 of 10,000 edge triples each); `limiting_reagent`'s rounded
+ratios pick another index than the exact m_i·c_j < m_j·c_i on 227 of 2,852 corpus rows (the deliberate near-ties and
+over- and underflows), 21 % of seeded near-ties, about half of the pairs whose ratios both overflow to +∞ or both
+underflow, and none of 100,000 random lists; `percent_composition`'s ((mass·count)/mw)·100 is up to 2 ulp from
+RN(mass·count·100/mw) given Rust's mw on 26 % of the corpus's entries; `empirical_formula` with exact ratios and an exact
+1/10 tolerance changes Ok ↔ Err on 14 of 3,351 corpus rows and 45 of 50,000 formulas' own percentages (never the
+multiplier or a count alone); `balance_equation`'s checked i64 elimination fails where a valid u32 solution exists
+([[3037000500, 1, −3037000501], [1, 3037000500, −3037000501]]: x = [1, 1, 1], but the first step forms
+3037000500² − 1 > i64::MAX), a case for the library-wide overflow audit after M4. The oxidation states' checked sums can
+overflow only with 2³⁰ or more entries.
 
 ## Consequences
 

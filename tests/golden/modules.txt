@@ -14,5 +14,6 @@ potential
 reaction
 solution
 spectroscopy
+stoichiometry
 thermo
 thermochem

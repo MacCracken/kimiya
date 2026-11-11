@@ -523,6 +523,42 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     (S₈'s seven peaks bit for bit against `validate.py`'s replica, ³⁶S raising M+4 … M+6): 350 assertions; benches
     `spectroscopy/isotope_pattern_cystine` and `isotope_pattern_s8`
 
+- **M4f stoichiometry** (port plan §4, §6.4 "Decided in M4f"; [ADR 0002 #7](docs/adr/0002-port-api-divergences.md),
+  realised; M4 complete):
+  - **stoichiometry** (`src/stoichiometry.cyr`, in the `[lib]` order between kinetics and organic_data) —
+    `balance_equation(matrix, m, n, out, cap)` on an integer matrix (flat row-major; Rust's fraction-free Gauss–Jordan
+    elimination with checked i64 arithmetic, its gcd reductions, the null vector from the RREF, the sign and u32 checks
+    and the i128 verification, every Rust overflow an Err at the same step), `assign_oxidation_states(atoms, n, charge,
+    out, cap)` with exact rational states (24-byte (Z, numerator, denominator) records), `limiting_reagent`,
+    `theoretical_yield_moles`, `percent_yield`, `percent_composition(molecule, out, cap)`, `empirical_formula`; Rust's
+    errors, codes and order; the private helpers `_km_i64_{add,sub,mul,neg}_ck`, `_km_gcd_u64`, `_km_reduce_row`, the
+    signed 128-bit `_km_i128_mul_u32` / `_km_i128_add_ck`, `_km_exact_oxidation_state`, `_km_rule_oxidation_state`,
+    `_km_is_metal`, `_km_empirical_close`
+  - generator `m_stoichiometry.rs`: golden module `stoichiometry` (41,435 rows: `balance_equation` 3,329, A —
+    the Rust tests, CH₄ / CuSO₄ + Fe / KMnO₄ + HCl in every row order, textbook and ionic equations, every combustion
+    C_aH_bO_c with a ≤ 10, chains to 70 species, 820 seeded consistent and 700 random matrices, every error class, the
+    10⁻⁹ tolerance to the ulp, ±2⁵³, intermediate overflow; `assign_oxidation_states` 23,498, A — the 1.2 tests, every u8
+    Z alone, every element's oxides, hydrides and fluorides, (su)peroxides and ozonides, the u32 / i32 extremes, seeded
+    species; `limiting_reagent` 2,897, A; `theoretical_yield_moles` 2,965, B; `percent_yield` 4,071, B;
+    `percent_composition` 1,292, B; `empirical_formula` 3,383, A); `m_stoichiometry::port_oxidation`, Rust's algorithm on
+    exact rationals, checked against the oracle on every row, writes ADR 0002 #7's notes
+  - harness: the stoichiometry dispatcher; the matrix converted as Rust's test converts it (`_par_in_matrix`) and replayed
+    on integers; 9,090 oxidation rows noted with the port's exact states and 78 balancing rows with no integer
+    counterpart mapped under ADR 2, counted; `_par_map_toks(adr, tag)` takes the note's tag
+  - `validate.py` §18: every row recomputed from Rust's semantics (checked i64 / i128 on Python integers, IEEE doubles in
+    Rust's order), the port's states with `Fraction` and every note proven, every balancing row checked by exact linear
+    algebra (1,976 Ok rows the primitive null vector; 104 Err rows where Rust's i64 elimination overflows although a valid
+    u32 solution exists), EMPIRICAL_TOLERANCE, INTEGER_TOLERANCE and MAX_COMPOSITION_ENTRY pinned
+  - **result**, x86_64 ELF, x86_64 PE and aarch64: `333397 ok, 0 failed, 0 measured, 0 pending, 28999 accepted (ADR 6:
+    809), 0 glibc-matching (failed)` on 18 modules ([`port-parity.md`](docs/development/port-parity.md) §19)
+  - tests: `tests/stoichiometry.tcyr`, the 63 Rust tests (7 adapted for ADR 0002 #7) and 6 Cyrius-only groups (the
+    rational states and their i32 range, the integer matrix and its 2⁵³ bound, the checked i64 and i128 helpers at their
+    edges, out-of-type words, slices and buffers, the tolerance to the ulp): 265 assertions; `tests/kimiya.tcyr` balances
+    CH₄ and assigns Fe₃O₄ through the bundle; surface parity 401/401; benches `stoichiometry/balance_ch4_combustion`,
+    `oxidation_states_kmno4` (against Rust) and seven Cyrius-only
+  - the five float functions are Rust's arithmetic unchanged; their measured misses of the exact values are listed in
+    ADR 0002's M4f addition for the user's decision
+
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
   kJ/mol result × 1000 exactly (Rust's difference, then one multiply). `reaction_entropy` (J/(mol·K)) and the table
@@ -658,6 +694,16 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   *Migration:* none for physical masses compared with a tolerance; code that tested 1.2's exact bits sees at most one ulp
   in the normal range.
 
+### Breaking (relative to Rust 1.2.0, ADR 0002 #7)
+- **stoichiometry** — `assign_oxidation_states` returns each state as an exact rational, a (Z, numerator, denominator)
+  record with the fraction reduced and the denominator positive: where 1.2 returned `Err(ComputationError)` "non-integer
+  average oxidation state", 2.0 returns the average (C₃H₈'s C −8/3, Fe₃O₄'s Fe +8/3, KO₂'s O −1/2, O₂⁻ −1/2); an
+  integer state n is n/1. An average outside i32 stays `Err(ComputationError)`, as in 1.2. `balance_equation` takes an
+  integer matrix (flat row-major, m rows by n columns) instead of `&[Vec<f64>]`; Rust's bound |entry| ≤ 2⁵³ is kept.
+  Every other error, its kind and its order are 1.2's.
+  *Migration:* read the denominator (1 for every state 1.2 returned); pass the composition counts as integers (1.2's
+  near-integer f64 entries are their rounded integers; there is no non-integer entry to pass, and no ragged row).
+
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
@@ -768,6 +814,12 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   `isotope_pattern_cystine` 16.9 → 18.5 µs (+10 %) and `isotope_pattern_s8` 8.4 → 18.8 µs (2.2×): ³⁶S's fourth isotope
   makes each sulfur step's scratch a third longer and its pattern wider (S₈ up to 17 peaks a step instead of 15; the
   scratch at most 68 records, within the 192-record stack tables)
+
+- M4f stoichiometry (Cyrius before → after the proven fast paths, the same host, back to back):
+  `stoichiometry/balance_ch4_combustion` 1.20 µs → 770 ns (Rust 233.90 ns), `oxidation_states_kmno4` 156 → 122 ns (Rust
+  22.38); the Cyrius-only `balance_kmno4_hcl` 3.84 → 2.16 µs, `oxidation_states_fe3o4` 132 → 110 ns, `limiting_reagent`
+  31 ns, `theoretical_yield_moles` 46, `percent_yield` 14, `percent_composition_glucose` 71, `empirical_formula_glucose`
+  217 ([`docs/benchmarks-rust-v-cyrius.md`](docs/benchmarks-rust-v-cyrius.md))
 
 ## [1.2.0] - 2026-11-08
 

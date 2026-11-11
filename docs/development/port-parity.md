@@ -1254,6 +1254,66 @@ Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **17 modules, 0 faili
 === parity summary: 17 modules, 0 failing | rows: 301130 ok, 0 failed, 0 measured, 0 pending, 19831 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
 ```
 
+## 19. M4f: stoichiometry, ADR 0002 #7 realised (2026-11-10)
+
+`src/stoichiometry.cyr` ports `rust-old/src/stoichiometry.rs` with ADR 0002 #7's two API changes: `balance_equation` on an
+integer matrix and `assign_oxidation_states` with exact rational states. Rust's algorithms, checks, Err codes and order
+are kept; the five float functions are Rust's arithmetic operation for operation.
+
+| Function | Class | Rows | Oracle Ok | Oracle Err | #7 mapped | ulp (every target) |
+|---|---|---|---|---|---|---|
+| `stoichiometry::balance_equation` | A | 3,329 | 1,976 | 1,353 | 78 (no integer-matrix counterpart) | — |
+| `stoichiometry::assign_oxidation_states` | A | 23,498 | 11,165 | 12,333 | 9,090 (the port's exact rational states) | — |
+| `stoichiometry::limiting_reagent` | A | 2,897 | 2,852 | 45 | — | — |
+| `stoichiometry::theoretical_yield_moles` | B | 2,965 | 2,892 | 73 | — | 0 |
+| `stoichiometry::percent_yield` | B | 4,071 | 4,042 | 29 | — | 0 |
+| `stoichiometry::percent_composition` | B | 1,292 | 1,279 | 13 | — | 0 (3,591 floats) |
+| `stoichiometry::empirical_formula` | A | 3,383 | 2,632 | 751 | — | — |
+
+- **The integer matrix.** The harness converts each row's f64 entries as Rust's test does (finite, within 10⁻⁹ of
+  round(v), that integer an i64) and replays the integers on the port; 3,251 rows have a counterpart (41 with a
+  near-integer entry rounded as Rust does), all class-A equal. 78 have none — 55 a non-integer entry, 11 a non-finite
+  one, 7 an integer beyond i64, 5 ragged rows — and are the oracle's Err(InvalidInput); the generator notes them
+  (`[ADR 0002 #7: no integer-matrix counterpart (…)]`), the harness requires the note and the Err and counts them as
+  accepted under ADR 2. Integers past Rust's 2⁵³ bound but within i64 have a counterpart, which the port refuses with
+  Rust's code (plain rows).
+- **The rational states.** 9,090 rows where the oracle returns Err "non-integer average oxidation state" (every u8 Z
+  alone at most counts and charges, the oxides and hydrides of every element, KO₂, KO₃, C₃H₈, Fe₃O₄, …) carry the port's
+  whole result in their note, `(v:n i:z i:p i:q …)`; the harness compares it token by token. A row whose average lies
+  outside i32 is the port's Err(ComputationError), the oracle's code: plain. Every other row's port result is the oracle's
+  n/1 (the harness requires every denominator to be 1 there).
+- **The proofs** (`validate.py` §18). Every row recomputed from Rust's semantics: the two integer functions on Python
+  integers with i64 checks at every Rust `checked_*` call (and i128 in the verification), the float functions on IEEE
+  doubles in Rust's order; the port's states with `Fraction`, each note exactly where Rust's Err is the non-integer one and
+  the port is Ok, its tokens the port's (reduced, q > 0); every balancing row with a counterpart by exact linear algebra
+  (Fraction RREF): the 1,976 Ok rows are the primitive positive vector of a one-dimensional null space; of the Err rows,
+  294 have only the trivial solution, 630 a null space of dimension 2 … 6, 238 a basis vector with a zero, mixed signs or
+  a coefficient past u32, and **104 a valid u32 solution that Rust's i64 elimination overflows on the way to** (the
+  corpus's large-coefficient and near-2⁴⁰ rows; the overflow audit's case). Pinning: EMPIRICAL_TOLERANCE × ½ / × 2
+  change 472 / 774 of the 3,383 empirical rows (± 1 ulp none: the deviation is a multiple of the ratio's ulp, at least
+  2⁻⁵², and the first change is at + 6 / − 11 ulps; `tests/stoichiometry.tcyr` pins 0.1 to the ulp on
+  `_km_empirical_close`); INTEGER_TOLERANCE + 1 / − 1 ulp change 4 / 7 balancing rows (the probes at 0, where the
+  deviation is any double); MAX_COMPOSITION_ENTRY − 1 / + 2 change 3 / 2 rows (±2⁵³ accepted, 2⁵³ + 2 refused).
+- **Measured, not fixed** (ADR 0002's M4f addition has the numbers): the float functions' misses of their exact values
+  — `percent_yield` one ulp from RN(100a/t) on 968 of the 4,042 Ok rows (24 %; up to 50 ulp and 0 for some subnormal
+  results), `theoretical_yield_moles` and `percent_composition` likewise, `limiting_reagent`'s index on near-ties and
+  where both ratios over- or underflow (227 of 2,852 corpus rows), `empirical_formula`'s Ok ↔ Err on 14 rows with exact
+  ratios and an exact 1/10.
+
+`tests/stoichiometry.tcyr`: the 63 Rust tests (7 adapted for #7) and 6 Cyrius-only groups, 265 assertions.
+
+**Cost** (`tests/kimiya.bcyr`, before → after the proven fast paths): `stoichiometry/balance_ch4_combustion` 1.20 µs →
+770 ns (Rust 233.90), `oxidation_states_kmno4` 156 → 122 ns (Rust 22.38).
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **18 modules, 0 failing; 333,397 ok, 0 failed, 0 measured,
+0 pending, 28,999 accepted (809 under ADR 6; under ADR 2, 440 #4 Antoine, 13 #12 CFSE, 23 #3 SEMF, 1,810 #13, 208 #14,
+59 #15, 1,041 #16, 180 #17, 181 #18, 1,654 #19, 3,605 #20, 6,617 #21, 2,837 #22, 354 #23 and 9,168 #7 rows), 0
+glibc-matching.**
+
+```text
+=== parity summary: 18 modules, 0 failing | rows: 333397 ok, 0 failed, 0 measured, 0 pending, 28999 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
+```
+
 ## How to reproduce
 
 ```sh

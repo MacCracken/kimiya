@@ -4,8 +4,8 @@
 # It includes dist/kimiya.cyr (written by `cyrius distlib --all`; `cyrius distlib --check` proves it
 # current), not src/, so the bundle compiles warning-free as one unit and its modules work
 # together. The reference tests are tests/{error,validate,element,molecule,reaction,thermo,thermochem,
-# phase,gas,solution,electrochemistry,kinetics,organic,inorganic,potential,nuclear,spectroscopy}.tcyr; the golden
-# corpus is tests/parity.tcyr.
+# phase,gas,solution,electrochemistry,kinetics,stoichiometry,organic,inorganic,potential,nuclear,spectroscopy}.tcyr;
+# the golden corpus is tests/parity.tcyr.
 
 include "dist/kimiya.cyr"
 
@@ -88,6 +88,32 @@ fn main() {
     var tl, vl = lineweaver_burk(100.0, 5.0, &lb);
     var slope: f64 = load64(&lb);
     assert(is_ok(tl) == 1 && vl == 2 && slope == 0.05, "kinetics (Lineweaver–Burk buffer)");
+    var ch4: i64[12];
+    ch4[0] = 1;
+    ch4[1] = 0;
+    ch4[2] = 0 - 1;
+    ch4[3] = 0;
+    ch4[4] = 4;
+    ch4[5] = 0;
+    ch4[6] = 0;
+    ch4[7] = 0 - 2;
+    ch4[8] = 0;
+    ch4[9] = 2;
+    ch4[10] = 0 - 2;
+    ch4[11] = 0 - 1;
+    var co: i64[4];
+    var tbal, vbal = balance_equation(&ch4, 3, 4, &co, 4);
+    assert(is_ok(tbal) == 1 && vbal == 4 && load64(&co + 8) == 2 && load64(&co + 24) == 2,
+        "stoichiometry (CH4 + 2 O2 -> CO2 + 2 H2O, ADR 0002 #7's integer matrix)");
+    var fe3o4: i64[4];
+    fe3o4[0] = 26;
+    fe3o4[1] = 3;
+    fe3o4[2] = 8;
+    fe3o4[3] = 4;
+    var os: i64[6];
+    var tox, vox = assign_oxidation_states(&fe3o4, 2, 0, &os, 2);
+    assert(is_ok(tox) == 1 && vox == 2 && load64(&os + 8) == 8 && load64(&os + 16) == 3,
+        "stoichiometry (Fe3O4: Fe +8/3, ADR 0002 #7's rational state)");
     var eo: f64 = bond_type_energy_kj(KM_BOND_TYPE_NN_TRIPLE);
     assert(eo == 945.0 && KM_GEOMETRY_T_SHAPED == 7, "organic_data (ADR 0002 #6: KM_GEOMETRY_T_SHAPED)");
     var bonds: i64[4];

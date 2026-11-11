@@ -25,7 +25,7 @@
 //! `kinetics` (M3b); `organic` and `inorganic`, with `src/organic_data.cyr` and `src/inorganic_data.cyr` (M4b);
 //! `nuclear`, with `src/nuclear_data.cyr` (M4c); `potential` (M4d: no data file); `spectroscopy`, with
 //! `src/spectroscopy_data.cyr` (M4e; since M4e-4 its isotope table from the cited `isotopes.tsv`, ADR 0002 #23, checked
-//! against the oracle); …
+//! against the oracle); `stoichiometry` (M4f: no data file); …
 
 mod cyr;
 mod exact;
@@ -46,6 +46,7 @@ mod m_potential;
 mod m_reaction;
 mod m_solution;
 mod m_spectroscopy;
+mod m_stoichiometry;
 mod m_thermo;
 mod m_thermochem;
 mod t_constants;
@@ -84,6 +85,7 @@ fn golden_modules(isos: &[t_spectroscopy::Iso]) -> Vec<tsv::Module> {
         m_reaction::emit(),
         m_solution::emit(),
         m_spectroscopy::emit(isos),
+        m_stoichiometry::emit(),
         m_thermo::emit(),
         m_thermochem::emit(),
     ]

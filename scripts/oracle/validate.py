@@ -3420,8 +3420,419 @@ print(f"spectroscopy: reduced_mass has {len(mass_ties)} tie rows (normal and sub
       f"of {len(eq_m)} equal-mass rows and −R on {zn_miss} of the {len(zn)} Z = n level rows (each noted); {near_rep} "
       f"isotope peaks exactly at the 0.001 report threshold ({near_rep23} in the port's #23 results)")
 
+# ── 18. stoichiometry.tsv (M4f): Rust's semantics recomputed, ADR 0002 #7's mapping proven ─────────────────────────
+# Every row is recomputed from rust-old/src/stoichiometry.rs's operations: balance_equation and assign_oxidation_states
+# on Python integers checked against i64 at every Rust checked_* call (i128 in the verification), the float functions
+# on IEEE doubles in Rust's order. Then:
+# - balance_equation: every row is checked again by exact linear algebra (Fraction RREF): an Ok result is the
+#   primitive positive basis vector of a one-dimensional null space; an Err is a null space of another dimension, a
+#   basis vector with a zero or mixed signs or past u32, or (counted) Rust's i64 overflow where a valid u32 solution
+#   exists. The `[ADR 0002 #7: no integer-matrix counterpart` notes sit exactly on the rows whose f64 matrix has no
+#   integer one (an entry Rust's test refuses, an integer beyond i64, ragged rows), all Err(InvalidInput);
+# - assign_oxidation_states: the port's exact rational states (ADR 0002 #7: Rust's algorithm on Fractions, the i32
+#   range applied to the value) are computed; a row is noted exactly where Rust's Err is its "non-integer average" and
+#   the port is Ok, the note's tokens are the port's result (reduced, the denominator positive), so every unnoted row's
+#   port result is the oracle's;
+# - the typed constants: EMPIRICAL_TOLERANCE (0.1) × ½ and × 2, INTEGER_TOLERANCE (10⁻⁹: the generator's and the
+#   harness's conversion) ± 1 ulp and MAX_COMPOSITION_ENTRY (2⁵³) ± 1 each change some row.
+stsrc = (root / "rust-old/src/stoichiometry.rs").read_text()
+ST_MAX_ENTRY = float(re.search(r"^const MAX_COMPOSITION_ENTRY: f64 = ([0-9_.]+);", stsrc, re.M).group(1).replace("_", ""))
+ST_INT_TOL = float(re.search(r"^const INTEGER_TOLERANCE: f64 = ([0-9e.-]+);", stsrc, re.M).group(1))
+ST_EMP_TOL = float(re.search(r"^const EMPIRICAL_TOLERANCE: f64 = ([0-9.]+);", stsrc, re.M).group(1))
+check((ST_MAX_ENTRY, ST_INT_TOL, ST_EMP_TOL) == (2.0 ** 53, 1e-9, 0.1),
+      f"stoichiometry.rs: constants parsed as {ST_MAX_ENTRY}, {ST_INT_TOL}, {ST_EMP_TOL}")
+I64_MIN, I64_MAX, I128_MIN, I128_MAX = -2 ** 63, 2 ** 63 - 1, -2 ** 127, 2 ** 127 - 1
+I32_MIN, I32_MAX, U32_MAX = -2 ** 31, 2 ** 31 - 1, 2 ** 32 - 1
+class Ovf(Exception):
+    """A Rust checked_* call returned None: the overflow Err (ComputationError)."""
+def c64(v):
+    if v < I64_MIN or v > I64_MAX: raise Ovf
+    return v
+def tdiv(a, b):
+    """Rust's i64 `/`: truncation toward zero."""
+    q = abs(a) // abs(b)
+    return q if (a >= 0) == (b > 0) else -q
+def st_reduce(a, lo, n):
+    g = 0
+    for v in a[lo:lo + n]: g = math.gcd(g, abs(v))
+    if g > 1:
+        if g > I64_MAX: raise Ovf
+        for k in range(lo, lo + n): a[k] = tdiv(a[k], g)
+def st_matrix(ins):
+    """Rust's &[Vec<f64>] from `v:m`, then per row `v:len` and its floats."""
+    m, k, rows = ins[0][1], 1, []
+    for _ in range(m):
+        ln = ins[k][1]
+        rows.append([t[1] for t in ins[k + 1:k + 1 + ln]])
+        k += 1 + ln
+    check(k == len(ins), "balance_equation: malformed matrix tokens")
+    return rows
+def st_counterpart(mat, tol=None):
+    """The port's integer matrix (ADR 0002 #7), row-major, or None: equal rows, every entry finite and within 10⁻⁹ of
+    round(v) (Rust's test), that integer below 2⁶³ in magnitude."""
+    tol = ST_INT_TOL if tol is None else tol
+    if mat and any(len(r) != len(mat[0]) for r in mat): return None
+    out = []
+    for row in mat:
+        for v in row:
+            if not math.isfinite(v): return None
+            r = r_round(v)
+            if abs(v - r) > tol or abs(r) >= 2.0 ** 63: return None
+            out.append(int(r))
+    return out
+def st_balance(mat, tol=None, bound=None):
+    """Rust 1.2.0's balance_equation on its f64 matrix: the u32 coefficients, or Err."""
+    tol = ST_INT_TOL if tol is None else tol
+    bound = ST_MAX_ENTRY if bound is None else bound
+    if not mat: return Err("InvalidInput")
+    n = len(mat[0])
+    if n < 2 or any(len(r) != n for r in mat): return Err("InvalidInput")
+    a = []
+    for row in mat:
+        for v in row:
+            r = r_round(v) if math.isfinite(v) else v
+            if not math.isfinite(v) or abs(v - r) > tol or abs(r) > bound: return Err("InvalidInput")
+            a.append(int(r))
+    return st_balance_int(a, len(mat), n, bound)
+def st_balance_int(a, m, n, bound=None):
+    """The port's balance_equation (ADR 0002 #7) on the integer matrix a, row-major: Rust's checks with its 2⁵³ bound
+    on the integers, then Rust's elimination; the u32 coefficients, or Err."""
+    bound = ST_MAX_ENTRY if bound is None else bound
+    if m < 1 or n < 2: return Err("InvalidInput")
+    if any(abs(v) > bound for v in a): return Err("InvalidInput")
+    a = list(a)
+    orig = list(a)
+    try:
+        rank, free = 0, None
+        for col in range(n):
+            p = next((r for r in range(rank, m) if a[r * n + col] != 0), None)
+            if p is None:
+                if free is not None: return Err("ComputationError")       # ambiguous
+                free = col
+                continue
+            if p != rank:
+                for j in range(n): a[p * n + j], a[rank * n + j] = a[rank * n + j], a[p * n + j]
+            pr = rank * n
+            st_reduce(a, pr, n)
+            if a[pr + col] < 0:
+                for j in range(n): a[pr + j] = c64(-a[pr + j])
+            piv = a[pr + col]
+            for r in range(m):
+                rr, fac = r * n, a[r * n + col]
+                if r == rank or fac == 0: continue
+                for j in range(n): a[rr + j] = c64(c64(piv * a[rr + j]) - c64(fac * a[pr + j]))
+                st_reduce(a, rr, n)
+            rank += 1
+        if free is None: return Err("ComputationError")                   # only the trivial solution
+        lcm = 1
+        for k in range(rank):
+            pv = next((v for v in a[k * n:k * n + n] if v != 0), None)
+            if pv is not None:
+                g = math.gcd(abs(lcm), abs(pv))
+                if g > I64_MAX: raise Ovf
+                lcm = c64(tdiv(lcm, g) * pv)
+        x = [0] * n
+        x[free] = lcm
+        for k in range(rank):
+            row = a[k * n:k * n + n]
+            c = next((j for j, v in enumerate(row) if v != 0), None)
+            if c is not None: x[c] = c64(-c64(row[free] * tdiv(lcm, row[c])))
+        st_reduce(x, 0, n)
+        if 0 in x: return Err("ComputationError")
+        pos = sum(1 for v in x if v > 0)
+        if pos == 0: x = [c64(-v) for v in x]
+        elif pos != n: return Err("ComputationError")
+        if any(v < 0 or v > U32_MAX for v in x): return Err("ComputationError")
+        for i in range(m):
+            s_ = 0
+            for j in range(n):
+                s_ += orig[i * n + j] * x[j]                                   # |term| < 2⁹⁵: checked_mul can't fail
+                if s_ < I128_MIN or s_ > I128_MAX: return Err("ComputationError")
+            if s_ != 0: return Err("ComputationError")
+        return x
+    except Ovf:
+        return Err("ComputationError")
+def st_nullspace(a, m, n):
+    """The exact null space of the integer matrix: (dimension, its primitive basis vector when the dimension is 1)."""
+    M = [[Fraction(a[i * n + j]) for j in range(n)] for i in range(m)]
+    pivots, r = [], 0
+    for c in range(n):
+        p = next((i for i in range(r, m) if M[i][c] != 0), None)
+        if p is None: continue
+        M[r], M[p] = M[p], M[r]
+        inv = M[r][c]
+        M[r] = [v / inv for v in M[r]]
+        for i in range(m):
+            if i != r and M[i][c] != 0:
+                f_ = M[i][c]
+                M[i] = [vi - f_ * vr for vi, vr in zip(M[i], M[r])]
+        pivots.append(c)
+        r += 1
+    free = [c for c in range(n) if c not in pivots]
+    if len(free) != 1: return len(free), None
+    f_ = free[0]
+    v = [Fraction(0)] * n
+    v[f_] = Fraction(1)
+    for i, c in enumerate(pivots): v[c] = -M[i][f_]
+    den = 1
+    for q in v: den = den * q.denominator // math.gcd(den, q.denominator)
+    w = [int(q * den) for q in v]
+    g = 0
+    for q in w: g = math.gcd(g, abs(q))
+    w = [q // g for q in w]
+    if all(q <= 0 for q in w): w = [-q for q in w]
+    return 1, w
+
+ST_CAT = {z: e[5] for z, e in ELEMS.items()}
+ST_METALS = {"AlkaliMetal", "AlkalineEarth", "TransitionMetal", "PostTransitionMetal", "Lanthanide", "Actinide"}
+NONINT = "non-integer"
+def st_exact(num, den, port):
+    """exact_oxidation_state: Rust's integer (port=False; Err(NONINT) for its non-integer average) or the port's exact
+    Fraction (port=True; ADR 0002 #7: the i32 range on the value)."""
+    if den == 0: return Err("InvalidInput")
+    if num == I64_MIN and den == -1: return Err("ComputationError")
+    q = Fraction(num, den)
+    if q.denominator != 1:
+        if not port: return Err(NONINT)
+        fl_ = math.floor(q)
+        return Err("ComputationError") if (fl_ >= I32_MAX or fl_ < I32_MIN) else q
+    return Err("ComputationError") if (q < I32_MIN or q > I32_MAX) else q
+def st_rule(z, has_f, hydride):
+    if z == 9: return -1
+    if z == 1: return -1 if hydride else 1
+    if z == 8: return None if has_f else -2
+    return {"AlkaliMetal": 1, "AlkalineEarth": 2}.get(ST_CAT[z])
+def st_oxidation(atoms, charge, port):
+    """Rust 1.2.0's assign_oxidation_states (port=False: integer states, Err(NONINT) for its non-integer Err) or the
+    port's (port=True: Fractions)."""
+    if not atoms: return Err("InvalidInput")
+    first = atoms[0][0]
+    single, has_f, others_metal, total = True, False, True, 0
+    try:
+        for z, c in atoms:
+            if c == 0: return Err("InvalidInput")
+            if z not in ST_CAT: return Err("InvalidElement")
+            single &= z == first
+            has_f |= z == 9
+            if z != 1 and ST_CAT[z] not in ST_METALS: others_metal = False
+            total = c64(total + c)
+        if single:
+            os_ = st_exact(charge, total, port)
+            return os_ if isinstance(os_, Err) else [(z, os_) for z, _ in atoms]
+        assigned, oxygen, unknown = 0, 0, None
+        for z, c in atoms:
+            os_ = st_rule(z, has_f, others_metal)
+            if os_ is not None:
+                assigned = c64(assigned + c64(os_ * c))
+                if z == 8: oxygen = c64(oxygen + c)
+            elif unknown is None: unknown = (z, c)
+            elif unknown[0] == z: unknown = (z, c64(unknown[1] + c))
+            else: return Err("ComputationError")
+        remaining = c64(charge - assigned)
+        solved = None
+        if unknown is not None:
+            os_ = st_exact(remaining, unknown[1], port)
+            if isinstance(os_, Err): return os_
+            solved = (unknown[0], os_)
+        elif remaining != 0:
+            if oxygen <= 0: return Err("ComputationError")
+            os_ = st_exact(c64(remaining + c64(oxygen * -2)), oxygen, port)
+            if isinstance(os_, Err): return os_
+            if not (-2 < os_ < 0): return Err("ComputationError")
+            solved = (8, os_)
+        return [(z, solved[1] if solved and solved[0] == z else Fraction(st_rule(z, has_f, others_metal)))
+                for z, _ in atoms]
+    except Ovf:
+        return Err("ComputationError")
+def st_pairs(ins):
+    n = ins[0][1]
+    return [(ins[1 + 2 * k][1], ins[2 + 2 * k][1]) for k in range(n)]
+def st_out_rust(r):
+    if isinstance(r, Err): return [("E", "ComputationError" if r.name == NONINT else r.name, None)]
+    return [("v", len(r), None)] + [t for z, q in r for t in (("i", z, None), ("i", int(q), None))]
+def st_out_port(r):
+    if isinstance(r, Err): return [("E", r.name, None)]
+    return [("v", len(r), None)] + [t for z, q in r for t in (("i", z, None), ("i", q.numerator, None), ("i", q.denominator, None))]
+def st_limiting(mo, co):
+    if len(mo) != len(co) or not mo: return Err("InvalidInput")
+    best, idx = math.inf, 0
+    for i, (m_, c_) in enumerate(zip(mo, co)):
+        if not is_non_negative(m_) or not is_positive(c_): return Err("InvalidInput")
+        r = m_ / c_
+        if r < best: best, idx = r, i
+    return idx
+def st_two_slices(ins):
+    n1 = ins[0][1]
+    n2 = ins[1 + n1][1]
+    return [t[1] for t in ins[1:1 + n1]], [t[1] for t in ins[2 + n1:2 + n1 + n2]], ins[2 + n1 + n2:]
+def st_yield(mo, co, p):
+    if not is_positive(p): return Err("InvalidInput")
+    k = st_limiting(mo, co)
+    return k if isinstance(k, Err) else dv(mo[k], co[k]) * p
+def st_percent_yield(a, t):
+    if not is_positive(t): return Err("InvalidInput")
+    if not is_non_negative(a): return Err("InvalidInput")
+    return dv(a, t) * 100.0
+def st_composition(pairs):
+    mw = 0.0
+    for z, c in pairs:
+        if z not in ELEMS: return Err("InvalidElement")
+        mw += ELEMS[z][3] * float(c)
+    if not is_positive(mw): return Err("ComputationError")
+    return [(z, dv(ELEMS[z][3] * float(c), mw) * 100.0) for z, c in pairs]
+def st_empirical(els, tol=None):
+    tol = ST_EMP_TOL if tol is None else tol
+    if not els: return Err("InvalidInput")
+    moles = []
+    for z, p in els:
+        if z not in ELEMS: return Err("InvalidElement")
+        if not is_positive(p): return Err("InvalidInput")
+        moles.append(dv(p, ELEMS[z][3]))
+    mn = math.inf
+    for v in moles: mn = v if v < mn else mn                                 # f64::min: no NaN here
+    if not is_positive(mn): return Err("ComputationError")
+    rat = []
+    for v in moles:
+        r = dv(v, mn)
+        if not math.isfinite(r): return Err("ComputationError")
+        rat.append(r)
+    mult = next((float(k) for k in range(1, 7) if all(abs(r * k - r_round(r * k)) <= tol for r in rat)), None)
+    if mult is None: return Err("ComputationError")
+    out = []
+    for (z, _), r in zip(els, rat):
+        c = r_round(r * mult)
+        if c > 4294967295.0: return Err("ComputationError")
+        out.append((z, int(c)))
+    return out
+def st_toks(fn, r):
+    if isinstance(r, Err): return [("E", r.name, None)]
+    if fn == "stoichiometry::balance_equation": return [("v", len(r), None)] + [("i", v, None) for v in r]
+    if fn == "stoichiometry::percent_composition":
+        return [("v", len(r), None)] + [t for z, p in r for t in (("i", z, None), ("f", p, f2b(p)))]
+    if fn == "stoichiometry::empirical_formula":
+        return [("v", len(r), None)] + [t for z, c in r for t in (("i", z, None), ("i", c, None))]
+    if isinstance(r, int): return [("i", r, None)]
+    return [("f", r, f2b(r))]
+ST_CLASS = {"stoichiometry::balance_equation": "A", "stoichiometry::assign_oxidation_states": "A",
+            "stoichiometry::limiting_reagent": "A", "stoichiometry::theoretical_yield_moles": "B",
+            "stoichiometry::percent_yield": "B", "stoichiometry::percent_composition": "B",
+            "stoichiometry::empirical_formula": "A"}
+NOTE7_NONE = "[ADR 0002 #7: no integer-matrix counterpart ("
+NOTE7_OX = "[ADR 0002 #7: the port returns the exact average oxidation states"
+st_count, st_none, st_round, st_ox, st_bal_ok, st_bal_err = {}, {}, 0, 0, 0, {}
+st_ovf_valid, st_ovf_examples = 0, []
+st_rows = {}
+for fn, cls, ins, outs, where in R.get("stoichiometry", []):
+    st_count[fn] = st_count.get(fn, 0) + 1
+    st_rows.setdefault(fn, []).append((ins, outs, where))
+    check(ST_CLASS.get(fn) == cls, f"{where}: {fn} class {cls}")
+    note = NOTES.get(where, "")
+    if fn == "stoichiometry::balance_equation":
+        mat = st_matrix(ins)
+        rust = st_balance(mat)
+        check(toks_equal(outs, st_toks(fn, rust)), f"{where}: balance_equation -> {outs}, recomputed {rust}")
+        cp = st_counterpart(mat)
+        noted = NOTE7_NONE in note
+        check(noted == (cp is None), f"{where}: the #7 no-counterpart note is {'stray' if noted else 'missing'}")
+        if cp is None:
+            check(outs == [("E", "InvalidInput", None)], f"{where}: a matrix without an integer counterpart is not Err(InvalidInput)")
+            why = re.search(r"no integer-matrix counterpart \(([^)]*)\)", note)
+            st_none[why.group(1) if why else "?"] = st_none.get(why.group(1) if why else "?", 0) + 1
+            continue
+        st_round += any(math.isfinite(v) and v != r_round(v) for row in mat for v in row)
+        m_, n_ = len(mat), len(mat[0]) if mat else 0
+        # the port's integer function on the counterpart gives the oracle's result: the f64 entry test is the one step
+        # the integer API lacks, and every entry Rust accepts is its rounded integer
+        check(toks_equal(outs, st_toks(fn, st_balance_int(cp, m_, n_))), f"{where}: the integer counterpart's result")
+        if m_ == 0 or n_ < 2 or any(abs(v) > ST_MAX_ENTRY for v in cp):
+            continue
+        dim, w = st_nullspace(cp, m_, n_)
+        valid = dim == 1 and all(q > 0 for q in w) and max(w) <= U32_MAX
+        if isinstance(rust, Err):
+            st_bal_err[dim if dim != 1 else ("valid" if valid else "invalid")] = st_bal_err.get(
+                dim if dim != 1 else ("valid" if valid else "invalid"), 0) + 1
+            if valid:
+                st_ovf_valid += 1
+                if len(st_ovf_examples) < 2: st_ovf_examples.append((mat, w))
+        else:
+            st_bal_ok += 1
+            check(valid and rust == w, f"{where}: balance_equation's Ok {rust} is not the exact null vector {w} (dim {dim})")
+    elif fn == "stoichiometry::assign_oxidation_states":
+        atoms, charge = st_pairs(ins), ins[-1][1]
+        check(len(ins) == 2 + 2 * len(atoms) and all(0 <= z <= 255 and 0 <= c <= U32_MAX for z, c in atoms)
+              and I32_MIN <= charge <= I32_MAX, f"{where}: (u8, u32) atoms and an i32 charge")
+        rust = st_oxidation(atoms, charge, False)
+        port = st_oxidation(atoms, charge, True)
+        check(toks_equal(outs, st_out_rust(rust)), f"{where}: assign_oxidation_states -> {outs}, recomputed {rust}")
+        nonint = isinstance(rust, Err) and rust.name == NONINT
+        if not nonint:
+            check(st_out_port(port) == ([("E", rust.name, None)] if isinstance(rust, Err) else
+                  [("v", len(rust), None)] + [t for z, q in rust for t in (("i", z, None), ("i", int(q), None), ("i", 1, None))]),
+                  f"{where}: the port's states differ from Rust's on a row Rust answers")
+        expect_note = nonint and not isinstance(port, Err)
+        noted = NOTE7_OX in note
+        check(noted == expect_note, f"{where}: the #7 oxidation note is {'stray' if noted else 'missing'}")
+        if nonint and isinstance(port, Err):
+            check(port.name == "ComputationError", f"{where}: the port's Err for a non-integer average is {port.name}")
+        if noted:
+            m = re.search(r" \(([^()]*)\)\]$", note)
+            toks = [parse_tok(t, where) for t in m.group(1).split(" ")] if m else []
+            check(toks == st_out_port(port), f"{where}: the #7 note is not the port's exact states {port}")
+            check(all(q.denominator > 0 and math.gcd(q.numerator, q.denominator) == 1 for _, q in port),
+                  f"{where}: a state not reduced")
+            st_ox += 1
+    elif fn in ("stoichiometry::limiting_reagent", "stoichiometry::theoretical_yield_moles"):
+        mo, co, rest = st_two_slices(ins)
+        r = st_limiting(mo, co) if fn.endswith("limiting_reagent") else st_yield(mo, co, rest[0][1])
+        check(toks_equal(outs, st_toks(fn, r)), f"{where}: {fn} -> {outs}, recomputed {r}")
+    elif fn == "stoichiometry::percent_yield":
+        r = st_percent_yield(ins[0][1], ins[1][1])
+        check(toks_equal(outs, st_toks(fn, r)), f"{where}: percent_yield -> {outs}, recomputed {r}")
+    elif fn == "stoichiometry::percent_composition":
+        r = st_composition(st_pairs(ins))
+        check(toks_equal(outs, st_toks(fn, r)), f"{where}: percent_composition -> {outs}, recomputed {r}")
+    elif fn == "stoichiometry::empirical_formula":
+        r = st_empirical(st_pairs(ins))
+        check(toks_equal(outs, st_toks(fn, r)), f"{where}: empirical_formula -> {outs}, recomputed {r}")
+    else:
+        check(False, f"{where}: stoichiometry.tsv function {fn} has no rule here")
+check(set(st_count) == set(ST_CLASS), f"stoichiometry: functions {sorted(st_count)}")
+print(f"stoichiometry rows checked: {sum(st_count.values())} ({', '.join(f'{k.split(chr(58))[-1]} {v}' for k, v in sorted(st_count.items()))})")
+print(f"stoichiometry: ADR 0002 #7: {st_ox} assign_oxidation_states rows noted with the port's exact rational states "
+      f"(Fraction, reduced; the oracle's non-integer-average Err), {sum(st_none.values())} balance_equation rows without "
+      f"an integer counterpart ({', '.join(f'{v} {k}' for k, v in sorted(st_none.items()))}), "
+      f"{st_round} replayed with a near-integer entry rounded as Rust does")
+print(f"stoichiometry: balance_equation by exact linear algebra: {st_bal_ok} Ok rows the primitive positive null "
+      f"vector; Err rows by null-space dimension / vector: {dict(sorted(st_bal_err.items(), key=str))}; "
+      f"{st_ovf_valid} rows where Rust's i64 elimination overflows although a valid u32 solution exists")
+for mat, w in st_ovf_examples:
+    print(f"  e.g. {[[int(v) for v in row] for row in mat]}: Err(ComputationError), the exact answer {w}")
+# The typed constants: each must change some golden row when perturbed.
+def st_changes(fn, rule):
+    return sum(1 for ins, outs, w in st_rows.get(fn, []) if not toks_equal(st_toks(fn, rule(ins)), outs))
+ST_PINS = [
+    ("EMPIRICAL_TOLERANCE × 0.5", "stoichiometry::empirical_formula", lambda a: st_empirical(st_pairs(a), tol=0.05)),
+    ("EMPIRICAL_TOLERANCE × 2", "stoichiometry::empirical_formula", lambda a: st_empirical(st_pairs(a), tol=0.2)),
+    ("INTEGER_TOLERANCE + 1 ulp", "stoichiometry::balance_equation", lambda a: st_balance(st_matrix(a), tol=nextup(1e-9))),
+    ("INTEGER_TOLERANCE − 1 ulp", "stoichiometry::balance_equation", lambda a: st_balance(st_matrix(a), tol=nextdown(1e-9))),
+    ("MAX_COMPOSITION_ENTRY − 1", "stoichiometry::balance_equation", lambda a: st_balance(st_matrix(a), bound=2.0 ** 53 - 1)),
+    ("MAX_COMPOSITION_ENTRY + 2", "stoichiometry::balance_equation", lambda a: st_balance(st_matrix(a), bound=2.0 ** 53 + 2)),
+]
+for label, fn, rule in ST_PINS:
+    ch = st_changes(fn, rule)
+    print(f"  pinning: with {label}, {ch} of {len(st_rows.get(fn, []))} {fn.split('::')[1]} rows change")
+    check(ch > 0, f"stoichiometry: no golden {fn} row pins {label}")
+for label, tol in (("+ 1 ulp", nextup(0.1)), ("− 1 ulp", nextdown(0.1))):
+    ch = st_changes("stoichiometry::empirical_formula", lambda a, t=tol: st_empirical(st_pairs(a), tol=t))
+    up_ = label[0] == "+"
+    k = next((kk for kk in range(1, 33) if st_changes("stoichiometry::empirical_formula", lambda a, kk=kk:
+              st_empirical(st_pairs(a), tol=(0.1 + kk * 2.0 ** -56) if up_ else (0.1 - kk * 2.0 ** -56))) > 0), None)
+    print(f"  EMPIRICAL_TOLERANCE {label}: {ch} rows change (|r·k − round(r·k)| is a multiple of the ratio's ulp, at "
+          f"least 2⁻⁵² here, so only a change across a multiple shows: the first at {k} ulps; "
+          f"tests/stoichiometry.tcyr pins 0.1 to the ulp on _km_empirical_close)")
+
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
-             "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy"}
+             "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy", "stoichiometry"}
 check(set(tsvs) == VALIDATED, f"golden modules with no section here: {sorted(set(tsvs) - VALIDATED)}; "
       f"sections with no module: {sorted(VALIDATED - set(tsvs))}")
 

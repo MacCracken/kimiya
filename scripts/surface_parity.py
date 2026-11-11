@@ -47,6 +47,7 @@ MODULES = {
     "nuclear": {"prefix": "", "structs": set()},
     "potential": {"prefix": "", "structs": set()},
     "spectroscopy": {"prefix": "", "structs": set()},
+    "stoichiometry": {"prefix": "", "structs": set()},    # M4f: ADR 0002 #7's integer matrix and rational states
 }
 
 # Rust enums with `impl` methods (M4b): their const property methods are free functions of the enum value,
@@ -119,7 +120,6 @@ EXCEPTIONS = {
 
 # Later milestones (port plan §2.1): counted, not checked.
 PENDING_MODULES = {
-    "stoichiometry": "M4",
     "reaction_dynamics": "M5", "network": "M5", "fitting": "M5", "sensitivity": "M5",
 }
 DEFERRED_MODULES = {

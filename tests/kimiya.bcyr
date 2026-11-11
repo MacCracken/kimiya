@@ -27,6 +27,7 @@ include "src/solution.cyr"
 include "src/electrochemistry_data.cyr"
 include "src/electrochemistry.cyr"
 include "src/kinetics.cyr"
+include "src/stoichiometry.cyr"
 include "src/organic_data.cyr"
 include "src/organic.cyr"
 include "src/inorganic_data.cyr"
@@ -75,6 +76,16 @@ var _bench_s8 = 0;          # [(16, 8)]: 1 record
 var _bench_iso_out = 0;     # isotope_pattern's out buffer (64 records)
 var _bench_sig = 0;         # fft_spectrum's signal (4096 f64) and find_peaks' data (1000 of them)
 var _bench_spec = 0;        # fft_spectrum's out buffer (2 × 4096 f64: the in-place transform), find_peaks' indices
+# M4f: CH₄ + 2O₂ → CO₂ + 2H₂O's 3 × 4 matrix (Rust's bench, as ADR 0002 #7's integers); 2KMnO₄ + 16HCl → …'s 5 × 6.
+var _bench_ch4: i64[12] = { 1, 0, -1, 0, 4, 0, 0, -2, 0, 2, -2, -1 };
+var _bench_kmno4m: i64[30] = { 1, 0, -1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 4, 0, 0, 0, -1, 0, 0, 1, 0, 0, -2, 0, 0, 1, -1, -2,
+    0, -2 };
+var _bench_kmno4: i64[6] = { 19, 1, 25, 1, 8, 4 };     # KMnO₄: 3 (z, count) records
+var _bench_fe3o4: i64[4] = { 26, 3, 8, 4 };            # Fe₃O₄: an average, ADR 0002 #7's rational path
+var _bench_st_out = 0;      # the coefficients' / states' / records' out buffer (32 words)
+var _bench_st_f = 0;        # 7 f64 input slots: moles (3, 2), coefficients (2, 1), the product's 2, the yields (8, 10)
+var _bench_emp = 0;         # glucose's mass percents: [(6, 40.00), (1, 6.71), (8, 53.29)], 3 (z, f64) records
+var _bench_mol = 0;         # glucose as a KmMolecule (its atoms vec)
 
 # element/lookup_by_symbol: `lookup_by_symbol(black_box("Fe"))`, a linear scan to row 26.
 fn bench_lookup_by_symbol(per_batch, batches) {
@@ -947,6 +958,87 @@ fn bench_wavenumber(per_batch, batches) {
     bench_report(b);
 }
 
+# stoichiometry/balance_ch4_combustion: `balance_equation(black_box(&m))` of CH₄ + 2O₂ → CO₂ + 2H₂O (Rust's bench, its
+# matrix as ADR 0002 #7's integers): the entry check, 3 pivots of fraction-free elimination with checked i64 products
+# and gcd reductions, the null vector, the i128 verification; and the Cyrius-only balance_kmno4_hcl (5 × 6).
+fn bench_balance(name, mat, m, n, per_batch, batches) {
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = balance_equation(mat, m, n, _bench_st_out, 32);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# stoichiometry/oxidation_states_kmno4: `assign_oxidation_states(black_box(&[(19, 1), (25, 1), (8, 4)]), 0)` (Rust's
+# bench): the three lookups, the rules, Mn solved as +7/1; and the Cyrius-only oxidation_states_fe3o4 (Fe +8/3: the
+# gcd-reduced rational where Rust took its Err path).
+fn bench_oxidation(name, atoms, n, per_batch, batches) {
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = assign_oxidation_states(atoms, n, 0, _bench_st_out, 8);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# Cyrius-only (rust-old/benches has no other stoichiometry bench): stoichiometry/limiting_reagent ((3, 2) mol over
+# (2, 1)), theoretical_yield_moles (the same, × 2), percent_yield (8 of 10), percent_composition_glucose,
+# empirical_formula_glucose (40.00 / 6.71 / 53.29 %: CH₂O at k = 1).
+fn bench_stoich_small(name, which, per_batch, batches) {
+    var mo = _bench_st_f;
+    var co = _bench_st_f + 16;
+    var p: f64 = load64(_bench_st_f + 32);
+    var a: f64 = load64(_bench_st_f + 40);
+    var th: f64 = load64(_bench_st_f + 48);
+    var mol: KmMolecule;
+    mol.atoms = _bench_mol;
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            if (which == 0) {
+                var t0, v0 = limiting_reagent(mo, 2, co, 2);
+                _bench_sink = v0;
+            } elif (which == 1) {
+                var t1, v1 = theoretical_yield_moles(mo, 2, co, 2, p);
+                _bench_sink = v1;
+            } elif (which == 2) {
+                var t2, v2 = percent_yield(a, th);
+                _bench_sink = v2;
+            } elif (which == 3) {
+                var t3, v3 = percent_composition(mol, _bench_st_out, 4);
+                _bench_sink = v3;
+            } else {
+                var t4, v4 = empirical_formula(_bench_emp, 3, _bench_st_out, 4);
+                _bench_sink = v4;
+            }
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
 # Runs every bench.
 fn main(): i64 {
     alloc_init();
@@ -1211,6 +1303,39 @@ fn main(): i64 {
     bench_fft_spectrum("spectroscopy/fft_spectrum_4096", 4096, 50, 20);
     bench_find_peaks(10000, 20);
     bench_wavenumber(1000000, 20);
+    _bench_st_out = alloc(32 * 8);
+    bench_balance("stoichiometry/balance_ch4_combustion", &_bench_ch4, 3, 4, 100000, 20);
+    bench_balance("stoichiometry/balance_kmno4_hcl", &_bench_kmno4m, 5, 6, 100000, 20);
+    bench_oxidation("stoichiometry/oxidation_states_kmno4", &_bench_kmno4, 3, 1000000, 20);
+    bench_oxidation("stoichiometry/oxidation_states_fe3o4", &_bench_fe3o4, 2, 1000000, 20);
+    _bench_st_f = alloc(7 * 8);
+    var sf: f64[7];
+    sf[0] = 3.0;
+    sf[1] = 2.0;
+    sf[2] = 2.0;
+    sf[3] = 1.0;
+    sf[4] = 2.0;
+    sf[5] = 8.0;
+    sf[6] = 10.0;
+    memcpy(_bench_st_f, &sf, 7 * 8);
+    var glu = KmMolecule_glucose();
+    _bench_mol = glu.atoms;
+    _bench_emp = alloc(6 * 8);
+    var ef: f64[3];
+    ef[0] = 40.00;
+    ef[1] = 6.71;
+    ef[2] = 53.29;
+    store64(_bench_emp, 6);
+    store64(_bench_emp + 8, load64(&ef));
+    store64(_bench_emp + 16, 1);
+    store64(_bench_emp + 24, load64(&ef + 8));
+    store64(_bench_emp + 32, 8);
+    store64(_bench_emp + 40, load64(&ef + 16));
+    bench_stoich_small("stoichiometry/limiting_reagent", 0, 1000000, 20);
+    bench_stoich_small("stoichiometry/theoretical_yield_moles", 1, 1000000, 20);
+    bench_stoich_small("stoichiometry/percent_yield", 2, 1000000, 20);
+    bench_stoich_small("stoichiometry/percent_composition_glucose", 3, 1000000, 20);
+    bench_stoich_small("stoichiometry/empirical_formula_glucose", 4, 1000000, 20);
     return 0;
 }
 
