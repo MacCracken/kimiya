@@ -1,8 +1,9 @@
-//! Exact integer arithmetic for the exact values ADR 0002 #13, #16, #19 … #22 and #24 … #28 name (M4c … the overflow
-//! audit's B1): binary64 rounding of m·2^e for a mantissa of any size, the two irrational factors the port rounds once,
+//! Exact integer arithmetic for the exact values ADR 0002 #13, #16, #19 … #22 and #24 … #30 name (M4c … the overflow
+//! audit's B2): binary64 rounding of m·2^e for a mantissa of any size, the two irrational factors the port rounds once,
 //! 2⁻ᶠ (N₀/2ⁿ for a fractional n) and 2^(1/6) (σ·2^(1/6)), the rational 1/(100·x) (the wavenumber conversions), binary64
-//! with an unbounded exponent (the geometry, and B1's kinetics), the exact rationals p/q·2^e of the Bohr model, the
-//! Rydberg formula and the reduced mass, and the correctly rounded monomials of stoichiometry and B1.
+//! with an unbounded exponent (the geometry, B1's kinetics and B2's Nernst equation), the exact rationals p/q·2^e of the
+//! Bohr model, the Rydberg formula and the reduced mass, the correctly rounded monomials of stoichiometry, B1 and B2,
+//! and B2's correctly rounded √ of a quotient.
 //! Integer arithmetic only, independent of the port's double-word and multi-word code (`validate.py` checks every value
 //! again, with `Fraction` and MPFR).
 
@@ -531,6 +532,46 @@ impl Ux {
         round_scaled(mant, e, neg)
     }
 
+    /// x + y rounded once into binary64 (its subnormal grid, ±∞ past DBL_MAX), with IEEE's signed zeros (an exact
+    /// cancellation is +0; −0 + −0 is −0): ADR 0002 #29 (the overflow audit's B2), the Nernst equation's final
+    /// subtraction. The exact sum for an exponent gap up to 72 (below 2¹²⁶), otherwise the larger term with a sticky bit
+    /// three places below its last (the smaller is below 2⁻¹⁹ of that place, and no binary64 rounding boundary lies
+    /// strictly between the two: `add`'s argument, and at the subnormal grid the larger term's last place is at most
+    /// 2⁻¹⁰⁷⁵, so its boundaries are multiples of it); then `round_scaled`.
+    pub fn add_f64(self, o: Self) -> f64 {
+        if self.is_zero() && o.is_zero() {
+            return if self.neg && o.neg { -0.0 } else { 0.0 };
+        }
+        if self.is_zero() {
+            return round_scaled(u128::from(o.m), o.e, o.neg);
+        }
+        if o.is_zero() {
+            return round_scaled(u128::from(self.m), self.e, self.neg);
+        }
+        let (h, l) = if self.e >= o.e { (self, o) } else { (o, self) };
+        let d = h.e - l.e;
+        if d > 72 {
+            let base = u128::from(h.m) << 3;
+            let mant = if h.neg == l.neg { base | 1 } else { base - 1 };
+            return round_scaled(mant, h.e - 3, h.neg);
+        }
+        let hm = u128::from(h.m) << u32::try_from(d).unwrap_or(0);
+        let lm = u128::from(l.m);
+        if h.neg == l.neg {
+            return round_scaled(hm + lm, l.e, h.neg);
+        }
+        match hm.cmp(&lm) {
+            std::cmp::Ordering::Equal => 0.0,
+            std::cmp::Ordering::Greater => round_scaled(hm - lm, l.e, h.neg),
+            std::cmp::Ordering::Less => round_scaled(lm - hm, l.e, l.neg),
+        }
+    }
+
+    /// x − y rounded once into binary64 (`add_f64` of −y).
+    pub fn sub_f64(self, o: Self) -> f64 {
+        self.add_f64(o.neg())
+    }
+
     /// Whether this is exactly the double x (a finite x; zeros by sign too).
     pub fn is(self, x: f64) -> bool {
         x.is_finite() && Self::from_f64(x) == self
@@ -735,6 +776,30 @@ pub fn cr_monomial(num: &[f64], den: &[f64]) -> f64 {
         e -= ey;
     }
     sign * cr_ratio(&p, &q, e)
+}
+
+/// The overflow audit's B2 (ADR 0002 #30): RN(√(x/y)) for positive finite doubles, rounded once (nearest; subnormal
+/// results on the 2⁻¹⁰⁷⁴ grid; +∞ past DBL_MAX): with x/y = mₓ/m_y·2^(eₓ − e_y), Q = ⌊mₓ·2^k/m_y⌋ of 121 or 122 bits
+/// (k ≥ 0 with eₓ − e_y − k even), R = ⌊√Q⌋ (of at least 60 bits; ⌊√⌊z⌋⌋ = ⌊√z⌋), sticky = [R² ≠ Q or the division
+/// left a remainder], then `round_scaled(2R + sticky)` (which drops at least eight bits, so the sticky bit decides every
+/// rounding: v·2^-(h − 1) lies in [2R, 2R + 2), strictly inside when sticky). Integer arithmetic only, independent of
+/// the port's double-double fast path and its multi-word root (`validate.py` checks every value again with Python's
+/// integers and MPFR).
+pub fn cr_sqrt_ratio(x: f64, y: f64) -> f64 {
+    assert!(x > 0.0 && x.is_finite() && y > 0.0 && y.is_finite(), "cr_sqrt_ratio({x:?}, {y:?})");
+    let (mx, ex) = decompose(x);
+    let (my, ey) = decompose(y);
+    let (p, q) = (Big::new(u128::from(mx)), Big::new(u128::from(my)));
+    let mut k = (121 + i64::try_from(q.bits()).unwrap_or(0) - i64::try_from(p.bits()).unwrap_or(0)).max(0);
+    if (ex - ey - k).rem_euclid(2) == 1 {
+        k += 1;
+    }
+    let (quo, rem) = p.shl(u64::try_from(k).unwrap_or(0)).divrem(&q);
+    assert!(quo.bits() <= 124, "cr_sqrt_ratio: Q has {} bits", quo.bits());
+    let qq = u128::from(quo.0.first().copied().unwrap_or(0)) | (u128::from(quo.0.get(1).copied().unwrap_or(0)) << 64);
+    let r = isqrt(qq);
+    let sticky = u128::from(r * r != qq || !rem.is_zero());
+    round_scaled((r << 1) | sticky, (ex - ey - k) / 2 - 1, false)
 }
 
 /// a·2^ea against b·2^eb, for non-negative integers a and b, exactly.

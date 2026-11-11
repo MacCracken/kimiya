@@ -360,6 +360,21 @@ var _par_adr28_zhl = 0;                      # steady_state_intermediate, pre_eq
 var _par_adr28_ssi = 0;
 var _par_adr28_pre = 0;
 var _par_adr28_mm = 0;
+# The overflow audit's B2 (ADR 0002 #29, #30): solution's, electrochemistry's and spectroscopy's rows noted with the
+# port's value (rounded once, or Rust's sequence with an unbounded exponent for nernst_potential), mapped as B1's and
+# counted per function.
+var _par_adr29_dil = 0;                      # #29: dilution, solution_conductivity, faraday_mass_deposited,
+var _par_adr29_cond = 0;                     # faraday_charge_required, faraday_mass_ratio, nernst_potential
+var _par_adr29_fmass = 0;
+var _par_adr29_fcharge = 0;
+var _par_adr29_fratio = 0;
+var _par_adr29_nernst = 0;
+var _par_adr30_abs = 0;                      # #30: absorbance, concentration_from_absorbance, vibrational_frequency,
+var _par_adr30_conc = 0;                     # rigid_rotor_energy, rotational_constant, diatomic_moment_of_inertia
+var _par_adr30_vib = 0;
+var _par_adr30_rotor = 0;
+var _par_adr30_rot = 0;
+var _par_adr30_moment = 0;
 
 # The got list for an f64-valued function's row whose note may name the port's value under ADR 0002 #`adr` (the C string
 # `tag`): mapped when it does, compared with the oracle as usual otherwise.
@@ -811,7 +826,8 @@ fn _par_in_ions(k): i64 {
     return buf;
 }
 
-# `solution` rows: src/solution.cyr. The activity models' first input is the charge (`i:z`).
+# `solution` rows: src/solution.cyr. The activity models' first input is the charge (`i:z`). ADR 0002 #29 (the overflow
+# audit's B2): dilution and solution_conductivity rows noted with the port's correctly rounded value are mapped.
 fn _par_solution(fp, fl): i64 {
     if (_par_eq(fp, fl, "solution::ionic_strength") == 1) {
         var r: f64 = ionic_strength(_par_in_ions(0), _par_in(0));
@@ -865,11 +881,17 @@ fn _par_solution(fp, fl): i64 {
     if (_par_eq(fp, fl, "solution::weak_base_ph") == 1) { var t, v = weak_base_ph(x, y); _par_got_res(t, v); return 1; }
     if (_par_eq(fp, fl, "solution::solution_conductivity") == 1) {
         var r: f64 = solution_conductivity(x, y);
-        _par_got_f(r);
+        _par_got_noted_f(29, "[ADR 0002 #29:", r);
+        if (_par_mapped == 29) { _par_adr29_cond = _par_adr29_cond + 1; }
         return 1;
     }
     var z: f64 = _par_in(2);
-    if (_par_eq(fp, fl, "solution::dilution") == 1) { var t, v = dilution(x, y, z); _par_got_res(t, v); return 1; }
+    if (_par_eq(fp, fl, "solution::dilution") == 1) {
+        var t, v = dilution(x, y, z);
+        _par_got_noted(29, "[ADR 0002 #29:", t, v);
+        if (_par_mapped == 29) { _par_adr29_dil = _par_adr29_dil + 1; }
+        return 1;
+    }
     if (_par_eq(fp, fl, "solution::henderson_hasselbalch") == 1) {
         var t, v = henderson_hasselbalch(x, y, z);
         _par_got_res(t, v);
@@ -908,7 +930,9 @@ fn _par_in_text(k): i64 {
 }
 
 # `electrochemistry` rows: src/electrochemistry.cyr and the generated src/electrochemistry_data.cyr. An electron
-# count is an `i:` token (Rust's u8), passed as the word.
+# count is an `i:` token (Rust's u8), passed as the word. ADR 0002 #29 (the overflow audit's B2): Faraday's three laws'
+# rows noted with the port's correctly rounded value, and nernst_potential's with its unbounded-exponent value, are
+# mapped.
 fn _par_electrochemistry(fp, fl): i64 {
     if (_par_eq(fp, fl, "electrochemistry::STANDARD_POTENTIALS") == 1) {
         _par_got_seq(KM_STANDARD_POTENTIALS_COUNT);
@@ -961,7 +985,8 @@ fn _par_electrochemistry(fp, fl): i64 {
         var tk: f64 = _par_in(2);
         var q: f64 = _par_in(3);
         var t, v = nernst_potential(x, _par_in(1), tk, q);
-        _par_got_res(t, v);
+        _par_got_noted(29, "[ADR 0002 #29:", t, v);
+        if (_par_mapped == 29) { _par_adr29_nernst = _par_adr29_nernst + 1; }
         return 1;
     }
     var y: f64 = _par_in(1);
@@ -972,18 +997,21 @@ fn _par_electrochemistry(fp, fl): i64 {
     }
     if (_par_eq(fp, fl, "electrochemistry::faraday_mass_deposited") == 1) {
         var t, v = faraday_mass_deposited(x, y, _par_in(2));
-        _par_got_res(t, v);
+        _par_got_noted(29, "[ADR 0002 #29:", t, v);
+        if (_par_mapped == 29) { _par_adr29_fmass = _par_adr29_fmass + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "electrochemistry::faraday_charge_required") == 1) {
         var t, v = faraday_charge_required(x, y, _par_in(2));
-        _par_got_res(t, v);
+        _par_got_noted(29, "[ADR 0002 #29:", t, v);
+        if (_par_mapped == 29) { _par_adr29_fcharge = _par_adr29_fcharge + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "electrochemistry::faraday_mass_ratio") == 1) {
         var mb: f64 = _par_in(3);
         var t, v = faraday_mass_ratio(x, y, _par_in(2), mb, _par_in(4));
-        _par_got_res(t, v);
+        _par_got_noted(29, "[ADR 0002 #29:", t, v);
+        if (_par_mapped == 29) { _par_adr29_fratio = _par_adr29_fratio + 1; }
         return 1;
     }
     return 0;
@@ -1864,7 +1892,8 @@ fn _par_got_f64s(t, v, buf) {
 # fft_spectrum runs with a buffer of n/2 + 1 values up to n = 64 (the heap work table) and of 2n above (the in-place
 # transform), so both paths replay the corpus. ADR 0002 #19 (the wavenumber conversions), #21 (the Bohr levels, the
 # transition energy, the Rydberg formula and the series) and #22 (the reduced mass): a noted row's port value must be
-# the note's; #23 (the isotope abundances and patterns, M4e-4): a noted row's whole result must be the note's tokens.
+# the note's; #23 (the isotope abundances and patterns, M4e-4): a noted row's whole result must be the note's tokens;
+# #30 (the overflow audit's B2: the Beer–Lambert, rotor and moment-of-inertia monomials, √(k/μ)): as #19's.
 fn _par_spectroscopy(fp, fl): i64 {
     if (_par_spec_alloc() != 1) { return 0 - 1; }
     if (_par_eq(fp, fl, "SpectralSeries::n_lower") == 1) {
@@ -2007,7 +2036,8 @@ fn _par_spectroscopy(fp, fl): i64 {
     }
     if (_par_eq(fp, fl, "spectroscopy::rotational_constant") == 1) {
         var t11, v11 = rotational_constant(x);
-        _par_got_res(t11, v11);
+        _par_got_noted(30, "[ADR 0002 #30:", t11, v11);
+        if (_par_mapped == 30) { _par_adr30_rot = _par_adr30_rot + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "spectroscopy::harmonic_oscillator_energy") == 1) {
@@ -2019,7 +2049,8 @@ fn _par_spectroscopy(fp, fl): i64 {
     if (_par_eq(fp, fl, "spectroscopy::rigid_rotor_energy") == 1) {
         var b13: f64 = _par_in(1);
         var r13: f64 = rigid_rotor_energy(_par_in(0), b13);
-        _par_got_f(r13);
+        _par_got_noted_f(30, "[ADR 0002 #30:", r13);
+        if (_par_mapped == 30) { _par_adr30_rotor = _par_adr30_rotor + 1; }
         return 1;
     }
     var y: f64 = _par_in(1);
@@ -2030,23 +2061,27 @@ fn _par_spectroscopy(fp, fl): i64 {
     }
     if (_par_eq(fp, fl, "spectroscopy::vibrational_frequency") == 1) {
         var t15, v15 = vibrational_frequency(x, y);
-        _par_got_res(t15, v15);
+        _par_got_noted(30, "[ADR 0002 #30:", t15, v15);
+        if (_par_mapped == 30) { _par_adr30_vib = _par_adr30_vib + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "spectroscopy::diatomic_moment_of_inertia") == 1) {
         var r16: f64 = diatomic_moment_of_inertia(x, y);
-        _par_got_f(r16);
+        _par_got_noted_f(30, "[ADR 0002 #30:", r16);
+        if (_par_mapped == 30) { _par_adr30_moment = _par_adr30_moment + 1; }
         return 1;
     }
     var z: f64 = _par_in(2);
     if (_par_eq(fp, fl, "spectroscopy::absorbance") == 1) {
         var r17: f64 = absorbance(x, y, z);
-        _par_got_f(r17);
+        _par_got_noted_f(30, "[ADR 0002 #30:", r17);
+        if (_par_mapped == 30) { _par_adr30_abs = _par_adr30_abs + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "spectroscopy::concentration_from_absorbance") == 1) {
         var t18, v18 = concentration_from_absorbance(x, y, z);
-        _par_got_res(t18, v18);
+        _par_got_noted(30, "[ADR 0002 #30:", t18, v18);
+        if (_par_mapped == 30) { _par_adr30_conc = _par_adr30_conc + 1; }
         return 1;
     }
     return 0;
@@ -2494,8 +2529,9 @@ fn _par_accepted(fp, fl, ip, il): i64 {
     if (_par_mapped == 3) { return 2; }
     # ADR 0002 #13 … #22: a row whose note names the port's exact value, which the port returned; #23 its whole result;
     # #24 … #26 (M4f-2) stoichiometry's exact value, index or whole result; #27, #28 (the overflow audit's B1) thermo's,
-    # phase's and kinetics' rounded-once or unbounded-exponent value.
-    if (_par_mapped >= 13 && _par_mapped <= 28) { return 2; }
+    # phase's and kinetics' rounded-once or unbounded-exponent value; #29, #30 (B2) solution's, electrochemistry's and
+    # spectroscopy's.
+    if (_par_mapped >= 13 && _par_mapped <= 30) { return 2; }
     # ADR 0002 #7 (M4f): an oxidation-state row whose note names the port's exact rational states, or a balancing row
     # whose f64 matrix has no integer counterpart (the oracle's Err(InvalidInput)).
     if (_par_mapped == 7) { return 2; }
@@ -2504,13 +2540,14 @@ fn _par_accepted(fp, fl, ip, il): i64 {
 
 # 1 for an ADR whose accepted rows are counted but not printed row by row: ADR 0002 #4's Antoine mapping, #13 … #22's
 # exact-value rows (M4c … M4e-3; about 17,000 rows between them), #23's isotope rows (M4e-4), #7's oxidation-state
-# and balancing rows (M4f), #24 … #26's stoichiometry rows (M4f-2) and #27 / #28's (the overflow audit's B1), each
+# and balancing rows (M4f), #24 … #26's stoichiometry rows (M4f-2), #27 / #28's (the overflow audit's B1) and #29 /
+# #30's (B2), each
 # summarised by _par_module_done with its count; the validate.py proofs check every one of them. ADR 0002 #12's CFSE
 # rows (13) and #3's SEMF rows (23) are printed by name.
 #must_use
 fn _par_accepted_quiet(adr): i64 {
     if (adr == 2 && _par_mapped == 2) { return 1; }
-    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 28) { return 1; }
+    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 30) { return 1; }
     if (adr == 2 && _par_mapped == 7) { return 1; }
     return 0;
 }
@@ -2524,11 +2561,38 @@ fn _par_accepted_bits(adr): i64 {
 }
 
 # After the phase module: the ADR 0002 #27 (per function) and #4 mapping summaries; after thermo, #27's (per function);
-# after kinetics, #28's (per function); after thermochem, ADR 0002 #1's; after organic, #6's; after inorganic, #12's and
-# #15's; after nuclear, #3's, #13's and #14's; after potential, #16's, #17's, #18's and #20's; after spectroscopy,
-# #19's, #21's (per function), #22's and #23's (per function); after stoichiometry, #7's (the oxidation states, the
-# integer matrix) and #24's (per function), #25's and #26's.
+# after kinetics, #28's (per function); after solution and electrochemistry, #29's (per function); after thermochem,
+# ADR 0002 #1's; after organic, #6's; after inorganic, #12's and #15's; after nuclear, #3's, #13's and #14's; after
+# potential, #16's, #17's, #18's and #20's; after spectroscopy, #19's, #21's (per function), #22's, #23's (per function)
+# and #30's (per function); after stoichiometry, #7's (the oxidation states, the integer matrix) and #24's (per
+# function), #25's and #26's.
 fn _par_module_done(mp, ml) {
+    if (_par_eq(mp, ml, "solution") == 1) {
+        print("  ADR 0002 #29 rounded once: ", 29);
+        fmt_int(_par_adr29_dil + _par_adr29_cond);
+        print(" rows (dilution ", 16);
+        fmt_int(_par_adr29_dil);
+        print(", solution_conductivity ", 24);
+        fmt_int(_par_adr29_cond);
+        print(") where the port's correctly rounded value differs from Rust's", 62);
+        println(" (accepted, ADR 2, counted, not listed)");
+        return 0;
+    }
+    if (_par_eq(mp, ml, "electrochemistry") == 1) {
+        print("  ADR 0002 #29 Faraday rounded once, Nernst unbounded: ", 55);
+        fmt_int(_par_adr29_fmass + _par_adr29_fcharge + _par_adr29_fratio + _par_adr29_nernst);
+        print(" rows (faraday_mass_deposited ", 30);
+        fmt_int(_par_adr29_fmass);
+        print(", faraday_charge_required ", 26);
+        fmt_int(_par_adr29_fcharge);
+        print(", faraday_mass_ratio ", 21);
+        fmt_int(_par_adr29_fratio);
+        print(", nernst_potential ", 19);
+        fmt_int(_par_adr29_nernst);
+        print(") where the port's rounded-once or unbounded-exponent value differs from Rust's", 79);
+        println(" (accepted, ADR 2, counted, not listed)");
+        return 0;
+    }
     if (_par_eq(mp, ml, "thermo") == 1) {
         print("  ADR 0002 #27 rounded once: ", 29);
         fmt_int(_par_adr27_heat + _par_adr27_cal);
@@ -2619,6 +2683,23 @@ fn _par_module_done(mp, ml) {
         print(", isotope_pattern ", 18);
         fmt_int(_par_adr23_pattern);
         print(") where the port's result from the cited table is the noted one, not Rust's", 75);
+        println(" (accepted, ADR 2, counted, not listed)");
+        print("  ADR 0002 #30 rounded once: ", 29);
+        var n30 = _par_adr30_abs + _par_adr30_conc + _par_adr30_vib + _par_adr30_rotor + _par_adr30_rot;
+        fmt_int(n30 + _par_adr30_moment);
+        print(" rows (absorbance ", 18);
+        fmt_int(_par_adr30_abs);
+        print(", concentration_from_absorbance ", 32);
+        fmt_int(_par_adr30_conc);
+        print(", vibrational_frequency ", 24);
+        fmt_int(_par_adr30_vib);
+        print(", rigid_rotor_energy ", 21);
+        fmt_int(_par_adr30_rotor);
+        print(", rotational_constant ", 22);
+        fmt_int(_par_adr30_rot);
+        print(", diatomic_moment_of_inertia ", 29);
+        fmt_int(_par_adr30_moment);
+        print(") where the port's correctly rounded value differs from Rust's", 62);
         println(" (accepted, ADR 2, counted, not listed)");
         return 0;
     }

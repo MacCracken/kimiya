@@ -89,6 +89,7 @@ var _bench_mol = 0;         # glucose as a KmMolecule (its atoms vec)
 var _bench_st_x = 0;        # ADR 0002 #24–#26's exact paths: 9 f64 slots (bench_stoich_exact)
 var _bench_emp2 = 0;        # [(6, 12.011), (8, 17.5989)]: r − 1 within 1/(10·9·10¹⁵) of 1/10
 var _bench_b1 = 0;          # the audit's B1 (ADR 0002 #27, #28): 12 × 4 f64 input slots (bench_audit_b1)
+var _bench_b2 = 0;          # the audit's B2 (ADR 0002 #29, #30): 14 × 5 input words (bench_audit_b2)
 
 # element/lookup_by_symbol: `lookup_by_symbol(black_box("Fe"))`, a linear scan to row 26.
 fn bench_lookup_by_symbol(per_batch, batches) {
@@ -1138,6 +1139,73 @@ fn bench_audit_b1(name, which, per_batch, batches) {
     bench_report(b);
 }
 
+# Cyrius-only, the overflow audit's B2 (ADR 0002 #29, #30): solution's, electrochemistry's and spectroscopy's functions
+# without a Rust bench (nernst_potential and absorbance have theirs above), on typical inputs, then on the edges that
+# take each one's other paths. Five words per bench, an electron count or J as its integer word. which: 0 dilution
+# (2 M, 0.1 L, 0.5 L), 1 solution_conductivity (126.4 S·cm²/mol, 0.01 M), 2 faraday_mass_deposited (9648.5 C, Cu
+# 63.546 g/mol, 2), 3 faraday_charge_required (1 g, 63.546, 2), 4 faraday_mass_ratio (1 g of Cu, 2 → Ag 107.868, 1),
+# 5 concentration_from_absorbance (0.5, 100, 1 cm), 6 vibrational_frequency (HCl: 516 N/m, 1.6266·10⁻²⁷ kg),
+# 7 rigid_rotor_energy (J = 2, B = 3.19·10¹¹ Hz), 8 rotational_constant (2.64·10⁻⁴⁷ kg·m²), 9 diatomic_moment_of_inertia
+# (1.6266·10⁻²⁷ kg, 1.2746·10⁻¹⁰ m); the edges: 10 nernst_potential_edge (0.342, 2, DBL_MAX, 0.1: R·T overflows, the
+# unbounded-exponent slow path), 11 vibrational_frequency_edge (500, 2⁻¹⁰²²: k/μ overflows in Rust; the √ fast path),
+# 12 vibrational_frequency_subnormal (10⁻³⁰⁰, 5·10⁻³²⁴: a subnormal μ, the exact path), 13 faraday_mass_ratio_tie
+# (y·3 with 3y = 2⁵³ + 1, a midpoint the 3/2 shape's test leaves to _km_mono_tie).
+fn bench_audit_b2(name, which, per_batch, batches) {
+    var x = _bench_b2 + 40 * which;
+    var a0: f64 = load64(x);
+    var a1: f64 = load64(x + 8);
+    var a2: f64 = load64(x + 16);
+    var a3: f64 = load64(x + 24);
+    var w2 = load64(x + 16);
+    var w4 = load64(x + 32);
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            if (which == 0) {
+                var t0, v0 = dilution(a0, a1, a2);
+                _bench_sink = v0;
+            } elif (which == 1) {
+                var r1: f64 = solution_conductivity(a0, a1);
+                _bench_sink = r1;
+            } elif (which == 2) {
+                var t2, v2 = faraday_mass_deposited(a0, a1, w2);
+                _bench_sink = v2;
+            } elif (which == 3) {
+                var t3, v3 = faraday_charge_required(a0, a1, w2);
+                _bench_sink = v3;
+            } elif (which == 4 || which == 13) {
+                var t4, v4 = faraday_mass_ratio(a0, a1, w2, a3, w4);
+                _bench_sink = v4;
+            } elif (which == 5) {
+                var t5, v5 = concentration_from_absorbance(a0, a1, a2);
+                _bench_sink = v5;
+            } elif (which == 6 || which == 11 || which == 12) {
+                var t6, v6 = vibrational_frequency(a0, a1);
+                _bench_sink = v6;
+            } elif (which == 7) {
+                var r7: f64 = rigid_rotor_energy(load64(x), a1);
+                _bench_sink = r7;
+            } elif (which == 8) {
+                var t8, v8 = rotational_constant(a0);
+                _bench_sink = v8;
+            } elif (which == 9) {
+                var r9: f64 = diatomic_moment_of_inertia(a0, a1);
+                _bench_sink = r9;
+            } else {
+                var t10, v10 = nernst_potential(a0, load64(x + 8), a2, a3);
+                _bench_sink = v10;
+            }
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
 # Runs every bench.
 fn main(): i64 {
     alloc_init();
@@ -1517,6 +1585,68 @@ fn main(): i64 {
     bench_audit_b1("phase/osmotic_pressure_subnormal", 9, 100000, 20);
     bench_audit_b1("kinetics/second_order_concentration_edge", 10, 1000000, 20);
     bench_audit_b1("kinetics/michaelis_menten_edge", 11, 1000000, 20);
+    _bench_b2 = alloc(70 * 8);
+    var bw: f64[70];
+    q = 0;
+    while (q < 70) {
+        bw[q] = 0.0;
+        q = q + 1;
+    }
+    bw[0] = 2.0;                            # 0 dilution
+    bw[1] = 0.1;
+    bw[2] = 0.5;
+    bw[5] = 126.4;                          # 1 solution_conductivity
+    bw[6] = 0.01;
+    bw[10] = 9648.5;                        # 2 faraday_mass_deposited (n = 2, slot 12: below)
+    bw[11] = 63.546;
+    bw[15] = 1.0;                           # 3 faraday_charge_required (n = 2, slot 17)
+    bw[16] = 63.546;
+    bw[20] = 1.0;                           # 4 faraday_mass_ratio (n_a = 2, slot 22; n_b = 1, slot 24)
+    bw[21] = 63.546;
+    bw[23] = 107.868;
+    bw[25] = 0.5;                           # 5 concentration_from_absorbance
+    bw[26] = 100.0;
+    bw[27] = 1.0;
+    bw[30] = 516.0;                         # 6 vibrational_frequency
+    bw[31] = 0.0000000000000000000000000016266;
+    bw[36] = 319000000000.0;                # 7 rigid_rotor_energy (J = 2, slot 35)
+    bw[40] = 0.0000000000000000000000000000000000000000000000264;  # 8 rotational_constant
+    bw[45] = 0.0000000000000000000000000016266;                    # 9 diatomic_moment_of_inertia
+    bw[46] = 0.00000000012746;
+    bw[50] = 0.342;                         # 10 nernst_potential_edge (n = 2, slot 51)
+    bw[52] = dmax;
+    bw[53] = 0.1;
+    bw[55] = 500.0;                         # 11 vibrational_frequency_edge (slot 56: 2⁻¹⁰²², below)
+    # 12 vibrational_frequency_subnormal: (10⁻³⁰⁰, 2⁻¹⁰⁷⁴), slots 60 and 61, below
+    bw[65] = 3002399751580331.0;            # 13 faraday_mass_ratio_tie: y·3/1 (n_a = n_b = 1, slots 67 and 69)
+    bw[66] = 1.0;
+    bw[68] = 3.0;
+    memcpy(_bench_b2, &bw, 70 * 8);
+    store64(_bench_b2 + 8 * 12, 2);
+    store64(_bench_b2 + 8 * 17, 2);
+    store64(_bench_b2 + 8 * 22, 2);
+    store64(_bench_b2 + 8 * 24, 1);
+    store64(_bench_b2 + 8 * 35, 2);
+    store64(_bench_b2 + 8 * 51, 2);
+    store64(_bench_b2 + 8 * 56, 0x0010000000000000);
+    store64(_bench_b2 + 8 * 60, 0x01A56E1FC2F8F359);
+    store64(_bench_b2 + 8 * 61, 1);
+    store64(_bench_b2 + 8 * 67, 1);
+    store64(_bench_b2 + 8 * 69, 1);
+    bench_audit_b2("solution/dilution", 0, 1000000, 20);
+    bench_audit_b2("solution/solution_conductivity", 1, 1000000, 20);
+    bench_audit_b2("electrochemistry/faraday_mass_deposited", 2, 1000000, 20);
+    bench_audit_b2("electrochemistry/faraday_charge_required", 3, 1000000, 20);
+    bench_audit_b2("electrochemistry/faraday_mass_ratio", 4, 1000000, 20);
+    bench_audit_b2("spectroscopy/concentration_from_absorbance", 5, 1000000, 20);
+    bench_audit_b2("spectroscopy/vibrational_frequency", 6, 1000000, 20);
+    bench_audit_b2("spectroscopy/rigid_rotor_energy", 7, 1000000, 20);
+    bench_audit_b2("spectroscopy/rotational_constant", 8, 1000000, 20);
+    bench_audit_b2("spectroscopy/diatomic_moment_of_inertia", 9, 1000000, 20);
+    bench_audit_b2("electrochemistry/nernst_potential_edge", 10, 1000000, 20);
+    bench_audit_b2("spectroscopy/vibrational_frequency_edge", 11, 1000000, 20);
+    bench_audit_b2("spectroscopy/vibrational_frequency_subnormal", 12, 100000, 20);
+    bench_audit_b2("electrochemistry/faraday_mass_ratio_tie", 13, 1000000, 20);
     return 0;
 }
 

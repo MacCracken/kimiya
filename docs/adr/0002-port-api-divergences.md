@@ -44,6 +44,8 @@ are compared through the stated mapping:
 | 26 *(2026-11-10, M4f-2)* | `stoichiometry::empirical_formula` tests \|r·k − round(r·k)\| ≤ 0.1 on rounded mole ratios: inputs at the ±1/10 edge flip between Ok and Err (14 of M4f's 3,383 rows; C 12.011 % with O 17.5989 % is an Err, but exactly CO), and its "non-positive min" and "ratio not finite" Errs are underflow and overflow artefacts | exact evaluation: the moles pctᵢ/massᵢ and their minimum exact, the ratios rᵢ = pctᵢ·mass_j/(massᵢ·pct_j) exact, the multiplier the smallest k in 1 ..= 6 with \|rᵢ·k − round(rᵢ·k)\| ≤ 1/10 exactly for every i, the counts round(rᵢ·k) exactly (past u32::MAX Rust's Err); a ratio of 2³² − ½ or more is the ComputationError (proven), the others a double-double with a tolerance test that is proven or defers to an exact integer test. Rust's validation and its order are kept | class A; equal rows plain; the others noted with the whole result `(v:n i:z i:c …)` or `(E:ComputationError)`, mapped and counted (270 rows) |
 | 27 *(2026-11-10, the overflow audit's B1)* | `thermo::heat_transfer` computes (m·c)·ΔT, `specific_heat_from_calorimetry` q/(m·ΔT), `phase::boiling_point_elevation` and `freezing_point_depression` (K·m)·i, `osmotic_pressure` (((i·M)·R)·1000)·T: two to four roundings of one product or quotient of inputs, so about a quarter of results are 1–2 ulp off, and a partial product that over- or underflows gives 0, ±∞ or NaN although the value is representable (`specific_heat_from_calorimetry(4184, 1000, DBL_MAX)` 0, not 2.33·10⁻³⁰⁸; `osmotic_pressure(5e-324, 0.1, 298.15)` 0, not 1.22·10⁻³¹⁸; `heat_transfer(1e300, 1e300, 0)` ∞·0 = NaN, not 0) | each exact product or quotient **rounded once** — RN(m·c·ΔT), RN(q/(m·ΔT)), RN(K·m·i), RN(i·M·R·1000·T) with R `KM_GAS_CONSTANT`'s double and 1000 exact — by `src/mathx.cyr`'s correctly rounded monomial `_km_cr_mono` (M4f-2's `_km_cr_mul_div` generalised: a double-double fast path with `_km_dd_div_cr`'s rounding test and an exact midpoint resolution, the exact `_km_cr_ratio` past the normal range): the sign the factors' xor, a zero factor that signed zero, ties to even, subnormal results on the 2⁻¹⁰⁷⁴ grid, ±∞ only past DBL_MAX. A non-finite input of the three unvalidated functions keeps Rust's expression; Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (151 `heat_transfer`, 171 `specific_heat_from_calorimetry`, 82 + 82 colligative, 196 `osmotic_pressure`: 682) |
 | 28 *(2026-11-10, the overflow audit's B1)* | `kinetics::zero_order_half_life` computes [A]₀/(2k), `steady_state_intermediate` (k₁·[A])/k₂, `pre_equilibrium_rate` (k₂·(k₁/k₋₁))·[A], `second_order_concentration` 1/(1/[A]₀ + k·t) and `michaelis_menten` (Vmax·[S])/(Km + [S]): an intermediate over- or underflows where the result is representable (`zero_order_half_life(DBL_MAX, DBL_MAX)` 0, not ½; `second_order_concentration(1, DBL_MAX, 10)` 0, not 5.56·10⁻³¹⁰; `michaelis_menten(100, DBL_MAX, DBL_MAX)` ∞/∞ = NaN, not 50; `pre_equilibrium_rate(1e300, 1, 1e300, 0)` ∞·0 = NaN, not 0), and the monomials' two or three roundings are 1–2 ulp off on a quarter of inputs | the three monomials **rounded once** (#27's helper: RN([A]₀/(2k)) — Rust's own division wherever 2k is finite, where it already is that value —, RN(k₁·[A]/k₂), RN(k₂·k₁·[A]/k₋₁)); the two with a sum inside under **#20's semantics**: Rust's operation sequence with an unbounded exponent (`_km_ux_*`), the final division rounded once into binary64, behind a range test (`_km_second_order_fast`, `_km_michaelis_menten_fast`) that proves Rust's chain stayed normal, so those inputs keep Rust's bits. Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (89 `second_order_concentration`, 90 `zero_order_half_life`, 118 `steady_state_intermediate`, 179 `pre_equilibrium_rate`, 160 `michaelis_menten`: 636) |
+| 29 *(2026-11-10, the overflow audit's B2)* | `solution::dilution` computes (M₁·V₁)/V₂, `solution_conductivity` (Λ·c)/1000, `electrochemistry::faraday_mass_deposited` (Q·M)/(n·F), `faraday_charge_required` ((m·n)·F)/M, `faraday_mass_ratio` (m_A·(M_B/n_B))/(M_A/n_A) and `nernst_potential` E° − ((R·T)/(n·F))·ln Q: the five quotients round two to four times, so about a quarter of results are 1–2 ulp off (`dilution(1.5, 0.2, 0.6)` 0.5000000000000001), and a partial product, an equivalent weight M/n or R·T that over- or underflows gives ±∞, 0, NaN or a degraded value although the value is representable (`faraday_mass_deposited(DBL_MAX, 63.546, 2)` ∞, not 5.92·10³⁰⁴; `solution_conductivity(126.4, DBL_MAX)` ∞, not 2.27·10³⁰⁷; `faraday_mass_ratio(1, 5e-324, 3, 1e-300, 1)` ∞, not 6.07·10²³; `nernst_potential(0.342, 2, DBL_MAX, 0.1)` ∞, not 1.78·10³⁰⁴, and at Q = 1 NaN, not E°) | the five monomials **rounded once** — RN(M₁·V₁/V₂), RN(Λ·c/1000), RN(Q·M/(n·F)), RN(m·n·F/M), RN(m_A·M_B·n_A/(n_B·M_A)), F as `KM_FARADAY`'s double, 1000 and the electron counts exact — by #27's `_km_cr_mono` (two new straight-line shapes, `_km_mul2_div2_fast` and `_km_mul3_div2_fast`); `nernst_potential` under **#20's semantics** with the correctly rounded ln Q (`_km_cr_ln`, ADR 0006) as its primitive: Rust's operation sequence with an unbounded exponent (`_km_ux_*`), the final subtraction rounded once into binary64 (`_km_nernst_ux`), behind a range test (`_km_nernst_fast`) that proves Rust's chain stayed normal, so those inputs keep Rust's bits (every `nernst_potential_25c` input among them). The unvalidated `solution_conductivity` keeps Rust's expression for a non-finite input; Rust's checks, Err codes and order are kept | class B (the monomials) and C (`nernst_potential`); equal rows plain; the others noted `(f:…)`, mapped and counted (94 `dilution`, 148 `solution_conductivity`, 904 `faraday_mass_deposited`, 644 `faraday_charge_required`, 847 `faraday_mass_ratio`, 119 `nernst_potential`: 2,756) |
+| 30 *(2026-11-10, the overflow audit's B2)* | `spectroscopy::absorbance` computes (ε·l)·c, `concentration_from_absorbance` A/(ε·l), `rigid_rotor_energy` ((h·B)·J)·(J + 1), `rotational_constant` h/(((8·π)·π)·I), `diatomic_moment_of_inertia` (μ·r)·r and `vibrational_frequency` (k/μ).sqrt(): two to four roundings of one product or quotient of inputs and constants (one quotient under a √), so a fraction of results are 1–2 ulp off (HCl's ω = √(516/1.6266·10⁻²⁷) is 563228298138879.9, not …880.0; `rotational_constant(1.45e-46)` 57875971594.410576, not …41057), and a partial product or quotient that over- or underflows gives ±∞, 0, NaN or a degraded value although the value is representable (`vibrational_frequency(500, 2⁻¹⁰²²)` ∞, not 1.50·10¹⁵⁵, and `(10⁻³⁰⁰, 10³⁰)` 0, not 10⁻¹⁶⁵; `rigid_rotor_energy(2³² − 1, 10⁻³⁰⁰)` 0, not 1.22·10⁻³¹⁴; `rotational_constant(10⁻³²⁰)` 8.392090·10²⁸⁴, not 8.392109·10²⁸⁴; `absorbance(1e300, 1e300, 0)` NaN, not 0; `concentration_from_absorbance(1e300, 1e200, 1e200)` 0, not 10⁻¹⁰⁰) | the five monomials **rounded once** — RN(ε·l·c), RN(A/(ε·l)), RN(h·B·J·(J + 1)), RN(h/(8·π·π·I)) (h `KM_PLANCK`'s double, π its double each time Rust uses it, 8, J and J + 1 exact), RN(μ·r·r) — by #27's helper (two new straight-line shapes, `_km_mul4_fast` and `_km_div3_fast`); `vibrational_frequency` the **correctly rounded √ of the exact k/μ**, `src/mathx.cyr`'s `_km_cr_sqrt_div`: a double-double fast path (proven within 5.7u², u = 2⁻⁵³) with `_km_dd_div_cr`'s rounding test, and an exact integer square root on `_km_bn_*` (√(k/μ) is never a rounding boundary of binary64, proven), ±∞ only past DBL_MAX. A non-finite unvalidated input (absorbance's, the moment of inertia's, the rotor's B, concentration_from_absorbance's A) keeps Rust's expression; Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (195 `absorbance`, 219 `concentration_from_absorbance`, 706 `vibrational_frequency`, 344 `rigid_rotor_energy`, 524 `rotational_constant`, 118 `diatomic_moment_of_inertia`: 2,106) |
 
 Deferred with their modules (port plan §2.2), and decided when they port: #5 `bridge::*` →
 `Result` and removal of `ionization_to_bond_energy_estimate`; #10 soorat `from_molecule` →
@@ -754,6 +756,126 @@ and the port's representable, 323 53-bit midpoints, 551 subnormal results with 1
 16 → 16, `second_order_concentration` 23 → 33, `michaelis_menten` 17 → 24 (Rust 2.92); a midpoint `heat_transfer_tie`
 365 ns, a subnormal `osmotic_pressure_subnormal` 4.04 µs, the unbounded-exponent edges 230 and 126 ns; stoichiometry
 as in M4f-2 (`percent_yield` 82, `theoretical_yield_moles` 115, `percent_composition_glucose` 266 ns).
+
+## Addition, 2026-11-10 (audit B2): #29 and #30
+
+**The decisions.** B1's section above quotes the user's decisions verbatim; they apply to B2 unchanged: a formula that
+is one product or quotient of inputs and constants is rounded once, correctly rounded for every input; a formula with a
+sum inside gets #20's edge fix (Rust's chain with an unbounded exponent, the final operation rounded once, a fast-path
+range test so in-range rows keep Rust's bits); where Rust gives NaN and the true value is out of range, the correctly
+rounded ±∞ or 0; meaningless edges are fixed too; every Rust check, Err code and order stays. As in B1, no B2 function
+has a NaN from finite inputs whose true value is out of range: their NaNs are ∞·0 with an exact zero factor
+(`absorbance(1e300, 1e300, 0)`; `nernst_potential` at Q = 1 with R·T past DBL_MAX, whose value is E°) and 0/0 with an
+exact zero numerator (`concentration_from_absorbance` with A = 0 and ε·l underflowing, `faraday_mass_ratio` with m_A = 0
+and M_A/n_A underflowing), each a representable value. B2 is the survey's families F3 (#29) and F5 (#30), one row each.
+
+**The treatment, per function** (each checked against `rust-old/src/` and the survey):
+
+| Function | Rust's formula | Treatment | Why |
+|---|---|---|---|
+| `solution::dilution` | (M₁·V₁)/V₂ | rounded once, RN(M₁·V₁/V₂) | one quotient of a product of inputs |
+| `solution::solution_conductivity` | (Λ·c)/1000 | rounded once, RN(Λ·c/1000) | one quotient; 1000 is an integer literal of Rust's formula (exact); no validation, so a non-finite input keeps Rust's expression |
+| `electrochemistry::faraday_mass_deposited` | (Q·M)/(n·F) | rounded once, RN(Q·M/(n·F)) | one quotient; F enters as its double, n exact |
+| `electrochemistry::faraday_charge_required` | ((m·n)·F)/M | rounded once, RN(m·n·F/M) | one quotient |
+| `electrochemistry::faraday_mass_ratio` | (m_A·(M_B/n_B))/(M_A/n_A) | rounded once, RN(m_A·M_B·n_A/(n_B·M_A)) | Rust's two equivalent weights are quotients inside one quotient (as #28's `pre_equilibrium_rate`'s k₁/k₋₁), not a sum |
+| `electrochemistry::nernst_potential` | E° − ((R·T)/(n·F))·ln Q | #20's semantics, the correctly rounded ln Q as the primitive | a sum (the subtraction) inside |
+| `spectroscopy::absorbance` | (ε·l)·c | rounded once, RN(ε·l·c) | one product; no validation, so a non-finite input keeps Rust's expression |
+| `spectroscopy::concentration_from_absorbance` | A/(ε·l) | rounded once, RN(A/(ε·l)) | one quotient; A is not validated, so a non-finite A keeps Rust's expression (B1's rule for unvalidated inputs) |
+| `spectroscopy::rigid_rotor_energy` | ((h·B)·J)·(J + 1) | rounded once, RN(h·B·J·(J + 1)) | one product; h as its double, J and J + 1 exact (u32: J + 1 ≤ 2³²); a non-finite B keeps Rust's expression |
+| `spectroscopy::rotational_constant` | h/(((8·π)·π)·I) | rounded once, RN(h/(8·π·π·I)) | one quotient; π enters as its double each time Rust uses it, 8 exact (computed as (h/8)/(π·π·I), h/8 exact) |
+| `spectroscopy::diatomic_moment_of_inertia` | (μ·r)·r | rounded once, RN(μ·r·r) | one product; non-finite inputs keep Rust's expression |
+| `spectroscopy::vibrational_frequency` | (k/μ).sqrt() | the correctly rounded √ of the exact k/μ | a monomial under a square root: √ rounded once, as the decision rounds the monomials (the planned treatment; its fallback, #20's semantics with `_km_ux_sqrt_f64`, was not needed) |
+
+The survey's F3 lists `nernst_potential_25c` as "no finding": it calls `nernst_potential` at T = 298.15 K, whose
+(R·T)/(n·F) is a normal constant-like factor, so every input takes the fast path and keeps Rust's bits (`validate.py`
+proves each golden row's chain normal); `cell_gibbs_energy` and the charge conversions are unchanged.
+
+**#29's and #30's monomials, the machinery** (`src/mathx.cyr`). #27's `_km_cr_mono` serves them, with one straight-line
+fast path per new shape, B1's arithmetic without the factor tables (a zero, subnormal or non-finite operand, a failed
+test or a possibly subnormal result falls back to `_km_cr_mono`):
+- `_km_mul2_div2_fast` (RN(x·y/(z·w)): N and D exact TwoProducts, `_km_dd_div_ends`) — `faraday_mass_deposited`;
+- `_km_mul3_div2_fast` (RN(x·y·z/(v·w)): N by `_km_dd_mul_d` within 3.01u², D exact) — `faraday_mass_ratio`;
+- `_km_mul4_fast` (RN(a·b·c·d): within 6.1u², `_km_dd_round_ends`) — `rigid_rotor_energy`;
+- `_km_div3_fast` (RN(x/(y·z·w)): D within 3.01u²) — `rotational_constant`;
+with their wrappers `_km_cr_mul2_div2`, `_km_cr_mul3_div2`, `_km_cr_mul4` and `_km_cr_div3`; `dilution`,
+`solution_conductivity` (z = 1000), `faraday_charge_required`, `absorbance`, `concentration_from_absorbance` and
+`diatomic_moment_of_inertia` use B1's `_km_cr_mul_div`, `_km_cr_mul3_div`, `_km_cr_mul3` and `_km_cr_div2`. Midpoints
+of the 2/2 and 3/2 shapes (3F·y/F with 3F exact, F's odd part having 51 bits; y·w·3/(n_B·w)·n_B) fall back to
+`_km_cr_mono`'s fast path, which resolves them exactly (`_km_mono_tie`); the 4/0 and 1/3 shapes have none in practice
+(h's odd part has 53 bits, π's squared 100), and their rare failed tests take the exact path.
+
+**#30's square root, the machinery** (`src/mathx.cyr`, "correctly rounded square roots of quotients"):
+`_km_cr_sqrt_div(x, y)` = RN(√(x/y)) for positive finite doubles, rounded once (the subnormal grid, +∞ past DBL_MAX):
+- *no midpoint*: with x/y = (a/b)·2^E (a, b odd, below 2⁵³) a rounding boundary m = M·2^f (M odd) has √(x/y) = m only if
+  a = b·M² and E = 2f, impossible: a 53-bit-grid midpoint has M of 54 bits (M² > a), a subnormal-grid one f = −1075
+  (E ≥ −2097). So the fast path's test fails only near a midpoint, and the exact path never breaks a tie;
+- *the fast path* `_km_sqrt_div_fast`, normal x and y: the significands with K = eₓ − e_y made even (sₓ doubled), F =
+  sₓ/s_y in (½, 4) as q_h + q_l (an exact remainder), y₀ = RN(√q_h), the residual q_h − y₀² by TwoProduct, d = (t₁ +
+  q_l)/(2y₀): |y₀ + d − √F| ≤ 5.7u²·√F (the bound in the code: 6.01u² for t, 4.51u² for d, 1.14u² for the Taylor
+  term); then `_km_dd_div_cr`'s test (ε = 2⁻¹⁰⁰·y₀, the two ends rounded alike) and `_km_mono_fin`'s exact scale by
+  2^(K/2) (normal x and y give at most 2¹⁰²³·√2); it fails with probability about 2⁻⁴⁶, and declines possibly
+  subnormal results;
+- *the exact path* `_km_sqrt_div_acc`, every positive finite x and y: x = A·2^eₐ, y = B·2^e_b (A, B in [2⁵², 2⁵³)), the
+  exponent made even, R = ⌊√(A·2¹¹⁰/B)⌋ (in [2⁵⁴, 2⁵⁶)) by a guess from the fast path's arithmetic corrected by exact
+  multi-word comparisons (R + 1 while (R + 1)²·B ≤ A·2¹¹⁰, R − 1 while R²·B > A·2¹¹⁰), sticky = [R²·B ≠ A·2¹¹⁰], and
+  `_km_cr_from_int(2R + sticky, h − 1)` — `_km_cr_ratio`'s argument: 2R + sticky has 56 or 57 bits and every rounding
+  boundary is a multiple of 4 of its units.
+The generator's reference is `exact::cr_sqrt_ratio` (an integer square root of a 121-bit quotient, `round_scaled`),
+`validate.py`'s Python's `math.isqrt` and, independently, MPFR's √ of a 256-bit quotient (`mpfr_ref.ux_sqrt_div_final`:
+the no-midpoint argument gives every √(x/y) a distance of at least 2⁻¹⁶² from every boundary, far beyond the quotient's
+2⁻²⁵⁶).
+
+**#29's Nernst equation** (`src/electrochemistry.cyr`). `_km_nernst_fast` returns Rust's E° − ((R·T)/(n·F))·l (l =
+`_km_cr_ln(Q)`) when R·T lies in [2⁻¹⁰²², DBL_MAX], (R·T)/(n·F) is at least 2⁻¹⁰²² and the product with l is at least
+2⁻¹⁰²² in magnitude or l = 0 (n·F is always normal, the product always finite): each operation is then the unbounded
+chain's, and the final subtraction of two doubles rounds once in both. Otherwise `_km_nernst_ux` evaluates the chain
+with `_km_ux_from`, `_km_ux_mul`, `_km_ux_div` and the final `_km_ux_sub_f64`. So
+`nernst_potential(0.342, 2, DBL_MAX, 0.1)` is 1.78·10³⁰⁴ (Rust's ∞), `nernst_potential(0.342, 2, DBL_MAX, 1)` E° (Rust's
+∞·0 = NaN) and `nernst_potential(0, 1, 10⁻³¹⁰, 10⁻³⁰⁰)` 5.952642933123·10⁻³¹² (Rust's degraded …4057·10⁻³¹²).
+
+**Golden comparison** (as #27 and #28). The corpus keeps the oracle's values; where the port's value differs the note
+names it: `[ADR 0002 #29: the port returns the correctly rounded M₁·V₁/V₂ = <x> (f:…)]` (likewise `Λ·c/1000`,
+`Q·M/(n·F)`, `m·n·F/M`, `m_A·M_B·n_A/(n_B·M_A)`), `[ADR 0002 #29: the port returns Rust's sequence evaluated with an
+unbounded exponent (the final subtraction rounded once) = <x> (f:…)]`, and `[ADR 0002 #30: the port returns the
+correctly rounded ε·l·c = <x> (f:…)]` (likewise `A/(ε·l)`, `√(k/μ)`, `h·B·J·(J + 1)`, `h/(8·π·π·I)`, `μ·r·r`). The
+generator computes them independently of the port (`scripts/oracle/src/audit.rs`: `exact::cr_monomial`, the new
+`exact::cr_sqrt_ratio`, `exact::Ux` with its new `add_f64` / `sub_f64`; the Nernst ln is glibc's, correctly rounded on
+every golden row — `validate.py` checks it against MPFR), with Rust's validation replicated and asserted against the
+oracle on every row, and appends 2,459 edge rows with their own seeds (solution 458, electrochemistry 823, spectroscopy
+1,178): partial products past DBL_MAX or below 2⁻¹⁰²² with the other factors bringing them back, Λ·c in [2¹⁰²⁴, 2¹⁰³⁴),
+equivalent weights M/n subnormal or 0, R·T past DBL_MAX and subnormal (R·T)/(n·F), E° against an overflowing product,
+k/μ past DBL_MAX or below 2⁻¹⁰⁷⁴, subnormal k, μ and results, exact roots, twelve roots within 2⁻¹⁰⁷ of a 53-bit
+midpoint (continued-fraction convergents of m²), h·B and 8π²·I subnormal, the 53-bit midpoints 3·y/2^j, 3F·y/F, y·3·F/F,
+y·w·3/(n_B·w)·n_B, 3000·y/1000 and 3·r·r (3r² of 54 bits), the subnormal grid's ties. The harness maps a noted row
+(`_par_got_noted`, `_par_got_noted_f`) and counts it per function: **2,756 #29 rows** (94 `dilution`, 148
+`solution_conductivity`, 904 `faraday_mass_deposited`, 644 `faraday_charge_required`, 847 `faraday_mass_ratio`, 119
+`nernst_potential`) and **2,106 #30 rows** (195 `absorbance`, 219 `concentration_from_absorbance`, 706
+`vibrational_frequency`, 344 `rigid_rotor_energy`, 524 `rotational_constant`, 118 `diatomic_moment_of_inertia`). Of the
+rows that existed before B2, 38 of 208, 50 of 186, 870 of 3,975, 565 of 2,168, 716 of 2,199, 2 of 1,485, 131 of 560, 130
+of 564, 440 of 3,047, 273 of 1,015, 459 of 1,587 and 111 of 440 change (the same order): the monomials' in-range quarter
+(an eighth for the √: Rust's √ of RN(k/μ) misses one input in eight), and the edges. `validate.py` §20 recomputes every
+row of the twelve functions — the monomials with `Fraction`, the √ with `math.isqrt` and MPFR, Nernst through
+`mpfr_ref.UX` with MPFR's log and `ux_sub_final` — and proves that a row is noted exactly where the port's value differs
+from the oracle's, the note naming it bit for bit, that no `nernst_potential` row whose f64 chain stays in the normal
+range is noted (1,455 rows: Rust's bits) and that every `nernst_potential_25c` row's chain is normal, that
+no √ row is a rounding boundary, and counts the hard rows: 818 where Rust's value is 0, ±∞ or NaN and the port's
+representable (56 `dilution`, 64 `solution_conductivity`, 9 `faraday_mass_deposited`, 28 `faraday_charge_required`, 71
+`faraday_mass_ratio`, 70 `nernst_potential`, 76 `absorbance`, 79 `concentration_from_absorbance`, 336
+`vibrational_frequency`, 29 `rigid_rotor_energy`), 409 midpoints of the 53-bit grid, 1,309 subnormal results with 60 of
+the subnormal grid's ties, and for the √ 86 exact roots, 195 quotients past DBL_MAX, 146 below 2⁻¹⁰⁷⁴, 168 subnormal
+operands, 3 subnormal results and 13 roots within 2⁻⁹⁸ of a 53-bit midpoint; no row where Rust's NaN stands for an
+out-of-range value (none is possible: the decisions paragraph above). `cr_verify.py` checks `sqrtdiv` and the twelve
+functions' public, fast and forced slow paths (`dil`, `cond`, `fmass`, `fcharge`, `fratio`, `nernst`, `abs`, `conc`,
+`vib`, `rotor`, `rot`, `moment`) against `Fraction`, exact integer roots and `mpfr_ref.UX` on x86_64 ELF, x86_64 PE and
+aarch64, roots within 2⁻¹⁰⁰ of a midpoint and the shapes' midpoints included.
+
+**Cost** (`tests/kimiya.bcyr`, before → after, the same host; `docs/benchmarks-rust-v-cyrius.md`'s B2 section):
+`spectroscopy/absorbance` 5 → 68 ns (Rust 0.98), `electrochemistry/nernst_potential` 83 → 92 ns (Rust 6.42; its range
+test), `dilution` 17 → 86, `solution_conductivity` 6 → 72, `faraday_mass_deposited` 19 → 109, `faraday_charge_required`
+21 → 122, `faraday_mass_ratio` 33 → 148, `concentration_from_absorbance` 16 → 90, `vibrational_frequency` 18 → 87,
+`rigid_rotor_energy` 14 → 114, `rotational_constant` 18 → 117, `diatomic_moment_of_inertia` 11 → 74; the edges
+`nernst_potential_edge` 202 ns (the unbounded slow path), `vibrational_frequency_edge` 88 ns (k/μ past DBL_MAX: the fast
+path), `vibrational_frequency_subnormal` 883 ns (the exact root), `faraday_mass_ratio_tie` 402 ns (`_km_mono_tie`).
 
 ## Consequences
 

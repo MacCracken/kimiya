@@ -15,7 +15,9 @@
 # AME2020 / TICE 2009 isotope table) changes one: hydrogen_abundances_iupac_2009's exact pairs are the table's (¹H
 # 1.007825031898, ²H 2.014101777844), and its Σ = 1 loop gains sulfur, which Rust's left out (its sulfur sums to
 # 0.9999). The others hold as written (CH₄'s M+1 depends on the abundances only, Cl₂'s masses move by under 10⁻⁴ u);
-# the Cyrius-only ADR 0002 #23 groups test the table and a pattern ³⁶S changes (S₈).
+# the Cyrius-only ADR 0002 #23 groups test the table and a pattern ³⁶S changes (S₈). ADR 0002 #30 (the overflow audit's
+# B2: the Beer–Lambert, rotor and moment-of-inertia monomials rounded once, the correctly rounded √(k/μ)) changes none
+# of the Rust tests (each compares within a tolerance, or an exact 0); a Cyrius-only group checks it.
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -1476,6 +1478,100 @@ fn _t_cyrius_constants() {
     assert(with_data == 7, "seven elements with isotope data (H, C, N, O, S, Cl, Br)");
 }
 
+# ADR 0002 #30 (the overflow audit's B2): the Beer–Lambert, rotor and moment-of-inertia monomials rounded once and
+# vibrational_frequency's correctly rounded √(k/μ) — ordinary inputs where Rust's two to four roundings miss (HCl's ω),
+# Rust's ∞, 0 and NaN where the value is representable, its degraded subnormal products, Rust's expression for a
+# non-finite unvalidated input — and the public functions against their exact paths on 5,000 seeded inputs.
+fn _t_cyrius_adr30() {
+    test_group("cyrius: ADR 0002 #30 (rounded once; √(k/μ))");
+    var dmax: f64 = from_bits(0x7FEFFFFFFFFFFFFF);
+    var nmin: f64 = from_bits(0x0010000000000000);
+    var tiny: f64 = from_bits(0x01A56E1FC2F8F359);      # 1e-300
+    var e200: f64 = from_bits(0x6974E718D7D7625A);      # 1e200
+    var em200: f64 = from_bits(0x16687E92154EF7AC);     # 1e-200
+    var big: f64 = from_bits(0x7E37E43C8800759C);       # 1e300
+    var inf: f64 = 1.0 / 0.0;
+    var a1: f64 = absorbance(18716.0, 0.1, 0.0007);
+    assert_eq(_km_bits(a1), 0x3FF4F640639D5E4A, "ε·l·c rounded once (Rust's one ulp above)");
+    var a2: f64 = absorbance(e200, e200, em200);
+    assert_eq(_km_bits(a2), 0x6974E718D7D7625A, "1e200·1e200·1e-200 = 1e200 (Rust's ∞)");
+    var a3: f64 = absorbance(big, big, 0.0);
+    assert_eq(_km_bits(a3), 0, "1e300·1e300·0 = +0 (Rust's ∞·0 = NaN)");
+    var a4: f64 = absorbance(inf, 0.0, 1.0);
+    assert_eq(ulp_is_nan(_km_bits(a4)), 1, "∞·0·1: Rust's NaN (a non-finite input keeps Rust's expression)");
+    var t5, v5 = concentration_from_absorbance(1.33, 1272.0, 0.1);
+    assert(is_ok(t5) == 1 && v5 == 0x3F8569F12FFAD909, "A/(ε·l) rounded once (Rust's one ulp above)");
+    var t6, v6 = concentration_from_absorbance(big, e200, e200);
+    assert(is_ok(t6) == 1 && v6 == 0x2B2BFF2EE48E0531, "1e300/(1e200·1e200) = 1e-100 (Rust's 1e300/∞ = 0)");
+    var t7, v7 = concentration_from_absorbance(inf, e200, e200);
+    assert(is_ok(t7) == 1 && ulp_is_nan(v7) == 1, "A = ∞, ε·l = ∞: Rust's ∞/∞ = NaN, kept");
+    var hm: f64 = from_bits(0x3A601BEBC23E3327);        # 1.6266e-27 kg
+    var t8, v8 = vibrational_frequency(516.0, hm);
+    assert(is_ok(t8) == 1 && v8 == 0x43000206751AA800, "HCl: √(516/1.6266·10⁻²⁷) rounded once (Rust's one ulp below)");
+    var t9, v9 = vibrational_frequency(500.0, nmin);
+    assert(is_ok(t9) == 1 && v9 == 0x60265C55827DF1D2, "√(500/2^-1022) = 1.50·10¹⁵⁵ (Rust's k/μ = ∞)");
+    var e30: f64 = from_bits(0x46293E5939A08CEA);       # 1e30
+    var t10, v10 = vibrational_frequency(tiny, e30);
+    assert(is_ok(t10) == 1 && v10 == 0x1DAD7BECC2F23AC2, "√(10⁻³⁰⁰/10³⁰) = 10⁻¹⁶⁵ (Rust's k/μ = 0)");
+    var t11, v11 = vibrational_frequency(dmax, from_bits(1));
+    assert(is_ok(t11) == 1 && v11 == 0x7FF0000000000000, "√(DBL_MAX/2^-1074) is past DBL_MAX: +∞, as Rust's");
+    var hk: f64 = from_bits(0x3E57E3046A1F3250);
+    var hq: f64 = from_bits(0x3DD3D9DC063D8070);
+    var t12, v12 = vibrational_frequency(hk, hq);
+    assert(is_ok(t12) == 1 && v12 == 0x40318D1D41DCE77F, "√(k/μ) 10⁻³² from a midpoint: the exact root (Rust's above)");
+    var r13: f64 = rigid_rotor_energy(3, 156913000000.0);
+    assert_eq(_km_bits(r13), 0x3B97915016DEF43B, "h·B·J·(J + 1) rounded once (Rust's one ulp above)");
+    var r14: f64 = rigid_rotor_energy(4294967295, tiny);
+    assert_eq(_km_bits(r14), 0x0000000093757F20, "J = 2³² − 1, B = 10⁻³⁰⁰: 1.22·10⁻³¹⁴ (Rust's h·B underflows: 0)");
+    var r15: f64 = rigid_rotor_energy(0, inf);
+    assert_eq(ulp_is_nan(_km_bits(r15)), 1, "J = 0, B = ∞: Rust's (h·∞)·0·1 = NaN, kept");
+    var mone: f64 = -1.0;
+    var r16: f64 = rigid_rotor_energy(0, mone);
+    assert_eq(_km_bits(r16), 0x8000000000000000, "J = 0, B = −1: −0, as Rust's");
+    var hi: f64 = from_bits(0x366A7D5E1AD9E233);        # 1.45e-46 kg·m²
+    var t17, v17 = rotational_constant(hi);
+    assert(is_ok(t17) == 1 && v17 == 0x422AF35A7C14D236, "h/(8π²·I) rounded once (Rust's one ulp above)");
+    var e320: f64 = from_bits(0x00000000000007E8);      # 1e-320
+    var t18, v18 = rotational_constant(e320);
+    assert(is_ok(t18) == 1 && v18 == 0x7B16930879281B34, "8π²·10⁻³²⁰ subnormal: 8.392109·10²⁸⁴ (Rust's …090·10²⁸⁴)");
+    var mu: f64 = from_bits(0x3A601C2CA997C94D);        # 1.6267e-27 kg
+    var rr: f64 = from_bits(0x3DE184999DF45214);        # 1.2746e-10 m
+    var r19: f64 = diatomic_moment_of_inertia(mu, rr);
+    assert_eq(_km_bits(r19), 0x36434FD78475C3EC, "HCl's μ·r·r rounded once (Rust's one ulp above)");
+    var r20: f64 = diatomic_moment_of_inertia(3.0, 67108865.0);
+    assert_eq(_km_bits(r20), 0x434800000C000002, "3·r·r with r = 2²⁶ + 1: 3r² of 54 bits, a tie to even");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var w: f64[4];
+    var k = 0;
+    while (k < 5000) {
+        var j = 0;
+        while (j < 3) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            var bb = 0x3000000000000000 + ((st >> 3) % 0x1C00000000000000);
+            if (j == 0) { bb = bb | (st & 0x8000000000000000); }
+            store64(&w + 8 * j, bb);
+            j = j + 1;
+        }
+        var x: f64 = load64(&w);
+        var y: f64 = load64(&w + 8);
+        var z: f64 = load64(&w + 16);
+        var ra: f64 = absorbance(x, y, z);
+        var xa: f64 = _km_cr_mono_acc(&w, 3, 0, 0);
+        if (_km_bits(ra) != _km_bits(xa)) { bad = bad + 1; }
+        var tc, vc = concentration_from_absorbance(x, y, z);
+        var xc: f64 = _km_cr_mono_acc(&w, 1, &w + 8, 2);
+        if (is_ok(tc) != 1 || vc != _km_bits(xc)) { bad = bad + 1; }
+        var tv, vv = vibrational_frequency(y, z);
+        var xv: f64 = _km_sqrt_div_acc(y, z);
+        if (is_ok(tv) != 1 || vv != _km_bits(xv)) { bad = bad + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "absorbance, concentration_from_absorbance and vibrational_frequency = the exact paths (5,000)");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main(): i64 {
     _t_beer_lambert_basic();
@@ -1552,6 +1648,7 @@ fn main(): i64 {
     _t_cyrius_adr23_table();
     _t_cyrius_adr23_s8();
     _t_cyrius_constants();
+    _t_cyrius_adr30();
     return assert_summary();
 }
 

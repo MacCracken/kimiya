@@ -30,7 +30,11 @@
 //!   function transcribed with the table a parameter and checked against the oracle on every row); and **ADR 0002 #19**:
 //!   `wavenumber_from_wavelength` and `wavelength_from_wavenumber` (the edges, every decade, every power of two, the
 //!   subnormal-result and overflow ends, seeded over every binade), the rows where the port's correctly rounded
-//!   1/(100·x) differs from Rust's `0.01 / x` noted with it.
+//!   1/(100·x) differs from Rust's `0.01 / x` noted with it; **ADR 0002 #30** (the overflow audit's B2): `absorbance`,
+//!   `concentration_from_absorbance`, `rigid_rotor_energy`, `rotational_constant` and `diatomic_moment_of_inertia` rows
+//!   noted where the port's correctly rounded monomial differs from Rust's value, `vibrational_frequency`'s where its
+//!   correctly rounded √(k/μ) does (`audit.rs`), and `audit::emit_spectroscopy`'s edge rows appended with their own seed
+//!   (k/μ past DBL_MAX or below 2⁻¹⁰⁷⁴, h·B and 8π²·I subnormal, partial products past either end, midpoints).
 //! - Class C (bound 0 against the corrected oracle): `transmittance` (`10.0.powf(−A)`: A over exp10's whole range, the
 //!   integers, subnormal results, seeded), `absorbance_from_transmittance` (log10: every decade of T, T near 1, the
 //!   round trips, seeded), `fft_spectrum` (cos and sin twiddles: every length 0 … 16 and every power of two to 2¹³,
@@ -42,18 +46,18 @@
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::exact::{cr_bohr_level, cr_hundredth_div, cr_reduced_mass, cr_rydberg, cr_transition};
 use crate::grids::{Rng, decades, pow2};
 use crate::m_reaction::{edges, res};
 use crate::t_spectroscopy::{Iso, new_abundances};
 use crate::tsv::{Class, Module, Tok, e, err, f, i, tokens_note};
 use kimiya::spectroscopy::{
-    SpectralSeries, absorbance, absorbance_from_transmittance, bohr_energy_level, bohr_transition_energy,
-    concentration_from_absorbance, diatomic_moment_of_inertia, ev_to_joules, fft_spectrum, find_peaks,
-    frequency_from_wavelength, harmonic_oscillator_energy, isotope_abundances, isotope_pattern, joules_to_ev,
-    photon_energy_from_frequency, photon_energy_from_wavelength, reduced_mass, rigid_rotor_energy,
-    rotational_constant, rydberg_wavelength, transmittance, vibrational_frequency, wavelength_from_energy,
-    wavelength_from_wavenumber, wavenumber_from_wavelength, RYDBERG, RYDBERG_EV,
+    SpectralSeries, absorbance_from_transmittance, bohr_energy_level, bohr_transition_energy, ev_to_joules,
+    fft_spectrum, find_peaks, frequency_from_wavelength, harmonic_oscillator_energy, isotope_abundances,
+    isotope_pattern, joules_to_ev, photon_energy_from_frequency, photon_energy_from_wavelength, reduced_mass,
+    rydberg_wavelength, transmittance, wavelength_from_energy, wavelength_from_wavenumber,
+    wavenumber_from_wavelength, RYDBERG, RYDBERG_EV,
 };
 
 /// Every `SpectralSeries`, in Rust declaration order. `t_spectroscopy` proves the list against the enum in
@@ -361,8 +365,7 @@ fn oscillator(m: &mut Module, n: u32, w: f64) {
 }
 
 fn rotor(m: &mut Module, j: u32, b: f64) {
-    let out = rigid_rotor_energy(bb(j), bb(b));
-    m.row("spectroscopy::rigid_rotor_energy", Class::B, &[i(j), f(b)], &[f(out)]);
+    audit::rotor(m, j, b);
 }
 
 /// Rust 1.2.0's `isotope_pattern` (rust-old/src/spectroscopy.rs), transcribed operation for operation with the isotope
@@ -541,9 +544,7 @@ pub fn emit(isos: &[Iso]) -> Module {
     let tiny = f64::from_bits(1);
 
     // ── absorbance (B) ──
-    let ab = |m: &mut Module, e_: f64, l: f64, c: f64| {
-        ff(m, "spectroscopy::absorbance", Class::B, &[e_, l, c], absorbance(bb(e_), bb(l), bb(c)));
-    };
+    let ab = audit::absorbance_row;
     for x in edges() {
         ab(&mut m, x, 1.0, 0.01);
         ab(&mut m, 100.0, x, 0.01);
@@ -621,9 +622,7 @@ pub fn emit(isos: &[Iso]) -> Module {
     }
 
     // ── concentration_from_absorbance (B) ──
-    let conc = |m: &mut Module, a: f64, e_: f64, l: f64| {
-        fr(m, "spectroscopy::concentration_from_absorbance", Class::B, &[a, e_, l], concentration_from_absorbance(bb(a), bb(e_), bb(l)));
-    };
+    let conc = audit::conc;
     for x in edges() {
         conc(&mut m, x, 100.0, 1.0);
         conc(&mut m, 1.0, x, 1.0);
@@ -967,7 +966,7 @@ pub fn emit(isos: &[Iso]) -> Module {
     }
 
     // ── vibrational_frequency (B) ──
-    let vf = |m: &mut Module, k: f64, mu: f64| fr(m, "spectroscopy::vibrational_frequency", Class::B, &[k, mu], vibrational_frequency(bb(k), bb(mu)));
+    let vf = audit::vib;
     for x in edges() {
         vf(&mut m, x, 1.66e-27);
         vf(&mut m, 500.0, x);
@@ -1004,7 +1003,7 @@ pub fn emit(isos: &[Iso]) -> Module {
     }
 
     // ── rotational_constant (B) ──
-    let rc = |m: &mut Module, x: f64| fr(m, "spectroscopy::rotational_constant", Class::B, &[x], rotational_constant(bb(x)));
+    let rc = audit::rot_const;
     for x in edges() {
         rc(&mut m, x);
     }
@@ -1019,9 +1018,7 @@ pub fn emit(isos: &[Iso]) -> Module {
     }
 
     // ── diatomic_moment_of_inertia (B) ──
-    let mi = |m: &mut Module, mu: f64, r: f64| {
-        ff(m, "spectroscopy::diatomic_moment_of_inertia", Class::B, &[mu, r], diatomic_moment_of_inertia(bb(mu), bb(r)));
-    };
+    let mi = audit::moment;
     for x in edges() {
         mi(&mut m, x, 1e-10);
         mi(&mut m, 1e-26, x);
@@ -1254,5 +1251,6 @@ pub fn emit(isos: &[Iso]) -> Module {
         let data: Vec<f64> = (0..len).map(|_| rng.signed_log_uniform(-300.0, 308.0)).collect();
         peaks(&mut m, &data, rng.unit());
     }
+    audit::emit_spectroscopy(&mut m);
     m
 }

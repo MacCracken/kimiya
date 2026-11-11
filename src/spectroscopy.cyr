@@ -10,9 +10,10 @@
 # (generated). Fallible functions
 # return a value-form Result whose Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs where Rust does.
 # Every expression keeps Rust's operation order, constant by constant, so the arithmetic functions are
-# bit-identical (class B: + − × ÷ and √); transmittance (10^x) and absorbance_from_transmittance (log10) are class C
-# on src/mathx.cyr's correctly rounded _km_cr_exp10 / _km_cr_log10, and fft_spectrum on its correctly rounded
-# twiddles (_km_cr_sincos), all compared exactly against the corrected oracle (docs/development/port-parity.md §15).
+# bit-identical (class B: + − × ÷ and √) but where an ADR 0002 row below says otherwise; transmittance (10^x) and
+# absorbance_from_transmittance (log10) are class C on src/mathx.cyr's correctly rounded _km_cr_exp10 / _km_cr_log10,
+# and fft_spectrum on its correctly rounded twiddles (_km_cr_sincos), all compared exactly against the corrected oracle
+# (docs/development/port-parity.md §15).
 #
 # - Rust's integer arguments are words, never wrapped (port plan §6.4): a u8 Z or a u32 n / line / count outside its
 #   type is Err(KM_ERR_INVALID_INPUT) at the position of Rust's first check of it (the `== 0` tests: one test
@@ -58,11 +59,21 @@
 #   intermediate over- or underflows): so −R exactly at n = Z, m/2 for a homonuclear diatomic, and no cancellation for
 #   close large n (the Bohr model's section below; src/mathx.cyr's _km_cr_ratio, _km_dd_mul and _km_dd_div_cr). The
 #   golden rows keep the oracle's values; where the port's differ, the note names them (accepted under ADR 2, counted).
-# - Kept as Rust's (reviewed in M4e, reported to the user): the over- and underflow of products and quotients of
-#   inputs (ε·l·c, ε·l, k/μ, h·B, 8π²·I, μ·r·r, the FFT's sums and re² + im²), find_peaks' interpolated threshold, and
-#   the thresholds 0.001 and 10⁻¹² (heuristic and numerical cutoffs, compared as Rust does): each is a chain of rounded
-#   operations on inputs and physical constants, which ADR 0002's policy leaves as Rust's sequence (the products and
-#   quotients go to the library-wide overflow audit after M4).
+# - ADR 0002 #30 (the overflow audit's B2; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide audit" and
+#   "round once"): absorbance's (ε·l)·c, concentration_from_absorbance's A/(ε·l), rigid_rotor_energy's
+#   ((h·B)·J)·(J + 1), rotational_constant's h/(((8·π)·π)·I) and diatomic_moment_of_inertia's (μ·r)·r are each one
+#   product or quotient of inputs and constants' doubles (h, π as its double each time Rust uses it, 8 and J + 1 exact),
+#   so the port returns the exact value rounded once (src/mathx.cyr's correctly rounded monomial: _km_cr_mul3,
+#   _km_cr_div2, _km_cr_mul4 and _km_cr_div3), and vibrational_frequency's (k/μ).sqrt() the correctly rounded √ of the
+#   exact k/μ (_km_cr_sqrt_div), where Rust rounds two to four times (1–2 ulp off on a fraction of inputs) and a partial
+#   product or quotient that over- or underflows gives ±∞, 0, NaN or a degraded value although the result is
+#   representable (vibrational_frequency(500, 2⁻¹⁰²²) is ∞ in Rust, 1.50·10¹⁵⁵ here; rigid_rotor_energy(2³² − 1, 10⁻³⁰⁰)
+#   0, not 1.22·10⁻³¹⁴). Rust's checks and Err codes are kept; the unvalidated inputs (absorbance's, the moment of
+#   inertia's, the rotor's B, concentration_from_absorbance's A) keep Rust's expression where one is not finite.
+# - Kept as Rust's (reviewed in M4e, reported to the user): the FFT's sums and re² + im², find_peaks' interpolated
+#   threshold, and the thresholds 0.001 and 10⁻¹² (heuristic and numerical cutoffs, compared as Rust does): each is a
+#   chain of rounded operations on inputs and physical constants, which ADR 0002's policy leaves as Rust's sequence
+#   (the overflow audit's later batches review the FFT and find_peaks).
 
 include "lib/alloc.cyr"
 
@@ -78,12 +89,20 @@ const _KM_ISO_STACK = 192;
 # ── Beer–Lambert law ────────────────────────────────────────────────────────────────
 
 # The Beer–Lambert law A = ε·l·c: the absorbance (dimensionless) from the molar absorptivity ε (L/(mol·cm)), the path
-# length l (cm) and the concentration c (mol/L), as Rust's (ε·l)·c. Inputs are not validated. Mirrors
-# `spectroscopy::absorbance`.
+# length l (cm) and the concentration c (mol/L). Inputs are not validated. ADR 0002 #30: the correctly rounded ε·l·c
+# for finite inputs (a zero factor gives its signed zero), where Rust's (ε·l)·c rounds twice; a non-finite input gives
+# Rust's (ε·l)·c. Mirrors `spectroscopy::absorbance`, with ADR 0002 #30.
 #must_use
 fn absorbance(molar_absorptivity: f64, path_length: f64, concentration: f64): f64 {
-    var a: f64 = (molar_absorptivity * path_length) * concentration;
-    return a;
+    var f, ok = _km_mul3_fast(molar_absorptivity, path_length, concentration);
+    if (ok == 1) { return f; }
+    var fin = _km_is_finite(molar_absorptivity) + _km_is_finite(path_length) + _km_is_finite(concentration);
+    if (fin != 3) {
+        var a: f64 = (molar_absorptivity * path_length) * concentration;
+        return a;
+    }
+    var r: f64 = _km_cr_mul3(molar_absorptivity, path_length, concentration);
+    return r;
 }
 
 # The transmittance T = 10^(−A) from the absorbance A, as Rust's `10.0_f64.powf(-a)`: the correctly rounded
@@ -108,14 +127,20 @@ fn absorbance_from_transmittance(transmittance: f64): Result {
 
 # The concentration c = A/(ε·l) in mol/L from the absorbance A, the molar absorptivity ε (L/(mol·cm)) and the path
 # length l (cm). Ok(c), or Err(KM_ERR_INVALID_INPUT) if ε, then l, is not positive and finite; A is not validated.
-# Mirrors `spectroscopy::concentration_from_absorbance`.
+# ADR 0002 #30: the correctly rounded A/(ε·l) for a finite A (A = ±0 gives that signed zero), where Rust's A/(ε·l)
+# rounds twice and ε·l can over- or underflow; a non-finite A gives Rust's A/(ε·l). Mirrors
+# `spectroscopy::concentration_from_absorbance`, with ADR 0002 #30.
 #must_use
 fn concentration_from_absorbance(absorbance: f64, molar_absorptivity: f64, path_length: f64): Result {
     if (_km_is_positive(molar_absorptivity) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(path_length) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var el: f64 = molar_absorptivity * path_length;
-    var c: f64 = absorbance / el;
-    return Ok(c);
+    if (_km_is_finite(absorbance) != 1) {
+        var el: f64 = molar_absorptivity * path_length;
+        var c: f64 = absorbance / el;
+        return Ok(c);
+    }
+    var r: f64 = _km_cr_div2(absorbance, molar_absorptivity, path_length);
+    return Ok(r);
 }
 
 # ── photon energy, wavelength and frequency ─────────────────────────────────────────
@@ -596,48 +621,67 @@ fn harmonic_oscillator_energy(n, angular_frequency: f64): f64 {
 }
 
 # The angular vibrational frequency ω = √(k/μ) in rad/s from the force constant k (N/m) and the reduced mass μ (kg).
-# Ok(ω), or Err(KM_ERR_INVALID_INPUT) if k, then μ, is not positive and finite. Mirrors
-# `spectroscopy::vibrational_frequency`.
+# Ok(ω), or Err(KM_ERR_INVALID_INPUT) if k, then μ, is not positive and finite. ADR 0002 #30: the correctly rounded
+# √(k/μ) of the exact quotient (src/mathx.cyr's _km_cr_sqrt_div), where Rust's (k/μ).sqrt() rounds twice and k/μ can
+# over- or underflow (ω is finite and nonzero for every positive finite k and μ but a subnormal μ's largest quotients,
+# past DBL_MAX², where it is +∞). Mirrors `spectroscopy::vibrational_frequency`, with ADR 0002 #30.
 #must_use
 fn vibrational_frequency(force_constant: f64, reduced_mass_kg: f64): Result {
     if (_km_is_positive(force_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(reduced_mass_kg) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var q: f64 = force_constant / reduced_mass_kg;
-    var w: f64 = f64_sqrt(q);
+    var w: f64 = _km_cr_sqrt_div(force_constant, reduced_mass_kg);
     return Ok(w);
 }
 
 # ── rotational spectroscopy ─────────────────────────────────────────────────────────
 
 # The rigid-rotor energy E_J = h·B·J(J + 1) in J, from the rotational quantum number J (Rust's u32) and the rotational
-# constant B (Hz), as Rust's ((h·B)·J)·(J + 1). Inputs are not validated; NaN for a J outside 0 ..= u32::MAX. Mirrors
-# `spectroscopy::rigid_rotor_energy`.
+# constant B (Hz). Inputs are not validated; NaN for a J outside 0 ..= u32::MAX. ADR 0002 #30: the correctly rounded
+# h·B·J·(J + 1) for a finite B (J = 0 gives B's signed zero, J and J + 1 are exact), where Rust's ((h·B)·J)·(J + 1)
+# rounds three times and h·B underflows for |B| below 3.4·10⁻²⁷⁵; a non-finite B gives Rust's expression. Mirrors
+# `spectroscopy::rigid_rotor_energy`, with ADR 0002 #30.
 #must_use
 fn rigid_rotor_energy(j, rotational_constant_hz: f64): f64 {
     if (_km_is_u32(j) != 1) { return _km_nan(); }
     var jf: f64 = f64_from(j);
     var j1: f64 = jf + 1.0;
-    var e: f64 = ((KM_PLANCK * rotational_constant_hz) * jf) * j1;
-    return e;
+    var h: f64 = KM_PLANCK;
+    if (_km_is_finite(rotational_constant_hz) != 1) {
+        var e: f64 = ((h * rotational_constant_hz) * jf) * j1;
+        return e;
+    }
+    var r: f64 = _km_cr_mul4(h, rotational_constant_hz, jf, j1);
+    return r;
 }
 
-# The rotational constant B = h/(8π²I) in Hz from the moment of inertia I (kg·m²), as Rust's h/(((8·π)·π)·I). Ok(B),
-# or Err(KM_ERR_INVALID_INPUT) if I is not positive and finite. Mirrors `spectroscopy::rotational_constant`.
+# The rotational constant B = h/(8π²I) in Hz from the moment of inertia I (kg·m²). Ok(B), or Err(KM_ERR_INVALID_INPUT)
+# if I is not positive and finite. ADR 0002 #30: the correctly rounded h/(8·π·π·I) with π as its double (Rust's
+# h/(((8·π)·π)·I) exactly), computed as (h/8)/(π·π·I) (h/8 exact), where Rust rounds three times and 8π²·I is subnormal
+# for I below 2.8·10⁻³¹⁰. Mirrors `spectroscopy::rotational_constant`, with ADR 0002 #30.
 #must_use
 fn rotational_constant(moment_of_inertia: f64): Result {
     if (_km_is_positive(moment_of_inertia) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
-    var d: f64 = ((8.0 * pi) * pi) * moment_of_inertia;
-    var b: f64 = KM_PLANCK / d;
+    var h: f64 = KM_PLANCK;
+    var h8: f64 = h * 0.125;
+    var b: f64 = _km_cr_div3(h8, pi, pi, moment_of_inertia);
     return Ok(b);
 }
 
-# The moment of inertia of a diatomic I = μ·r² in kg·m² from the reduced mass μ (kg) and the bond length r (m), as
-# Rust's (μ·r)·r. Inputs are not validated. Mirrors `spectroscopy::diatomic_moment_of_inertia`.
+# The moment of inertia of a diatomic I = μ·r² in kg·m² from the reduced mass μ (kg) and the bond length r (m). Inputs
+# are not validated. ADR 0002 #30: the correctly rounded μ·r·r for finite inputs (a zero factor gives its signed zero),
+# where Rust's (μ·r)·r rounds twice; a non-finite input gives Rust's (μ·r)·r. Mirrors
+# `spectroscopy::diatomic_moment_of_inertia`, with ADR 0002 #30.
 #must_use
 fn diatomic_moment_of_inertia(reduced_mass_kg: f64, bond_length_m: f64): f64 {
-    var i: f64 = (reduced_mass_kg * bond_length_m) * bond_length_m;
-    return i;
+    var f, ok = _km_mul3_fast(reduced_mass_kg, bond_length_m, bond_length_m);
+    if (ok == 1) { return f; }
+    if (_km_is_finite(reduced_mass_kg) != 1 || _km_is_finite(bond_length_m) != 1) {
+        var i: f64 = (reduced_mass_kg * bond_length_m) * bond_length_m;
+        return i;
+    }
+    var r: f64 = _km_cr_mul3(reduced_mass_kg, bond_length_m, bond_length_m);
+    return r;
 }
 
 # ── mass-spectrometry isotope patterns ──────────────────────────────────────────────

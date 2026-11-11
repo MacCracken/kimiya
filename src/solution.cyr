@@ -6,9 +6,16 @@
 # KM_DH_B_WATER_25C and the seven KM_LAMBDA_* — are src/constants.cyr's (generated; solution has no data file
 # of its own). Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and
 # reject NaN and ±∞ inputs. Every expression keeps Rust's operation order, so the arithmetic functions are
-# bit-identical (class B); the log10 and 10^x functions are class C (docs/development/port-parity.md §7,
-# §10).
+# bit-identical (class B), except the two below; the log10 and 10^x functions are class C
+# (docs/development/port-parity.md §7, §10).
 #
+# - ADR 0002 #29 (the overflow audit's B2; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide audit" and
+#   "round once"): dilution's (M₁·V₁)/V₂ and solution_conductivity's (Λ·c)/1000 are each one quotient of a product of
+#   inputs (1000 an exact integer literal), so the port returns the exact value rounded once (src/mathx.cyr's
+#   correctly rounded monomial, _km_cr_mul_div), where Rust rounds twice (one ulp off on about a quarter of inputs) and
+#   M₁·V₁ or Λ·c that over- or underflows gives ±∞, 0 or a degraded subnormal although the value is representable
+#   (solution_conductivity(126.4, DBL_MAX) is ∞ in Rust, 2.27·10³⁰⁷ here). Rust's checks and Err codes are kept;
+#   solution_conductivity, which validates nothing, keeps Rust's expression for a non-finite input.
 # - log10 is src/mathx.cyr's correctly rounded _km_cr_log10 and 10^x its _km_cr_exp10 (the same value as a
 #   correctly rounded pow(10, x), Rust's 10.0_f64.powf(x)), as the Antoine equation's (ADR 0006). With both
 #   sides on correctly rounded primitives in Rust's operation order the class-C rows are compared exactly
@@ -59,12 +66,14 @@ fn molality(moles: f64, solvent_kg: f64): Result {
 
 # Dilution M₁V₁ = M₂V₂: the final concentration M₂ = M₁·V₁/V₂ in mol/L, from the initial concentration
 # (mol/L) and the initial and final volumes (any one volume unit). Ok(M₂), or Err(KM_ERR_INVALID_INPUT) if
-# V₂ is not positive and finite or M₁ or V₁ is not finite. Mirrors `solution::dilution`.
+# V₂ is not positive and finite or M₁ or V₁ is not finite. ADR 0002 #29: the correctly rounded M₁·V₁/V₂ (its sign the
+# xor of the factors'; a zero factor gives that signed zero), where Rust's (M₁·V₁)/V₂ rounds twice. Mirrors
+# `solution::dilution`, with ADR 0002 #29.
 #must_use
 fn dilution(m1: f64, v1: f64, v2: f64): Result {
     if (_km_is_positive(v2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_finite(m1) != 1 || _km_is_finite(v1) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var m2: f64 = (m1 * v1) / v2;
+    var m2: f64 = _km_cr_mul_div(m1, v1, v2);
     return Ok(m2);
 }
 
@@ -324,9 +333,17 @@ fn limiting_molar_conductivity(cation_conductivity: f64, cation_stoich: f64, ani
 }
 
 # The solution conductivity κ = Λ_m × c / 1000 in S/cm, from the molar conductivity Λ_m (S·cm²/mol) and the
-# concentration c (mol/L). Non-finite input propagates to the result. Mirrors `solution::solution_conductivity`.
+# concentration c (mol/L). Non-finite input propagates to the result. ADR 0002 #29: the correctly rounded Λ·c/1000 for
+# finite inputs (a zero factor gives its signed zero), where Rust's (Λ·c)/1000 rounds twice; a non-finite input gives
+# Rust's (Λ·c)/1000. Mirrors `solution::solution_conductivity`, with ADR 0002 #29.
 #must_use
 fn solution_conductivity(molar_conductivity: f64, concentration: f64): f64 {
-    var kappa: f64 = (molar_conductivity * concentration) / 1000.0;
-    return kappa;
+    var f, ok = _km_mul_div_fast(molar_conductivity, concentration, 1000.0);
+    if (ok == 1) { return f; }
+    if (_km_is_finite(molar_conductivity) != 1 || _km_is_finite(concentration) != 1) {
+        var kappa: f64 = (molar_conductivity * concentration) / 1000.0;
+        return kappa;
+    }
+    var r: f64 = _km_cr_mul_div(molar_conductivity, concentration, 1000.0);
+    return r;
 }

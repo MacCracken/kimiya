@@ -1442,6 +1442,81 @@ Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **18 modules, 0 faili
 === parity summary: 18 modules, 0 failing | rows: 337395 ok, 0 failed, 0 measured, 0 pending, 33471 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
 ```
 
+## 22. The overflow audit's B2: solution, electrochemistry and spectroscopy, ADR 0002 #29 and #30 (2026-11-10)
+
+B1's decisions unchanged (ADR 0002's B2 addition): a single product or quotient of inputs and constants rounds once, a
+formula with a sum inside gets #20's edge fix. B2 is the survey's F3 (#29: `dilution`, `solution_conductivity`,
+`faraday_mass_deposited`, `faraday_charge_required`, `faraday_mass_ratio` rounded once; `nernst_potential` with an
+unbounded exponent, the correctly rounded ln Q its primitive) and F5 (#30: `absorbance`,
+`concentration_from_absorbance`, `rigid_rotor_energy`, `rotational_constant`, `diatomic_moment_of_inertia` rounded once;
+`vibrational_frequency` the correctly rounded √ of the exact k/μ). Rust's checks, Err codes and order are kept. The
+corpus keeps the oracle's values; the rows where the port's value differs carry it in their note, and the harness maps
+and counts them per function. `scripts/oracle/src/audit.rs` appends each module's B2 edge rows with its own seed:
+solution 28,566 → 29,024, electrochemistry 18,574 → 19,397, spectroscopy 66,691 → 67,869 (2,459 rows).
+
+| Function | Class | Rows | Oracle Ok | Oracle Err | Noted (port ≠ oracle) | of the rows before B2 | ulp of the rest |
+|---|---|---|---|---|---|---|---|
+| `solution::dilution` | B | 473 | 455 | 18 | 94 (#29) | 38 of 208 | 0 |
+| `solution::solution_conductivity` | B | 379 | 379 | 0 | 148 (#29) | 50 of 186 | 0 |
+| `electrochemistry::faraday_mass_deposited` | B | 4,165 | 4,137 | 28 | 904 (#29) | 870 of 3,975 | 0 |
+| `electrochemistry::faraday_charge_required` | B | 2,356 | 2,328 | 28 | 644 (#29) | 565 of 2,168 | 0 |
+| `electrochemistry::faraday_mass_ratio` | B | 2,388 | 2,348 | 40 | 847 (#29) | 716 of 2,199 | 0 |
+| `electrochemistry::nernst_potential` | C | 1,741 | 1,686 | 55 | 119 (#29, unbounded) | 2 of 1,485 | 0 |
+| `spectroscopy::absorbance` | B | 771 | 771 | 0 | 195 (#30) | 131 of 560 | 0 |
+| `spectroscopy::concentration_from_absorbance` | B | 724 | 701 | 23 | 219 (#30) | 130 of 564 | 0 |
+| `spectroscopy::vibrational_frequency` | B | 3,473 | 3,450 | 23 | 706 (#30, √) | 440 of 3,047 | 0 |
+| `spectroscopy::rigid_rotor_energy` | B | 1,142 | 1,142 | 0 | 344 (#30) | 273 of 1,015 | 0 |
+| `spectroscopy::rotational_constant` | B | 1,654 | 1,641 | 13 | 524 (#30) | 459 of 1,587 | 0 |
+| `spectroscopy::diatomic_moment_of_inertia` | B | 627 | 627 | 0 | 118 (#30) | 111 of 440 | 0 |
+
+- **The noted rows** are read by `_par_got_noted` (the Result functions) and `_par_got_noted_f` (the four f64 ones,
+  `solution_conductivity`, `absorbance`, `rigid_rotor_energy`, `diatomic_moment_of_inertia`): the port's value must be
+  the note's bit for bit, and the row is accepted under ADR 2 even within class B's 2 ulp. Every other row of the twelve
+  is the port's value and the oracle's at once (0 ulp). Of the rows that existed before B2, the monomials change on a
+  fifth to a third of their ordinary rows and at their edges, the √ on about an eighth (Rust's √ of RN(k/μ) misses one
+  input in eight), and `nernst_potential` only at its two edge rows where R·T passes DBL_MAX (T = DBL_MAX and 10³⁰⁸ K).
+  The 1,132 `nernst_potential_25c` rows are unchanged: T = 298.15 K keeps Rust's chain normal.
+- **The proofs** (`validate.py` §20). Each row's port value recomputed independently — the monomials with `Fraction`,
+  the √ with Python's `math.isqrt` and again with MPFR's √ of a 256-bit quotient (`mpfr_ref.ux_sqrt_div_final`), Nernst
+  through `mpfr_ref.UX` with MPFR's log and `ux_sub_final` — and each note proven to sit exactly where it differs from
+  the oracle's, naming it; no `nernst_potential` row whose f64 chain stays normal is noted (1,455 rows: Rust's bits),
+  every `nernst_potential_25c` row's chain is normal, glibc's ln is correctly rounded on every Nernst row (so the
+  generator's notes, from glibc's ln, are the port's), and no √ row is a rounding boundary. The hard rows: 818 where
+  Rust's value is 0, ±∞ or NaN and the port's representable (56 `dilution`, 64 `solution_conductivity`, 9
+  `faraday_mass_deposited`, 28 `faraday_charge_required`, 71 `faraday_mass_ratio`, 70 `nernst_potential`, 76
+  `absorbance`, 79 `concentration_from_absorbance`, 336 `vibrational_frequency`, 29 `rigid_rotor_energy`), 409 midpoints
+  of the 53-bit grid, 1,309 subnormal results with 60 of the subnormal grid's ties; for the √ 86 exact roots, 195
+  quotients past DBL_MAX, 146 below 2⁻¹⁰⁷⁴, 168 subnormal operands, 3 subnormal results, 13 roots within 2⁻⁹⁸ of a
+  53-bit midpoint (twelve from continued-fraction convergents of m², where the fast path's test fails); no row where
+  Rust's NaN stands for an out-of-range value (none is possible in these functions: their NaNs from finite inputs are
+  ∞·0 with an exact zero factor or 0/0 with an exact zero numerator).
+- **`cr_verify.py`**: `sqrtdiv` (`_km_cr_sqrt_div` on 326,845 arguments: every binade of both operands, typical HCl
+  values, k/μ past either end, subnormal operands and results, exact roots, roots within ulps and within 2⁻¹⁰⁰ of a
+  53-bit midpoint, the domain) and the twelve functions — `dil` 220,008, `cond` 250,121, `fmass` 210,010, `fcharge`
+  210,007, `fratio` 210,008, `nernst` 200,009, `abs` 281,000, `conc` 200,008, `vib` 266,885, `rotor` 200,009, `rot`
+  200,006, `moment` 311,000 (3,085,916 in all) — the public function, the shape's fast path where it answers and the
+  slow path forced, against `Fraction`, exact integer roots and `mpfr_ref.UX`: 0 mismatches, the same bits and flags on
+  x86_64 ELF, x86_64 PE and aarch64. The fast paths decline on the edge, midpoint and subnormal sections only (none on
+  the typical ones); the √'s on 19,779 of the 20,000 roots within 2⁻¹⁰⁰ of a midpoint, which its exact path decides.
+
+Tests: `tests/mathx.tcyr`'s `b2_values` and `b2_agrees`; `tests/solution.tcyr`'s and `tests/electrochemistry.tcyr`'s
+`cyrius_adr29`, `tests/spectroscopy.tcyr`'s ADR 0002 #30 group; no Rust test changes.
+
+**Cost** (`tests/kimiya.bcyr`, before → after, the same host; `docs/benchmarks-rust-v-cyrius.md`'s B2 section):
+`spectroscopy/absorbance` 5 → 68 ns (Rust 0.98), `electrochemistry/nernst_potential` 83 → 92 ns (Rust 6.42),
+`dilution` 17 → 86, `solution_conductivity` 6 → 72, `faraday_mass_deposited` 19 → 109, `faraday_charge_required`
+21 → 122, `faraday_mass_ratio` 33 → 148, `concentration_from_absorbance` 16 → 90, `vibrational_frequency` 18 → 87,
+`rigid_rotor_energy` 14 → 114, `rotational_constant` 18 → 117, `diatomic_moment_of_inertia` 11 → 74; the other paths
+`nernst_potential_edge` 202 ns, `vibrational_frequency_edge` 88 ns, `vibrational_frequency_subnormal` 883 ns,
+`faraday_mass_ratio_tie` 402 ns.
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **18 modules, 0 failing; 334,992 ok, 0 failed, 0 measured,
+0 pending, 38,333 accepted (809 under ADR 6; under ADR 2 as §21 plus 2,756 #29 and 2,106 #30 rows), 0 glibc-matching.**
+
+```text
+=== parity summary: 18 modules, 0 failing | rows: 334992 ok, 0 failed, 0 measured, 0 pending, 38333 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
+```
+
 ## How to reproduce
 
 ```sh

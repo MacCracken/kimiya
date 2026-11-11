@@ -2119,7 +2119,9 @@ var _KM_CR_HUNDREDTH_L = 0xBC0EB851EB851EB8;   # -2.0816681711721684e-19
 # binary64 with an unbounded exponent (_km_ux_*: potential.cyr's geometry under ADR 0002 #20, and the machinery of the
 # library-wide audit of intermediate over- and underflow after M4), and M4e-3, at the end of this file, multi-word
 # unsigned integers (_km_bn_*), the exact RN(p/q·2^e) _km_cr_ratio and the double-double _km_dd_mul / _km_dd_div_cr
-# (spectroscopy.cyr's Bohr model, Rydberg formula and reduced mass rounded once, ADR 0002 #21 and #22).
+# (spectroscopy.cyr's Bohr model, Rydberg formula and reduced mass rounded once, ADR 0002 #21 and #22). The overflow
+# audit's B1 added the correctly rounded monomials (_km_cr_mono and one straight-line fast path per shape: ADR 0002 #27,
+# #28) and B2 four more shapes and the correctly rounded √ of a quotient, _km_cr_sqrt_div (ADR 0002 #29, #30).
 # The coefficients and constants are bit patterns in typed f64 locals (never a hex `const`).
 
 # +∞ (0x7FF0000000000000), a compile-time constant.
@@ -6182,18 +6184,18 @@ fn _km_dd_div_cr(nh: f64, nl: f64, dh: f64, dl: f64): (f64, i64) {
     return (z1, 1);
 }
 
-# ── correctly rounded monomials (the overflow audit's B1): ADR 0002 #27, #28 ─────────────────────────────────────────
+# ── correctly rounded monomials (the overflow audit's B1, B2): ADR 0002 #27 … #30 ────────────────────────────────────
 #
 # RN(x₁·…·xₐ / (y₁·…·y_b)) in binary64, rounded ONCE — to nearest, ties to even, subnormal results on the 2⁻¹⁰⁷⁴ grid,
 # ±∞ only where the exact value rounds past DBL_MAX, the sign the xor of the factors' signs (a zero factor, or an exact
 # value that rounds to zero, gives that signed zero, as IEEE's products and quotients do) — for finite doubles with
 # nonzero denominator factors. It is the library-wide overflow audit's "round once" treatment (the user's decision of
 # 2026-11-10) of the functions whose whole formula is one product or quotient of inputs and constants: thermo's
-# calorimetry, phase's colligative properties and kinetics' rationals (ADR 0002 #27, #28), where Rust's two to four
-# roundings are 1–2 ulp off on about a quarter of inputs and an intermediate that over- or underflows gives 0, ±∞ or NaN
-# although the value is representable. M4f-2's RN(x·y/z) (ADR 0002 #24, written in stoichiometry.cyr) is its first
-# shape, _km_cr_mul_div below. A physical constant enters as its double, an integer literal of Rust's formula (2, 1000)
-# as an exact factor.
+# calorimetry, phase's colligative properties and kinetics' rationals (ADR 0002 #27, #28; B2's solution,
+# electrochemistry and spectroscopy monomials, #29, #30), where Rust's two to four roundings are 1–2 ulp off on about a
+# quarter of inputs and an intermediate that over- or underflows gives 0, ±∞ or NaN although the value is representable.
+# M4f-2's RN(x·y/z) (ADR 0002 #24, written in stoichiometry.cyr) is its first shape, _km_cr_mul_div below. A physical
+# constant enters as its double, an integer literal of Rust's formula (2, 1000) as an exact factor.
 # Domain: at most _KM_MONO_NMAX numerator and _KM_MONO_DMAX denominator factors, every one finite and every denominator
 # factor nonzero (otherwise NaN), and on each side odd parts of the significands of at most 253 bits in all (the exact
 # path's capacity: any four doubles and a 41-bit integer per side; otherwise NaN). No caller comes near either limit.
@@ -6923,6 +6925,391 @@ fn _km_cr_mul5(a: f64, b: f64, c: f64, d: f64, f: f64): f64 {
     store64(&nb + 32, f);
     var g: f64 = _km_cr_mono(&nb, 5, 0, 0);
     return g;
+}
+
+# The overflow audit's B2 (ADR 0002 #29, #30): the shapes solution.cyr, electrochemistry.cyr and spectroscopy.cyr call
+# beyond B1's, the same arithmetic.
+
+# RN(x·y/(z·w)) by its fast path: N = sₓs_y and D = s_zs_w exact TwoProducts, F in (¼, 4) by _km_dd_div_ends (exact
+# operands, inside its 32u² budget); a failed test (a midpoint, or within 2⁻⁹⁸ of one) falls back.
+#must_use
+fn _km_mul2_div2_fast(x: f64, y: f64, z: f64, w: f64): (f64, i64) {
+    var bx = load64(&x);
+    var by = load64(&y);
+    var bz = load64(&z);
+    var bw = load64(&w);
+    var neg = (bx ^ by ^ bz ^ bw) >> 63;
+    var abs = 0x7FFFFFFFFFFFFFFF;
+    var ax = bx & abs;
+    var ay = by & abs;
+    var az = bz & abs;
+    var aw = bw & abs;
+    var nmin = 0x0010000000000000;
+    var nmax = 0x7FF0000000000000;
+    if (ax < nmin || ay < nmin || az < nmin || aw < nmin) { return (0.0, 0); }
+    if (ax >= nmax || ay >= nmax || az >= nmax || aw >= nmax) { return (0.0, 0); }
+    var k = (ax >> 52) + (ay >> 52) - (az >> 52) - (aw >> 52);          # eₓ + e_y − e_z − e_w
+    var mask = 0x000FFFFFFFFFFFFF;
+    var one = 0x3FF0000000000000;
+    var sxb = (ax & mask) | one;
+    var syb = (ay & mask) | one;
+    var szb = (az & mask) | one;
+    var swb = (aw & mask) | one;
+    var sx: f64 = sxb;
+    var sy: f64 = syb;
+    var sz: f64 = szb;
+    var sw: f64 = swb;
+    var ph, pl = _km_two_prod(sx, sy);
+    var dh, dl = _km_two_prod(sz, sw);
+    var z1, z2 = _km_dd_div_ends(ph, pl, dh, dl);
+    if (z1 != z2) { return (0.0, 0); }
+    var r, ok = _km_mono_fin(z1, k, neg);
+    return (r, ok);
+}
+
+# RN(x·y/(z·w)), correctly rounded: faraday_mass_deposited's Q·M/(n·F) (#29). A midpoint the fast path leaves is
+# _km_cr_mono's (its 2/2 tie resolution).
+#must_use
+fn _km_cr_mul2_div2(x: f64, y: f64, z: f64, w: f64): f64 {
+    var r, ok = _km_mul2_div2_fast(x, y, z, w);
+    if (ok == 1) { return r; }
+    var nb: f64[2];
+    store64(&nb, x);
+    store64(&nb + 8, y);
+    var db: f64[2];
+    store64(&db, z);
+    store64(&db + 8, w);
+    var g: f64 = _km_cr_mono(&nb, 2, &db, 2);
+    return g;
+}
+
+# RN(x·y·z/(v·w)) by its fast path: N as in _km_mul3_fast (within 3.01u², in [1, 8)), D = s_vs_w an exact TwoProduct,
+# F in (⅛, 8) by _km_dd_div_ends; a failed test falls back.
+#must_use
+fn _km_mul3_div2_fast(x: f64, y: f64, z: f64, v: f64, w: f64): (f64, i64) {
+    var bx = load64(&x);
+    var by = load64(&y);
+    var bz = load64(&z);
+    var bv = load64(&v);
+    var bw = load64(&w);
+    var neg = (bx ^ by ^ bz ^ bv ^ bw) >> 63;
+    var abs = 0x7FFFFFFFFFFFFFFF;
+    var ax = bx & abs;
+    var ay = by & abs;
+    var az = bz & abs;
+    var av = bv & abs;
+    var aw = bw & abs;
+    var nmin = 0x0010000000000000;
+    var nmax = 0x7FF0000000000000;
+    if (ax < nmin || ay < nmin || az < nmin || av < nmin || aw < nmin) { return (0.0, 0); }
+    if (ax >= nmax || ay >= nmax || az >= nmax || av >= nmax || aw >= nmax) { return (0.0, 0); }
+    var k = (ax >> 52) + (ay >> 52) + (az >> 52) - (av >> 52) - (aw >> 52) - 1023;   # eₓ + e_y + e_z − e_v − e_w
+    var mask = 0x000FFFFFFFFFFFFF;
+    var one = 0x3FF0000000000000;
+    var sxb = (ax & mask) | one;
+    var syb = (ay & mask) | one;
+    var szb = (az & mask) | one;
+    var svb = (av & mask) | one;
+    var swb = (aw & mask) | one;
+    var sx: f64 = sxb;
+    var sy: f64 = syb;
+    var sz: f64 = szb;
+    var sv: f64 = svb;
+    var sw: f64 = swb;
+    var ph, pl = _km_two_prod(sx, sy);
+    var h, l = _km_dd_mul_d(ph, pl, sz);
+    var dh, dl = _km_two_prod(sv, sw);
+    var z1, z2 = _km_dd_div_ends(h, l, dh, dl);
+    if (z1 != z2) { return (0.0, 0); }
+    var r, ok = _km_mono_fin(z1, k, neg);
+    return (r, ok);
+}
+
+# RN(x·y·z/(v·w)), correctly rounded: faraday_mass_ratio's m_A·M_B·n_A/(n_B·M_A) (#29). A midpoint the fast path leaves
+# is _km_cr_mono's (its 3/2 tie resolution).
+#must_use
+fn _km_cr_mul3_div2(x: f64, y: f64, z: f64, v: f64, w: f64): f64 {
+    var r, ok = _km_mul3_div2_fast(x, y, z, v, w);
+    if (ok == 1) { return r; }
+    var nb: f64[3];
+    store64(&nb, x);
+    store64(&nb + 8, y);
+    store64(&nb + 16, z);
+    var db: f64[2];
+    store64(&db, v);
+    store64(&db + 8, w);
+    var g: f64 = _km_cr_mono(&nb, 3, &db, 2);
+    return g;
+}
+
+# RN(a·b·c·d) by its fast path: the exact TwoProduct s_a·s_b, then _km_dd_mul_d by s_c and s_d (within
+# 2·3.01u²·(1 + 2⁻⁵⁰) < 6.1u², N in [1, 16)), rounded by _km_dd_round_ends; a failed test falls back.
+#must_use
+fn _km_mul4_fast(a: f64, b: f64, c: f64, d: f64): (f64, i64) {
+    var ba = load64(&a);
+    var bb = load64(&b);
+    var bc = load64(&c);
+    var bd = load64(&d);
+    var neg = (ba ^ bb ^ bc ^ bd) >> 63;
+    var abs = 0x7FFFFFFFFFFFFFFF;
+    var aa = ba & abs;
+    var ab = bb & abs;
+    var ac = bc & abs;
+    var ad = bd & abs;
+    var nmin = 0x0010000000000000;
+    var nmax = 0x7FF0000000000000;
+    if (aa < nmin || ab < nmin || ac < nmin || ad < nmin) { return (0.0, 0); }
+    if (aa >= nmax || ab >= nmax || ac >= nmax || ad >= nmax) { return (0.0, 0); }
+    var k = (aa >> 52) + (ab >> 52) + (ac >> 52) + (ad >> 52) - 4092;   # e_a + e_b + e_c + e_d
+    var mask = 0x000FFFFFFFFFFFFF;
+    var one = 0x3FF0000000000000;
+    var sab = (aa & mask) | one;
+    var sbb = (ab & mask) | one;
+    var scb = (ac & mask) | one;
+    var sdb = (ad & mask) | one;
+    var sa: f64 = sab;
+    var sb: f64 = sbb;
+    var sc: f64 = scb;
+    var sd: f64 = sdb;
+    var ph, pl = _km_two_prod(sa, sb);
+    var h1, l1 = _km_dd_mul_d(ph, pl, sc);
+    var h2, l2 = _km_dd_mul_d(h1, l1, sd);
+    var z1, z2 = _km_dd_round_ends(h2, l2);
+    if (z1 != z2) { return (0.0, 0); }
+    var r, ok = _km_mono_fin(z1, k, neg);
+    return (r, ok);
+}
+
+# RN(a·b·c·d), correctly rounded: rigid_rotor_energy's h·B·J·(J + 1) (#30).
+#must_use
+fn _km_cr_mul4(a: f64, b: f64, c: f64, d: f64): f64 {
+    var r, ok = _km_mul4_fast(a, b, c, d);
+    if (ok == 1) { return r; }
+    var nb: f64[4];
+    store64(&nb, a);
+    store64(&nb + 8, b);
+    store64(&nb + 16, c);
+    store64(&nb + 24, d);
+    var g: f64 = _km_cr_mono(&nb, 4, 0, 0);
+    return g;
+}
+
+# RN(x/(y·z·w)) by its fast path: N = sₓ exact, D = s_ys_zs_w by _km_dd_mul_d on the exact TwoProduct s_ys_z (within
+# 3.01u², in [1, 8)), F in (⅛, 2) by _km_dd_div_ends; a failed test falls back.
+#must_use
+fn _km_div3_fast(x: f64, y: f64, z: f64, w: f64): (f64, i64) {
+    var bx = load64(&x);
+    var by = load64(&y);
+    var bz = load64(&z);
+    var bw = load64(&w);
+    var neg = (bx ^ by ^ bz ^ bw) >> 63;
+    var abs = 0x7FFFFFFFFFFFFFFF;
+    var ax = bx & abs;
+    var ay = by & abs;
+    var az = bz & abs;
+    var aw = bw & abs;
+    var nmin = 0x0010000000000000;
+    var nmax = 0x7FF0000000000000;
+    if (ax < nmin || ay < nmin || az < nmin || aw < nmin) { return (0.0, 0); }
+    if (ax >= nmax || ay >= nmax || az >= nmax || aw >= nmax) { return (0.0, 0); }
+    var k = (ax >> 52) - (ay >> 52) - (az >> 52) - (aw >> 52) + 2046;   # eₓ − e_y − e_z − e_w
+    var mask = 0x000FFFFFFFFFFFFF;
+    var one = 0x3FF0000000000000;
+    var sxb = (ax & mask) | one;
+    var syb = (ay & mask) | one;
+    var szb = (az & mask) | one;
+    var swb = (aw & mask) | one;
+    var sx: f64 = sxb;
+    var sy: f64 = syb;
+    var sz: f64 = szb;
+    var sw: f64 = swb;
+    var ph, pl = _km_two_prod(sy, sz);
+    var dh, dl = _km_dd_mul_d(ph, pl, sw);
+    var z1, z2 = _km_dd_div_ends(sx, 0.0, dh, dl);
+    if (z1 != z2) { return (0.0, 0); }
+    var r, ok = _km_mono_fin(z1, k, neg);
+    return (r, ok);
+}
+
+# RN(x/(y·z·w)), correctly rounded: rotational_constant's h/(8·π·π·I), called as (h/8)/(π·π·I) (h/8 exact) (#30).
+#must_use
+fn _km_cr_div3(x: f64, y: f64, z: f64, w: f64): f64 {
+    var r, ok = _km_div3_fast(x, y, z, w);
+    if (ok == 1) { return r; }
+    var nb: f64[1];
+    store64(&nb, x);
+    var db: f64[3];
+    store64(&db, y);
+    store64(&db + 8, z);
+    store64(&db + 16, w);
+    var g: f64 = _km_cr_mono(&nb, 1, &db, 3);
+    return g;
+}
+
+# ── correctly rounded square roots of quotients (the overflow audit's B2): ADR 0002 #30 ──────────────────────────────
+#
+# RN(√(x/y)) in binary64, rounded ONCE, for positive finite doubles x and y: spectroscopy's vibrational_frequency
+# ω = √(k/μ) (ADR 0002 #30, the user's "round once" decision of 2026-11-10 for a monomial under a square root), where
+# Rust's (k/μ).sqrt() rounds twice (one ulp off on about one input in eight) and k/μ over- or underflows although ω is
+# representable (√(500/2⁻¹⁰²²) = 1.50·10¹⁵⁵ is Rust's ∞; √(10⁻³⁰⁰/10³⁰) = 10⁻¹⁶⁵ Rust's 0). The value v = √(x/y) lies
+# within about 2^±1049; it is +∞ only past DBL_MAX's rounding boundary (a subnormal y), and subnormal only for x/y below
+# 2⁻²⁰⁴⁴.
+# No midpoint: v is never a rounding boundary of binary64 (a midpoint m of the 53-bit grid or of the subnormal grid).
+# With x = a·2^eₐ and y = b·2^e_b (a, b odd and below 2⁵³; eₐ ≥ −1074 and e_b ≤ 1023) and m = M·2^f (M odd), v = m means
+# a·2^(eₐ − e_b) = b·M²·2^(2f): the odd parts give a = b·M², so M² ≤ a < 2⁵³. A midpoint of the 53-bit grid has M of 54
+# bits; one of the subnormal grid has f = −1075, so eₐ − e_b = −2150 < −2097. So the rounding test below fails only near
+# a midpoint, and the exact path's sticky bit is never needed to break a tie (it is kept anyway).
+# The fast path, _km_sqrt_div_fast (u = 2⁻⁵³), for normal x and y:
+# - the significands sₓ, s_y in [1, 2) and K = eₓ − e_y; for an odd K, sₓ doubled (exactly) and K − 1, so
+#   v = √F·2^(K/2) with F = sₓ/s_y in (½, 4);
+# - F = q_h + ℓ exactly, q_h = RN(F), ℓ = (sₓ − q_h·s_y)/s_y (the remainder is exact: TwoProduct q_h·s_y = a + b, sₓ − a
+#   exact by Sterbenz, the remainder representable), |ℓ| ≤ u·q_h, q_l = RN(ℓ);
+# - y₀ = RN(√q_h); t₁ = (q_h − p) − pₑ with y₀·y₀ = p + pₑ (TwoProduct; q_h − p exact by Sterbenz), the residual
+#   q_h − y₀² (representable for a correctly rounded root, but the bound allows its rounding), |t₁| ≤ (2u + u²)·q_h;
+#   t = RN(t₁ + q_l); d = RN(t/(2y₀)). With D = F − y₀² = (q_h − y₀²) + ℓ, |D| ≤ (3u + u²)·q_h, |t − D| ≤ 6.01u²·q_h
+#   (t₁'s, q_l's and the sum's roundings), so |d − D/(2y₀)| ≤ 4.51u²·q_h/y₀ (with d's own); and
+#   D/(2y₀) − (√F − y₀) = (√F − y₀)²/(2y₀) ≤ 1.14u²·q_h/y₀ (|√F − y₀| ≤ |√F − √q_h| + |√q_h − y₀| ≤ 1.51u·√q_h). So
+#   |y₀ + d − √F| ≤ 5.65u²·q_h/y₀ ≤ 5.7u²·√F;
+# - the rounding test, _km_dd_div_cr's: ε = 2⁻¹⁰⁰·y₀ = 64u²·y₀ ≥ 63.8u²·√F, and RN(d ∓ ε) are within
+#   u·(|d| + ε) ≤ 1.6u²·y₀ of d ∓ ε (|d| ≤ 1.52u·y₀), so y₀ + RN(d − ε) < √F < y₀ + RN(d + ε): when the two sums round
+#   to the same double z, √F rounds to z (RN is monotone). It fails only within about 2⁻⁹⁸·√F of a midpoint, never on
+#   one (above): with probability about 2⁻⁴⁶;
+# - the scale, _km_mono_fin(z, K/2): exact for a result exponent in [−1021, 1023] (normal x and y give at most
+#   2¹⁰²³·√2); below −1021 the result may be subnormal and the exact path decides.
+# The exact path, _km_sqrt_div_acc, for every positive finite x and y: x = A·2^eₐ and y = B·2^e_b with A and B in
+# [2⁵², 2⁵³) (_km_f64_int; a subnormal's significand shifted up), E = eₐ − e_b, and for an odd E, A doubled and E − 1;
+# then v = √(P/B)·2^h with P = A·2¹¹⁰ (below 2¹⁶⁴) and h = (E − 110)/2, P/B in (2¹⁰⁹, 2¹¹²). R = ⌊√(P/B)⌋, in
+# [2⁵⁴, 2⁵⁶), exactly: a guess G from the fast path's arithmetic on A/B (y₀·2⁵⁵, an integer, plus d·2⁵⁵ truncated, so
+# within about one of R), then R + 1 while (R + 1)²·B ≤ P and R − 1 while R²·B > P (multi-word products, _km_bn_*: below
+# 2¹⁶⁵), and sticky = [R²·B ≠ P]. The guess only decides how many steps the loops take; R is exact whatever it is. Then
+# v·2^(1 − h) lies in [2R, 2R + 2), strictly inside when sticky = 1, and 2R + sticky has 56 or 57 bits, so every
+# binary64 rounding boundary there (53 bits kept, or fewer at the subnormal grid) is a multiple of 4 units: an end point
+# of that interval, so v and 2R + sticky round alike, and _km_cr_from_int(2R + sticky, h − 1) rounds once (ties to even,
+# subnormal results on the 2⁻¹⁰⁷⁴ grid, +∞ past DBL_MAX: _km_cr_ratio's argument).
+# scripts/oracle/cr_verify.py's `sqrtdiv` and `vib` families check both paths against exact integer square roots on
+# x86_64 ELF, x86_64 PE and aarch64.
+
+# (y₀, d) with y₀ + d = √(sₓ/s_y) to 5.7u² (the section comment), for sₓ/s_y in (½, 4) and both in [1, 4). (Inlining
+# the two TwoProducts saved 1 ns of 87 and was not kept.)
+#must_use
+fn _km_sqrt_div_dd(sx: f64, sy: f64): (f64, f64) {
+    var qh: f64 = sx / sy;
+    var a, b = _km_two_prod(qh, sy);
+    var rem: f64 = (sx - a) - b;
+    var ql: f64 = rem / sy;
+    var y0: f64 = f64_sqrt(qh);
+    var p, pe = _km_two_prod(y0, y0);
+    var t1: f64 = (qh - p) - pe;
+    var t: f64 = t1 + ql;
+    var tr: f64 = y0 + y0;
+    var d: f64 = t / tr;
+    return (y0, d);
+}
+
+# RN(√(x/y)) by the fast path (the section comment): (RN, 1), or (0, 0) for an operand that is not a positive normal
+# double, a failed rounding test or a possibly subnormal result.
+#must_use
+fn _km_sqrt_div_fast(x: f64, y: f64): (f64, i64) {
+    var bx = load64(&x);
+    var by = load64(&y);
+    var nmin = 0x0010000000000000;
+    var nmax = 0x7FF0000000000000;
+    if (bx < nmin || by < nmin || bx >= nmax || by >= nmax) { return (0.0, 0); }     # a sign bit reads negative
+    var kk = (bx >> 52) - (by >> 52);                                   # eₓ − e_y
+    var mask = 0x000FFFFFFFFFFFFF;
+    var one = 0x3FF0000000000000;
+    var sxb = (bx & mask) | one;
+    var syb = (by & mask) | one;
+    var sx: f64 = sxb;
+    var sy: f64 = syb;
+    if ((kk & 1) != 0) {
+        sx = sx * 2.0;
+        kk = kk - 1;
+    }
+    var y0, d = _km_sqrt_div_dd(sx, sy);
+    var k100: f64 = 0x39B0000000000000;     # 2⁻¹⁰⁰
+    var eps: f64 = y0 * k100;
+    var lo: f64 = d - eps;
+    var hi: f64 = d + eps;
+    var z1: f64 = y0 + lo;
+    var z2: f64 = y0 + hi;
+    if (z1 != z2) { return (0.0, 0); }
+    var r, ok = _km_mono_fin(z1, kk / 2, 0);
+    return (r, ok);
+}
+
+# R²·B into w (multi-word, below 2¹⁶⁵), for 0 ≤ R < 2⁵⁷ and B at bb; t and s are scratch.
+fn _km_sqrt_sq_mul(w, rr, bb, t, s) {
+    _km_bn_set(t, rr);
+    _km_bn_mul(s, t, t);
+    _km_bn_mul(w, s, bb);
+    return 0;
+}
+
+# RN(√(x/y)) by the exact path alone (the section comment), for positive finite x and y; NaN otherwise.
+#must_use
+fn _km_sqrt_div_acc(x: f64, y: f64): f64 {
+    var bx = load64(&x);
+    var by = load64(&y);
+    var nmax = 0x7FF0000000000000;
+    if (bx <= 0 || by <= 0 || bx >= nmax || by >= nmax) {
+        var nan: f64 = _km_nan();
+        return nan;
+    }
+    var am, ea = _km_f64_int(bx);
+    var bm, eb = _km_f64_int(by);
+    var e = ea - eb;
+    if ((e & 1) != 0) {
+        am = am * 2;
+        e = e - 1;
+    }
+    var af: f64 = f64_from(am);              # below 2⁵⁴: exact
+    var bf: f64 = f64_from(bm);
+    var p52: f64 = 0x3CB0000000000000;      # 2⁻⁵²: A/B as a quotient of significands in [1, 4), exactly scaled
+    var sa: f64 = af * p52;
+    var sb: f64 = bf * p52;
+    var y0, d = _km_sqrt_div_dd(sa, sb);
+    var p55: f64 = 0x4360000000000000;      # 2⁵⁵
+    var gy: f64 = y0 * p55;                 # an integer below 2⁵⁶ (y₀'s ulp is at least 2⁻⁵³)
+    var gd: f64 = d * p55;
+    var rr = f64_to(gy) + f64_to(gd);
+    var pb[64];
+    var bb[64];
+    var wb[64];
+    var tb[64];
+    var sb2[64];
+    _km_bn_set(&pb, am);
+    _km_bn_shl(&pb, 110);
+    _km_bn_set(&bb, bm);
+    var up = 1;
+    while (up == 1) {
+        _km_sqrt_sq_mul(&wb, rr + 1, &bb, &tb, &sb2);
+        if (_km_bn_cmp(&wb, &pb) > 0) {
+            up = 0;
+        } else {
+            rr = rr + 1;
+        }
+    }
+    _km_sqrt_sq_mul(&wb, rr, &bb, &tb, &sb2);
+    while (_km_bn_cmp(&wb, &pb) > 0) {
+        rr = rr - 1;
+        _km_sqrt_sq_mul(&wb, rr, &bb, &tb, &sb2);
+    }
+    var sticky = 0;
+    if (_km_bn_cmp(&wb, &pb) != 0) { sticky = 1; }
+    var h = (e - 110) / 2;
+    var r: f64 = _km_cr_from_int(2 * rr + sticky, h - 1);
+    return r;
+}
+
+# RN(√(x/y)), correctly rounded (the section comment), for positive finite x and y: the fast path, then the exact path
+# where it declines; NaN outside the domain.
+#must_use
+fn _km_cr_sqrt_div(x: f64, y: f64): f64 {
+    var r, ok = _km_sqrt_div_fast(x, y);
+    if (ok == 1) { return r; }
+    var a: f64 = _km_sqrt_div_acc(x, y);
+    return a;
 }
 
 # --- validate.cyr ---
@@ -11493,9 +11880,16 @@ fn joule_thomson_ideal(): f64 {
 # KM_DH_B_WATER_25C and the seven KM_LAMBDA_* — are src/constants.cyr's (generated; solution has no data file
 # of its own). Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and
 # reject NaN and ±∞ inputs. Every expression keeps Rust's operation order, so the arithmetic functions are
-# bit-identical (class B); the log10 and 10^x functions are class C (docs/development/port-parity.md §7,
-# §10).
+# bit-identical (class B), except the two below; the log10 and 10^x functions are class C
+# (docs/development/port-parity.md §7, §10).
 #
+# - ADR 0002 #29 (the overflow audit's B2; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide audit" and
+#   "round once"): dilution's (M₁·V₁)/V₂ and solution_conductivity's (Λ·c)/1000 are each one quotient of a product of
+#   inputs (1000 an exact integer literal), so the port returns the exact value rounded once (src/mathx.cyr's
+#   correctly rounded monomial, _km_cr_mul_div), where Rust rounds twice (one ulp off on about a quarter of inputs) and
+#   M₁·V₁ or Λ·c that over- or underflows gives ±∞, 0 or a degraded subnormal although the value is representable
+#   (solution_conductivity(126.4, DBL_MAX) is ∞ in Rust, 2.27·10³⁰⁷ here). Rust's checks and Err codes are kept;
+#   solution_conductivity, which validates nothing, keeps Rust's expression for a non-finite input.
 # - log10 is src/mathx.cyr's correctly rounded _km_cr_log10 and 10^x its _km_cr_exp10 (the same value as a
 #   correctly rounded pow(10, x), Rust's 10.0_f64.powf(x)), as the Antoine equation's (ADR 0006). With both
 #   sides on correctly rounded primitives in Rust's operation order the class-C rows are compared exactly
@@ -11546,12 +11940,14 @@ fn molality(moles: f64, solvent_kg: f64): Result {
 
 # Dilution M₁V₁ = M₂V₂: the final concentration M₂ = M₁·V₁/V₂ in mol/L, from the initial concentration
 # (mol/L) and the initial and final volumes (any one volume unit). Ok(M₂), or Err(KM_ERR_INVALID_INPUT) if
-# V₂ is not positive and finite or M₁ or V₁ is not finite. Mirrors `solution::dilution`.
+# V₂ is not positive and finite or M₁ or V₁ is not finite. ADR 0002 #29: the correctly rounded M₁·V₁/V₂ (its sign the
+# xor of the factors'; a zero factor gives that signed zero), where Rust's (M₁·V₁)/V₂ rounds twice. Mirrors
+# `solution::dilution`, with ADR 0002 #29.
 #must_use
 fn dilution(m1: f64, v1: f64, v2: f64): Result {
     if (_km_is_positive(v2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_finite(m1) != 1 || _km_is_finite(v1) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var m2: f64 = (m1 * v1) / v2;
+    var m2: f64 = _km_cr_mul_div(m1, v1, v2);
     return Ok(m2);
 }
 
@@ -11811,11 +12207,19 @@ fn limiting_molar_conductivity(cation_conductivity: f64, cation_stoich: f64, ani
 }
 
 # The solution conductivity κ = Λ_m × c / 1000 in S/cm, from the molar conductivity Λ_m (S·cm²/mol) and the
-# concentration c (mol/L). Non-finite input propagates to the result. Mirrors `solution::solution_conductivity`.
+# concentration c (mol/L). Non-finite input propagates to the result. ADR 0002 #29: the correctly rounded Λ·c/1000 for
+# finite inputs (a zero factor gives its signed zero), where Rust's (Λ·c)/1000 rounds twice; a non-finite input gives
+# Rust's (Λ·c)/1000. Mirrors `solution::solution_conductivity`, with ADR 0002 #29.
 #must_use
 fn solution_conductivity(molar_conductivity: f64, concentration: f64): f64 {
-    var kappa: f64 = (molar_conductivity * concentration) / 1000.0;
-    return kappa;
+    var f, ok = _km_mul_div_fast(molar_conductivity, concentration, 1000.0);
+    if (ok == 1) { return f; }
+    if (_km_is_finite(molar_conductivity) != 1 || _km_is_finite(concentration) != 1) {
+        var kappa: f64 = (molar_conductivity * concentration) / 1000.0;
+        return kappa;
+    }
+    var r: f64 = _km_cr_mul_div(molar_conductivity, concentration, 1000.0);
+    return r;
 }
 
 # --- electrochemistry_data.cyr ---
@@ -12243,8 +12647,21 @@ var KM_STANDARD_POTENTIALS_STANDARD_POTENTIAL: f64[49] = {
 # STANDARD_POTENTIALS rows — is src/electrochemistry_data.cyr (generated); FARADAY and ELEMENTARY_CHARGE are
 # src/constants.cyr's KM_FARADAY and KM_ELEMENTARY_CHARGE. Fallible functions return a value-form Result whose
 # Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs. Every expression keeps Rust's operation order,
-# so everything but the Nernst equation is + − × ÷ and bit-identical (class B); the Nernst functions are class
-# C through one ln (docs/development/port-parity.md §7, §10).
+# so everything but the Nernst equation is + − × ÷ and bit-identical (class B), except Faraday's laws under ADR 0002
+# #29 (below); the Nernst functions are class C through one ln (docs/development/port-parity.md §7, §10).
+#
+# - ADR 0002 #29 (the overflow audit's B2; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide audit" and
+#   "round once"): faraday_mass_deposited's (Q·M)/(n·F), faraday_charge_required's ((m·n)·F)/M and faraday_mass_ratio's
+#   (m_A·(M_B/n_B))/(M_A/n_A) are each one product or quotient of inputs and F's double, so the port returns the exact
+#   value rounded once (src/mathx.cyr's correctly rounded monomial: _km_cr_mul2_div2, _km_cr_mul3_div and
+#   _km_cr_mul3_div2), where Rust rounds three or four times (1–2 ulp off on about a quarter of inputs) and a partial
+#   product or an equivalent weight that over- or underflows gives ±∞, 0 or NaN although the value is representable
+#   (faraday_mass_deposited(DBL_MAX, 63.546, 2) is ∞ in Rust, 5.92·10³⁰⁴ here). nernst_potential's
+#   E° − ((R·T)/(n·F))·ln Q has a sum, so it gets ADR 0002 #20's semantics instead: Rust's operation sequence with an
+#   unbounded exponent (src/mathx.cyr's _km_ux_*), the final subtraction rounded once into binary64, behind a range
+#   test (_km_nernst_fast) that proves Rust's chain stayed in the normal range, where the bits are Rust's (and so every
+#   nernst_potential_25c row: T = 298.15 K keeps (R·T)/(n·F) normal). R·T past DBL_MAX (T > 2.16·10³⁰⁷ K) is Rust's ±∞
+#   or NaN, here E° minus the finite product. Rust's checks, Err codes and order are kept.
 #
 # - Rows are reached by handle (port plan §6.4): STANDARD_POTENTIALS row + 1, 0 for None. HalfReaction's
 #   fields are half_reaction_equation(h) / half_reaction_couple(h) ("" for an invalid handle),
@@ -12337,21 +12754,65 @@ fn half_reaction_standard_potential(h): f64 {
 # the standard potential E° (V), the electron count n (a Rust u8, as a word), T in K and the reaction quotient
 # Q (product over reactant activities). Ok(E); Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite;
 # Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, Q is not positive and finite, or E° is not finite
-# (in that order). ln Q is correctly rounded (_km_cr_ln, ADR 0006). Mirrors
-# `electrochemistry::nernst_potential`.
+# (in that order). ln Q is correctly rounded (_km_cr_ln, ADR 0006). ADR 0002 #29: Rust's E° − ((R·T)/(n·F))·ln Q
+# where its chain stays in the normal range (Rust's bits), otherwise the same sequence with an unbounded exponent and
+# the final subtraction rounded once (_km_nernst_ux). Mirrors `electrochemistry::nernst_potential`, with ADR 0002 #29.
 #must_use
 fn nernst_potential(standard_potential: f64, n_electrons, temperature_k: f64, reaction_quotient: f64): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(reaction_quotient) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_finite(standard_potential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var n: f64 = f64_from(n_electrons);
+    var l: f64 = _km_cr_ln(reaction_quotient);
+    var e, ok = _km_nernst_fast(standard_potential, n, temperature_k, l);
+    if (ok == 1) { return Ok(e); }
+    var u: f64 = _km_nernst_ux(standard_potential, n, temperature_k, l);
+    return Ok(u);
+}
+
+# (E° − ((R·T)/(n·F))·l, 1), Rust's chain on validated inputs (n the electron count as a double, l = RN(ln Q)), when it
+# stays in the normal range: R·T in [2⁻¹⁰²², DBL_MAX], (R·T)/(n·F) at least 2⁻¹⁰²² (it is below DBL_MAX/F) and the
+# product with l at least 2⁻¹⁰²² in magnitude or l = 0 (the product an exact +0; it is below 1.2·10³⁰⁷, so finite). n·F
+# is always normal. Each operation is then the same one on the same operands as in the unbounded chain, and the final
+# subtraction of two doubles is rounded once in both (IEEE's overflow is the rounding past DBL_MAX, a subnormal
+# difference exact), so the result is _km_nernst_ux's. Otherwise (0, 0).
+#must_use
+fn _km_nernst_fast(e0: f64, n: f64, t: f64, l: f64): (f64, i64) {
     var r: f64 = KM_GAS_CONSTANT;
     var f: f64 = KM_FARADAY;
-    var n: f64 = f64_from(n_electrons);
-    var factor: f64 = (r * temperature_k) / (n * f);
-    var l: f64 = _km_cr_ln(reaction_quotient);
-    var e: f64 = standard_potential - (factor * l);
-    return Ok(e);
+    var nmin: f64 = 0x0010000000000000;     # 2⁻¹⁰²²
+    var dmax: f64 = 0x7FEFFFFFFFFFFFFF;
+    var a: f64 = r * t;
+    if (a < nmin || a > dmax) { return (0.0, 0); }
+    var b: f64 = n * f;
+    var c: f64 = a / b;
+    if (c < nmin) { return (0.0, 0); }
+    var p: f64 = c * l;
+    var ap: f64 = f64_abs(p);
+    if (l != 0.0 && ap < nmin) { return (0.0, 0); }
+    var e: f64 = e0 - p;
+    return (e, 1);
+}
+
+# E° − ((R·T)/(n·F))·l under ADR 0002 #20's semantics: every operation rounded to 53 bits with an unbounded exponent
+# (src/mathx.cyr's _km_ux_*; n·F is a normal IEEE product, the same value), the final subtraction rounded once into
+# binary64 (_km_ux_sub_f64), for validated inputs (T positive and finite, n ≥ 1, l = RN(ln Q), E° finite).
+#must_use
+fn _km_nernst_ux(e0: f64, n: f64, t: f64, l: f64): f64 {
+    var r: f64 = KM_GAS_CONSTANT;
+    var f: f64 = KM_FARADAY;
+    var b: f64 = n * f;
+    var rs, re = _km_ux_from(r);
+    var ts, te = _km_ux_from(t);
+    var qs, qe = _km_ux_mul(rs, re, ts, te);
+    var bs, be = _km_ux_from(b);
+    var cs, ce = _km_ux_div(qs, qe, bs, be);
+    var ls, le = _km_ux_from(l);
+    var ps, pe = _km_ux_mul(cs, ce, ls, le);
+    var xs, xe = _km_ux_from(e0);
+    var y: f64 = _km_ux_sub_f64(xs, xe, ps, pe);
+    return y;
 }
 
 # The Nernst equation at 25 °C, E = E° − (0.05916/n)·log₁₀ Q: nernst_potential at T = 298.15 K, so the
@@ -12414,7 +12875,8 @@ fn cell_gibbs_energy(n_electrons, cell_potential: f64): Result {
 # Faraday's first law m = (Q × M)/(n × F): the mass deposited in g (negative for a negative charge, i.e.
 # dissolution), from the charge passed Q (C), the molar mass M (g/mol) and the electrons per ion n (a word).
 # Ok(m), or Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, M is not positive and finite, or Q is not
-# finite. Mirrors `electrochemistry::faraday_mass_deposited`.
+# finite. ADR 0002 #29: the correctly rounded Q·M/(n·F) (F as its double; Q = ±0 gives that signed zero), where Rust's
+# (Q·M)/(n·F) rounds three times. Mirrors `electrochemistry::faraday_mass_deposited`, with ADR 0002 #29.
 #must_use
 fn faraday_mass_deposited(charge_c: f64, molar_mass_g: f64, n_electrons): Result {
     if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -12422,13 +12884,15 @@ fn faraday_mass_deposited(charge_c: f64, molar_mass_g: f64, n_electrons): Result
     if (_km_is_finite(charge_c) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var f: f64 = KM_FARADAY;
     var n: f64 = f64_from(n_electrons);
-    var m: f64 = (charge_c * molar_mass_g) / (n * f);
+    var m: f64 = _km_cr_mul2_div2(charge_c, molar_mass_g, n, f);
     return Ok(m);
 }
 
 # The charge needed to deposit a mass, Q = (m × n × F)/M, in C, from the mass m (g), the molar mass M (g/mol) and
 # the electrons per ion n (a word). Ok(Q), or Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, M is not
-# positive and finite, or m is not finite. Mirrors `electrochemistry::faraday_charge_required`.
+# positive and finite, or m is not finite. ADR 0002 #29: the correctly rounded m·n·F/M (F as its double; m = ±0 gives
+# that signed zero), where Rust's ((m·n)·F)/M rounds three times. Mirrors `electrochemistry::faraday_charge_required`,
+# with ADR 0002 #29.
 #must_use
 fn faraday_charge_required(mass_g: f64, molar_mass_g: f64, n_electrons): Result {
     if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -12436,15 +12900,18 @@ fn faraday_charge_required(mass_g: f64, molar_mass_g: f64, n_electrons): Result 
     if (_km_is_finite(mass_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var f: f64 = KM_FARADAY;
     var n: f64 = f64_from(n_electrons);
-    var q: f64 = ((mass_g * n) * f) / molar_mass_g;
+    var q: f64 = _km_cr_mul3_div(mass_g, n, f, molar_mass_g);
     return Ok(q);
 }
 
 # Faraday's second law: the same charge deposits masses in the ratio of the equivalent weights M/n. The mass of
 # substance B in g deposited while mass_a_g grams of A are, from the molar masses (g/mol) and electron counts
 # (words) of A and B. Ok(m_B), or Err(KM_ERR_INVALID_INPUT) if an electron count is 0 or outside 0 ..= 255, either
-# molar mass is not positive and finite (A's checked first), or mass_a_g is not finite. Mirrors
-# `electrochemistry::faraday_mass_ratio`.
+# molar mass is not positive and finite (A's checked first), or mass_a_g is not finite. ADR 0002 #29: the correctly
+# rounded m_A·M_B·n_A/(n_B·M_A), Rust's (m_A·(M_B/n_B))/(M_A/n_A) exactly (m_A = ±0 gives that signed zero), where Rust
+# rounds four times and an equivalent weight M/n can underflow (M_A/n_A is subnormal for M_A below n_A·2⁻¹⁰²², and 0
+# below n_A·2⁻¹⁰⁷⁵, where the mass is degraded or ±∞). Mirrors `electrochemistry::faraday_mass_ratio`, with ADR 0002
+# #29.
 #must_use
 fn faraday_mass_ratio(mass_a_g: f64, molar_mass_a: f64, n_electrons_a, molar_mass_b: f64, n_electrons_b): Result {
     if (_km_is_electron_count(n_electrons_a) != 1 || _km_is_electron_count(n_electrons_b) != 1) {
@@ -12455,9 +12922,7 @@ fn faraday_mass_ratio(mass_a_g: f64, molar_mass_a: f64, n_electrons_a, molar_mas
     if (_km_is_finite(mass_a_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var na: f64 = f64_from(n_electrons_a);
     var nb: f64 = f64_from(n_electrons_b);
-    var equiv_a: f64 = molar_mass_a / na;
-    var equiv_b: f64 = molar_mass_b / nb;
-    var m: f64 = (mass_a_g * equiv_b) / equiv_a;
+    var m: f64 = _km_cr_mul3_div2(mass_a_g, molar_mass_b, na, nb, molar_mass_a);
     return Ok(m);
 }
 
@@ -16605,9 +17070,10 @@ const _KM_RYDBERG_HYDROGEN = 10967758.340280328;
 # (generated). Fallible functions
 # return a value-form Result whose Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs where Rust does.
 # Every expression keeps Rust's operation order, constant by constant, so the arithmetic functions are
-# bit-identical (class B: + − × ÷ and √); transmittance (10^x) and absorbance_from_transmittance (log10) are class C
-# on src/mathx.cyr's correctly rounded _km_cr_exp10 / _km_cr_log10, and fft_spectrum on its correctly rounded
-# twiddles (_km_cr_sincos), all compared exactly against the corrected oracle (docs/development/port-parity.md §15).
+# bit-identical (class B: + − × ÷ and √) but where an ADR 0002 row below says otherwise; transmittance (10^x) and
+# absorbance_from_transmittance (log10) are class C on src/mathx.cyr's correctly rounded _km_cr_exp10 / _km_cr_log10,
+# and fft_spectrum on its correctly rounded twiddles (_km_cr_sincos), all compared exactly against the corrected oracle
+# (docs/development/port-parity.md §15).
 #
 # - Rust's integer arguments are words, never wrapped (port plan §6.4): a u8 Z or a u32 n / line / count outside its
 #   type is Err(KM_ERR_INVALID_INPUT) at the position of Rust's first check of it (the `== 0` tests: one test
@@ -16653,11 +17119,21 @@ const _KM_RYDBERG_HYDROGEN = 10967758.340280328;
 #   intermediate over- or underflows): so −R exactly at n = Z, m/2 for a homonuclear diatomic, and no cancellation for
 #   close large n (the Bohr model's section below; src/mathx.cyr's _km_cr_ratio, _km_dd_mul and _km_dd_div_cr). The
 #   golden rows keep the oracle's values; where the port's differ, the note names them (accepted under ADR 2, counted).
-# - Kept as Rust's (reviewed in M4e, reported to the user): the over- and underflow of products and quotients of
-#   inputs (ε·l·c, ε·l, k/μ, h·B, 8π²·I, μ·r·r, the FFT's sums and re² + im²), find_peaks' interpolated threshold, and
-#   the thresholds 0.001 and 10⁻¹² (heuristic and numerical cutoffs, compared as Rust does): each is a chain of rounded
-#   operations on inputs and physical constants, which ADR 0002's policy leaves as Rust's sequence (the products and
-#   quotients go to the library-wide overflow audit after M4).
+# - ADR 0002 #30 (the overflow audit's B2; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide audit" and
+#   "round once"): absorbance's (ε·l)·c, concentration_from_absorbance's A/(ε·l), rigid_rotor_energy's
+#   ((h·B)·J)·(J + 1), rotational_constant's h/(((8·π)·π)·I) and diatomic_moment_of_inertia's (μ·r)·r are each one
+#   product or quotient of inputs and constants' doubles (h, π as its double each time Rust uses it, 8 and J + 1 exact),
+#   so the port returns the exact value rounded once (src/mathx.cyr's correctly rounded monomial: _km_cr_mul3,
+#   _km_cr_div2, _km_cr_mul4 and _km_cr_div3), and vibrational_frequency's (k/μ).sqrt() the correctly rounded √ of the
+#   exact k/μ (_km_cr_sqrt_div), where Rust rounds two to four times (1–2 ulp off on a fraction of inputs) and a partial
+#   product or quotient that over- or underflows gives ±∞, 0, NaN or a degraded value although the result is
+#   representable (vibrational_frequency(500, 2⁻¹⁰²²) is ∞ in Rust, 1.50·10¹⁵⁵ here; rigid_rotor_energy(2³² − 1, 10⁻³⁰⁰)
+#   0, not 1.22·10⁻³¹⁴). Rust's checks and Err codes are kept; the unvalidated inputs (absorbance's, the moment of
+#   inertia's, the rotor's B, concentration_from_absorbance's A) keep Rust's expression where one is not finite.
+# - Kept as Rust's (reviewed in M4e, reported to the user): the FFT's sums and re² + im², find_peaks' interpolated
+#   threshold, and the thresholds 0.001 and 10⁻¹² (heuristic and numerical cutoffs, compared as Rust does): each is a
+#   chain of rounded operations on inputs and physical constants, which ADR 0002's policy leaves as Rust's sequence
+#   (the overflow audit's later batches review the FFT and find_peaks).
 
 include "lib/alloc.cyr"
 
@@ -16673,12 +17149,20 @@ const _KM_ISO_STACK = 192;
 # ── Beer–Lambert law ────────────────────────────────────────────────────────────────
 
 # The Beer–Lambert law A = ε·l·c: the absorbance (dimensionless) from the molar absorptivity ε (L/(mol·cm)), the path
-# length l (cm) and the concentration c (mol/L), as Rust's (ε·l)·c. Inputs are not validated. Mirrors
-# `spectroscopy::absorbance`.
+# length l (cm) and the concentration c (mol/L). Inputs are not validated. ADR 0002 #30: the correctly rounded ε·l·c
+# for finite inputs (a zero factor gives its signed zero), where Rust's (ε·l)·c rounds twice; a non-finite input gives
+# Rust's (ε·l)·c. Mirrors `spectroscopy::absorbance`, with ADR 0002 #30.
 #must_use
 fn absorbance(molar_absorptivity: f64, path_length: f64, concentration: f64): f64 {
-    var a: f64 = (molar_absorptivity * path_length) * concentration;
-    return a;
+    var f, ok = _km_mul3_fast(molar_absorptivity, path_length, concentration);
+    if (ok == 1) { return f; }
+    var fin = _km_is_finite(molar_absorptivity) + _km_is_finite(path_length) + _km_is_finite(concentration);
+    if (fin != 3) {
+        var a: f64 = (molar_absorptivity * path_length) * concentration;
+        return a;
+    }
+    var r: f64 = _km_cr_mul3(molar_absorptivity, path_length, concentration);
+    return r;
 }
 
 # The transmittance T = 10^(−A) from the absorbance A, as Rust's `10.0_f64.powf(-a)`: the correctly rounded
@@ -16703,14 +17187,20 @@ fn absorbance_from_transmittance(transmittance: f64): Result {
 
 # The concentration c = A/(ε·l) in mol/L from the absorbance A, the molar absorptivity ε (L/(mol·cm)) and the path
 # length l (cm). Ok(c), or Err(KM_ERR_INVALID_INPUT) if ε, then l, is not positive and finite; A is not validated.
-# Mirrors `spectroscopy::concentration_from_absorbance`.
+# ADR 0002 #30: the correctly rounded A/(ε·l) for a finite A (A = ±0 gives that signed zero), where Rust's A/(ε·l)
+# rounds twice and ε·l can over- or underflow; a non-finite A gives Rust's A/(ε·l). Mirrors
+# `spectroscopy::concentration_from_absorbance`, with ADR 0002 #30.
 #must_use
 fn concentration_from_absorbance(absorbance: f64, molar_absorptivity: f64, path_length: f64): Result {
     if (_km_is_positive(molar_absorptivity) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(path_length) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var el: f64 = molar_absorptivity * path_length;
-    var c: f64 = absorbance / el;
-    return Ok(c);
+    if (_km_is_finite(absorbance) != 1) {
+        var el: f64 = molar_absorptivity * path_length;
+        var c: f64 = absorbance / el;
+        return Ok(c);
+    }
+    var r: f64 = _km_cr_div2(absorbance, molar_absorptivity, path_length);
+    return Ok(r);
 }
 
 # ── photon energy, wavelength and frequency ─────────────────────────────────────────
@@ -17191,48 +17681,67 @@ fn harmonic_oscillator_energy(n, angular_frequency: f64): f64 {
 }
 
 # The angular vibrational frequency ω = √(k/μ) in rad/s from the force constant k (N/m) and the reduced mass μ (kg).
-# Ok(ω), or Err(KM_ERR_INVALID_INPUT) if k, then μ, is not positive and finite. Mirrors
-# `spectroscopy::vibrational_frequency`.
+# Ok(ω), or Err(KM_ERR_INVALID_INPUT) if k, then μ, is not positive and finite. ADR 0002 #30: the correctly rounded
+# √(k/μ) of the exact quotient (src/mathx.cyr's _km_cr_sqrt_div), where Rust's (k/μ).sqrt() rounds twice and k/μ can
+# over- or underflow (ω is finite and nonzero for every positive finite k and μ but a subnormal μ's largest quotients,
+# past DBL_MAX², where it is +∞). Mirrors `spectroscopy::vibrational_frequency`, with ADR 0002 #30.
 #must_use
 fn vibrational_frequency(force_constant: f64, reduced_mass_kg: f64): Result {
     if (_km_is_positive(force_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(reduced_mass_kg) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var q: f64 = force_constant / reduced_mass_kg;
-    var w: f64 = f64_sqrt(q);
+    var w: f64 = _km_cr_sqrt_div(force_constant, reduced_mass_kg);
     return Ok(w);
 }
 
 # ── rotational spectroscopy ─────────────────────────────────────────────────────────
 
 # The rigid-rotor energy E_J = h·B·J(J + 1) in J, from the rotational quantum number J (Rust's u32) and the rotational
-# constant B (Hz), as Rust's ((h·B)·J)·(J + 1). Inputs are not validated; NaN for a J outside 0 ..= u32::MAX. Mirrors
-# `spectroscopy::rigid_rotor_energy`.
+# constant B (Hz). Inputs are not validated; NaN for a J outside 0 ..= u32::MAX. ADR 0002 #30: the correctly rounded
+# h·B·J·(J + 1) for a finite B (J = 0 gives B's signed zero, J and J + 1 are exact), where Rust's ((h·B)·J)·(J + 1)
+# rounds three times and h·B underflows for |B| below 3.4·10⁻²⁷⁵; a non-finite B gives Rust's expression. Mirrors
+# `spectroscopy::rigid_rotor_energy`, with ADR 0002 #30.
 #must_use
 fn rigid_rotor_energy(j, rotational_constant_hz: f64): f64 {
     if (_km_is_u32(j) != 1) { return _km_nan(); }
     var jf: f64 = f64_from(j);
     var j1: f64 = jf + 1.0;
-    var e: f64 = ((KM_PLANCK * rotational_constant_hz) * jf) * j1;
-    return e;
+    var h: f64 = KM_PLANCK;
+    if (_km_is_finite(rotational_constant_hz) != 1) {
+        var e: f64 = ((h * rotational_constant_hz) * jf) * j1;
+        return e;
+    }
+    var r: f64 = _km_cr_mul4(h, rotational_constant_hz, jf, j1);
+    return r;
 }
 
-# The rotational constant B = h/(8π²I) in Hz from the moment of inertia I (kg·m²), as Rust's h/(((8·π)·π)·I). Ok(B),
-# or Err(KM_ERR_INVALID_INPUT) if I is not positive and finite. Mirrors `spectroscopy::rotational_constant`.
+# The rotational constant B = h/(8π²I) in Hz from the moment of inertia I (kg·m²). Ok(B), or Err(KM_ERR_INVALID_INPUT)
+# if I is not positive and finite. ADR 0002 #30: the correctly rounded h/(8·π·π·I) with π as its double (Rust's
+# h/(((8·π)·π)·I) exactly), computed as (h/8)/(π·π·I) (h/8 exact), where Rust rounds three times and 8π²·I is subnormal
+# for I below 2.8·10⁻³¹⁰. Mirrors `spectroscopy::rotational_constant`, with ADR 0002 #30.
 #must_use
 fn rotational_constant(moment_of_inertia: f64): Result {
     if (_km_is_positive(moment_of_inertia) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
-    var d: f64 = ((8.0 * pi) * pi) * moment_of_inertia;
-    var b: f64 = KM_PLANCK / d;
+    var h: f64 = KM_PLANCK;
+    var h8: f64 = h * 0.125;
+    var b: f64 = _km_cr_div3(h8, pi, pi, moment_of_inertia);
     return Ok(b);
 }
 
-# The moment of inertia of a diatomic I = μ·r² in kg·m² from the reduced mass μ (kg) and the bond length r (m), as
-# Rust's (μ·r)·r. Inputs are not validated. Mirrors `spectroscopy::diatomic_moment_of_inertia`.
+# The moment of inertia of a diatomic I = μ·r² in kg·m² from the reduced mass μ (kg) and the bond length r (m). Inputs
+# are not validated. ADR 0002 #30: the correctly rounded μ·r·r for finite inputs (a zero factor gives its signed zero),
+# where Rust's (μ·r)·r rounds twice; a non-finite input gives Rust's (μ·r)·r. Mirrors
+# `spectroscopy::diatomic_moment_of_inertia`, with ADR 0002 #30.
 #must_use
 fn diatomic_moment_of_inertia(reduced_mass_kg: f64, bond_length_m: f64): f64 {
-    var i: f64 = (reduced_mass_kg * bond_length_m) * bond_length_m;
-    return i;
+    var f, ok = _km_mul3_fast(reduced_mass_kg, bond_length_m, bond_length_m);
+    if (ok == 1) { return f; }
+    if (_km_is_finite(reduced_mass_kg) != 1 || _km_is_finite(bond_length_m) != 1) {
+        var i: f64 = (reduced_mass_kg * bond_length_m) * bond_length_m;
+        return i;
+    }
+    var r: f64 = _km_cr_mul3(reduced_mass_kg, bond_length_m, bond_length_m);
+    return r;
 }
 
 # ── mass-spectrometry isotope patterns ──────────────────────────────────────────────

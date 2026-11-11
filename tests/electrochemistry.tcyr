@@ -2,8 +2,10 @@
 # Rust test's name; all 35), plus Cyrius-only tests of the handles, out-of-u8 electron counts and the Nernst
 # equation's correctly rounded ln. `lookup_half_reaction(..).unwrap()` is a non-zero handle, read with the
 # half_reaction_* accessors; the tests that iterate STANDARD_POTENTIALS loop over handles 1 ..= KM_STANDARD_
-# POTENTIALS_COUNT (`windows(2)` is handles h and h + 1). No Rust test needed adapting beyond that. The golden
-# corpus separately checks every function over its grid (tests/parity.tcyr).
+# POTENTIALS_COUNT (`windows(2)` is handles h and h + 1). No Rust test needed adapting beyond that; none changes with
+# ADR 0002 #29 (the overflow audit's B2: Faraday's laws rounded once, the Nernst equation's unbounded-exponent edges),
+# which a Cyrius-only group checks. The golden corpus separately checks every function over its grid
+# (tests/parity.tcyr).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -466,6 +468,93 @@ fn _t_cyrius_nernst_ln() {
     assert(is_ok(t3) == 1 && e3 == 0.342, "ln 1 = 0 exactly: E = E°");
 }
 
+# The f64 whose bit pattern is `bits` (store64, so no hex literal is read as an integer).
+#must_use
+fn fbits(bits): f64 {
+    var x: f64 = 0.0;
+    store64(&x, bits);
+    return x;
+}
+
+# ADR 0002 #29 (the overflow audit's B2): Faraday's laws rounded once — ordinary inputs where Rust's three or four
+# roundings miss, the partial products and equivalent weights past either end, a midpoint, the signed zeros — and the
+# Nernst equation under #20's semantics: R·T past DBL_MAX (Rust's ∞ and ∞·0 = NaN), a subnormal (R·T)/(n·F) (Rust's
+# degraded product), the fast path declining there, and the fast path against the unbounded slow path on 5,000 seeded
+# in-range inputs (Rust's bits wherever its test passes).
+fn _t_cyrius_adr29() {
+    test_group("cyrius_adr29");
+    var dmax: f64 = fbits(0x7FEFFFFFFFFFFFFF);
+    var sub1: f64 = fbits(1);
+    var tiny: f64 = fbits(0x01A56E1FC2F8F359);      # 1e-300
+    var t1, v1 = faraday_mass_deposited(10198.3, 63.083, 2);
+    assert(is_ok(t1) == 1 && v1 == 0x400AABC4B712095F, "Q·M/(n·F) rounded once (Rust's one ulp above)");
+    var t2, v2 = faraday_mass_deposited(dmax, 63.546, 2);
+    assert(is_ok(t2) == 1 && v2 == 0x7F3594CDA6DEAC17, "DBL_MAX·63.546/(2F) = 5.92·10³⁰⁴ (Rust's ∞)");
+    var f: f64 = KM_FARADAY;
+    var f3: f64 = f * 3.0;                          # exact: F's odd part has 51 bits
+    var y: f64 = 3002399751580331.0;                # 3y = 2^53 + 1
+    var t3, v3 = faraday_mass_deposited(f3, y, 1);
+    assert(is_ok(t3) == 1 && v3 == 0x4340000000000000, "3F·y/(1·F) = 2^53 + 1, a tie: 2^53 (Rust's 2^53 + 2)");
+    var t4, v4 = faraday_charge_required(96.02, 2.323, 2);
+    assert(is_ok(t4) == 1 && v4 == 0x415E6D6593B29458, "m·n·F/M rounded once (Rust's one ulp below)");
+    var mz: f64 = -0.0;
+    var t5, v5 = faraday_charge_required(mz, dmax, 7);
+    assert(is_ok(t5) == 1 && v5 == 0x8000000000000000, "−0·7·F/DBL_MAX = −0");
+    var t6, v6 = faraday_mass_ratio(84.05, 185.705, 1, 194.214, 2);
+    assert(is_ok(t6) == 1 && v6 == 0x4045F9ACC33EC0D0, "m_A·M_B·n_A/(n_B·M_A) rounded once (Rust's one ulp above)");
+    var t7, v7 = faraday_mass_ratio(1.0, sub1, 3, tiny, 1);
+    assert(is_ok(t7) == 1 && v7 == 0x44E01297D23AB683, "M_A/n_A = 2^-1074/3 is Rust's 0: here 6.07·10²³ (Rust's ∞)");
+    var t8, v8 = nernst_potential(0.342, 2, dmax, 0.1);
+    assert(is_ok(t8) == 1 && v8 == 0x7F1A01EB1D65DA0E, "R·DBL_MAX overflows in Rust (∞): here 1.78·10³⁰⁴");
+    var t9, v9 = nernst_potential(0.342, 2, dmax, 1.0);
+    assert(is_ok(t9) == 1 && v9 == 0x3FD5E353F7CED917, "… and at Q = 1, E° itself (Rust's ∞·0 = NaN)");
+    var e310: f64 = fbits(0x000012688B70E62B);      # 1e-310
+    var t10, v10 = nernst_potential(0.0, 1, e310, tiny);
+    assert(is_ok(t10) == 1 && v10 == 0x00000118855D8A0E, "a subnormal (R·T)/F: 5.952642933123·10⁻³¹² (Rust's …4057)");
+    var r: f64 = KM_GAS_CONSTANT;
+    var nf: f64 = 2.0;
+    var lq: f64 = _km_cr_ln(0.1);
+    var e11, ok11 = _km_nernst_fast(0.342, nf, dmax, lq);
+    assert_eq(ok11, 0, "R·T = ∞: the fast path declines");
+    var e12, ok12 = _km_nernst_fast(0.0, 1.0, e310, lq);
+    assert_eq(ok12, 0, "R·T subnormal: the fast path declines");
+    var t13, v13 = nernst_potential_25c(0.342, 2, 0.1);
+    var fac: f64 = (r * 298.15) / (2.0 * f);
+    var want: f64 = 0.342 - (fac * lq);
+    assert(is_ok(t13) == 1 && v13 == _km_bits(want), "nernst_potential_25c keeps Rust's chain (298.15 K is in range)");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var took = 0;
+    var k = 0;
+    while (k < 5000) {
+        var w: f64[3];
+        var j = 0;
+        while (j < 3) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            store64(&w + 8 * j, 0x3000000000000000 + ((st >> 3) % 0x1C00000000000000));
+            j = j + 1;
+        }
+        var e0: f64 = load64(&w);
+        if ((st & 1) == 1) { e0 = -e0; }
+        var tk: f64 = load64(&w + 8);
+        var q: f64 = load64(&w + 16);
+        var n = 1 + ((st >> 9) % 255);
+        var nn: f64 = f64_from(n);
+        var l: f64 = _km_cr_ln(q);
+        var ef, eok = _km_nernst_fast(e0, nn, tk, l);
+        if (eok == 1) {
+            took = took + 1;
+            var eu: f64 = _km_nernst_ux(e0, nn, tk, l);
+            if (_km_bits(ef) != _km_bits(eu)) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "Rust's chain = the unbounded-exponent evaluation wherever the fast test passes");
+    assert(took > 4500, "the fast test passes on in-range inputs");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_faraday_constant_value();
@@ -506,6 +595,7 @@ fn main() {
     _t_cyrius_handles();
     _t_cyrius_u8_electrons();
     _t_cyrius_nernst_ln();
+    _t_cyrius_adr29();
     return assert_summary();
 }
 

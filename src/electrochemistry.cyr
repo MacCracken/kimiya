@@ -6,8 +6,21 @@
 # STANDARD_POTENTIALS rows — is src/electrochemistry_data.cyr (generated); FARADAY and ELEMENTARY_CHARGE are
 # src/constants.cyr's KM_FARADAY and KM_ELEMENTARY_CHARGE. Fallible functions return a value-form Result whose
 # Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs. Every expression keeps Rust's operation order,
-# so everything but the Nernst equation is + − × ÷ and bit-identical (class B); the Nernst functions are class
-# C through one ln (docs/development/port-parity.md §7, §10).
+# so everything but the Nernst equation is + − × ÷ and bit-identical (class B), except Faraday's laws under ADR 0002
+# #29 (below); the Nernst functions are class C through one ln (docs/development/port-parity.md §7, §10).
+#
+# - ADR 0002 #29 (the overflow audit's B2; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide audit" and
+#   "round once"): faraday_mass_deposited's (Q·M)/(n·F), faraday_charge_required's ((m·n)·F)/M and faraday_mass_ratio's
+#   (m_A·(M_B/n_B))/(M_A/n_A) are each one product or quotient of inputs and F's double, so the port returns the exact
+#   value rounded once (src/mathx.cyr's correctly rounded monomial: _km_cr_mul2_div2, _km_cr_mul3_div and
+#   _km_cr_mul3_div2), where Rust rounds three or four times (1–2 ulp off on about a quarter of inputs) and a partial
+#   product or an equivalent weight that over- or underflows gives ±∞, 0 or NaN although the value is representable
+#   (faraday_mass_deposited(DBL_MAX, 63.546, 2) is ∞ in Rust, 5.92·10³⁰⁴ here). nernst_potential's
+#   E° − ((R·T)/(n·F))·ln Q has a sum, so it gets ADR 0002 #20's semantics instead: Rust's operation sequence with an
+#   unbounded exponent (src/mathx.cyr's _km_ux_*), the final subtraction rounded once into binary64, behind a range
+#   test (_km_nernst_fast) that proves Rust's chain stayed in the normal range, where the bits are Rust's (and so every
+#   nernst_potential_25c row: T = 298.15 K keeps (R·T)/(n·F) normal). R·T past DBL_MAX (T > 2.16·10³⁰⁷ K) is Rust's ±∞
+#   or NaN, here E° minus the finite product. Rust's checks, Err codes and order are kept.
 #
 # - Rows are reached by handle (port plan §6.4): STANDARD_POTENTIALS row + 1, 0 for None. HalfReaction's
 #   fields are half_reaction_equation(h) / half_reaction_couple(h) ("" for an invalid handle),
@@ -100,21 +113,65 @@ fn half_reaction_standard_potential(h): f64 {
 # the standard potential E° (V), the electron count n (a Rust u8, as a word), T in K and the reaction quotient
 # Q (product over reactant activities). Ok(E); Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite;
 # Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, Q is not positive and finite, or E° is not finite
-# (in that order). ln Q is correctly rounded (_km_cr_ln, ADR 0006). Mirrors
-# `electrochemistry::nernst_potential`.
+# (in that order). ln Q is correctly rounded (_km_cr_ln, ADR 0006). ADR 0002 #29: Rust's E° − ((R·T)/(n·F))·ln Q
+# where its chain stays in the normal range (Rust's bits), otherwise the same sequence with an unbounded exponent and
+# the final subtraction rounded once (_km_nernst_ux). Mirrors `electrochemistry::nernst_potential`, with ADR 0002 #29.
 #must_use
 fn nernst_potential(standard_potential: f64, n_electrons, temperature_k: f64, reaction_quotient: f64): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(reaction_quotient) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_finite(standard_potential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var n: f64 = f64_from(n_electrons);
+    var l: f64 = _km_cr_ln(reaction_quotient);
+    var e, ok = _km_nernst_fast(standard_potential, n, temperature_k, l);
+    if (ok == 1) { return Ok(e); }
+    var u: f64 = _km_nernst_ux(standard_potential, n, temperature_k, l);
+    return Ok(u);
+}
+
+# (E° − ((R·T)/(n·F))·l, 1), Rust's chain on validated inputs (n the electron count as a double, l = RN(ln Q)), when it
+# stays in the normal range: R·T in [2⁻¹⁰²², DBL_MAX], (R·T)/(n·F) at least 2⁻¹⁰²² (it is below DBL_MAX/F) and the
+# product with l at least 2⁻¹⁰²² in magnitude or l = 0 (the product an exact +0; it is below 1.2·10³⁰⁷, so finite). n·F
+# is always normal. Each operation is then the same one on the same operands as in the unbounded chain, and the final
+# subtraction of two doubles is rounded once in both (IEEE's overflow is the rounding past DBL_MAX, a subnormal
+# difference exact), so the result is _km_nernst_ux's. Otherwise (0, 0).
+#must_use
+fn _km_nernst_fast(e0: f64, n: f64, t: f64, l: f64): (f64, i64) {
     var r: f64 = KM_GAS_CONSTANT;
     var f: f64 = KM_FARADAY;
-    var n: f64 = f64_from(n_electrons);
-    var factor: f64 = (r * temperature_k) / (n * f);
-    var l: f64 = _km_cr_ln(reaction_quotient);
-    var e: f64 = standard_potential - (factor * l);
-    return Ok(e);
+    var nmin: f64 = 0x0010000000000000;     # 2⁻¹⁰²²
+    var dmax: f64 = 0x7FEFFFFFFFFFFFFF;
+    var a: f64 = r * t;
+    if (a < nmin || a > dmax) { return (0.0, 0); }
+    var b: f64 = n * f;
+    var c: f64 = a / b;
+    if (c < nmin) { return (0.0, 0); }
+    var p: f64 = c * l;
+    var ap: f64 = f64_abs(p);
+    if (l != 0.0 && ap < nmin) { return (0.0, 0); }
+    var e: f64 = e0 - p;
+    return (e, 1);
+}
+
+# E° − ((R·T)/(n·F))·l under ADR 0002 #20's semantics: every operation rounded to 53 bits with an unbounded exponent
+# (src/mathx.cyr's _km_ux_*; n·F is a normal IEEE product, the same value), the final subtraction rounded once into
+# binary64 (_km_ux_sub_f64), for validated inputs (T positive and finite, n ≥ 1, l = RN(ln Q), E° finite).
+#must_use
+fn _km_nernst_ux(e0: f64, n: f64, t: f64, l: f64): f64 {
+    var r: f64 = KM_GAS_CONSTANT;
+    var f: f64 = KM_FARADAY;
+    var b: f64 = n * f;
+    var rs, re = _km_ux_from(r);
+    var ts, te = _km_ux_from(t);
+    var qs, qe = _km_ux_mul(rs, re, ts, te);
+    var bs, be = _km_ux_from(b);
+    var cs, ce = _km_ux_div(qs, qe, bs, be);
+    var ls, le = _km_ux_from(l);
+    var ps, pe = _km_ux_mul(cs, ce, ls, le);
+    var xs, xe = _km_ux_from(e0);
+    var y: f64 = _km_ux_sub_f64(xs, xe, ps, pe);
+    return y;
 }
 
 # The Nernst equation at 25 °C, E = E° − (0.05916/n)·log₁₀ Q: nernst_potential at T = 298.15 K, so the
@@ -177,7 +234,8 @@ fn cell_gibbs_energy(n_electrons, cell_potential: f64): Result {
 # Faraday's first law m = (Q × M)/(n × F): the mass deposited in g (negative for a negative charge, i.e.
 # dissolution), from the charge passed Q (C), the molar mass M (g/mol) and the electrons per ion n (a word).
 # Ok(m), or Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, M is not positive and finite, or Q is not
-# finite. Mirrors `electrochemistry::faraday_mass_deposited`.
+# finite. ADR 0002 #29: the correctly rounded Q·M/(n·F) (F as its double; Q = ±0 gives that signed zero), where Rust's
+# (Q·M)/(n·F) rounds three times. Mirrors `electrochemistry::faraday_mass_deposited`, with ADR 0002 #29.
 #must_use
 fn faraday_mass_deposited(charge_c: f64, molar_mass_g: f64, n_electrons): Result {
     if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -185,13 +243,15 @@ fn faraday_mass_deposited(charge_c: f64, molar_mass_g: f64, n_electrons): Result
     if (_km_is_finite(charge_c) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var f: f64 = KM_FARADAY;
     var n: f64 = f64_from(n_electrons);
-    var m: f64 = (charge_c * molar_mass_g) / (n * f);
+    var m: f64 = _km_cr_mul2_div2(charge_c, molar_mass_g, n, f);
     return Ok(m);
 }
 
 # The charge needed to deposit a mass, Q = (m × n × F)/M, in C, from the mass m (g), the molar mass M (g/mol) and
 # the electrons per ion n (a word). Ok(Q), or Err(KM_ERR_INVALID_INPUT) if n is 0 or outside 0 ..= 255, M is not
-# positive and finite, or m is not finite. Mirrors `electrochemistry::faraday_charge_required`.
+# positive and finite, or m is not finite. ADR 0002 #29: the correctly rounded m·n·F/M (F as its double; m = ±0 gives
+# that signed zero), where Rust's ((m·n)·F)/M rounds three times. Mirrors `electrochemistry::faraday_charge_required`,
+# with ADR 0002 #29.
 #must_use
 fn faraday_charge_required(mass_g: f64, molar_mass_g: f64, n_electrons): Result {
     if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -199,15 +259,18 @@ fn faraday_charge_required(mass_g: f64, molar_mass_g: f64, n_electrons): Result 
     if (_km_is_finite(mass_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var f: f64 = KM_FARADAY;
     var n: f64 = f64_from(n_electrons);
-    var q: f64 = ((mass_g * n) * f) / molar_mass_g;
+    var q: f64 = _km_cr_mul3_div(mass_g, n, f, molar_mass_g);
     return Ok(q);
 }
 
 # Faraday's second law: the same charge deposits masses in the ratio of the equivalent weights M/n. The mass of
 # substance B in g deposited while mass_a_g grams of A are, from the molar masses (g/mol) and electron counts
 # (words) of A and B. Ok(m_B), or Err(KM_ERR_INVALID_INPUT) if an electron count is 0 or outside 0 ..= 255, either
-# molar mass is not positive and finite (A's checked first), or mass_a_g is not finite. Mirrors
-# `electrochemistry::faraday_mass_ratio`.
+# molar mass is not positive and finite (A's checked first), or mass_a_g is not finite. ADR 0002 #29: the correctly
+# rounded m_A·M_B·n_A/(n_B·M_A), Rust's (m_A·(M_B/n_B))/(M_A/n_A) exactly (m_A = ±0 gives that signed zero), where Rust
+# rounds four times and an equivalent weight M/n can underflow (M_A/n_A is subnormal for M_A below n_A·2⁻¹⁰²², and 0
+# below n_A·2⁻¹⁰⁷⁵, where the mass is degraded or ±∞). Mirrors `electrochemistry::faraday_mass_ratio`, with ADR 0002
+# #29.
 #must_use
 fn faraday_mass_ratio(mass_a_g: f64, molar_mass_a: f64, n_electrons_a, molar_mass_b: f64, n_electrons_b): Result {
     if (_km_is_electron_count(n_electrons_a) != 1 || _km_is_electron_count(n_electrons_b) != 1) {
@@ -218,9 +281,7 @@ fn faraday_mass_ratio(mass_a_g: f64, molar_mass_a: f64, n_electrons_a, molar_mas
     if (_km_is_finite(mass_a_g) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var na: f64 = f64_from(n_electrons_a);
     var nb: f64 = f64_from(n_electrons_b);
-    var equiv_a: f64 = molar_mass_a / na;
-    var equiv_b: f64 = molar_mass_b / nb;
-    var m: f64 = (mass_a_g * equiv_b) / equiv_a;
+    var m: f64 = _km_cr_mul3_div2(mass_a_g, molar_mass_b, na, nb, molar_mass_a);
     return Ok(m);
 }
 

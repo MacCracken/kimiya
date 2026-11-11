@@ -1,7 +1,9 @@
 """Verify the correctly rounded exp, exp10, expm1, ln, log10, pow, sin, cos, atan2, acos, x·2^y and 1/(100·x) of
 src/mathx.cyr against MPFR (ADR 0006), and its unbounded-exponent final operations with potential's geometry (ADR 0002
 #20); and the exact rationals of spectroscopy (#21, #22), stoichiometry (#24 ... #26) and the overflow audit's B1 (#27,
-#28: the correctly rounded monomial, thermo's, phase's and kinetics' rationals) against Fraction and MPFR.
+#28: the correctly rounded monomial, thermo's, phase's and kinetics' rationals) and B2 (#29, #30: solution's,
+electrochemistry's and spectroscopy's, and the correctly rounded square root of a quotient) against Fraction, exact
+integer square roots and MPFR.
 
 For each primitive it generates seeded arguments (deterministic: random.Random with fixed seeds), builds
 a probe program that calls the Cyrius function on every argument, runs it on each target, and compares
@@ -78,6 +80,16 @@ monomial's exact path forced; references Fraction) and soc, mm (second_order_con
 michaelis_menten: the public function, its Rust-chain fast path where the range test passes, the unbounded-exponent slow
 path forced; reference mpfr_ref.UX), each on binade-uniform, typical, partial-products-past-the-range, midpoint,
 subnormal and Err arguments.
+The overflow audit's B2 (ADR 0002 #29, #30) adds sqrtdiv (_km_cr_sqrt_div = RN(sqrt(x/y)): every binade of both, x/y
+past either end, subnormal operands and results, exact roots, roots within ulps and within 2^-100 of a 53-bit midpoint
+(continued-fraction convergents of m^2), the domain; the fast path and _km_sqrt_div_acc forced; reference an exact
+integer square root) and the twelve functions: dil, cond, fmass, fcharge, fratio, abs, conc, rotor, rot, moment
+(dilution, solution_conductivity, faraday_mass_deposited, faraday_charge_required, faraday_mass_ratio, absorbance,
+concentration_from_absorbance, rigid_rotor_energy, rotational_constant, diatomic_moment_of_inertia: the public function,
+its shape's fast path, the monomial's exact path forced; reference Fraction), vib (vibrational_frequency: the root's two
+paths) and nernst (nernst_potential: the public function, its Rust-chain fast path where the range test passes, the
+unbounded-exponent slow path forced; reference mpfr_ref.UX with MPFR's log and ux_sub_final), each on binade-uniform,
+typical, past-the-range, midpoint, subnormal and Err arguments.
 Through each function's _km_cr_<f>_fast entry it reports the fast path's fallback rate per region, and
 checks the fast path's result equals the function's wherever its test passes. It checks that the three
 targets give identical bits and flags.
@@ -90,7 +102,9 @@ Usage, from the repo root:
                                                            # atan2 acos exp2s h100 uxsqrt uxmul uxdiv uxadd
                                                            # uxatan2 dist bond dih ratio bohr trans ryd series
                                                            # rmass muldiv pyield tyield pcomp limit empir mono
-                                                           # heat shc boil frz osm zhl ssi pre soc mm monotie)
+                                                           # heat shc boil frz osm zhl ssi pre soc mm monotie
+                                                           # sqrtdiv dil cond fmass fcharge fratio nernst abs
+                                                           # conc vib rotor rot moment)
     python3 -I scripts/oracle/cr_verify.py --work DIR      # probe sources and binaries in DIR
                                                            # (default build/cr-verify, gitignored)
 Exit status 1 on any mismatch or cross-target difference, 2 on a build or run failure.
@@ -1503,9 +1517,16 @@ def stoich_checks(work, targets, which):
 # the distance of F from their midpoint). A float function's Err is the NaN word (none of their Ok results is NaN where
 # the inputs are finite), a non-finite input of heat / boil / frz Rust's expression (both modes).
 AUDIT = [(33, "mono"), (34, "heat"), (35, "shc"), (36, "boil"), (37, "frz"), (38, "osm"), (39, "zhl"), (40, "ssi"),
-         (41, "pre"), (42, "soc"), (43, "mm"), (44, "monotie")]
+         (41, "pre"), (42, "soc"), (43, "mm"), (44, "monotie"),
+         (45, "sqrtdiv"), (46, "dil"), (47, "cond"), (48, "fmass"), (49, "fcharge"), (50, "fratio"), (51, "nernst"),
+         (52, "abs"), (53, "conc"), (54, "vib"), (55, "rotor"), (56, "rot"), (57, "moment")]
 AUDIT_NAMES = tuple(name for _, name in AUDIT)
+AUDIT2_NAMES = ("sqrtdiv", "dil", "cond", "fmass", "fcharge", "fratio", "nernst", "abs", "conc", "vib", "rotor", "rot",
+                "moment")
 ARITY.update({33: 12, 34: 3, 35: 3, 36: 3, 37: 3, 38: 3, 39: 2, 40: 3, 41: 4, 42: 3, 43: 3, 44: 8})
+ARITY.update({45: 2, 46: 3, 47: 2, 48: 3, 49: 3, 50: 5, 51: 4, 52: 3, 53: 3, 54: 2, 55: 2, 56: 1, 57: 2})
+F_CONST = _const("src/constants.cyr", "KM_FARADAY")
+H_CONST = _const("src/constants.cyr", "KM_PLANCK")
 R_GAS = _const("src/constants.cyr", "KM_GAS_CONSTANT")
 DMAX = fb(0x7FEFFFFFFFFFFFFF)
 
@@ -1540,8 +1561,87 @@ def _ok_side(vals):
     return sum(_odd_bits(v) for v in vals) <= 253
 
 
+def sqrt_ratio_ref(k, mu):
+    """RN(√(k/μ)) for positive finite doubles, exactly (Python's integer square root; B2's vib and sqrtdiv)."""
+    q = Fraction(k) / Fraction(mu)
+    n, d = q.numerator, q.denominator
+    s = max(0, 121 + d.bit_length() - n.bit_length())
+    if s % 2:
+        s += 1
+    quo, rem = divmod(n << s, d)
+    r = math.isqrt(quo)
+    st = 1 if (r * r != quo or rem) else 0
+    return rn(Fraction(2 * r + st, 1 << (s // 2 + 1)))
+
+
+def _ieee_div(a, b):
+    """IEEE division (Python raises on a zero divisor)."""
+    if b == 0.0:
+        return NAN if (a == 0.0 or math.isnan(a)) else math.copysign(INF, a) * math.copysign(1.0, b)
+    return a / b
+
+
+def _count(n):
+    return isinstance(n, int) and 1 <= n <= 255
+
+
+def ref_audit2(name, a):
+    """The reference word of ids 45 … 57 (the overflow audit's B2; NANW for an Err or outside a helper's domain)."""
+    if name in ("sqrtdiv", "vib"):
+        k, mu = a
+        return bits(sqrt_ratio_ref(k, mu)) if _pos(k) and _pos(mu) else NANW
+    if name == "dil":
+        m1, v1, v2 = a
+        if not (_pos(v2) and math.isfinite(m1) and math.isfinite(v1)):
+            return NANW
+        return bits(mono_ref([m1, v1], [v2]))
+    if name == "cond":
+        l, c = a
+        return bits(mono_ref([l, c], [1000.0]) if math.isfinite(l) and math.isfinite(c) else l * c / 1000.0)
+    if name in ("fmass", "fcharge"):
+        x, mm, n = a
+        if not (_count(n) and _pos(mm) and math.isfinite(x)):
+            return NANW
+        if name == "fmass":
+            return bits(mono_ref([x, mm], [float(n), F_CONST]))
+        return bits(mono_ref([x, float(n), F_CONST], [mm]))
+    if name == "fratio":
+        ma, mma, na, mmb, nb = a
+        if not (_count(na) and _count(nb) and _pos(mma) and _pos(mmb) and math.isfinite(ma)):
+            return NANW
+        return bits(mono_ref([ma, mmb, float(na)], [float(nb), mma]))
+    if name == "nernst":
+        e0, n, t, q = a
+        if not (_pos(t) and _count(n) and _pos(q) and math.isfinite(e0)):
+            return NANW
+        with mpfr_ref.unbounded():
+            c = (mpfr_ref.UX(R_GAS) * mpfr_ref.UX(t)) / (mpfr_ref.UX(float(n)) * mpfr_ref.UX(F_CONST))
+            p = c * mpfr_ref.UX(mpfr_ref.log(q))
+            return bits(mpfr_ref.ux_sub_final(mpfr_ref.UX(e0), p))
+    if name in ("abs", "moment"):
+        x, y, z = (a[0], a[1], a[2]) if name == "abs" else (a[0], a[1], a[1])
+        return bits(mono_ref([x, y, z], []) if all(math.isfinite(v) for v in (x, y, z)) else x * y * z)
+    if name == "conc":
+        av, e, l = a
+        if not (_pos(e) and _pos(l)):
+            return NANW
+        return bits(mono_ref([av], [e, l]) if math.isfinite(av) else _ieee_div(av, e * l))
+    if name == "rotor":
+        j, b = a
+        if not (isinstance(j, int) and 0 <= j <= 0xFFFFFFFF):
+            return NANW
+        jf = float(j)
+        return bits(mono_ref([H_CONST, b, jf, jf + 1.0], []) if math.isfinite(b) else H_CONST * b * jf * (jf + 1.0))
+    i_ = a[0]
+    if not _pos(i_):
+        return NANW
+    return bits(mono_ref([H_CONST], [8.0, math.pi, math.pi, i_]))
+
+
 def ref_audit(name, a):
     """The reference word of ids 33 … 44 (NANW for an Err)."""
+    if name in AUDIT2_NAMES:
+        return ref_audit2(name, a)
     fin = all(math.isfinite(v) for v in a if isinstance(v, float))
     if name == "mono":
         nn, nd = a[0], a[1]
@@ -1906,11 +2006,285 @@ def args_monotie(rng):
     return [("z1 below F", near), ("z1 a few ulps away", far), ("exact midpoints", mids)]
 
 
+
+# ── The overflow audit's B2 (ADR 0002 #29, #30): the new shapes, √ of a quotient, and the twelve functions ─────────────
+# ids 45 … 57: sqrtdiv (_km_cr_sqrt_div(x, y): the public helper, its fast path and flag; mode 1 _km_sqrt_div_acc), dil,
+# cond (dilution, solution_conductivity), fmass, fcharge, fratio (Faraday's three, an electron count as its integer
+# word), abs, conc, rotor (J as its integer word), rot, moment (absorbance, concentration_from_absorbance,
+# rigid_rotor_energy, rotational_constant, diatomic_moment_of_inertia): the public function, its shape's straight-line fast
+# path (_km_mul_div_fast, _km_mul2_div2_fast, _km_mul3_div_fast, _km_mul3_div2_fast, _km_mul3_fast, _km_div2_fast,
+# _km_mul4_fast, _km_div3_fast) and flag, mode 1 the monomial's exact path at its factors; vib (vibrational_frequency:
+# _km_sqrt_div_fast, mode 1 _km_sqrt_div_acc); nernst (nernst_potential: the public function, _km_nernst_fast where its
+# range test passes and the flag, mode 1 _km_nernst_ux). References: Fraction (the monomials), Python's integer square
+# root (√), mpfr_ref.UX with MPFR's log and the final subtraction (Nernst). An Err row, a NaN result of a helper outside
+# its domain, and a non-finite input of an unvalidated function (Rust's expression) give the public word in both slots.
+def _y3(rng):
+    """An odd y with 3y odd and of 54 bits (a 53-bit midpoint), as a double."""
+    return float(_odd_in(rng, (1 << 53) // 3 + 1, (1 << 54) // 3))
+
+
+def _sub_tie(rng):
+    """(q·2^a, 2^(a + 1)) for an odd q: their quotient a tie of the subnormal grid."""
+    a = rng.randint(0, 50)
+    return fb(rng.randrange(1, 1 << 41) | 1) * 2.0 ** a, 2.0 ** (a + 1)
+
+
+def _cf_best(x, lim):
+    """The last continued-fraction convergent p/q of the positive Fraction x with p, q below lim."""
+    h0, h1, k0, k1 = 0, 1, 1, 0
+    xx = x
+    while True:
+        a = xx.numerator // xx.denominator
+        h2, k2 = a * h1 + h0, a * k1 + k0
+        if h2 >= lim or k2 >= lim:
+            return h1, k1
+        h0, h1, k0, k1 = h1, h2, k1, k2
+        f = xx - a
+        if f == 0:
+            return h1, k1
+        xx = 1 / f
+
+
+def args_sqrtdiv(rng, n_rand=120_000):
+    """(k, μ) for _km_cr_sqrt_div and vibrational_frequency: every binade of both, k/μ past DBL_MAX and below 2^-1074
+    (Rust's ∞ and 0), subnormal operands and results, the overflow end, exact roots s²·2^2j/μ, near-ties (the root
+    within a few ulps of a 53-bit midpoint, from the midpoint's square), and the domain."""
+    rand = [(_pp(rng), _pp(rng)) for _ in range(n_rand)]
+    typical = [(_pp(rng, -10, 12), _pp(rng, -95, -80)) for _ in range(60_000)]
+    edge = []
+    for _ in range(60_000):
+        kind = rng.randint(0, 4)
+        if kind == 0:
+            edge.append((_pp(rng, 512, 1023), _pp(rng, -1022, -512)))          # k/μ past DBL_MAX
+        elif kind == 1:
+            edge.append((_pp(rng, -1022, -540), _pp(rng, 538, 1023)))          # k/μ below 2^-1074
+        elif kind == 2:
+            edge.append((_pp(rng, -1074, -1023), _pp(rng)))                   # a subnormal k
+        elif kind == 3:
+            edge.append((_pp(rng), _pp(rng, -1074, -1023)))                   # a subnormal μ
+        else:
+            edge.append((_pp(rng, -1074, -980), _pp(rng, 990, 1023)))          # a subnormal result
+    exact = []
+    for _ in range(30_000):
+        sq = float(rng.randrange(1, 1 << 26))
+        mu = _pp(rng, -500, 500)
+        j = rng.randint(-200, 200)
+        k = sq * sq * 2.0 ** (2 * j) * mu
+        if _pos(k) and k / mu == sq * sq * 2.0 ** (2 * j):
+            exact.append((k, mu))
+    near, close = [], []
+    for _ in range(40_000):                         # m = a 53-bit midpoint; k = RN(m²·μ) puts √(k/μ) within ulps of m
+        z = 1.0 + rng.randrange(1 << 52) * 2.0 ** -52
+        m = Fraction(z) + Fraction(1, 1 << 53)
+        mu = _pp(rng, -300, 300)
+        k = rn(m * m * Fraction(mu))
+        k = ulps(k, rng.randint(-3, 3))
+        if _pos(k):
+            near.append((k, mu))
+    for _ in range(20_000):                         # k/μ = p/q, m²'s best approximation with p, q below 2^53: within
+        z = 1.0 + rng.randrange(1 << 52) * 2.0 ** -52   # about 2^-105 of m², inside the fast path's 2^-98 band
+        m = Fraction(z) + Fraction(1, 1 << 53)
+        p, q = _cf_best(m * m, 1 << 53)
+        e = rng.randint(-480, 480)
+        close.append((float(p) * 2.0 ** e, float(q) * 2.0 ** (e - 2 * rng.randint(-20, 20))))
+    dom = [(0.0, 1.0), (1.0, 0.0), (-1.0, 1.0), (1.0, -1.0), (INF, 1.0), (1.0, INF), (NAN, 1.0), (DMAX, fb(1)),
+           (fb(1), DMAX), (fb(1), fb(1)), (4.0, 1.0), (2.0, 1.0)]
+    return [("binade-uniform", rand), ("typical (HCl's k, μ)", typical), ("k/μ past either end, subnormals", edge),
+            ("exact roots", exact), ("within ulps of a 53-bit midpoint", near),
+            ("within 2^-100 of a 53-bit midpoint", close), ("domain", dom)]
+
+
+def args_dil(rng):
+    """(M1, V1, V2) for dilution."""
+    rand = [(_spp(rng), _spp(rng), _pp(rng)) for _ in range(80_000)]
+    typical = [(_pp(rng, -20, 4), _pp(rng, -10, 10), _pp(rng, -10, 10)) for _ in range(60_000)]
+    comp = []
+    for _ in range(40_000):
+        if rng.random() < 0.5:
+            a, b = _spp(rng, 520, 1023), _spp(rng, 520, 1023)
+        else:
+            a, b = _spp(rng, -1074, -520), _spp(rng, -1074, -520)
+        e = math.frexp(a)[1] + math.frexp(b)[1]
+        comp.append((a, b, _around(rng, e)))
+    ties = []
+    for _ in range(40_000):
+        if rng.random() < 0.6:
+            ties.append((_y3(rng) * 2.0 ** rng.randint(-900, 900), 3.0, 2.0 ** rng.randint(-60, 60)))
+        else:
+            q, d = _sub_tie(rng)
+            ties.append((q, 1.0, d))
+    bad = [(1.0, 1.0, 0.0), (1.0, 1.0, -1.0), (NAN, 1.0, 1.0), (1.0, INF, 1.0), (1.0, 1.0, INF), (0.0, DMAX, fb(1)),
+           (-0.0, 1e300, 1e-300), (DMAX, DMAX, DMAX)]
+    return [("binade-uniform", rand), ("typical", typical), ("M1·V1 past the range", comp),
+            ("midpoints and subnormal ties", ties), ("Err and zeros", bad)]
+
+
+def args_cond(rng):
+    """(Λ, c) for solution_conductivity."""
+    rand = [(_spp(rng), _spp(rng)) for _ in range(80_000)]
+    typical = [(rng.uniform(50.0, 450.0), _pp(rng, -20, 3)) for _ in range(60_000)]
+    edge = []
+    for _ in range(40_000):
+        a = _spp(rng, 1, 1023)
+        e = math.frexp(a)[1]
+        edge.append((a, _around(rng, 1025 - e, 9)))                           # Λ·c past DBL_MAX, Λ·c/1000 not
+        edge.append((_spp(rng, -1074, -900), _pp(rng, -200, 60)))             # subnormal results
+    ties = [(3000.0 * rng.choice((1.0, -1.0)), _y3(rng) * 2.0 ** rng.randint(-900, 900)) for _ in range(30_000)]
+    sp = [0.0, -0.0, INF, -INF, NAN, 1.0, fb(1), DMAX, 1e300, 1e-300, 126.4]
+    specials = [(a, b) for a in sp for b in sp]
+    return [("binade-uniform", rand), ("typical", typical), ("Λ·c past the range, subnormal results", edge),
+            ("midpoints 3000·y/1000", ties), ("specials", specials)]
+
+
+def _n(rng):
+    return rng.choice((1, 2, 3, 4, 5, 6, 127, 128, 254, 255, rng.randint(1, 255)))
+
+
+def args_fmass(rng):
+    """(Q, M, n) for faraday_mass_deposited."""
+    rand = [(_spp(rng), _pp(rng), _n(rng)) for _ in range(80_000)]
+    typical = [(_spp(rng, -10, 27), rng.uniform(1.0, 250.0), _n(rng)) for _ in range(60_000)]
+    comp = []
+    for _ in range(40_000):
+        if rng.random() < 0.5:
+            q, mm = _spp(rng, 520, 1023), _pp(rng, 520, 1023)
+        else:
+            q, mm = _spp(rng, -1074, -520), _pp(rng, -1074, -400)
+        comp.append((q, mm, _n(rng)))
+    f3 = 3.0 * F_CONST
+    ties = [(f3 * 2.0 ** rng.randint(-600, 600) * rng.choice((1.0, -1.0)), _y3(rng), 1) for _ in range(30_000)]
+    bad = [(1.0, 1.0, 0), (1.0, 1.0, 256), (1.0, 1.0, -1), (1.0, 0.0, 2), (1.0, -1.0, 2), (NAN, 1.0, 2), (INF, 1.0, 2),
+           (0.0, DMAX, 1), (-0.0, DMAX, 255), (DMAX, DMAX, 1)]
+    return [("binade-uniform", rand), ("typical", typical), ("Q·M past the range", comp), ("midpoints 3F·y/F", ties),
+            ("Err and zeros", bad)]
+
+
+def args_fcharge(rng):
+    """(m, M, n) for faraday_charge_required."""
+    rand = [(_spp(rng), _pp(rng), _n(rng)) for _ in range(80_000)]
+    typical = [(_spp(rng, -20, 13), rng.uniform(1.0, 250.0), _n(rng)) for _ in range(60_000)]
+    comp = []
+    for _ in range(40_000):
+        if rng.random() < 0.5:
+            ma, mm = _spp(rng, 990, 1023), _pp(rng, 0, 1023)
+        else:
+            ma, mm = _spp(rng, -1074, -960), _pp(rng, -1022, 0)
+        comp.append((ma, mm, _n(rng)))
+    ties = [(_y3(rng) * 2.0 ** rng.randint(-600, 600), F_CONST * 2.0 ** rng.randint(-60, 60), 3) for _ in range(30_000)]
+    bad = [(1.0, 1.0, 0), (1.0, 1.0, 300), (1.0, 0.0, 2), (NAN, 1.0, 2), (1.0, INF, 2), (-0.0, DMAX, 7), (0.0, fb(1), 1)]
+    return [("binade-uniform", rand), ("typical", typical), ("m·n·F past the range", comp), ("midpoints y·3·F/F", ties),
+            ("Err and zeros", bad)]
+
+
+def args_fratio(rng):
+    """(m_A, M_A, n_A, M_B, n_B) for faraday_mass_ratio."""
+    rand = [(_spp(rng), _pp(rng), _n(rng), _pp(rng), _n(rng)) for _ in range(80_000)]
+    typical = [(_pp(rng, -20, 13), rng.uniform(1.0, 250.0), _n(rng), rng.uniform(1.0, 250.0), _n(rng))
+               for _ in range(60_000)]
+    edge = []
+    for _ in range(40_000):
+        if rng.random() < 0.5:                      # M_A/n_A subnormal or 0
+            edge.append((_spp(rng, -1000, 1000), _pp(rng, -1074, -1010), _n(rng), _pp(rng, -1000, 0), _n(rng)))
+        else:                                       # m_A·(M_B/n_B) past DBL_MAX
+            edge.append((_spp(rng, 520, 1023), _pp(rng, 520, 1023), _n(rng), _pp(rng, 520, 1023), _n(rng)))
+    ties = []
+    for _ in range(30_000):
+        nb = _n(rng)
+        w = float(rng.randrange(1, 1 << 20) | 1)
+        ties.append((_y3(rng) * 2.0 ** rng.randint(-600, 600), w, 3, w * nb, nb))
+    bad = [(1.0, 1.0, 0, 1.0, 1), (1.0, 1.0, 1, 1.0, 0), (1.0, 0.0, 1, 1.0, 1), (1.0, 1.0, 1, -1.0, 1),
+           (NAN, 1.0, 1, 1.0, 1), (1.0, fb(1), 3, 1e-300, 1), (-0.0, fb(1), 255, DMAX, 1), (DMAX, DMAX, 1, 2.0, 1)]
+    return [("binade-uniform", rand), ("typical", typical), ("M_A/n_A or m_A·M_B/n_B past the range", edge),
+            ("midpoints y·w·3/(n_B·w)·n_B", ties), ("Err and zeros", bad)]
+
+
+def args_nernst(rng):
+    """(E°, n, T, Q) for nernst_potential."""
+    rand = [(_spp(rng), _n(rng), _pp(rng), _pp(rng)) for _ in range(80_000)]
+    typical = [(rng.uniform(-3.1, 2.9), _n(rng), rng.uniform(200.0, 1500.0), _pp(rng, -100, 100)) for _ in range(60_000)]
+    edge = []
+    for _ in range(60_000):
+        kind = rng.randint(0, 3)
+        if kind == 0:                               # R·T past DBL_MAX
+            edge.append((_spp(rng, -10, 1023), _n(rng), _pp(rng, 1019, 1023), _pp(rng)))
+        elif kind == 1:                             # (R·T)/(n·F) subnormal, E° tiny or 0
+            e0 = 0.0 if rng.random() < 0.3 else _spp(rng, -1074, -1000)
+            edge.append((e0, _n(rng), _pp(rng, -1074, -1000), _pp(rng)))
+        elif kind == 2:                             # the product with ln Q subnormal: Q near 1
+            edge.append((_spp(rng, -1074, -1000), _n(rng), _pp(rng, -1050, -990), ulps(1.0, rng.randint(-40, 40))))
+        else:                                       # the difference past ±DBL_MAX
+            edge.append((DMAX * rng.choice((1.0, -1.0)) * rng.uniform(0.5, 1.0), _n(rng), _pp(rng, 1018, 1023),
+                         _pp(rng)))
+    bad = [(0.342, 2, 0.0, 0.1), (0.342, 0, 298.15, 0.1), (0.342, 2, 298.15, 0.0), (NAN, 2, 298.15, 0.1),
+           (0.342, 2, INF, 0.1), (0.342, 2, DMAX, 1.0), (-0.0, 1, fb(1), 1.0), (0.0, 1, DMAX, 1.0), (0.342, 256, 298.15, 0.1)]
+    return [("binade-uniform", rand), ("typical", typical), ("the chain past the range", edge), ("Err and specials", bad)]
+
+
+def args_conc(rng):
+    """(A, ε, l) for concentration_from_absorbance."""
+    rand = [(_spp(rng), _pp(rng), _pp(rng)) for _ in range(80_000)]
+    typical = [(rng.uniform(0.0, 3.0), _pp(rng, 0, 17), _pp(rng, -4, 4)) for _ in range(60_000)]
+    comp = []
+    for _ in range(40_000):
+        if rng.random() < 0.5:
+            comp.append((_spp(rng, 600, 1023), _pp(rng, 520, 1023), _pp(rng, 520, 1023)))
+        else:
+            comp.append((_spp(rng, -1074, -900), _pp(rng, -1074, -520), _pp(rng, -600, -10)))
+    ties = []
+    for _ in range(20_000):
+        q, d = _sub_tie(rng)
+        ties.append((q * rng.choice((1.0, -1.0)), 1.0, d))
+    bad = [(1.0, 0.0, 1.0), (1.0, 1.0, 0.0), (1.0, NAN, 1.0), (INF, 1e200, 1e200), (-INF, 1.0, 1.0), (NAN, 1.0, 1.0),
+           (-0.0, DMAX, DMAX), (1.0, DMAX, DMAX)]
+    return [("binade-uniform", rand), ("typical", typical), ("ε·l past the range", comp), ("subnormal ties", ties),
+            ("Err and specials", bad)]
+
+
+def args_mul3_30(rng, moment=False):
+    """(ε, l, c) for absorbance, or (μ, r) for diatomic_moment_of_inertia (moment)."""
+    secs = args_mul3(rng)
+    if not moment:
+        return secs
+    out = []
+    for tag, sec in secs:
+        out.append((tag, [(x, y) for x, y, _ in sec]))
+    ties = []
+    for _ in range(30_000):                         # 3·r·r with 3r² odd and of 54 bits
+        r = float(_odd_in(rng, 54_794_159, 77_490_641))
+        ties.append((3.0 * rng.choice((1.0, -1.0)), r * 2.0 ** rng.randint(-400, 400)))
+    out.append(("midpoints 3·r·r", ties))
+    return out
+
+
+def args_rotor(rng):
+    """(J, B) for rigid_rotor_energy."""
+    def j(rng_):
+        return rng_.choice((0, 1, 2, 3, 10, 0xFFFFFFFF, rng_.randint(0, 100), rng_.randint(0, 0xFFFFFFFF)))
+    rand = [(j(rng), _spp(rng)) for _ in range(80_000)]
+    typical = [(rng.randint(0, 100), _pp(rng, 30, 45)) for _ in range(60_000)]
+    edge = [(j(rng), _spp(rng, -1074, -900)) for _ in range(60_000)]            # h·B below 2^-1022
+    bad = [(-1, 1.0), (1 << 32, 1.0), (0, INF), (1, INF), (0, NAN), (2, -INF), (0xFFFFFFFF, DMAX), (0, -0.0), (5, -0.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("h·B past the range", edge), ("domain and specials", bad)]
+
+
+def args_rot(rng):
+    """(I,) for rotational_constant."""
+    rand = [(_pp(rng),) for _ in range(80_000)]
+    typical = [(_pp(rng, -160, -145),) for _ in range(60_000)]
+    edge = [(_pp(rng, -1074, -1020),) for _ in range(60_000)]                  # 8π²·I subnormal
+    bad = [(0.0,), (-1.0,), (INF,), (NAN,), (fb(1),), (DMAX,)]
+    return [("binade-uniform", rand), ("typical", typical), ("8π²·I subnormal", edge), ("Err and ends", bad)]
+
+
 def audit_checks(work, targets, which):
-    """Ids 33 … 44 against their exact references on every target, the exact path forced; True if anything failed."""
+    """Ids 33 … 57 against their exact references on every target, the exact path forced; True if anything failed."""
     failed = False
     gens = {"mono": args_mono, "heat": args_mul3, "shc": args_shc, "boil": args_mul3, "frz": args_mul3, "osm": args_osm,
-            "zhl": args_zhl, "ssi": args_ssi, "pre": args_pre, "soc": args_soc, "mm": args_mm, "monotie": args_monotie}
+            "zhl": args_zhl, "ssi": args_ssi, "pre": args_pre, "soc": args_soc, "mm": args_mm, "monotie": args_monotie,
+            "sqrtdiv": args_sqrtdiv, "dil": args_dil, "cond": args_cond, "fmass": args_fmass, "fcharge": args_fcharge,
+            "fratio": args_fratio, "nernst": args_nernst, "abs": args_mul3_30, "conc": args_conc,
+            "vib": lambda r: args_sqrtdiv(r, 60_000), "rotor": args_rotor, "rot": args_rot,
+            "moment": lambda r: args_mul3_30(r, True)}
 
     def eq(a, b):
         return a == b or (math.isnan(fb(a)) and math.isnan(fb(b)))
@@ -2022,6 +2396,9 @@ include "src/stoichiometry.cyr"
 include "src/thermo.cyr"
 include "src/phase_data.cyr"
 include "src/phase.cyr"
+include "src/solution.cyr"
+include "src/electrochemistry_data.cyr"
+include "src/electrochemistry.cyr"
 include "src/kinetics.cyr"
 include "src/organic_data.cyr"
 include "src/organic.cyr"
@@ -2054,6 +2431,11 @@ fn arity(fid): i64 {
     if (fid == 41) { return 4; }
     if (fid == 44) { return 8; }
     if (fid >= 34 && fid <= 43) { return 3; }
+    if (fid == 45 || fid == 47 || fid == 54 || fid == 55 || fid == 57) { return 2; }
+    if (fid == 50) { return 5; }
+    if (fid == 51) { return 4; }
+    if (fid == 56) { return 1; }
+    if (fid >= 46 && fid <= 53) { return 3; }
     return 1;
 }
 
@@ -2249,6 +2631,204 @@ fn run_stoich(fid, mode, a): (i64, i64, i64) {
     return (w0, load64(&eb + 40), 1);
 }
 
+# The overflow audit's B2 (ADR 0002 #29, #30): ids 45 … 57 as result words (cr_verify.py's AUDIT): mode 0 the public
+# function (an Err as the NaN word 0x7FF8000000000001), its shape's fast path at the function's factors and its flag
+# (_km_sqrt_div_fast for 45 and 54, _km_nernst_fast for 51); mode 1 the slow path forced (_km_cr_mono_acc at the factors,
+# _km_sqrt_div_acc, _km_nernst_ux). Id 45 is _km_cr_sqrt_div itself (its NaN outside the domain in both slots). An
+# electron count and J are integer words. An Err row, and a non-finite input of an unvalidated function, return the
+# public result in both slots and modes.
+#must_use
+fn run_audit2(fid, mode, a): (i64, i64, i64) {
+    var nanw = 0x7FF8000000000001;
+    var x: f64 = load64(a);
+    var y: f64 = load64(a + 8);
+    var z: f64 = load64(a + 16);
+    var w: f64 = load64(a + 24);
+    var wi1 = load64(a + 8);
+    var wi2 = load64(a + 16);
+    var fc: f64 = KM_FARADAY;
+    var hc: f64 = KM_PLANCK;
+    if (fid == 45 || fid == 54) {
+        var pw = 0;
+        if (fid == 45) {
+            var r45: f64 = _km_cr_sqrt_div(x, y);
+            pw = _km_bits(r45);
+            if (_km_is_nan(r45) == 1) { return (nanw, nanw, 1); }
+        } else {
+            var t54, v54 = vibrational_frequency(x, y);
+            if (is_ok(t54) != 1) { return (nanw, nanw, 1); }
+            pw = v54;
+        }
+        if (mode == 1) {
+            var sa: f64 = _km_sqrt_div_acc(x, y);
+            return (_km_bits(sa), _km_bits(sa), 0);
+        }
+        var sf, so = _km_sqrt_div_fast(x, y);
+        return (pw, _km_bits(sf), so);
+    }
+    if (fid == 51) {
+        var t51, v51 = nernst_potential(x, wi1, z, w);
+        if (is_ok(t51) != 1) { return (nanw, nanw, 1); }
+        var nf: f64 = f64_from(wi1);
+        var lq: f64 = _km_cr_ln(w);
+        if (mode == 1) {
+            var nu: f64 = _km_nernst_ux(x, nf, z, lq);
+            return (_km_bits(nu), _km_bits(nu), 0);
+        }
+        var nfa, nok = _km_nernst_fast(x, nf, z, lq);
+        return (v51, _km_bits(nfa), nok);
+    }
+    var nb: f64[4];
+    var db: f64[4];
+    var nn = 0;
+    var nd = 0;
+    var pw2 = 0;
+    var ok = 1;
+    var ff: f64 = 0.0;
+    var fo = 0;
+    if (fid == 46) {
+        var t46, v46 = dilution(x, y, z);
+        if (is_ok(t46) != 1) { return (nanw, nanw, 1); }
+        pw2 = v46;
+        store64(&nb, x);
+        store64(&nb + 8, y);
+        store64(&db, z);
+        nn = 2;
+        nd = 1;
+        var f46, o46 = _km_mul_div_fast(x, y, z);
+        ff = f46;
+        fo = o46;
+    } elif (fid == 47) {
+        var r47: f64 = solution_conductivity(x, y);
+        pw2 = _km_bits(r47);
+        if (_km_is_finite(x) != 1 || _km_is_finite(y) != 1) { ok = 0; }
+        var th: f64 = 1000.0;
+        store64(&nb, x);
+        store64(&nb + 8, y);
+        store64(&db, th);
+        nn = 2;
+        nd = 1;
+        var f47, o47 = _km_mul_div_fast(x, y, 1000.0);
+        ff = f47;
+        fo = o47;
+    } elif (fid == 48 || fid == 49) {
+        var nf2: f64 = f64_from(wi2);
+        if (fid == 48) {
+            var t48, v48 = faraday_mass_deposited(x, y, wi2);
+            if (is_ok(t48) != 1) { return (nanw, nanw, 1); }
+            pw2 = v48;
+            store64(&nb, x);
+            store64(&nb + 8, y);
+            store64(&db, nf2);
+            store64(&db + 8, fc);
+            nn = 2;
+            nd = 2;
+            var f48, o48 = _km_mul2_div2_fast(x, y, nf2, fc);
+            ff = f48;
+            fo = o48;
+        } else {
+            var t49, v49 = faraday_charge_required(x, y, wi2);
+            if (is_ok(t49) != 1) { return (nanw, nanw, 1); }
+            pw2 = v49;
+            store64(&nb, x);
+            store64(&nb + 8, nf2);
+            store64(&nb + 16, fc);
+            store64(&db, y);
+            nn = 3;
+            nd = 1;
+            var f49, o49 = _km_mul3_div_fast(x, nf2, fc, y);
+            ff = f49;
+            fo = o49;
+        }
+    } elif (fid == 50) {
+        var wi4 = load64(a + 32);
+        var t50, v50 = faraday_mass_ratio(x, y, wi2, w, wi4);
+        if (is_ok(t50) != 1) { return (nanw, nanw, 1); }
+        pw2 = v50;
+        var na: f64 = f64_from(wi2);
+        var nbf: f64 = f64_from(wi4);
+        store64(&nb, x);
+        store64(&nb + 8, w);
+        store64(&nb + 16, na);
+        store64(&db, nbf);
+        store64(&db + 8, y);
+        nn = 3;
+        nd = 2;
+        var f50, o50 = _km_mul3_div2_fast(x, w, na, nbf, y);
+        ff = f50;
+        fo = o50;
+    } elif (fid == 52 || fid == 57) {
+        var zz: f64 = z;
+        var r52: f64 = 0.0;
+        if (fid == 52) {
+            r52 = absorbance(x, y, z);
+        } else {
+            zz = y;
+            r52 = diatomic_moment_of_inertia(x, y);
+        }
+        pw2 = _km_bits(r52);
+        if (_km_is_finite(x) != 1 || _km_is_finite(y) != 1 || _km_is_finite(zz) != 1) { ok = 0; }
+        store64(&nb, x);
+        store64(&nb + 8, y);
+        store64(&nb + 16, zz);
+        nn = 3;
+        var f52, o52 = _km_mul3_fast(x, y, zz);
+        ff = f52;
+        fo = o52;
+    } elif (fid == 53) {
+        var t53, v53 = concentration_from_absorbance(x, y, z);
+        if (is_ok(t53) != 1) { return (nanw, nanw, 1); }
+        pw2 = v53;
+        if (_km_is_finite(x) != 1) { ok = 0; }
+        store64(&nb, x);
+        store64(&db, y);
+        store64(&db + 8, z);
+        nn = 1;
+        nd = 2;
+        var f53, o53 = _km_div2_fast(x, y, z);
+        ff = f53;
+        fo = o53;
+    } elif (fid == 55) {
+        var j = load64(a);
+        var r55: f64 = rigid_rotor_energy(j, y);
+        pw2 = _km_bits(r55);
+        if (_km_is_u32(j) != 1 || _km_is_finite(y) != 1) { ok = 0; }
+        var jf: f64 = f64_from(j);
+        var j1: f64 = jf + 1.0;
+        store64(&nb, hc);
+        store64(&nb + 8, y);
+        store64(&nb + 16, jf);
+        store64(&nb + 24, j1);
+        nn = 4;
+        var f55, o55 = _km_mul4_fast(hc, y, jf, j1);
+        ff = f55;
+        fo = o55;
+    } else {
+        var t56, v56 = rotational_constant(x);
+        if (is_ok(t56) != 1) { return (nanw, nanw, 1); }
+        pw2 = v56;
+        var pi: f64 = 0x400921FB54442D18;
+        var eight: f64 = 8.0;
+        store64(&nb, hc);
+        store64(&db, eight);
+        store64(&db + 8, pi);
+        store64(&db + 16, pi);
+        store64(&db + 24, x);
+        nn = 1;
+        nd = 4;
+        var h8: f64 = hc * 0.125;
+        var f56, o56 = _km_div3_fast(h8, pi, pi, x);
+        ff = f56;
+        fo = o56;
+    }
+    if (ok != 1) { return (pw2, pw2, 1); }
+    if (mode == 1) {
+        var aa: f64 = _km_cr_mono_acc(&nb, nn, &db, nd);
+        return (_km_bits(aa), _km_bits(aa), 0);
+    }
+    return (pw2, _km_bits(ff), fo);
+}
+
 # The overflow audit's B1 (ADR 0002 #27, #28): ids 33 … 44 as result words (cr_verify.py's AUDIT): mode 0 the public
 # function (an Err as the NaN word 0x7FF8000000000001), the fast path's result at the function's factors and its flag
 # (the monomial's _km_cr_mono_fast; for second_order_concentration and michaelis_menten their Rust-chain fast path);
@@ -2258,6 +2838,10 @@ fn run_stoich(fid, mode, a): (i64, i64, i64) {
 #must_use
 fn run_audit(fid, mode, a): (i64, i64, i64) {
     var nanw = 0x7FF8000000000001;
+    if (fid >= 45) {
+        var b0, b1, bf = run_audit2(fid, mode, a);
+        return (b0, b1, bf);
+    }
     if (fid == 33) {
         var nn = load64(a);
         var nd = load64(a + 8);

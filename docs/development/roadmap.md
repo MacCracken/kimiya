@@ -97,8 +97,12 @@ type for average oxidation states, no separate extrapolating Antoine function. I
     `zero_order_half_life`, `steady_state_intermediate`, `pre_equilibrium_rate` rounded once; `second_order_concentration`,
     `michaelis_menten` with an unbounded exponent) — done in the Cyrius API (ADR 0002 #27, #28; M4f-2's `_km_cr_mul_div`
     generalised to `src/mathx.cyr`'s correctly rounded monomial `_km_cr_mono`)
-  - [ ] B2 — F3, solution and electrochemistry (dilution, conductivity, Faraday's laws, Nernst)
-  - [ ] B3 — F5, spectroscopy products (Beer–Lambert, √(k/μ), the rotor, the moment of inertia)
+  - [x] B2 — F3, solution and electrochemistry (`dilution`, `solution_conductivity`, Faraday's three laws rounded once;
+    `nernst_potential` with an unbounded exponent, the correctly rounded ln Q its primitive) — done in the Cyrius API
+    (ADR 0002 #29)
+  - [x] B3 — F5, spectroscopy products (`absorbance`, `concentration_from_absorbance`, `rigid_rotor_energy`,
+    `rotational_constant`, `diatomic_moment_of_inertia` rounded once; `vibrational_frequency` the correctly rounded √ of
+    the exact k/μ, `src/mathx.cyr`'s new `_km_cr_sqrt_div`) — done with B2, in one batch (ADR 0002 #30)
   - [ ] B4 — F6, potentials, Born–Landé, binding energy per nucleon (folding #17 and #18)
   - [ ] B5 — F2, gas laws (ideal gas, density, van der Waals, Peng–Robinson and Redlich–Kwong pressure)
   - [ ] B6 — F7 and F8, sums with cancellation and the Shomate polynomial

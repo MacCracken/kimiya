@@ -636,6 +636,42 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     5,000 seeded inputs against the exact or slow paths); no Rust test changes; one Cyrius-only kinetics assertion of
     Rust's `second_order_concentration(2⁻¹⁰⁷⁴, 0, 1)` = +0 now pins [A]₀; benches for the eight functions without a Rust
     bench and four edge benches
+- **The library-wide overflow audit, B2** ([ADR 0002 #29 and #30](docs/adr/0002-port-api-divergences.md), B1's decisions
+  unchanged; port plan §6.4 "Decided in the overflow audit's B2"; the behaviour changes are under *Breaking*):
+  - **mathx** — four more straight-line monomial shapes on B1's `_km_cr_mono` (`_km_mul2_div2_fast`,
+    `_km_mul3_div2_fast`, `_km_mul4_fast`, `_km_div3_fast` with their wrappers `_km_cr_mul2_div2`, `_km_cr_mul3_div2`,
+    `_km_cr_mul4`, `_km_cr_div3`), and the correctly rounded √ of a quotient `_km_cr_sqrt_div(x, y)` = RN(√(x/y)): a
+    double-double fast path (`_km_sqrt_div_fast`, proven within 5.7u² with `_km_dd_div_cr`'s rounding test) and an
+    exact integer square root on `_km_bn_*` (`_km_sqrt_div_acc`); √(x/y) is never a rounding boundary of binary64
+    (proven)
+  - **solution** — `dilution` and `solution_conductivity` rounded once (#29)
+  - **electrochemistry** — `faraday_mass_deposited`, `faraday_charge_required` and `faraday_mass_ratio` rounded once;
+    `nernst_potential` under #20's semantics, Rust's chain behind a range test (`_km_nernst_fast`) and an
+    unbounded-exponent slow path (`_km_nernst_ux`), the correctly rounded ln Q its primitive; `nernst_potential_25c`
+    unchanged (#29)
+  - **spectroscopy** — `absorbance`, `concentration_from_absorbance`, `rigid_rotor_energy`, `rotational_constant` and
+    `diatomic_moment_of_inertia` rounded once; `vibrational_frequency` the correctly rounded √(k/μ) (#30)
+  - generator: `scripts/oracle/src/audit.rs`'s B2 (the port's values independently: `exact::cr_monomial`, the new
+    `exact::cr_sqrt_ratio` and `Ux::add_f64` / `sub_f64`; Rust's validation replicated and asserted; the notes; each
+    module's B2 edge rows appended with their own seed: solution +458, electrochemistry +823, spectroscopy +1,178)
+  - golden modules `solution` 29,024, `electrochemistry` 19,397, `spectroscopy` 67,869 rows; the oracle's values kept,
+    4,862 rows noted with the port's value — #29: 94 `dilution`, 148 `solution_conductivity`, 904
+    `faraday_mass_deposited`, 644 `faraday_charge_required`, 847 `faraday_mass_ratio`, 119 `nernst_potential`; #30: 195
+    `absorbance`, 219 `concentration_from_absorbance`, 706 `vibrational_frequency`, 344 `rigid_rotor_energy`, 524
+    `rotational_constant`, 118 `diatomic_moment_of_inertia`; the harness maps and counts them per function
+  - `validate.py` §20: every row of the twelve functions recomputed (`Fraction`; `math.isqrt` and MPFR's √ of a 256-bit
+    quotient for the √; `mpfr_ref.UX` with MPFR's log and the new `ux_sub_final` for Nernst), each note proven, no
+    in-range Nernst row noted, every `nernst_potential_25c` row's chain normal, no √ row a rounding boundary, the hard
+    rows counted; `mpfr_ref.py` gains `ux_sub_final` and `ux_sqrt_div_final`, with self-checks
+  - `cr_verify.py`: `sqrtdiv` and the twelve functions (`dil`, `cond`, `fmass`, `fcharge`, `fratio`, `nernst`, `abs`,
+    `conc`, `vib`, `rotor`, `rot`, `moment`: the public function, the shape's fast path, the slow path forced, roots
+    within 2⁻¹⁰⁰ of a midpoint included) on x86_64 ELF, x86_64 PE and aarch64
+  - tests: `tests/mathx.tcyr` `b2_values` (the √'s exact roots, range ends, subnormal result, overflow, domain and
+    near-midpoint roots; the shapes' ties and range ends), `b2_agrees` (20,000 seeded arguments: the four shapes against
+    `_km_cr_mono_acc`, the √ against its exact path); `tests/solution.tcyr`, `tests/electrochemistry.tcyr`
+    `cyrius_adr29` and `tests/spectroscopy.tcyr`'s ADR 0002 #30 group (the survey's edges, a 1-ulp in-range case per
+    function, HCl's ω, 5,000 seeded inputs against the exact or slow paths); no Rust test changes; Cyrius-only benches
+    for the ten functions without a Rust bench and four edge benches
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -834,6 +870,38 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   order are 1.2's.
   *Migration:* none for code that compares with a tolerance or stays within the normal range.
 
+### Breaking (relative to Rust 1.2.0, ADR 0002 #29)
+- **solution**, **electrochemistry** — `dilution`, `solution_conductivity`, `faraday_mass_deposited`,
+  `faraday_charge_required` and `faraday_mass_ratio` return the exact quotient rounded once — RN(M₁·V₁/V₂),
+  RN(Λ·c/1000), RN(Q·M/(n·F)), RN(m·n·F/M), RN(m_A·M_B·n_A/(n_B·M_A)) with F as `KM_FARADAY`'s double — where 1.2
+  rounded two to four times: about a quarter of ordinary results move by 1–2 ulp (`dilution(1.5, 0.2, 0.6)` is 0.5,
+  1.2's 0.5000000000000001; `solution_conductivity(126.4, 0.01)` 0.0012640000000000001, 1.2's 0.001264), and the range
+  ends are right (`faraday_mass_deposited(DBL_MAX, 63.546, 2)` is 5.92·10³⁰⁴, 1.2's +∞;
+  `solution_conductivity(126.4, DBL_MAX)` 2.27·10³⁰⁷, 1.2's +∞; `faraday_mass_ratio(1, 5e-324, 3, 1e-300, 1)` 6.07·10²³,
+  1.2's +∞). A zero factor gives the quotient's signed zero; a non-finite input of `solution_conductivity` gives 1.2's
+  IEEE result; the errors and their order are 1.2's. `nernst_potential` evaluates 1.2's operation sequence with an
+  unbounded exponent, the final subtraction rounded once: every input whose 1.2 chain stays in the normal range keeps
+  its bits (every `nernst_potential_25c` input does), and the edges are right
+  (`nernst_potential(0.342, 2, DBL_MAX, 0.1)` 1.78·10³⁰⁴, 1.2's +∞; at Q = 1 E°, 1.2's NaN; T = 10⁻³¹⁰ K's subnormal
+  product no longer degraded).
+  *Migration:* none for code that compares with a tolerance or stays within the normal range.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #30)
+- **spectroscopy** — `absorbance`, `concentration_from_absorbance`, `rigid_rotor_energy`, `rotational_constant` and
+  `diatomic_moment_of_inertia` return the exact product or quotient rounded once — RN(ε·l·c), RN(A/(ε·l)),
+  RN(h·B·J·(J + 1)), RN(h/(8·π·π·I)) with h as `KM_PLANCK`'s double and π its double, RN(μ·r·r) — and
+  `vibrational_frequency` the correctly rounded √ of the exact k/μ, where 1.2 rounded two to four times: a fraction of
+  ordinary results move by 1 ulp (HCl's `vibrational_frequency(516, 1.6266e-27)` is 563228298138880, 1.2's
+  563228298138879.9; `absorbance(18716, 0.1, 0.0007)` 1.31012, 1.2's 1.3101200000000002), and the range ends are right
+  (`vibrational_frequency(500, 2⁻¹⁰²²)` 1.50·10¹⁵⁵, 1.2's +∞; `vibrational_frequency(1e-300, 1e30)` 10⁻¹⁶⁵, 1.2's 0;
+  `rigid_rotor_energy(2³² − 1, 1e-300)` 1.22·10⁻³¹⁴, 1.2's 0; `rotational_constant(1e-320)` 8.392109·10²⁸⁴, 1.2's
+  8.392090·10²⁸⁴; `concentration_from_absorbance(1e300, 1e200, 1e200)` 10⁻¹⁰⁰, 1.2's 0; `absorbance(1e300, 1e300, 0)`
+  +0, 1.2's NaN). A zero factor gives the product's signed zero; a non-finite unvalidated input (absorbance's, the
+  moment of inertia's, the rotor's B, `concentration_from_absorbance`'s A) gives 1.2's IEEE result; the errors and their
+  order are 1.2's.
+  *Migration:* none for code that compares with a tolerance; code that tested 1.2's NaN for a zero concentration against
+  an overflowing ε·l gets 0.
+
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
@@ -969,6 +1037,15 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   (`percent_yield` 82, `theoretical_yield_moles` 115, `percent_composition_glucose` 266, `percent_yield_subnormal`
   2.19 → 1.62 µs). Routing every shape through the general `_km_cr_mono` was measured (`heat_transfer` 148 ns,
   `percent_yield` 108, `percent_composition_glucose` 422) and replaced by straight-line fast paths per shape
+- The overflow audit's B2, ADR 0002 #29 and #30 (Cyrius before → after, the same host, back to back):
+  `spectroscopy/absorbance` 5 → 68 ns (Rust 0.98), `electrochemistry/nernst_potential` 83 → 92 ns (Rust 6.42: the range
+  test); Cyrius-only `dilution` 17 → 86, `solution_conductivity` 6 → 72, `faraday_mass_deposited` 19 → 109,
+  `faraday_charge_required` 21 → 122, `faraday_mass_ratio` 33 → 148, `concentration_from_absorbance` 16 → 90,
+  `vibrational_frequency` 18 → 87, `rigid_rotor_energy` 14 → 114, `rotational_constant` 18 → 117,
+  `diatomic_moment_of_inertia` 11 → 74; the other paths `nernst_potential_edge` 90 → 202 ns (R·T past DBL_MAX: the
+  unbounded-exponent slow path), `vibrational_frequency_edge` 19 → 88 ns (k/μ past DBL_MAX: the √ fast path),
+  `vibrational_frequency_subnormal` 26 → 883 ns (a subnormal μ: the exact root), `faraday_mass_ratio_tie` 33 → 402 ns (a
+  midpoint, `_km_mono_tie`). Inlining the √ fast path's two TwoProducts was measured (87 → 86 ns) and not kept
 
 ## [1.2.0] - 2026-11-08
 

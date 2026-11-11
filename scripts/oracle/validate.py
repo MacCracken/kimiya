@@ -4174,6 +4174,212 @@ for fn, (ok_, nt, inr, ql) in b1_n.items():
 print(f"ADR 0002 #27, #28 hard rows: {b1_cov}")
 check(all(v > 0 for k, v in b1_cov.items() if "out of range" not in k), f"B1: a hard-row class has no golden row: {b1_cov}")
 
+# ── 20. The overflow audit's B2 (ADR 0002 #29, #30): solution's, electrochemistry's and spectroscopy's functions ──────────
+# Every row of the twelve functions is recomputed from the port's semantics, independently of the generator and the port:
+# - the monomials (#29: dilution, solution_conductivity, faraday_mass_deposited, faraday_charge_required,
+#   faraday_mass_ratio; #30: absorbance, concentration_from_absorbance, rigid_rotor_energy, rotational_constant,
+#   diatomic_moment_of_inertia): the exact rational (Fraction; F, h and π as their doubles, Rust's 1000, 8, n and J + 1
+#   exact) rounded once (b1_mono), the unvalidated inputs' non-finite values keeping Rust's expression;
+# - #30's vibrational_frequency: RN(√(k/μ)) of the exact quotient, by Python's integer square root (b2_sqrt, exact) and
+#   again by MPFR (mpfr_ref.ux_sqrt_div_final, a 256-bit quotient: its argument needs the gap this section proves, that
+#   √(k/μ) is never a rounding boundary of binary64);
+# - #29's nernst_potential: Rust's sequence on mpfr_ref.UX (53 bits, MPFR's widest exponent range) with ln Q MPFR's
+#   correctly rounded log (the port's _km_cr_ln), the final subtraction rounded once into binary64 (ux_sub_final).
+# Rust's validation is replicated here and must agree with the oracle (Err rows carry no note). Every row: noted exactly
+# where the port's value differs from the oracle's (by its bits; NaN is one value), the note naming it bit for bit, so
+# every unnoted row's port value is the oracle's. nernst_potential: no row whose f64 chain stays in the normal range is
+# noted (Rust's bits), and every nernst_potential_25c row's chain stays in it (so the 25 °C function, which calls
+# nernst_potential at 298.15 K, is unchanged). The hard rows are counted: 53-bit midpoints, subnormal results and their
+# ties, Rust's 0, ±∞ or NaN where the value is representable, √'s exact roots and its quotients past either end.
+B2_HOW = {
+    "solution::dilution": (29, "the correctly rounded M₁·V₁/V₂"),
+    "solution::solution_conductivity": (29, "the correctly rounded Λ·c/1000"),
+    "electrochemistry::faraday_mass_deposited": (29, "the correctly rounded Q·M/(n·F)"),
+    "electrochemistry::faraday_charge_required": (29, "the correctly rounded m·n·F/M"),
+    "electrochemistry::faraday_mass_ratio": (29, "the correctly rounded m_A·M_B·n_A/(n_B·M_A)"),
+    "electrochemistry::nernst_potential": (29, "Rust's sequence evaluated with an unbounded exponent (the final "
+                                           "subtraction rounded once)"),
+    "spectroscopy::absorbance": (30, "the correctly rounded ε·l·c"),
+    "spectroscopy::concentration_from_absorbance": (30, "the correctly rounded A/(ε·l)"),
+    "spectroscopy::vibrational_frequency": (30, "the correctly rounded √(k/μ)"),
+    "spectroscopy::rigid_rotor_energy": (30, "the correctly rounded h·B·J·(J + 1)"),
+    "spectroscopy::rotational_constant": (30, "the correctly rounded h/(8·π·π·I)"),
+    "spectroscopy::diatomic_moment_of_inertia": (30, "the correctly rounded μ·r·r"),
+}
+def b2_sqrt(k, mu):
+    """RN(√(k/μ)) for positive finite doubles, exactly: Q = ⌊N·2^s/D⌋ with at least 120 bits and the exponent even, R =
+    ⌊√Q⌋ (math.isqrt), and RN((2R + sticky)·2^(e − 1)) by CPython's correctly rounded int true division."""
+    q = Fraction(k) / Fraction(mu)
+    n, d = q.numerator, q.denominator
+    s = max(0, 121 + d.bit_length() - n.bit_length())
+    if s % 2: s += 1
+    quo, rem = divmod(n << s, d)
+    r = math.isqrt(quo)
+    st = 1 if (r * r != quo or rem) else 0
+    return rn_frac(Fraction(2 * r + st, 1 << (s // 2 + 1)))
+def b2_no_boundary(k, mu):
+    """True if √(k/μ) is no rounding boundary of binary64, exactly: a boundary is dyadic, so k/μ must be the square of a
+    dyadic r = M·2^f (M odd), and r a midpoint: M of 54 bits on the 53-bit grid (r ≥ 2⁻¹⁰²²), f = −1075 on the subnormal
+    one. (The general argument: k/μ = (p/q)·2^E with p, q odd needs q = 1 and p = M² < 2⁵³, so M has at most 26 bits,
+    and E = 2f ≥ −2097 > −2150.)"""
+    q = Fraction(k) / Fraction(mu)
+    n, d = q.numerator, q.denominator
+    if d & (d - 1): return True                     # not dyadic
+    j = d.bit_length() - 1
+    r = math.isqrt(n)
+    if r * r != n or j % 2: return True             # not a dyadic square
+    mm, t = r, 0
+    while mm % 2 == 0:
+        mm //= 2
+        t += 1
+    if Fraction(r, 1 << (j // 2)) >= Fraction(2) ** -1022: return mm.bit_length() != 54
+    return t - j // 2 != -1075
+DMAX_V = b2f(0x7FEFFFFFFFFFFFFF)
+def b2_nernst(e0, n, t, q):
+    with MPFR.unbounded():
+        a = MPFR.UX(R_GAS) * MPFR.UX(t)
+        c = a / (MPFR.UX(float(n)) * MPFR.UX(FARADAY))
+        p_ = c * MPFR.UX(MPFR.log(q))
+        return MPFR.ux_sub_final(MPFR.UX(e0), p_)
+def b2_nernst_in_range(t, n, l):
+    OOR[0] = False
+    a = tm(R_GAS, t)
+    c = _t_chk(dv(a, float(n) * FARADAY), a, float(n) * FARADAY)
+    tm(c, l)
+    return not OOR[0]
+def b2_factors(fn, a):
+    """A monomial's (numerator, denominator) factor lists, in the port's order (rotational_constant's 8 included)."""
+    if fn == "solution::dilution": return [a[0], a[1]], [a[2]]
+    if fn == "solution::solution_conductivity": return [a[0], a[1]], [1000.0]
+    if fn == "electrochemistry::faraday_mass_deposited": return [a[0], a[1]], [float(a[2]), FARADAY]
+    if fn == "electrochemistry::faraday_charge_required": return [a[0], float(a[2]), FARADAY], [a[1]]
+    if fn == "electrochemistry::faraday_mass_ratio": return [a[0], a[3], float(a[2])], [float(a[4]), a[1]]
+    if fn == "spectroscopy::concentration_from_absorbance": return [a[0]], [a[1], a[2]]
+    if fn == "spectroscopy::rigid_rotor_energy": return [PLANCK, a[1], float(a[0]), float(a[0]) + 1.0], []
+    if fn == "spectroscopy::rotational_constant": return [PLANCK], [8.0, math.pi, math.pi, a[0]]
+    if fn == "spectroscopy::diatomic_moment_of_inertia": return [a[0], a[1], a[1]], []
+    return list(a), []                              # absorbance
+def b2_valid(fn, a):
+    """Rust's validation (None: Ok), in Rust's order."""
+    if fn == "solution::dilution":
+        return None if is_positive(a[2]) and is_finite(a[0]) and is_finite(a[1]) else Err("InvalidInput")
+    if fn in ("electrochemistry::faraday_mass_deposited", "electrochemistry::faraday_charge_required"):
+        return None if a[2] != 0 and is_positive(a[1]) and is_finite(a[0]) else Err("InvalidInput")
+    if fn == "electrochemistry::faraday_mass_ratio":
+        ok = a[2] != 0 and a[4] != 0 and is_positive(a[1]) and is_positive(a[3]) and is_finite(a[0])
+        return None if ok else Err("InvalidInput")
+    if fn == "electrochemistry::nernst_potential":
+        if not is_positive(a[2]): return Err("InvalidTemperature")
+        return None if a[1] != 0 and is_positive(a[3]) and is_finite(a[0]) else Err("InvalidInput")
+    if fn == "spectroscopy::concentration_from_absorbance":
+        return None if is_positive(a[1]) and is_positive(a[2]) else Err("InvalidInput")
+    if fn == "spectroscopy::vibrational_frequency":
+        return None if is_positive(a[0]) and is_positive(a[1]) else Err("InvalidInput")
+    if fn == "spectroscopy::rotational_constant":
+        return None if is_positive(a[0]) else Err("InvalidInput")
+    return None
+def b2_port(fn, a):
+    e = b2_valid(fn, a)
+    if e is not None: return e
+    if fn == "electrochemistry::nernst_potential": return b2_nernst(*a)
+    if fn == "spectroscopy::vibrational_frequency": return b2_sqrt(a[0], a[1])
+    if fn == "solution::solution_conductivity" and not all(math.isfinite(v) for v in a):
+        return dv(a[0] * a[1], 1000.0)
+    if fn in ("spectroscopy::absorbance", "spectroscopy::diatomic_moment_of_inertia") and not all(
+            math.isfinite(v) for v in a):
+        return a[0] * a[1] * (a[2] if fn == "spectroscopy::absorbance" else a[1])
+    if fn == "spectroscopy::concentration_from_absorbance" and not math.isfinite(a[0]):
+        return dv(a[0], a[1] * a[2])
+    if fn == "spectroscopy::rigid_rotor_energy" and not math.isfinite(a[1]):
+        return PLANCK * a[1] * float(a[0]) * (float(a[0]) + 1.0)
+    return b1_mono(*b2_factors(fn, a))
+B2_RE = re.compile(r"\[ADR 0002 #(29|30): the port returns (.+) = (\S+) \(f:([0-9a-f]{16})\)\]$")
+b2_n = {fn: [0, 0, 0, 0] for fn in B2_HOW}          # Ok rows, noted, in range (nernst), qualitative
+b2_cov = {"53-bit midpoint": 0, "subnormal result": 0, "subnormal tie": 0, "Rust 0, ±∞ or NaN, the value representable": 0,
+          "Rust's special differs, the value out of range": 0, "√ exact": 0, "√: k/μ past DBL_MAX": 0,
+          "√: k/μ below 2⁻¹⁰⁷⁴": 0, "√: a subnormal operand": 0, "√: subnormal result": 0,
+          "√ within 2⁻⁹⁸ of a 53-bit midpoint": 0}
+b2_mpfr = [0, 0]                                     # √ rows checked against MPFR; Nernst rows whose glibc ln misrounds
+for mod_ in ("solution", "electrochemistry", "spectroscopy"):
+    for fn, cls, ins, outs, where in R.get(mod_, []):
+        if fn == "electrochemistry::nernst_potential_25c":
+            a = fl(ins)
+            if b2_valid("electrochemistry::nernst_potential", [a[0], a[1], 298.15, a[2]]) is None:
+                check(b2_nernst_in_range(298.15, a[1], math.log(a[2])), f"{where}: nernst_potential_25c{tuple(a)} leaves "
+                      f"the normal range")
+            continue
+        if fn not in B2_HOW: continue
+        adr, how = B2_HOW[fn]
+        a = fl(ins)
+        port = b2_port(fn, a)
+        note = NOTES.get(where, "")
+        noted = f"[ADR 0002 #{adr}:" in note
+        pt = out_toks(port)
+        differs = not toks_equal(pt, outs)
+        check(noted == differs, f"{where}: {fn}{tuple(a)}: the port's {pt} vs the oracle's {outs}: the #{adr} note is "
+              f"{'missing' if differs else 'stray'}")
+        if isinstance(port, Err): continue
+        b2_n[fn][0] += 1
+        if noted:
+            b2_n[fn][1] += 1
+            mm_ = B2_RE.search(note)
+            check(mm_ is not None and int(mm_.group(1)) == adr and mm_.group(2) == how and int(mm_.group(4), 16) == f2b(port)
+                  and same_bits(float(mm_.group(3)), port), f"{where}: the #{adr} note does not name {how} = {port!r}")
+        if fn == "electrochemistry::nernst_potential":
+            lg = MPFR.log(a[3])
+            if not same_bits(lg, math.log(a[3])): b2_mpfr[1] += 1
+            inr = b2_nernst_in_range(a[2], a[1], lg)
+            b2_n[fn][2] += inr
+            check(not (inr and noted), f"{where}: {fn}{tuple(a)}: Rust's chain stays in the normal range, so its bits are "
+                  f"the port's, but the row is noted")
+        o = outs[0][1] if outs[0][0] == "f" else None
+        if o is not None and (o == 0.0 or not math.isfinite(o)) and not same_bits(o, port):
+            zero_in = any(v == 0.0 for v in a if isinstance(v, float))
+            if math.isfinite(port) and (port != 0.0 or zero_in):
+                b2_n[fn][3] += 1                   # the value is representable: a nonzero double, or an exact 0
+                b2_cov["Rust 0, ±∞ or NaN, the value representable"] += 1
+            else:
+                b2_cov["Rust's special differs, the value out of range"] += 1
+        if fn == "spectroscopy::vibrational_frequency":
+            k, mu = a
+            check(b2_no_boundary(k, mu), f"{where}: √({k!r}/{mu!r}) is a rounding boundary")
+            wm = MPFR.ux_sqrt_div_final(MPFR.UX(k), MPFR.UX(mu))
+            check(same_bits(wm, port), f"{where}: MPFR's √(k/μ) {wm!r} vs the integer root's {port!r}")
+            b2_mpfr[0] += 1
+            q = Fraction(k) / Fraction(mu)
+            if math.isfinite(port) and Fraction(port) ** 2 == q: b2_cov["√ exact"] += 1
+            if q > Fraction(DMAX_V): b2_cov["√: k/μ past DBL_MAX"] += 1
+            if q < Fraction(2) ** -1074: b2_cov["√: k/μ below 2⁻¹⁰⁷⁴"] += 1
+            if min(k, mu) < 2.0 ** -1022: b2_cov["√: a subnormal operand"] += 1
+            if port < 2.0 ** -1022: b2_cov["√: subnormal result"] += 1
+            if 2.0 ** -1022 <= port < math.inf:
+                h = Fraction(math.ulp(port)) / 2
+                if any(abs(q / (Fraction(port) + d) ** 2 - 1) < Fraction(1, 1 << 97) for d in (h, -h)):
+                    b2_cov["√ within 2⁻⁹⁸ of a 53-bit midpoint"] += 1
+            continue
+        if fn == "electrochemistry::nernst_potential": continue
+        num, den = b2_factors(fn, a)
+        if not all(math.isfinite(v) for v in num + den) or any(v == 0.0 for v in num): continue
+        q = Fraction(1)
+        for v in num: q *= abs(Fraction(v))
+        for v in den: q /= abs(Fraction(v))
+        if q < Fraction(2) ** -1022:
+            b2_cov["subnormal result"] += 1
+            b2_cov["subnormal tie"] += b1_midpoint(q)
+        elif b1_midpoint(q):
+            b2_cov["53-bit midpoint"] += 1
+for fn, (ok_, nt, inr, ql) in b2_n.items():
+    extra = f", {inr} with Rust's chain in the normal range (all unnoted, Rust's bits)" if fn == (
+        "electrochemistry::nernst_potential") else ""
+    print(f"{fn.split('::')[0]}: ADR 0002 #{B2_HOW[fn][0]}: {fn.split('::')[1]}: {nt} of {ok_} Ok rows noted with the port's "
+          f"value ({ql} where Rust's is 0, ±∞ or NaN and the value representable){extra}")
+    check(nt > 0, f"{fn}: no noted row")
+print(f"ADR 0002 #29, #30 hard rows: {b2_cov}")
+print(f"ADR 0002 #30: {b2_mpfr[0]} vibrational_frequency rows checked against MPFR's √ of a 256-bit quotient as well; "
+      f"ADR 0002 #29: {b2_mpfr[1]} nernst_potential rows where glibc's ln is not correctly rounded")
+check(all(v > 0 for k, v in b2_cov.items() if "out of range" not in k), f"B2: a hard-row class has no golden row: {b2_cov}")
+check(b2_mpfr[1] == 0, "B2: a nernst_potential row whose glibc ln misrounds (its note, from glibc's ln, is not the port's)")
+
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
              "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy", "stoichiometry"}
 check(set(tsvs) == VALIDATED, f"golden modules with no section here: {sorted(set(tsvs) - VALIDATED)}; "

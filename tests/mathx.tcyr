@@ -1,7 +1,8 @@
 # mathx.tcyr — the correctly rounded exp, exp10, expm1, ln, log10 (M3c-2a), pow (M3c-2b), sin, cos, sincos,
 # atan2 and acos (M4a), x·2^y (M4d) and 1/(100·x) (M4e) of src/mathx.cyr (ADR 0006), the unbounded-exponent
 # arithmetic (M4e-2, ADR 0002 #20), the multi-word integers, RN(p/q·2^e) and the double-double quotient (M4e-3, ADR
-# 0002 #21, #22), and the correctly rounded monomial (the overflow audit's B1, ADR 0002 #27, #28).
+# 0002 #21, #22), the correctly rounded monomial (the overflow audit's B1, ADR 0002 #27, #28), and B2's shapes and the
+# correctly rounded √ of a quotient (ADR 0002 #29, #30).
 #
 # Special values, the exact and tie cases, the thresholds, subnormal results (rounded once), the known
 # hardest-to-round arguments (Lefèvre–Muller's binary64 worst cases for exp, ln, sin, cos, arctan and arccos),
@@ -1883,6 +1884,140 @@ fn _t_mono_agrees() {
     assert(answered > 10000, "the fast path answers most of them");
 }
 
+# The overflow audit's B2 (ADR 0002 #29, #30): the four new monomial shapes and the correctly rounded √ of a quotient on
+# hand cases — exact roots, Rust's ∞ and 0 where the value is representable, a subnormal result, the overflow end, the
+# domain, roots within 2⁻¹⁰⁷ of a 53-bit midpoint (the fast path's test fails), the shapes' midpoints — each against
+# MPFR's / Fraction's correctly rounded value, by the public helper and its exact path.
+fn _t_b2_values() {
+    test_group("b2_values (ADR 0002 #29, #30)");
+    var dmax: f64 = from_bits(0x7FEFFFFFFFFFFFFF);
+    var nmin: f64 = from_bits(0x0010000000000000);
+    var sub1: f64 = from_bits(1);
+    var e300: f64 = from_bits(0x01A56E1FC2F8F359);      # 1e-300
+    var a: f64 = _km_cr_sqrt_div(4.0, 1.0);
+    assert_eq(_km_bits(a), 0x4000000000000000, "√(4/1) = 2, exact");
+    var b: f64 = _km_cr_sqrt_div(2.0, 1.0);
+    assert_eq(_km_bits(b), 0x3FF6A09E667F3BCD, "√2");
+    var c: f64 = _km_cr_sqrt_div(9.0, 0.25);
+    assert_eq(_km_bits(c), 0x4018000000000000, "√(9/0.25) = 6, exact");
+    var d: f64 = _km_cr_sqrt_div(500.0, nmin);
+    assert_eq(_km_bits(d), 0x60265C55827DF1D2, "√(500/2^-1022) = 1.50·10¹⁵⁵ (Rust's (k/μ).sqrt(): ∞)");
+    var e30: f64 = from_bits(0x46293E5939A08CEA);       # 1e30
+    var e: f64 = _km_cr_sqrt_div(e300, e30);
+    assert_eq(_km_bits(e), 0x1DAD7BECC2F23AC2, "√(10⁻³⁰⁰/10³⁰) = 10⁻¹⁶⁵ (Rust's 0)");
+    var f: f64 = _km_cr_sqrt_div(dmax, nmin);
+    assert_eq(_km_bits(f), 0x7FDFFFFFFFFFFFFF, "√(DBL_MAX/2^-1022) = 2^1023·√(2 − 2^-52) (Rust's ∞)");
+    var g: f64 = _km_cr_sqrt_div(e300, sub1);
+    assert_eq(_km_bits(g), 0x425A2FE76A3F9475, "a subnormal μ: the exact path");
+    var h: f64 = _km_cr_sqrt_div(sub1, dmax);
+    assert_eq(_km_bits(h), 0x0000000002000000, "√(2^-1074/DBL_MAX): a subnormal result, 2^-1049 (Rust's 0)");
+    var i: f64 = _km_cr_sqrt_div(dmax, sub1);
+    assert_eq(_km_bits(i), 0x7FF0000000000000, "√(DBL_MAX/2^-1074) past DBL_MAX: +∞");
+    var hk: f64 = 516.0;
+    var hm: f64 = from_bits(0x3A601BEBC23E3327);        # 1.6266e-27 kg: HCl
+    var j: f64 = _km_cr_sqrt_div(hk, hm);
+    assert_eq(_km_bits(j), 0x43000206751AA800, "HCl's ω = √(516/1.6266·10⁻²⁷) (Rust's one ulp below)");
+    var nk: f64 = from_bits(0x3E57E3046A1F3250);
+    var nm: f64 = from_bits(0x3DD3D9DC063D8070);
+    var k1: f64 = _km_cr_sqrt_div(nk, nm);
+    var k2: f64 = _km_sqrt_div_acc(nk, nm);
+    var kf, ko = _km_sqrt_div_fast(nk, nm);
+    assert(_km_bits(k1) == 0x40318D1D41DCE77F && _km_bits(k2) == 0x40318D1D41DCE77F && ko == 0,
+        "√(k/μ) 10⁻³² from a midpoint: the fast test fails, the exact root rounds down (Rust's up)");
+    var nk2: f64 = from_bits(0x2A6C395DF951EF97);
+    var nm2: f64 = from_bits(0x29418CDED749A2CF);
+    var l: f64 = _km_cr_sqrt_div(nk2, nm2);
+    assert_eq(_km_bits(l), 0x40844A4FA43E7741, "… and one just above a midpoint rounds up (Rust's down)");
+    var m0: f64 = _km_cr_sqrt_div(0.0, 1.0);
+    var m1: f64 = _km_cr_sqrt_div(1.0, 0.0);
+    var mn: f64 = -1.0;
+    var m2: f64 = _km_cr_sqrt_div(mn, 1.0);
+    var inf: f64 = 1.0 / 0.0;
+    var m3: f64 = _km_cr_sqrt_div(inf, 1.0);
+    var m4: f64 = _km_sqrt_div_acc(1.0, inf);
+    var nans = _km_is_nan(m0) + _km_is_nan(m1) + _km_is_nan(m2) + _km_is_nan(m3) + _km_is_nan(m4);
+    assert_eq(nans, 5, "outside the positive finite domain: NaN");
+    # the shapes: midpoints resolved to even, Rust's out-of-range partial products
+    var y: f64 = 3002399751580331.0;                    # 3y = 2^53 + 1
+    var fc: f64 = from_bits(0x40F78E555060882C);        # FARADAY = 96485.33212331001
+    var f3: f64 = fc * 3.0;
+    var p1: f64 = _km_cr_mul2_div2(f3, y, 1.0, fc);
+    assert_eq(_km_bits(p1), 0x4340000000000000, "3F·y/(1·F) = 2^53 + 1, a tie: 2^53 (Rust's (3F·y)/F 2^53 + 2)");
+    var p2: f64 = _km_cr_mul3_div2(y, 14.0, 3.0, 2.0, 7.0);
+    assert_eq(_km_bits(p2), 0x4340000000000000, "y·14·3/(2·7) = 3y, a tie: 2^53");
+    var hc: f64 = from_bits(0x390B860BDE023111);        # PLANCK = 6.62607015e-34
+    var jm: f64 = 4294967295.0;
+    var j1: f64 = 4294967296.0;
+    var p3: f64 = _km_cr_mul4(hc, e300, jm, j1);
+    assert_eq(_km_bits(p3), 0x0000000093757F20, "h·10⁻³⁰⁰·(2³² − 1)·2³² = 1.22·10⁻³¹⁴, subnormal (Rust's 0)");
+    var pi: f64 = from_bits(0x400921FB54442D18);
+    var e320: f64 = from_bits(0x00000000000007E8);      # 1e-320
+    var h8: f64 = hc * 0.125;
+    var p4: f64 = _km_cr_div3(h8, pi, pi, e320);
+    assert_eq(_km_bits(p4), 0x7B16930879281B34, "h/(8π²·10⁻³²⁰) = 8.392109·10²⁸⁴ (Rust's 8.392090·10²⁸⁴)");
+    var p5: f64 = _km_cr_mul2_div2(dmax, 63.546, 2.0, fc);
+    assert_eq(_km_bits(p5), 0x7F3594CDA6DEAC17, "DBL_MAX·63.546/(2F) = 5.92·10³⁰⁴ (Rust's ∞)");
+    var p6: f64 = _km_cr_mul3_div2(1.0, e300, 3.0, 1.0, sub1);
+    assert_eq(_km_bits(p6), 0x44E01297D23AB683, "1·10⁻³⁰⁰·3/(1·2^-1074) = 6.07·10²³ (Rust's ∞)");
+    var mz: f64 = -0.0;
+    var p7: f64 = _km_cr_mul4(hc, mz, 1.0, 2.0);
+    assert_eq(_km_bits(p7), 0x8000000000000000, "a zero factor: its signed zero");
+}
+
+# The four new shapes against the general monomial's exact path, and _km_cr_sqrt_div against _km_sqrt_div_acc, on
+# 20,000 seeded arguments each (both signs for the shapes, positive for the root; subnormals and the range ends
+# included), and every fast path wherever it answers.
+fn _t_b2_agrees() {
+    test_group("b2_agrees (ADR 0002 #29, #30)");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var answered = 0;
+    var w: f64[5];
+    var k = 0;
+    while (k < 20000) {
+        var j = 0;
+        while (j < 5) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            var x: f64 = ux_rand(st, k % 3);
+            if (x != x || x - x != 0.0 || x == 0.0) { x = 1.25; }
+            store64(&w + 8 * j, x);
+            j = j + 1;
+        }
+        var a: f64 = load64(&w);
+        var b: f64 = load64(&w + 8);
+        var c: f64 = load64(&w + 16);
+        var d: f64 = load64(&w + 24);
+        var e: f64 = load64(&w + 32);
+        var r1: f64 = _km_cr_mul2_div2(a, b, c, d);
+        var x1: f64 = _km_cr_mono_acc(&w, 2, &w + 16, 2);
+        if (_km_bits(r1) != _km_bits(x1)) { bad = bad + 1; }
+        var r2: f64 = _km_cr_mul3_div2(a, b, c, d, e);
+        var x2: f64 = _km_cr_mono_acc(&w, 3, &w + 24, 2);
+        if (_km_bits(r2) != _km_bits(x2)) { bad = bad + 1; }
+        var r3: f64 = _km_cr_mul4(a, b, c, d);
+        var x3: f64 = _km_cr_mono_acc(&w, 4, 0, 0);
+        if (_km_bits(r3) != _km_bits(x3)) { bad = bad + 1; }
+        var r4: f64 = _km_cr_div3(a, b, c, d);
+        var x4: f64 = _km_cr_mono_acc(&w, 1, &w + 8, 3);
+        if (_km_bits(r4) != _km_bits(x4)) { bad = bad + 1; }
+        var aa: f64 = f64_abs(a);
+        var ab: f64 = f64_abs(b);
+        var r5: f64 = _km_cr_sqrt_div(aa, ab);
+        var x5: f64 = _km_sqrt_div_acc(aa, ab);
+        if (_km_bits(r5) != _km_bits(x5)) { bad = bad + 1; }
+        var f5, o5 = _km_sqrt_div_fast(aa, ab);
+        if (o5 == 1) {
+            answered = answered + 1;
+            if (_km_bits(f5) != _km_bits(x5)) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "the shapes and the root agree with their exact paths on 20,000 seeded arguments");
+    assert(answered > 10000, "the root's fast path answers most of them");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_special_values();
@@ -1914,6 +2049,8 @@ fn main() {
     _t_mono_values();
     _t_mono_sign_and_tie();
     _t_mono_agrees();
+    _t_b2_values();
+    _t_b2_agrees();
     return assert_summary();
 }
 

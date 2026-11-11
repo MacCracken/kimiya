@@ -8,7 +8,8 @@ do that: it misjudges exact ties (it rounds pow(0.5, 1075) = 2^-1075 up instead 
 
 UX (M4e-2, ADR 0002 #20) is binary64 with an unbounded exponent range: 53-bit MPFR numbers operated on at MPFR's widest
 exponent range, the final operation rounded once into binary64 (ux_*_final), and potential.rs's geometry on them
-(potential_*), the reference for the port's unbounded-exponent helpers and geometry.
+(potential_*), the reference for the port's unbounded-exponent helpers and geometry; since the overflow audit's B2 also
+the final subtraction (ux_sub_final) and the √ of a quotient (ux_sqrt_div_final).
 
 No Python package is needed: MPFR (libmpfr.so.6, MPFR 4.x) is called through ctypes. Run
 `python3 -I scripts/oracle/mpfr_ref.py` for the self-checks.
@@ -313,6 +314,37 @@ def ux_add_final(a, b):
     return _final(_UX_FN["add"], a, b)
 
 
+def ux_sub_final(a, b):
+    """a − b rounded once into binary64 (MPFR's subtraction: IEEE's signed zeros, x − x = +0): ADR 0002 #29's Nernst
+    equation, E° − ((R·T)/(n·F))·ln Q (the overflow audit's B2)."""
+    return _final(_UX_FN["sub"], a, b)
+
+
+class _Wide:
+    """An MPFR number of `prec` bits (the quotient of ux_sqrt_div_final)."""
+    __slots__ = ("v",)
+
+    def __init__(self, prec):
+        self.v = _MPFR_T()
+        _m.mpfr_init2(self.v, prec)
+
+    def __del__(self):
+        _m.mpfr_clear(self.v)
+
+
+def ux_sqrt_div_final(a, b, prec=256):
+    """√(a/b) rounded once into binary64 for positive a, b (ADR 0002 #30, the overflow audit's B2: vibrational_frequency's
+    √(k/μ)): the quotient at `prec` bits (relative error at most 2^-prec, MPFR's widest exponent range), then its square
+    root rounded once (_final). For doubles a, b this is RN(√(a/b)) itself when prec ≥ 166: with a/b = (p/q)·2^E (p, q
+    odd, below 2^53) and a rounding boundary m = M·2^f (M odd, at most 54 bits), p·2^E − q·M²·2^(2f) is a nonzero
+    multiple of 2^min(E, 2f) (validate.py's §20 proves it is never 0), so a/b is at least 2^-161 (relative) from every m²
+    and √(a/b) at least 2^-162 from every m, far beyond the quotient's error."""
+    q = _Wide(prec)
+    with unbounded():
+        _UX_FN["div"](q.v, a.v, b.v, _RNDN)
+    return _final(_m.mpfr_sqrt, q)
+
+
 def ux_scaled(s, e):
     """s·2^e as a UX, exactly, for a double s and any integer e."""
     r = UX(s)
@@ -430,9 +462,22 @@ if __name__ == "__main__":
     assert ux_atan2_final(UX(1.0), UX(2.0 ** -1000) * UX(2.0 ** -1000)) == math.pi / 2
     assert (UX(1.0) - UX(1.0)).is_zero() and not (UX(1.0) - UX(1.0)).neg_sign() and (UX(-0.0) * UX(1.0)).neg_sign()
     assert (big * big).is_f64(2.0 ** 1000) is False and (UX(3.0) * UX(5.0)).is_f64(15.0) and UX(-0.0).is_f64(-0.0)
+    # The overflow audit's B2: the final subtraction's signed zeros and range ends; √ of a 256-bit quotient.
+    assert bits(ux_sub_final(UX(-0.0), UX(0.0))) == bits(-0.0) and bits(ux_sub_final(UX(1.5), UX(1.5))) == 0
+    assert ux_sub_final(UX(from_bits(0x7FEFFFFFFFFFFFFF)), UX(-2.0 ** 1000) * UX(2.0 ** 24)) == math.inf
+    assert bits(ux_sub_final(UX(0.0), UX(from_bits(1)) * UX(1.5))) == bits(-from_bits(2))       # −1.5·2^-1074: a tie
+    assert ux_sqrt_div_final(UX(4.0), UX(1.0)) == 2.0 and ux_sqrt_div_final(UX(2.0), UX(1.0)) == math.sqrt(2.0)
+    assert bits(ux_sqrt_div_final(UX(500.0), UX(2.0 ** -1022))) == 0x60265C55827DF1D2       # Rust's (500/2^-1022).sqrt() = ∞
+    assert bits(ux_sqrt_div_final(UX(from_bits(1)), UX(from_bits(0x7FEFFFFFFFFFFFFF)))) == 0x2000000
+    assert ux_sqrt_div_final(UX(from_bits(0x7FEFFFFFFFFFFFFF)), UX(from_bits(1))) == math.inf
     rng = __import__("random").Random(20)
     for _ in range(2000):
         a, b = rng.uniform(-1e3, 1e3), rng.uniform(-1e3, 1e3)
         assert (UX(a) * UX(b)).is_f64(a * b) and (UX(a) + UX(b)).is_f64(a + b) and (UX(a) - UX(b)).is_f64(a - b)
         assert (UX(a) / UX(b)).is_f64(a / b) and (UX(abs(a)).sqrt()).is_f64(math.sqrt(abs(a)))
+        assert ux_sub_final(UX(a), UX(b)) == a - b
+        if a > 0 and b > 0:
+            q = Fraction(a) / Fraction(b)
+            r = ux_sqrt_div_final(UX(a), UX(b))
+            assert Fraction(r) ** 2 * (1 - Fraction(1, 2 ** 52)) < q < Fraction(r) ** 2 * (1 + Fraction(1, 2 ** 52))
     print(f"mpfr_ref: MPFR {VERSION}, self-checks ok")

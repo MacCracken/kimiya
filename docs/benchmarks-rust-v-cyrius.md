@@ -424,3 +424,39 @@ straight-line fast paths per shape (`_km_mul_div_fast`, `_km_mul3_fast`, `_km_di
 `load64(&x)` instead of a call to `_km_bits` saved 4–15 ns a call; inlining `_km_dd_mul_d`'s TwoProduct about 1. The
 #20-style functions pay 7–10 ns for their range test, a function call (`_km_*_fast`, shared with the tests and
 `cr_verify.py`).
+
+## The overflow audit's B2 (2026-11-10)
+
+ADR 0002 #29 and #30: solution's and electrochemistry's quotients and spectroscopy's products rounded once on B1's
+`_km_cr_mono` (four new straight-line shapes), `vibrational_frequency` on the new correctly rounded √ of a quotient
+(`_km_cr_sqrt_div`), `nernst_potential` with an unbounded exponent behind a range test (Rust's chain in range). Before:
+B2's new benches added to `tests/kimiya.bcyr` first and run on the code before B2; after: the same trimmed copy of the
+bench file (only these benches; it reproduces the full run's numbers) on the code after, the same host, back to back.
+Two benches have a Rust counterpart; the rest are Cyrius-only.
+
+| Bench | Body | Rust | Before | After |
+|---|---|---|---|---|
+| `spectroscopy/absorbance` | (100, 1, 0.01): RN(ε·l·c) by `_km_mul3_fast` | 0.98 ns | 5 ns | 68 ns |
+| `electrochemistry/nernst_potential` | (0.342, 2, 298.15 K, 0.1): four guards, `_km_cr_ln`, Rust's chain and its range test (`_km_nernst_fast`) | 6.42 ns | 83 ns | 92 ns |
+| `solution/dilution` | (2 M, 0.1 L, 0.5 L): three guards, RN(M₁·V₁/V₂) by `_km_mul_div_fast` | — | 17 ns | 86 ns |
+| `solution/solution_conductivity` | (126.4, 0.01 M): RN(Λ·c/1000) by `_km_mul_div_fast` | — | 6 ns | 72 ns |
+| `electrochemistry/faraday_mass_deposited` | (9648.5 C, 63.546, 2): RN(Q·M/(n·F)) by `_km_mul2_div2_fast` | — | 19 ns | 109 ns |
+| `electrochemistry/faraday_charge_required` | (1 g, 63.546, 2): RN(m·n·F/M) by `_km_mul3_div_fast` | — | 21 ns | 122 ns |
+| `electrochemistry/faraday_mass_ratio` | (1 g, 63.546, 2, 107.868, 1): RN(m_A·M_B·n_A/(n_B·M_A)) by `_km_mul3_div2_fast` | — | 33 ns | 148 ns |
+| `spectroscopy/concentration_from_absorbance` | (0.5, 100, 1 cm): RN(A/(ε·l)) by `_km_div2_fast` | — | 16 ns | 90 ns |
+| `spectroscopy/vibrational_frequency` | HCl (516 N/m, 1.6266·10⁻²⁷ kg): RN(√(k/μ)) by `_km_sqrt_div_fast` | — | 18 ns | 87 ns |
+| `spectroscopy/rigid_rotor_energy` | (J = 2, 3.19·10¹¹ Hz): RN(h·B·J·(J + 1)) by `_km_mul4_fast` | — | 14 ns | 114 ns |
+| `spectroscopy/rotational_constant` | (2.64·10⁻⁴⁷ kg·m²): RN(h/(8π²·I)) by `_km_div3_fast` | — | 18 ns | 117 ns |
+| `spectroscopy/diatomic_moment_of_inertia` | (1.6266·10⁻²⁷ kg, 1.2746·10⁻¹⁰ m): RN(μ·r·r) by `_km_mul3_fast` | — | 11 ns | 74 ns |
+| `electrochemistry/nernst_potential_edge` | (0.342, 2, DBL_MAX, 0.1): R·T overflows, the unbounded-exponent slow path | — | 90 ns | 202 ns |
+| `spectroscopy/vibrational_frequency_edge` | (500, 2⁻¹⁰²²): k/μ overflows in Rust; the √ fast path | — | 19 ns | 88 ns |
+| `spectroscopy/vibrational_frequency_subnormal` | (10⁻³⁰⁰, 2⁻¹⁰⁷⁴): a subnormal μ, the exact root (multi-word comparisons) | — | 26 ns | 883 ns |
+| `electrochemistry/faraday_mass_ratio_tie` | y·3 with 3y = 2⁵³ + 1, a midpoint: the shape's test fails, `_km_mono_tie` resolves it | — | 33 ns | 402 ns |
+
+The rounded-once functions cost 68–148 ns where Rust's two to four operations took 5–33 ns, as B1's did (the decision's
+"roughly 5× slower"; more for the unvalidated products whose Rust body is two multiplies, and for the five-factor
+`faraday_mass_ratio`). The √ costs 87 ns: a division, a square root, two TwoProducts and the rounding test; inlining the
+two TwoProducts was measured (87 → 86 ns) and not kept. `nernst_potential` pays 9 ns for its range test; its 25 °C form
+takes the same path. The exact root (`vibrational_frequency_subnormal`) is a few multi-word products and comparisons
+after a guess from the fast path's arithmetic, under a microsecond; it serves subnormal operands, possibly subnormal
+results and the rare failed test.

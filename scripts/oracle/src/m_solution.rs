@@ -28,11 +28,16 @@
 //! rejected` when the accepted x was not positive and finite — and the generator prints the tally and the
 //! largest update count.
 //!
+//! - ADR 0002 #29 (the overflow audit's B2): `dilution` and `solution_conductivity` rows are noted where the port's
+//!   correctly rounded M₁·V₁/V₂ or Λ·c/1000 differs from Rust's value (`audit.rs`), and `audit::emit_solution` appends
+//!   their edge rows (partial products past DBL_MAX or below 2⁻¹⁰²², midpoints and subnormal ties) with their own seed.
+//!
 //! Every input goes through `black_box`; grid inputs use only exact or correctly rounded operations
 //! (`grids.rs`). The near-cancellation pKa values come from `log10_arith`, + − × ÷ only.
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::grids::{Rng, decades};
 use crate::m_reaction::{edges, res};
 use crate::tsv::{Class, Module, Tok, f, i};
@@ -40,10 +45,10 @@ use kimiya::error::KimiyaError;
 use kimiya::solution::{
     DH_A_WATER_25C, DH_B_WATER_25C, KW_WATER_25C, LAMBDA_CL_MINUS, LAMBDA_H_PLUS, LAMBDA_K_PLUS,
     LAMBDA_NA_PLUS, LAMBDA_NO3_MINUS, LAMBDA_OH_MINUS, LAMBDA_SO4_2MINUS, davies_activity,
-    debye_huckel_extended, debye_huckel_limiting, dilution, h_concentration_from_ph,
+    debye_huckel_extended, debye_huckel_limiting, h_concentration_from_ph,
     henderson_hasselbalch, ionic_strength, kohlrausch_molar_conductivity, limiting_molar_conductivity,
     molality, molarity, ph_from_h_concentration, ph_from_poh, poh_from_oh_concentration,
-    solution_conductivity, weak_acid_ph, weak_base_ph,
+    weak_acid_ph, weak_base_ph,
 };
 
 // ── the charge-balance replica ──────────────────────────────────────────────────────
@@ -247,10 +252,7 @@ pub fn emit() -> Module {
             two(&mut m, name, x, y);
         }
     }
-    let dil = |m: &mut Module, a: f64, b: f64, c: f64| {
-        let out = res(dilution(bb(a), bb(b), bb(c)));
-        m.row("solution::dilution", Class::B, &[f(a), f(b), f(c)], &[out]);
-    };
+    let dil = audit::dilution_row;
     for x in edges() {
         dil(&mut m, x, 0.1, 0.5);
         dil(&mut m, 1.0, x, 0.5);
@@ -603,10 +605,7 @@ pub fn emit() -> Module {
         let d = f64::from(i32::try_from(rng.int(1, 3)).unwrap_or(1));
         lmc(&mut m, a, b, c, d);
     }
-    let cond = |m: &mut Module, a: f64, c: f64| {
-        let out = solution_conductivity(bb(a), bb(c));
-        m.row("solution::solution_conductivity", Class::B, &[f(a), f(c)], &[f(out)]);
-    };
+    let cond = audit::conductivity;
     for x in edges() {
         cond(&mut m, x, 0.1);
         cond(&mut m, 126.4, x);
@@ -616,5 +615,6 @@ pub fn emit() -> Module {
         let c = rng.log_uniform(-6.0, 1.0);
         cond(&mut m, a, c);
     }
+    audit::emit_solution(&mut m);
     m
 }

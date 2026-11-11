@@ -1,7 +1,9 @@
 # solution.tcyr — the tests of rust-old/src/solution.rs, ported one for one (each test_group is the Rust test's
 # name; all 49), plus Cyrius-only tests of the ion-record convention, out-of-i32 charges, the private
 # charge-balance Newton (its exits and Rust's relative-step tolerance, pinned on the helper) and henderson_
-# hasselbalch's log10. No Rust test needed adapting beyond the literals: a value Rust writes with an exponent
+# hasselbalch's log10, and of ADR 0002 #29 (the overflow audit's B2: dilution and solution_conductivity rounded once;
+# no Rust test changes with it, each compares within a tolerance). No Rust test needed adapting beyond the literals: a
+# value Rust writes with an exponent
 # (1e-7, 1.8e-5, 1e300) is written positionally here, or as its bit pattern, since the Cyrius lexer has no
 # exponent notation; `assert_close(a, e, tol)` is `close(a, e, tol)`. The golden corpus separately checks every
 # function over its grid (tests/parity.tcyr).
@@ -668,6 +670,78 @@ fn _t_cyrius_constants() {
     assert(so4 == 160.0 && oh == 198.0, "λ°");
 }
 
+# The f64 whose bit pattern is `bits` (store64, so no hex literal is read as an integer).
+#must_use
+fn fbits(bits): f64 {
+    var x: f64 = 0.0;
+    store64(&x, bits);
+    return x;
+}
+
+# ADR 0002 #29 (the overflow audit's B2): dilution's M₁·V₁/V₂ and solution_conductivity's Λ·c/1000 rounded once, where
+# Rust rounds twice and a partial product over- or underflows; Rust's expression for a non-finite input of the
+# unvalidated conductivity; the public functions against the monomial's exact path on 5,000 seeded triples.
+fn _t_cyrius_adr29() {
+    test_group("cyrius_adr29");
+    var t1, v1 = dilution(1.5, 0.2, 0.6);
+    assert(is_ok(t1) == 1 && v1 == 0x3FE0000000000000, "1.5·0.2/0.6 = 0.5 (Rust's 0.5000000000000001)");
+    var e200: f64 = fbits(0x6974E718D7D7625A);      # 1e200
+    var t2, v2 = dilution(e200, e200, e200);
+    assert(is_ok(t2) == 1 && v2 == 0x6974E718D7D7625A, "1e200·1e200/1e200 = 1e200 (Rust's ∞)");
+    var y: f64 = 3002399751580331.0;                # 3y = 2^53 + 1
+    var t3, v3 = dilution(y, 3.0, 2.0);
+    assert(is_ok(t3) == 1 && v3 == 0x4330000000000000, "y·3/2 = 2^52 + ½, a tie: 2^52 (even)");
+    var mz: f64 = -0.0;
+    var big: f64 = fbits(0x7E37E43C8800759C);       # 1e300
+    var tiny: f64 = fbits(0x01A56E1FC2F8F359);      # 1e-300
+    var t4, v4 = dilution(mz, big, tiny);
+    assert(is_ok(t4) == 1 && v4 == 0x8000000000000000, "−0·1e300/1e-300 = −0");
+    var dmax: f64 = fbits(0x7FEFFFFFFFFFFFFF);
+    var c1: f64 = solution_conductivity(126.4, dmax);
+    assert_eq(_km_bits(c1), 0x7FC02DE00D1B7175, "126.4·DBL_MAX/1000 = 2.27·10³⁰⁷ (Rust's ∞)");
+    var c2: f64 = solution_conductivity(126.4, 0.01);
+    assert_eq(_km_bits(c2), 0x3F54B599AA60913B, "126.4·0.01/1000 rounded once (Rust's one ulp below)");
+    var inf: f64 = 1.0 / 0.0;
+    var c3: f64 = solution_conductivity(inf, 0.0);
+    assert_eq(ulp_is_nan(_km_bits(c3)), 1, "∞·0/1000: Rust's NaN (a non-finite input keeps Rust's expression)");
+    var c4: f64 = solution_conductivity(mz, 1.0);
+    assert_eq(_km_bits(c4), 0x8000000000000000, "−0·1/1000 = −0");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var nb: f64[2];
+    var db: f64[1];
+    var k = 0;
+    while (k < 5000) {
+        var w: f64[3];
+        var j = 0;
+        while (j < 3) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            var bb = 0x3000000000000000 + ((st >> 3) % 0x1C00000000000000);
+            if (j < 2) { bb = bb | (st & 0x8000000000000000); }
+            store64(&w + 8 * j, bb);
+            j = j + 1;
+        }
+        var a: f64 = load64(&w);
+        var b: f64 = load64(&w + 8);
+        var c: f64 = load64(&w + 16);
+        store64(&nb, a);
+        store64(&nb + 8, b);
+        store64(&db, c);
+        var td, vd = dilution(a, b, c);
+        var xd: f64 = _km_cr_mono_acc(&nb, 2, &db, 1);
+        if (is_ok(td) != 1 || vd != _km_bits(xd)) { bad = bad + 1; }
+        var th: f64 = 1000.0;
+        store64(&db, th);
+        var rc: f64 = solution_conductivity(a, b);
+        var xc: f64 = _km_cr_mono_acc(&nb, 2, &db, 1);
+        if (_km_bits(rc) != _km_bits(xc)) { bad = bad + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "dilution and solution_conductivity = the exact path on 5,000 seeded triples");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_pure_water_ph();
@@ -724,6 +798,7 @@ fn main() {
     _t_cyrius_charge_balance_root();
     _t_cyrius_henderson_log10();
     _t_cyrius_constants();
+    _t_cyrius_adr29();
     return assert_summary();
 }
 

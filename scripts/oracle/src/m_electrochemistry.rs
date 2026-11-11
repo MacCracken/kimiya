@@ -18,17 +18,23 @@
 //!   purpose**: E° = (RT/nF)·ln Q to within a few ulp, so E ≈ 0 of both signs (E° placed with `ln_arith`, + − × ÷
 //!   only, as grids may not call a transcendental).
 //!
+//! - ADR 0002 #29 (the overflow audit's B2): the three Faraday functions' rows are noted where the port's correctly
+//!   rounded value differs from Rust's, and `nernst_potential`'s where Rust's sequence with an unbounded exponent (the
+//!   final subtraction rounded once) does (`audit.rs`; in-range rows keep Rust's bits); `audit::emit_electrochemistry`
+//!   appends their edge rows (R·T past DBL_MAX, a subnormal (R·T)/(n·F), partial products past either end, an
+//!   equivalent weight underflowing, midpoints) with their own seed.
+//!
 //! Every input goes through `black_box`; grid inputs use only exact or correctly rounded operations (`grids.rs`).
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::grids::{Rng, decades};
 use crate::m_reaction::{edges, res};
 use crate::tsv::{Class, Module, Tok, b, f, i, s};
 use kimiya::electrochemistry::{
     FARADAY, HalfReaction, STANDARD_POTENTIALS, cell_gibbs_energy, cell_potential_from_couples,
-    charge_to_moles_electrons, faraday_charge_required, faraday_mass_deposited, faraday_mass_ratio,
-    is_spontaneous_cell, lookup_half_reaction, moles_electrons_to_charge, nernst_potential,
+    charge_to_moles_electrons, is_spontaneous_cell, lookup_half_reaction, moles_electrons_to_charge,
     nernst_potential_25c, standard_cell_potential,
 };
 use kimiya::element::GAS_CONSTANT;
@@ -115,10 +121,7 @@ pub fn emit() -> Module {
     }
 
     // ── the Nernst equation ──
-    let nernst = |m: &mut Module, e0: f64, n: u8, t: f64, q: f64| {
-        let out = res(nernst_potential(bb(e0), bb(n), bb(t), bb(q)));
-        m.row("electrochemistry::nernst_potential", Class::C, &[f(e0), i(n), f(t), f(q)], &[out]);
-    };
+    let nernst = audit::nernst;
     let n25 = |m: &mut Module, e0: f64, n: u8, q: f64| {
         let out = res(nernst_potential_25c(bb(e0), bb(n), bb(q)));
         m.row("electrochemistry::nernst_potential_25c", Class::C, &[f(e0), i(n), f(q)], &[out]);
@@ -199,8 +202,7 @@ pub fn emit() -> Module {
                 let out = res(nernst_potential_25c(bb(e0), bb(n), bb(q)));
                 m.row("electrochemistry::nernst_potential_25c", Class::C, &[f(e0), i(n), f(q)], &[out]);
             } else {
-                let out = res(nernst_potential(bb(e0), bb(n), bb(t), bb(q)));
-                m.row("electrochemistry::nernst_potential", Class::C, &[f(e0), i(n), f(t), f(q)], &[out]);
+                audit::nernst(m, e0, n, t, q);
             }
         }
     };
@@ -272,23 +274,9 @@ pub fn emit() -> Module {
     }
 
     // ── Faraday's laws ──
-    let dep = |m: &mut Module, q: f64, mm: f64, n: u8| {
-        let out = res(faraday_mass_deposited(bb(q), bb(mm), bb(n)));
-        m.row("electrochemistry::faraday_mass_deposited", Class::B, &[f(q), f(mm), i(n)], &[out]);
-    };
-    let req = |m: &mut Module, ma: f64, mm: f64, n: u8| {
-        let out = res(faraday_charge_required(bb(ma), bb(mm), bb(n)));
-        m.row("electrochemistry::faraday_charge_required", Class::B, &[f(ma), f(mm), i(n)], &[out]);
-    };
-    let ratio = |m: &mut Module, ma: f64, mma: f64, na: u8, mmb: f64, nb: u8| {
-        let out = res(faraday_mass_ratio(bb(ma), bb(mma), bb(na), bb(mmb), bb(nb)));
-        m.row(
-            "electrochemistry::faraday_mass_ratio",
-            Class::B,
-            &[f(ma), f(mma), i(na), f(mmb), i(nb)],
-            &[out],
-        );
-    };
+    let dep = audit::fmass;
+    let req = audit::fcharge;
+    let ratio = audit::fratio;
     for x in edges() {
         dep(&mut m, x, 63.546, 2);
         dep(&mut m, FARADAY, x, 2);
@@ -357,5 +345,6 @@ pub fn emit() -> Module {
         let q = moles_electrons_to_charge(bb(x));
         m.row("electrochemistry::moles_electrons_to_charge", Class::B, &[f(x)], &[f(q)]);
     }
+    audit::emit_electrochemistry(&mut m);
     m
 }
