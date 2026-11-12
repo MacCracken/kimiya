@@ -1,0 +1,161 @@
+# audit2.bcyr — benchmarks of the library-wide overflow audit from its B5 on (ADR 0002 #35 …), Cyrius-only, as
+# tests/audit.bcyr's are for B1–B4 (ADR 0002 #27 … #34): the functions each batch fixed, on typical inputs and on the
+# edges that take their other paths. With B5's benches tests/audit.bcyr would take about 219 s of `cyrius bench`'s
+# 300 s per-file deadline (189 s without), so the audit's later batches open this third file, the same way B4 split
+# tests/kimiya.bcyr (the user's decision of 2026-11-11: split the bench files rather than raise the deadline). The
+# method is kimiya.bcyr's: each timed batch is a tight loop of `per_batch` calls, inputs from globals (Rust's
+# `black_box`), results to a sink.
+
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/element_data.cyr"
+include "src/element.cyr"
+include "src/molecule.cyr"
+include "src/reaction.cyr"
+include "src/thermo.cyr"
+include "src/thermochem_data.cyr"
+include "src/thermochem.cyr"
+include "src/phase_data.cyr"
+include "src/phase.cyr"
+include "src/gas_data.cyr"
+include "src/gas.cyr"
+include "src/solution.cyr"
+include "src/electrochemistry_data.cyr"
+include "src/electrochemistry.cyr"
+include "src/kinetics.cyr"
+include "src/stoichiometry.cyr"
+include "src/organic_data.cyr"
+include "src/organic.cyr"
+include "src/inorganic_data.cyr"
+include "src/inorganic.cyr"
+include "src/potential.cyr"
+include "src/nuclear_data.cyr"
+include "src/nuclear.cyr"
+include "src/spectroscopy_data.cyr"
+include "src/spectroscopy.cyr"
+
+# A sink the timed loops write to, so their results are used.
+var _bench_sink = 0;
+
+var _bench_b5 = 0;          # the audit's B5 (ADR 0002 #35): 10 × 6 input words (bench_audit_b5)
+
+# Cyrius-only, the overflow audit's B5 (ADR 0002 #35): the exp / exp10 arguments, on typical inputs, then on the edges
+# that take each one's unbounded-exponent slow path. which: 0 equilibrium_constant (−5000 J/mol, 298 K),
+# 1 debye_huckel_limiting (2, 0.01 M, 0.509), 2 debye_huckel_extended (1, 0.05 M, 0.509, 0.328, 3 Å), 3 davies_activity
+# (1, 0.1 M, 0.509); the edges: 4 equilibrium_constant_edge (−DBL_MAX, DBL_MAX: R·T past DBL_MAX),
+# 5 equilibrium_constant_subnormal (−10⁻³²⁰, 10⁻³²²: R·T subnormal), 6 debye_huckel_limiting_edge (100000, 0, 10³⁰⁰:
+# A·z² past DBL_MAX at I = 0), 7 debye_huckel_extended_edge (1, 1, 10³⁰⁸, 10¹⁵⁵, 10¹⁵⁵: B·å past DBL_MAX),
+# 8 debye_huckel_extended_overflow (100000, 1, 10³⁰⁰, 10¹⁵⁴, 10¹⁵⁴: A·z² past DBL_MAX), 9 davies_activity_edge
+# (100000, 0, 10³⁰⁰). The charge is the first word of the DH rows, an integer.
+fn bench_audit_b5(name, which, per_batch, batches) {
+    var x = _bench_b5 + 48 * which;
+    var w0 = load64(x);
+    var a0: f64 = load64(x);
+    var a1: f64 = load64(x + 8);
+    var a2: f64 = load64(x + 16);
+    var a3: f64 = load64(x + 24);
+    var a4: f64 = load64(x + 32);
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            if (which == 0 || which == 4 || which == 5) {
+                var t0, v0 = equilibrium_constant(a0, a1);
+                _bench_sink = v0;
+            } elif (which == 1 || which == 6) {
+                var t1, v1 = debye_huckel_limiting(w0, a1, a2);
+                _bench_sink = v1;
+            } elif (which == 2 || which == 7 || which == 8) {
+                var t2, v2 = debye_huckel_extended(w0, a1, a2, a3, a4);
+                _bench_sink = v2;
+            } else {
+                var t3, v3 = davies_activity(w0, a1, a2);
+                _bench_sink = v3;
+            }
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# The B5 input words (bench_audit_b5): 10 rows of 6 words, the DH rows' charge an integer word.
+fn _bench_b5_setup() {
+    _bench_b5 = alloc(60 * 8);
+    var b5 = _bench_b5;
+    var q = 0;
+    while (q < 60) {
+        store64(b5 + 8 * q, 0);
+        q = q + 1;
+    }
+    var dg: f64 = -5000.0;                  # 0 equilibrium_constant
+    var t298: f64 = 298.0;
+    store64(b5, _km_bits(dg));
+    store64(b5 + 8, _km_bits(t298));
+    var i01: f64 = 0.01;                    # 1 debye_huckel_limiting
+    var a509: f64 = 0.509;
+    store64(b5 + 48, 2);
+    store64(b5 + 56, _km_bits(i01));
+    store64(b5 + 64, _km_bits(a509));
+    var i05: f64 = 0.05;                    # 2 debye_huckel_extended
+    var b328: f64 = 0.328;
+    var s3: f64 = 3.0;
+    store64(b5 + 96, 1);
+    store64(b5 + 104, _km_bits(i05));
+    store64(b5 + 112, _km_bits(a509));
+    store64(b5 + 120, _km_bits(b328));
+    store64(b5 + 128, _km_bits(s3));
+    var i1: f64 = 0.1;                      # 3 davies_activity
+    store64(b5 + 144, 1);
+    store64(b5 + 152, _km_bits(i1));
+    store64(b5 + 160, _km_bits(a509));
+    var dmax: f64 = 0x7FEFFFFFFFFFFFFF;     # 4 equilibrium_constant_edge: −DBL_MAX, DBL_MAX
+    var ndmax: f64 = -dmax;
+    store64(b5 + 192, _km_bits(ndmax));
+    store64(b5 + 200, _km_bits(dmax));
+    var s320: f64 = 0x00000000000007E8;     # 5 equilibrium_constant_subnormal: −10⁻³²⁰, 10⁻³²²
+    var ns320: f64 = -s320;
+    store64(b5 + 240, _km_bits(ns320));
+    store64(b5 + 248, 0x0000000000000014);
+    store64(b5 + 288, 100000);              # 6 debye_huckel_limiting_edge: (100000, 0, 10³⁰⁰)
+    store64(b5 + 304, 0x7E37E43C8800759C);
+    var one: f64 = 1.0;                     # 7 debye_huckel_extended_edge: (1, 1, 10³⁰⁸, 10¹⁵⁵, 10¹⁵⁵)
+    store64(b5 + 336, 1);
+    store64(b5 + 344, _km_bits(one));
+    store64(b5 + 352, 0x7FE1CCF385EBC8A0);
+    store64(b5 + 360, 0x601DD55745CBB7ED);
+    store64(b5 + 368, 0x601DD55745CBB7ED);
+    store64(b5 + 384, 100000);              # 8 debye_huckel_extended_overflow: (100000, 1, 10³⁰⁰, 10¹⁵⁴, 10¹⁵⁴)
+    store64(b5 + 392, _km_bits(one));
+    store64(b5 + 400, 0x7E37E43C8800759C);
+    store64(b5 + 408, 0x5FE7DDDF6B095FF1);
+    store64(b5 + 416, 0x5FE7DDDF6B095FF1);
+    store64(b5 + 432, 100000);              # 9 davies_activity_edge: (100000, 0, 10³⁰⁰)
+    store64(b5 + 448, 0x7E37E43C8800759C);
+}
+
+# Runs every bench.
+fn main(): i64 {
+    alloc_init();
+    _bench_b5_setup();
+    bench_audit_b5("reaction/equilibrium_constant", 0, 1000000, 20);
+    bench_audit_b5("solution/debye_huckel_limiting", 1, 1000000, 20);
+    bench_audit_b5("solution/debye_huckel_extended", 2, 1000000, 20);
+    bench_audit_b5("solution/davies_activity", 3, 1000000, 20);
+    bench_audit_b5("reaction/equilibrium_constant_edge", 4, 1000000, 20);
+    bench_audit_b5("reaction/equilibrium_constant_subnormal", 5, 1000000, 20);
+    bench_audit_b5("solution/debye_huckel_limiting_edge", 6, 1000000, 20);
+    bench_audit_b5("solution/debye_huckel_extended_edge", 7, 1000000, 20);
+    bench_audit_b5("solution/debye_huckel_extended_overflow", 8, 1000000, 20);
+    bench_audit_b5("solution/davies_activity_edge", 9, 1000000, 20);
+    return 0;
+}
+
+var r = main();
+sys_exit_group(r);

@@ -5008,6 +5008,180 @@ print(f"ADR 0002 #34's data-backed callers: every SHOMATE_DATA segment in the po
 check(b4_cov["Rust 0, ±∞ or NaN, the value representable"] > 0 and b4_cov["Rust's NaN, the value ±∞"] > 0,
       f"B4: a hard-row class has no golden row: {b4_cov}")
 
+# ── 23. The overflow audit's B5 (ADR 0002 #35): the exp / exp10 arguments ──────────────────────────────────────────────
+# Every row of the four functions is recomputed from the port's semantics, independently of the generator and the port:
+# Rust's validation in Rust's order, then the argument — equilibrium_constant's −ΔG/(R·T), the activity models' log₁₀ γ
+# (((−A)·z)·z)·√I, ((((−A)·z)·z)·√I)/(1 + (B·å)·√I) and (((−A)·z)·z)·(√I/(1 + √I) − 0.3·I) — in Rust's sequence on
+# mpfr_ref.UX (53 bits at MPFR's widest exponent range), every operation rounded to 53 bits, the last one too: X, the
+# argument of ADR 0002 #20's target; the result is MPFR's exp / exp10 of X rounded once into binary64
+# (mpfr_ref.ux_exp_final, ux_exp10_final), and equilibrium_constant's ComputationError where that K is not finite.
+# ADR 0002 #35's lemma — the port's exp / 10^x of x, X's last operation rounded once into binary64 (ux_div_final,
+# ux_mul_final), is that value — is checked on every row (x normal: the same double; |X| past DBL_MAX: x = ±∞, both
+# ∞ or 0; |X| ≤ 2⁻¹⁰²¹: |x| ≤ 2⁻¹⁰²¹, both 1). Every row: noted exactly where the port's result differs from the row's
+# reference (the corrected oracle's outputs where tests/golden/<module>.cr.tsv has the row, else the oracle's), the note
+# naming it bit for bit (so every noted value, glibc's exp or pow(10, x) in the generator, is MPFR's), or its Err
+# (`= Err(ComputationError) (E:ComputationError)`). The port's fast tests (src/reaction.cyr, src/solution.cyr: R·T in
+# [2⁻¹⁰²¹, DBL_MAX]; A·z² finite; the extended law's numerator and (B·å)·√I finite) are checked on every row: where one
+# passes the row is unnoted (Rust's result). And no row whose f64 chain stays in the normal range is noted (B3's strict
+# tracers: a product or quotient leaves the range when it is not finite, 0 from nonzero factors, or nonzero and at most
+# 2⁻¹⁰²²; a sum only when it is not finite; the argument's own last operation does not count). The noted rows are
+# counted by class.
+B5_DIV = "the argument evaluated with an unbounded exponent (its final quotient rounded once), then the correctly rounded"
+B5_MUL = "the argument evaluated with an unbounded exponent (its final product rounded once), then the correctly rounded"
+B5_HOW = {
+    "reaction::equilibrium_constant": B5_DIV + " exp",
+    "solution::debye_huckel_limiting": B5_MUL + " 10^x",
+    "solution::debye_huckel_extended": B5_DIV + " 10^x",
+    "solution::davies_activity": B5_MUL + " 10^x",
+}
+B5_KEQ, B5_LIM, B5_EXT, B5_DAV = B5_HOW
+B5_LO, B5_HI = 2.0 ** -1021, DMAX_V
+def b5_valid(fn, a):
+    """Rust's validation (None: Ok), in Rust's order."""
+    if fn == B5_KEQ:
+        if not is_positive(a[1]): return INVT
+        return None if is_finite(a[0]) else INVALID
+    if fn == B5_EXT:
+        if r_ia(a[1], a[2]): return INVALID
+        return None if is_non_negative(a[3]) and is_non_negative(a[4]) else INVALID
+    return INVALID if r_ia(a[1], a[2]) else None
+def b5_arg(fn, a):
+    """(X, x): the argument with every operation rounded to 53 bits at MPFR's widest exponent range (X, a UX), and with
+    its last operation rounded once into binary64 instead (x, the port's)."""
+    with MPFR.unbounded():
+        if fn == B5_KEQ:
+            n, rt = U(-a[0]), U(R_GAS) * U(a[1])
+            return n / rt, MPFR.ux_div_final(n, rt)
+        z = U(float(a[0]))
+        p_ = U(-a[2]) * z * z
+        sq = U(a[1]).sqrt()
+        if fn == B5_LIM: return p_ * sq, MPFR.ux_mul_final(p_, sq)
+        if fn == B5_EXT:
+            num, den = p_ * sq, U(1.0) + U(a[3]) * U(a[4]) * sq
+            return num / den, MPFR.ux_div_final(num, den)
+        br = sq / (U(1.0) + sq) - U(0.3) * U(a[1])
+        return p_ * br, MPFR.ux_mul_final(p_, br)
+def b5_lemma_class(xx):
+    """The lemma's case for the argument X: its 53-bit value normal, past DBL_MAX, or at most 2⁻¹⁰²¹ (0 included)."""
+    if xx.is_zero(): return "|X| ≤ 2⁻¹⁰²¹"
+    if U(B5_HI).cmp(xx) < 0 or U(-B5_HI).cmp(xx) > 0: return "|X| past DBL_MAX"
+    if U(B5_LO).cmp(xx) > 0 and U(-B5_LO).cmp(xx) < 0: return "|X| ≤ 2⁻¹⁰²¹"
+    return "X normal"
+def b5_port(fn, a):
+    """The port's result of the row (a double, or Err) and the lemma's case."""
+    e = b5_valid(fn, a)
+    if e is not None: return e, None
+    xx, x = b5_arg(fn, a)
+    if fn == B5_KEQ:
+        y, y64 = MPFR.ux_exp_final(xx), MPFR.exp(x)
+    else:
+        y, y64 = MPFR.ux_exp10_final(xx), MPFR.exp10(x)
+    cls = b5_lemma_class(xx)
+    check(same_bits(y, y64), f"{fn}{tuple(a)}: ADR 0002 #35's lemma: the correctly rounded exp of the 53-bit argument "
+          f"{y!r} is not that of its binary64 rounding {x!r}, {y64!r} ({cls})")
+    if fn == B5_KEQ and not math.isfinite(y): return Err("ComputationError"), cls
+    return y, cls
+def b5_fast(fn, a):
+    """True where the port's fast test passes on the row (validated): Rust's chain is its result."""
+    if fn == B5_KEQ: return B5_LO <= R_GAS * a[1] <= B5_HI
+    z = float(a[0])
+    p_ = -a[2] * z * z
+    if fn != B5_EXT: return math.isfinite(p_)
+    sq = math.sqrt(a[1])
+    return math.isfinite(p_ * sq) and math.isfinite(a[3] * a[4] * sq)
+def b5_in_range(fn, a):
+    """True when Rust's f64 chain of the row (validated) stays in the normal range, its last operation apart."""
+    OOR[0] = False
+    if fn == B5_KEQ:
+        t3m(R_GAS * a[1], R_GAS, a[1])
+        return not OOR[0]
+    z, ii, aa = float(a[0]), a[1], a[2]
+    p1 = t3m(-aa * z, aa, z)
+    p_ = t3m(p1 * z, p1, z)
+    sq = math.sqrt(ii)
+    if fn == B5_EXT:
+        t3m(p_ * sq, p_, sq)
+        b1 = t3m(a[3] * a[4], a[3], a[4])
+        t3a(1.0 + t3m(b1 * sq, b1, sq))
+    elif fn == B5_DAV:
+        d1 = t3a(1.0 + sq)
+        q = t3m(dv(sq, d1), sq)
+        t3a(q - t3m(0.3 * ii, 0.3, ii))
+    return not OOR[0]
+B5_RE = re.compile(r"\[ADR 0002 #35: the port returns (.+) = (\S+) \((f:([0-9a-f]{16})|E:ComputationError)\)\]$")
+b5_n = {fn: [0, 0, 0, 0] for fn in B5_HOW}            # rows past validation, noted, fast test passing, chain in range
+b5_lemma = {"X normal": 0, "|X| past DBL_MAX": 0, "|X| ≤ 2⁻¹⁰²¹": 0}
+b5_cov = {"Rust's K finite, the port's overflows (its ComputationError)": 0,
+          "Rust's K overflows (ComputationError), the port's finite": 0,
+          "Rust NaN, the value representable": 0, "Rust 0 or ∞, the value representable": 0,
+          "Rust's special differs, the value out of range": 0,
+          "degraded: the value normal, Rust's more than 2 ulp off": 0, "within 2 ulp, or the value subnormal": 0}
+b5_ref = [0, 0]                                       # rows whose reference is a correction; noted rows among them
+B5_CORR = {w: ct for m_ in ("reaction", "solution") for w, ct, _ in CORRECTIONS.get(m_, [])}
+for mod_ in ("reaction", "solution"):
+    for fn, cls, ins, outs, where in R.get(mod_, []):
+        if fn not in B5_HOW: continue
+        how = B5_HOW[fn]
+        a = fl(ins)
+        port, lcls = b5_port(fn, a)
+        note = NOTES.get(where, "")
+        noted = "[ADR 0002 #35:" in note
+        ref = B5_CORR.get(where, outs)
+        if where in B5_CORR:
+            b5_ref[0] += 1
+            b5_ref[1] += noted
+        pt = out_toks(port)
+        differs = not toks_equal(pt, ref)
+        check(noted == differs, f"{where}: {fn}{tuple(a)}: the port's {pt} vs the reference {ref}: the #35 note is "
+              f"{'missing' if differs else 'stray'}")
+        if lcls is None:
+            check(not noted, f"{where}: a row Rust's validation refuses is noted")
+            continue
+        b5_n[fn][0] += 1
+        b5_lemma[lcls] += 1
+        fast = b5_fast(fn, a)
+        b5_n[fn][2] += fast
+        check(not (fast and noted), f"{where}: {fn}{tuple(a)}: the port's fast test passes, so its result is Rust's, but "
+              f"the row is noted")
+        inr = b5_in_range(fn, a)
+        b5_n[fn][3] += inr
+        check(not (inr and noted), f"{where}: {fn}{tuple(a)}: Rust's chain stays in the normal range, so its result is "
+              f"the port's, but the row is noted")
+        if not noted: continue
+        b5_n[fn][1] += 1
+        mm_ = B5_RE.search(note)
+        if isinstance(port, Err):
+            ok_ = mm_ is not None and mm_.group(1) == how and mm_.group(2) == "Err(ComputationError)" and mm_.group(4) is None
+        else:
+            ok_ = (mm_ is not None and mm_.group(1) == how and mm_.group(4) is not None
+                   and int(mm_.group(4), 16) == f2b(port) and same_bits(float(mm_.group(2)), port))
+        check(ok_, f"{where}: the #35 note does not name {how} = {port!r}")
+        o = ref[0]
+        if isinstance(port, Err):
+            b5_cov["Rust's K finite, the port's overflows (its ComputationError)"] += 1
+        elif o[0] == "E":
+            b5_cov["Rust's K overflows (ComputationError), the port's finite"] += 1
+        elif math.isnan(o[1]) or o[1] == 0.0 or math.isinf(o[1]):
+            if math.isfinite(port) and port != 0.0:
+                b5_cov["Rust NaN, the value representable" if math.isnan(o[1]) else "Rust 0 or ∞, the value representable"] += 1
+            else:
+                b5_cov["Rust's special differs, the value out of range"] += 1
+        elif port >= 2.0 ** -1022 and abs(ulp_dist(o[2], f2b(port))) > 2:
+            b5_cov["degraded: the value normal, Rust's more than 2 ulp off"] += 1
+        else:
+            b5_cov["within 2 ulp, or the value subnormal"] += 1
+for fn, (ok_, nt, fast, inr) in b5_n.items():
+    print(f"{fn.split('::')[0]}: ADR 0002 #35: {fn.split('::')[1]}: {nt} of {ok_} rows past Rust's validation noted with "
+          f"the port's result, {fast} with the port's fast test passing and {inr} with Rust's chain in the normal range "
+          f"(all unnoted, Rust's result)")
+    check(nt > 0, f"{fn}: no noted row")
+print(f"ADR 0002 #35 noted rows: {b5_cov}")
+print(f"ADR 0002 #35's lemma, checked on every row past validation: {b5_lemma}; {b5_ref[0]} rows compared against the "
+      f"corrected oracle ({b5_ref[1]} of them noted)")
+check(all(v > 0 for k, v in b5_cov.items() if "out of range" not in k), f"B5: a noted-row class has no golden row: "
+      f"{b5_cov}")
+check(all(v > 0 for v in b5_lemma.values()), f"B5: a case of the lemma has no golden row: {b5_lemma}")
+
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
              "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy", "stoichiometry"}
 check(set(tsvs) == VALIDATED, f"golden modules with no section here: {sorted(set(tsvs) - VALIDATED)}; "

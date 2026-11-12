@@ -3,8 +3,9 @@ src/mathx.cyr against MPFR (ADR 0006), and its unbounded-exponent final operatio
 #20); and the exact rationals of spectroscopy (#21, #22), stoichiometry (#24 ... #26) and the overflow audit's B1 (#27,
 #28: the correctly rounded monomial, thermo's, phase's and kinetics' rationals), B2 (#29, #30: solution's,
 electrochemistry's and spectroscopy's, and the correctly rounded square root of a quotient) and B3 (#31, #32: gas's,
-potential's, inorganic's and nuclear's, and the correctly rounded w·√(x/y·2^e)) and B4 (#33, #34: the sums with
-cancellation and the Shomate polynomials) against Fraction, exact integer square roots and MPFR.
+potential's, inorganic's and nuclear's, and the correctly rounded w·√(x/y·2^e)), B4 (#33, #34: the sums with
+cancellation and the Shomate polynomials) and B5 (#35: the exp / exp10 arguments) against Fraction, exact integer square
+roots and MPFR.
 
 For each primitive it generates seeded arguments (deterministic: random.Random with fixed seeds), builds
 a probe program that calls the Cyrius function on every argument, runs it on each target, and compares
@@ -109,6 +110,13 @@ gibbs_free_energy, kohlrausch_molar_conductivity, limiting_molar_conductivity, z
 unbounded-exponent slow path forced on every argument; reference mpfr_ref.UX with mpfr_ref.ux_sum in Rust's summation
 order; each on binade-uniform, typical, partial-sums-past-DBL_MAX, subnormal and special arguments. B4 also adds to
 nernst the products c·l that IEEE rounds up to 2^-1022 from below (ADR 0002 #29's correction).
+The overflow audit's B5 (ADR 0002 #35) adds keq, dhl, dhe, dav (equilibrium_constant, debye_huckel_limiting,
+debye_huckel_extended, davies_activity: the public function, its Rust-chain fast path where the test passes, the
+unbounded-exponent argument forced on every argument, then the correctly rounded exp or 10^x); reference the argument
+on mpfr_ref.UX with every operation at 53 bits and MPFR's exp / exp10 of it rounded once (mpfr_ref.ux_exp_final,
+ux_exp10_final), so the lemma that the port's binary64 argument gives the same result is checked on every argument; each
+on binade-uniform, typical, R·T past DBL_MAX or subnormal, A·z², B·å or the numerator past DBL_MAX (at I = 0, or brought
+back), subnormal products, Davies' bracket at 0, the 2^-1022 boundaries, and Err arguments.
 Through each function's _km_cr_<f>_fast entry it reports the fast path's fallback rate per region, and
 checks the fast path's result equals the function's wherever its test passes. It checks that the three
 targets give identical bits and flags.
@@ -126,7 +134,7 @@ Usage, from the repo root:
                                                            # conc vib rotor rot moment wsqrt igp igv dens
                                                            # vdw prp rkp lj width coul force lande bea
                                                            # hess eff rsum qv ionic haber gibbs kohl lim zoc
-                                                           # shcp shh)
+                                                           # shcp shh keq dhl dhe dav)
     python3 -I scripts/oracle/cr_verify.py --work DIR      # probe sources and binaries in DIR
                                                            # (default build/cr-verify, gitignored)
 Exit status 1 on any mismatch or cross-target difference, 2 on a build or run failure.
@@ -1545,7 +1553,8 @@ AUDIT = [(33, "mono"), (34, "heat"), (35, "shc"), (36, "boil"), (37, "frz"), (38
          (58, "wsqrt"), (59, "igp"), (60, "igv"), (61, "dens"), (62, "vdw"), (63, "prp"), (64, "rkp"), (65, "lj"),
          (66, "width"), (67, "coul"), (68, "force"), (69, "lande"), (70, "bea"),
          (71, "hess"), (72, "eff"), (73, "rsum"), (74, "qv"), (75, "ionic"), (76, "haber"), (77, "gibbs"), (78, "kohl"),
-         (79, "lim"), (80, "zoc"), (81, "shcp"), (82, "shh")]
+         (79, "lim"), (80, "zoc"), (81, "shcp"), (82, "shh"),
+         (83, "keq"), (84, "dhl"), (85, "dhe"), (86, "dav")]
 AUDIT_NAMES = tuple(name for _, name in AUDIT)
 AUDIT2_NAMES = ("sqrtdiv", "dil", "cond", "fmass", "fcharge", "fratio", "nernst", "abs", "conc", "vib", "rotor", "rot",
                 "moment")
@@ -1553,6 +1562,7 @@ ARITY.update({33: 12, 34: 3, 35: 3, 36: 3, 37: 3, 38: 3, 39: 2, 40: 3, 41: 4, 42
 ARITY.update({45: 2, 46: 3, 47: 2, 48: 3, 49: 3, 50: 5, 51: 4, 52: 3, 53: 3, 54: 2, 55: 2, 56: 1, 57: 2})
 ARITY.update({58: 4, 59: 3, 60: 3, 61: 3, 62: 5, 63: 5, 64: 4, 65: 3, 66: 3, 67: 3, 68: 3, 69: 5, 70: 3})
 ARITY.update({71: 6, 72: 8, 73: 11, 74: 8, 75: 7, 76: 5, 77: 3, 78: 3, 79: 4, 80: 3, 81: 6, 82: 6})
+ARITY.update({83: 2, 84: 3, 85: 5, 86: 3})
 F_CONST = _const("src/constants.cyr", "KM_FARADAY")
 H_CONST = _const("src/constants.cyr", "KM_PLANCK")
 R_GAS = _const("src/constants.cyr", "KM_GAS_CONSTANT")
@@ -1674,6 +1684,8 @@ def ref_audit(name, a):
         return ref_audit3(name, a)
     if name in AUDIT4_NAMES:
         return ref_audit4(name, a)
+    if name in AUDIT5_NAMES:
+        return ref_audit5(name, a)
     fin = all(math.isfinite(v) for v in a if isinstance(v, float))
     if name == "mono":
         nn, nd = a[0], a[1]
@@ -3150,6 +3162,177 @@ def args_shomate(rng):
             ("T = ±0 and specials", bad)]
 
 
+# ── The overflow audit's B5 (ADR 0002 #35): the exp / exp10 arguments ────────────────────────────────────────────────
+# ids 83 … 86: keq (equilibrium_constant: ΔG, T), dhl (debye_huckel_limiting: z, I, A), dhe (debye_huckel_extended:
+# z, I, A, B, å), dav (davies_activity: z, I, A), the charge z an integer word: mode 0 the public function, Rust's chain
+# where the function's fast test passes (R·T in [2^-1021, DBL_MAX]; A·z² finite; the extended law's numerator and
+# (B·å)·√I finite) and the flag; mode 1 the unbounded-exponent argument forced (_km_keq_arg_ux, _km_dh_limiting_arg_ux,
+# _km_dh_extended_arg_ux, _km_davies_arg_ux), then the correctly rounded exp or 10^x. Reference: Rust's validation in
+# Rust's order, then the argument in Rust's sequence on mpfr_ref.UX with every operation at 53 bits, the last one too,
+# and MPFR's exp or exp10 of that 53-bit value rounded once (mpfr_ref.ux_exp_final, ux_exp10_final): ADR 0002 #20's
+# target itself, so every argument checks ADR 0002 #35's lemma as well (the port rounds the argument's last operation
+# into binary64 first). An Err is the word 2^63 | its KM_ERR_* code (K and γ are never negative), in both slots and
+# modes; equilibrium_constant's ComputationError where its K is not finite.
+AUDIT5_NAMES = ("keq", "dhl", "dhe", "dav")
+
+
+def _err_code(name):
+    import re
+    m = re.search(rf"^\s+{name} = ([0-9]+);", (_ROOT / "src/error.cyr").read_text(), re.M)
+    return int(m.group(1))
+
+
+ERR5 = {n: (1 << 63) | _err_code("KM_ERR_" + n) for n in ("INVALID_TEMPERATURE", "INVALID_INPUT", "COMPUTATION_ERROR")}
+KEQ_T_2M1022 = 541_658_533_363_376      # T = k·2^-1074 with R·k = 2^52 − 0.27…: IEEE's R·T rounds up to 2^-1022
+DAVIES_ZERO_I = (1.940363884733242, 1.9403638847332425)     # √I/(1 + √I) = RN(0.3·I): Davies' bracket exactly 0
+
+
+def ref_audit5(name, a):
+    """The reference word of ids 83 … 86 (an Err as 2^63 | its code)."""
+    UX = mpfr_ref.UX
+    if name == "keq":
+        dg, t = a
+        if not _pos(t):
+            return ERR5["INVALID_TEMPERATURE"]
+        if not math.isfinite(dg):
+            return ERR5["INVALID_INPUT"]
+        with mpfr_ref.unbounded():
+            x = UX(-dg) / (UX(R_GAS) * UX(t))
+        k = mpfr_ref.ux_exp_final(x)
+        return bits(k) if math.isfinite(k) else ERR5["COMPUTATION_ERROR"]
+    z, ii, aa = a[0], a[1], a[2]
+    if not (-(1 << 31) <= z < (1 << 31) and _nonneg(ii) and math.isfinite(aa)):
+        return ERR5["INVALID_INPUT"]
+    if name == "dhe" and not (_nonneg(a[3]) and _nonneg(a[4])):
+        return ERR5["INVALID_INPUT"]
+    with mpfr_ref.unbounded():
+        zf = UX(float(z))
+        p = UX(-aa) * zf * zf
+        sq = UX(ii).sqrt()
+        if name == "dhl":
+            x = p * sq
+        elif name == "dhe":
+            x = (p * sq) / (UX(1.0) + UX(a[3]) * UX(a[4]) * sq)
+        else:
+            x = p * (sq / (UX(1.0) + sq) - UX(0.3) * UX(ii))
+    return bits(mpfr_ref.ux_exp10_final(x))
+
+
+def _z5(rng, big=False):
+    """A charge of a random magnitude (|z| ≥ 2 when big, so that A·z² can pass DBL_MAX), a random sign."""
+    k = rng.randint(0, 3)
+    m = (rng.randint(2, 4), rng.randint(5, 1000), rng.randint(1001, 100_000), rng.randint(100_001, (1 << 31) - 1))[k]
+    m = m if big else m - 1
+    return m * rng.choice((1, -1))
+
+
+def _past(rng, z):
+    """A with |A·z²| past DBL_MAX (|z| ≥ 2), A itself finite."""
+    lo = DMAX / float(z) / float(z)
+    return min(lo * rng.uniform(1.0001, 4.0), DMAX) * rng.choice((1.0, -1.0))
+
+
+def args_keq(rng):
+    rand = [(_spp(rng), _pp(rng)) for _ in range(40_000)]
+    typical = [(rng.uniform(-1e6, 1e6), rng.uniform(1.0, 5000.0)) for _ in range(20_000)]
+    over = []
+    for _ in range(30_000):                         # R·T past DBL_MAX: |x| < 1/R, Rust's K = 1
+        t = DMAX * rng.uniform(0.121, 1.0)
+        over.append((rng.choice((_spp(rng, 900, 1023), _spp(rng))), t))
+    sub = []
+    for _ in range(30_000):                         # R·T subnormal: ΔG = −x·R·T for x across exp's range
+        t = _pp(rng, -1074, -1025)
+        sub.append((-rng.uniform(-760.0, 720.0) * R_GAS * t, t))
+    ends = []
+    for _ in range(20_000):                         # a short subnormal T and ΔG between the two ends' thresholds
+        k = rng.randint(1, 1 << 24)
+        rk53, rki = R_GAS * k, float(bits(R_GAS * fb(k)))
+        mid = 0.5 * (rk53 + rki)
+        xe, sg = rng.choice(((709.782712893384, -1.0), (745.1332191019411, 1.0)))
+        n = int(xe * mid) + rng.randint(-2, 2)
+        ends.append((sg * fb(max(n, 0)), fb(k)))
+    bound = []
+    t_ov, t_un = DMAX / R_GAS, 2.0 ** -1021 / R_GAS
+    for d in range(-20, 21):                        # the boundaries T = DBL_MAX/R and 2^-1021/R, R·T at 2^-1022
+        for t in (fb(bits(t_ov) + d), fb(bits(t_un) + d), fb(KEQ_T_2M1022 + d)):
+            for _ in range(40):
+                x = rng.uniform(-760.0, 720.0)
+                bound.append((-x * 2.0 ** -1022 if t < 1.0 else -DMAX * rng.uniform(0.0, 1.0), t))
+    bad = [(1.0, 0.0), (1.0, -1.0), (NAN, 1.0), (1.0, NAN), (INF, 1.0), (1.0, INF), (-2e6, 298.0), (2e6, 298.0),
+           (-0.0, fb(1)), (0.0, DMAX), (-DMAX, DMAX), (-1e-320, 1e-322), (-DMAX, fb(1)), (DMAX, fb(1))]
+    return [("binade-uniform", rand), ("typical", typical), ("R·T past DBL_MAX", over), ("R·T subnormal", sub),
+            ("the ends at a short subnormal T", ends), ("T at the boundaries", bound), ("Err and specials", bad)]
+
+
+def args_dh(rng, name):
+    rand = []
+    for _ in range(40_000):
+        z = _z5(rng)
+        rand.append((z, _pp(rng), _spp(rng)) if name != "dhe" else (z, _pp(rng), _spp(rng), _pp(rng), _pp(rng)))
+    typical = []
+    for _ in range(20_000):
+        z, ii, aa = rng.randint(-4, 4), rng.uniform(0.0, 1.0), rng.uniform(0.4, 0.6)
+        typical.append((z, ii, aa) if name != "dhe" else (z, ii, aa, rng.uniform(0.3, 0.35), rng.uniform(2.0, 10.0)))
+    past = []
+    for _ in range(30_000):                         # A·z² past DBL_MAX at I = ±0, Davies' zero bracket, or brought back
+        z = _z5(rng, True)
+        ii = rng.choice((0.0, -0.0, rng.choice(DAVIES_ZERO_I), _pp(rng), rng.uniform(1.9, 2.0)))
+        aa = _past(rng, z)
+        if name != "dhe":
+            past.append((z, ii, aa))
+        else:
+            sq = math.sqrt(ii)
+            lv = 10.0 ** rng.uniform(-3.0, 2.5)
+            r = math.sqrt(abs(aa)) * abs(z) / math.sqrt(lv * sq) if sq > 0 else _pp(rng)
+            u = 10.0 ** rng.uniform(-3.0, 3.0)
+            b_, s_ = r * u, r / u
+            past.append((z, ii, aa, b_ if math.isfinite(b_) else DMAX, s_ if math.isfinite(s_) else 1.0))
+    small = []
+    for _ in range(10_000):                         # A·z² subnormal (exact in both)
+        z = _z5(rng)
+        ii, aa = _pp(rng, -40, 40), _spp(rng, -1074, -1023)
+        small.append((z, ii, aa) if name != "dhe" else (z, ii, aa, _pp(rng, -40, 40), _pp(rng, -40, 40)))
+    extra = []
+    if name == "dhe":
+        for _ in range(30_000):
+            kind = rng.randint(0, 4)
+            z = _z5(rng)
+            if kind == 0:                           # B·å past DBL_MAX, the numerator finite: log₁₀ γ ≈ −A·z²/(B·å)
+                b_, s_ = _pp(rng, 512, 1023), _pp(rng, 512, 1023)
+                aa = 10.0 ** rng.uniform(-6.0, 2.5) * rng.choice((1.0, -1.0)) * (b_ / z) * (s_ / z)
+                extra.append((z, _pp(rng, -300, 300), aa if math.isfinite(aa) else 1.0, b_, s_))
+            elif kind == 1:                         # the numerator past DBL_MAX with A·z² finite
+                aa = (DMAX / z / z) * rng.uniform(0.01, 1.0) * rng.choice((1.0, -1.0))
+                extra.append((z, _pp(rng, 2, 1000), aa, _pp(rng, -10, 1023), _pp(rng, -10, 1023)))
+            elif kind == 2:                         # I = ±0 with B·å or A·z² past DBL_MAX
+                extra.append((_z5(rng, True), rng.choice((0.0, -0.0)), _spp(rng, 800, 1023), _pp(rng, 512, 1023),
+                              _pp(rng, 512, 1023)))
+            elif kind == 3:                         # the numerator subnormal, or IEEE's rounded up to 2^-1022 from below
+                ii = _pp(rng, 0, 40)
+                k = int(2.0 ** 52 / math.sqrt(ii)) + rng.randint(-1, 1)
+                aa = -fb(max(1, min(k, (1 << 52) - 1))) * rng.choice((1.0, -1.0))
+                extra.append((1, ii, aa, rng.choice((0.0, 0.328)), rng.choice((0.0, 3.0))))
+            else:                                   # B·å subnormal (the denominator 1 in both), B or å ±0
+                extra.append((z, _pp(rng, -100, 1023), _spp(rng, -10, 10), rng.choice((_pp(rng, -1074, -1023), -0.0)),
+                              rng.choice((_pp(rng, -40, 1), 0.0, -0.0))))
+    elif name == "dav":
+        for _ in range(30_000):                     # the bracket near 0 (I ≈ 1.9404), negative, or I subnormal
+            ii = rng.choice((rng.uniform(1.9403, 1.9404), rng.uniform(1.9, 2.0), _pp(rng, 1, 1023), _pp(rng, -1074, -1019)))
+            extra.append((_z5(rng), ii, _spp(rng, -10, 1023)))
+    bad = [(1, -0.1, 0.509), (1, NAN, 0.509), (1, INF, 0.509), (1, 0.01, NAN), (1, 0.01, INF), (1 << 31, 0.01, 0.509),
+           (-(1 << 31) - 1, 0.01, 0.509), (100_000, 0.0, 1e300), (100_000, -0.0, -1e300), (0, 0.0, DMAX),
+           ((1 << 31) - 1, 0.0, 1e290), (-(1 << 31), 1.0, DMAX)]
+    if name == "dhe":
+        bad = [(z, ii, aa, 0.328, 3.0) for z, ii, aa in bad] + [
+            (1, 0.01, 0.509, -0.328, 3.0), (1, 0.01, 0.509, 0.328, -3.0), (1, 0.01, 0.509, NAN, 3.0),
+            (1, 0.01, 0.509, 0.328, INF), (1, 1.0, 1e308, 1e155, 1e155), (100_000, 1.0, 1e300, 1e154, 1e154),
+            (1, 0.0, 1.0, DMAX, 2.0), (2, 1.0, DMAX, DMAX, DMAX), (1, 0.01, 0.509, -0.0, -0.0)]
+    elif name == "dav":
+        bad += [(2, DAVIES_ZERO_I[0], DMAX), (-2, DAVIES_ZERO_I[1], -DMAX), (1, DAVIES_ZERO_I[0], 0.509)]
+    return [("binade-uniform", rand), ("typical", typical), ("A·z² past DBL_MAX", past), ("A·z² subnormal", small),
+            ("the function's own edges", extra), ("Err and specials", bad)]
+
+
 def audit_checks(work, targets, which):
     """Ids 33 … 82 against their exact references on every target, the exact path forced; True if anything failed."""
     failed = False
@@ -3164,7 +3347,9 @@ def audit_checks(work, targets, which):
             "lande": args_lande, "bea": args_bea,
             "hess": args_hess, "eff": args_eff, "rsum": args_rsum, "qv": args_qv, "ionic": args_ionic, "haber": args_haber,
             "gibbs": args_gibbs, "kohl": args_kohl, "lim": args_lim, "zoc": args_zoc, "shcp": args_shomate,
-            "shh": args_shomate}
+            "shh": args_shomate,
+            "keq": args_keq, "dhl": lambda r: args_dh(r, "dhl"), "dhe": lambda r: args_dh(r, "dhe"),
+            "dav": lambda r: args_dh(r, "dav")}
 
     def eq(a, b):
         return a == b or (math.isnan(fb(a)) and math.isnan(fb(b)))
@@ -3331,6 +3516,9 @@ fn arity(fid): i64 {
     if (fid == 76) { return 5; }
     if (fid == 79) { return 4; }
     if (fid >= 77 && fid <= 80) { return 3; }
+    if (fid == 83) { return 2; }
+    if (fid == 84 || fid == 86) { return 3; }
+    if (fid == 85) { return 5; }
     return 1;
 }
 
@@ -4202,6 +4390,110 @@ fn run_audit4(fid, mode, a): (i64, i64, i64) {
 }
 
 
+# The overflow audit's B5 (ADR 0002 #35): an Err as the word 2⁶³ | its KM_ERR_* code (K and γ are never negative).
+#must_use
+fn _km_res5(t, v): i64 {
+    if (is_ok(t) == 1) { return v; }
+    return (1 << 63) | v;
+}
+
+# equilibrium_constant's result word for a K: Rust's ComputationError where it is not finite.
+#must_use
+fn _km_k5(k: f64): i64 {
+    if (_km_is_finite(k) != 1) { return (1 << 63) | KM_ERR_COMPUTATION_ERROR; }
+    return _km_bits(k);
+}
+
+# The overflow audit's B5 (ADR 0002 #35): ids 83 … 86 (cr_verify.py's AUDIT5_NAMES has the argument layouts): mode 0
+# the public function, Rust's chain where the function's fast test passes (R·T in [2⁻¹⁰²¹, DBL_MAX]; A·z² finite; the
+# extended law's numerator and (B·å)·√I finite) and the flag; mode 1 the unbounded-exponent argument forced
+# (_km_keq_arg_ux, _km_dh_limiting_arg_ux, _km_dh_extended_arg_ux, _km_davies_arg_ux), then the correctly rounded exp or
+# 10^x. A row Rust's validation refuses returns the public Err in both slots and modes.
+#must_use
+fn run_audit5(fid, mode, a): (i64, i64, i64) {
+    if (fid == 83) {
+        var dg: f64 = load64(a);
+        var tk: f64 = load64(a + 8);
+        var t83, v83 = equilibrium_constant(dg, tk);
+        var w83 = _km_res5(t83, v83);
+        if (_km_is_positive(tk) != 1 || _km_is_finite(dg) != 1) { return (w83, w83, 1); }
+        if (mode == 1) {
+            var u83: f64 = _km_keq_arg_ux(dg, tk);
+            var k83: f64 = _km_cr_exp(u83);
+            var s83 = _km_k5(k83);
+            return (s83, s83, 0);
+        }
+        var r: f64 = KM_GAS_CONSTANT;
+        var rt: f64 = r * tk;
+        var lo: f64 = 0x0020000000000000;
+        var hi: f64 = 0x7FEFFFFFFFFFFFFF;
+        if (rt >= lo && rt <= hi) {
+            var x83: f64 = -dg / rt;
+            var f83: f64 = _km_cr_exp(x83);
+            return (w83, _km_k5(f83), 1);
+        }
+        return (w83, 0, 0);
+    }
+    var z = load64(a);
+    var ii: f64 = load64(a + 8);
+    var aa: f64 = load64(a + 16);
+    var bc: f64 = load64(a + 24);
+    var sz: f64 = load64(a + 32);
+    var tp = 0;
+    var vp = 0;
+    if (fid == 84) {
+        var t84, v84 = debye_huckel_limiting(z, ii, aa);
+        tp = t84;
+        vp = v84;
+    } elif (fid == 85) {
+        var t85, v85 = debye_huckel_extended(z, ii, aa, bc, sz);
+        tp = t85;
+        vp = v85;
+    } else {
+        var t86, v86 = davies_activity(z, ii, aa);
+        tp = t86;
+        vp = v86;
+    }
+    var w = _km_res5(tp, vp);
+    if (is_ok(tp) != 1) { return (w, w, 1); }
+    if (mode == 1) {
+        var u: f64 = 0.0;
+        if (fid == 84) {
+            u = _km_dh_limiting_arg_ux(z, ii, aa);
+        } elif (fid == 85) {
+            u = _km_dh_extended_arg_ux(z, ii, aa, bc, sz);
+        } else {
+            u = _km_davies_arg_ux(z, ii, aa);
+        }
+        var g: f64 = _km_cr_exp10(u);
+        return (_km_bits(g), _km_bits(g), 0);
+    }
+    var zf: f64 = f64_from(z);
+    var sq: f64 = f64_sqrt(ii);
+    var p: f64 = ((-aa) * zf) * zf;
+    var dp: f64 = p - p;
+    if (fid == 85) {
+        var num: f64 = p * sq;
+        var yv: f64 = (bc * sz) * sq;
+        var dn: f64 = num - num;
+        var dy: f64 = yv - yv;
+        if (dn == 0.0 && dy == 0.0) {
+            var l85: f64 = num / (1.0 + yv);
+            var g85: f64 = _km_cr_exp10(l85);
+            return (w, _km_bits(g85), 1);
+        }
+        return (w, 0, 0);
+    }
+    if (dp != 0.0) { return (w, 0, 0); }
+    var lg: f64 = p * sq;
+    if (fid == 86) {
+        var br: f64 = (sq / (1.0 + sq)) - (0.3 * ii);
+        lg = p * br;
+    }
+    var gf: f64 = _km_cr_exp10(lg);
+    return (w, _km_bits(gf), 1);
+}
+
 # The overflow audit's B1 (ADR 0002 #27, #28): ids 33 … 44 as result words (cr_verify.py's AUDIT): mode 0 the public
 # function (an Err as the NaN word 0x7FF8000000000001), the fast path's result at the function's factors and its flag
 # (the monomial's _km_cr_mono_fast; for second_order_concentration and michaelis_menten their Rust-chain fast path);
@@ -4211,6 +4503,10 @@ fn run_audit4(fid, mode, a): (i64, i64, i64) {
 #must_use
 fn run_audit(fid, mode, a): (i64, i64, i64) {
     var nanw = 0x7FF8000000000001;
+    if (fid >= 83) {
+        var e0, e1, ef = run_audit5(fid, mode, a);
+        return (e0, e1, ef);
+    }
     if (fid >= 71) {
         var d0, d1, df = run_audit4(fid, mode, a);
         return (d0, d1, df);

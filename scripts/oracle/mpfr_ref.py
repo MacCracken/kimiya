@@ -11,7 +11,8 @@ exponent range, the final operation rounded once into binary64 (ux_*_final), and
 (potential_*), the reference for the port's unbounded-exponent helpers and geometry; since the overflow audit's B2 also
 the final subtraction (ux_sub_final) and the √ of a quotient (ux_sqrt_div_final), and since B3 the power x^y at 53 bits
 (UX.pow: Redlich–Kwong's Tc^2.5) and w·√(a/b) rounded once (ux_mul_sqrt_div_final: the Morse width), and since B4
-Rust's sums in their order (ux_sum, ux_sum_final: ADR 0002 #33).
+Rust's sums in their order (ux_sum, ux_sum_final: ADR 0002 #33), and since B5 exp and exp10 of a 53-bit value at any
+exponent rounded once (ux_exp_final, ux_exp10_final: ADR 0002 #35's exp / exp10 arguments).
 
 No Python package is needed: MPFR (libmpfr.so.6, MPFR 4.x) is called through ctypes. Run
 `python3 -I scripts/oracle/mpfr_ref.py` for the self-checks.
@@ -331,6 +332,19 @@ def ux_sub_final(a, b):
     return _final(_UX_FN["sub"], a, b)
 
 
+def ux_exp_final(a):
+    """e^a rounded once into binary64 for a 53-bit value a at any exponent (MPFR's exp at its widest exponent range, then
+    binary64's: +∞ or +0 past either end): the overflow audit's B5, ADR 0002 #35's target for equilibrium_constant, the
+    correctly rounded exp of the unbounded argument."""
+    return _final(_m.mpfr_exp, a)
+
+
+def ux_exp10_final(a):
+    """10^a rounded once into binary64 for a 53-bit value a at any exponent: ADR 0002 #35's target for the activity
+    models (the overflow audit's B5)."""
+    return _final(_m.mpfr_exp10, a)
+
+
 class _Wide:
     """An MPFR number of `prec` bits (the quotient of ux_sqrt_div_final)."""
     __slots__ = ("v",)
@@ -531,12 +545,18 @@ if __name__ == "__main__":
     assert bits(ux_sum_final([-0.0, -0.0])) == bits(-0.0) and bits(ux_sum_final([0.0, -0.0])) == 0
     assert ux_sum([dm, dm, -dm, -dm]).is_zero() and not ux_sum([dm, dm, -dm, -dm]).neg_sign()
     assert ux_sum([], 0.0).is_f64(0.0) and ux_sum([from_bits(1), from_bits(1)]).is_f64(from_bits(2))
+    # The overflow audit's B5: exp and exp10 of a 53-bit value past binary64's range, against binary64's own exp.
+    assert ux_exp_final(UX(dm) * UX(2.0)) == math.inf and ux_exp_final(UX(-dm) * UX(2.0)) == 0.0
+    assert ux_exp10_final(UX(dm) * UX(2.0)) == math.inf and ux_exp10_final(UX(-dm) * UX(2.0)) == 0.0
+    assert ux_exp_final(UX(2.0 ** -1000) * UX(2.0 ** -1000)) == 1.0 and ux_exp10_final(UX(-0.0)) == 1.0
+    assert bits(ux_exp_final(UX(dm) / (UX(8.314462618) * UX(dm)))) == 0x3FF20B7C2DBB7559    # e^0.12: R·T past DBL_MAX
     rng = __import__("random").Random(20)
     for _ in range(2000):
         a, b = rng.uniform(-1e3, 1e3), rng.uniform(-1e3, 1e3)
         assert (UX(a) * UX(b)).is_f64(a * b) and (UX(a) + UX(b)).is_f64(a + b) and (UX(a) - UX(b)).is_f64(a - b)
         assert (UX(a) / UX(b)).is_f64(a / b) and (UX(abs(a)).sqrt()).is_f64(math.sqrt(abs(a)))
         assert ux_sub_final(UX(a), UX(b)) == a - b
+        assert ux_exp_final(UX(a / 1e3)) == exp(a / 1e3) and ux_exp10_final(UX(b / 1e3)) == exp10(b / 1e3)
         if a > 0 and b > 0:
             q = Fraction(a) / Fraction(b)
             r = ux_sqrt_div_final(UX(a), UX(b))

@@ -196,6 +196,82 @@ fn _t_cyrius_adr33_gibbs() {
     assert(took > 1000, "the fast test passes on most seeded inputs");
 }
 
+# ADR 0002 #35 (the overflow audit's B5): equilibrium_constant's R·T past DBL_MAX (Rust's K = e^∓0 = 1) and subnormal
+# (Rust's degraded K), the port's ComputationError where Rust's K is finite and the reverse, the 2⁻¹⁰²² boundary (an
+# R·T that IEEE rounds up to 2⁻¹⁰²² from below takes the slow path: a fast-path bound of 2⁻¹⁰²² would keep Rust's K, 2
+# ulp off), Rust's checks, and the forced slow path against the fast one on 3,000 seeded inputs. The values are MPFR's
+# (validate.py and cr_verify.py check every one: the correctly rounded exp of the 53-bit unbounded argument).
+fn _t_cyrius_adr35_keq() {
+    test_group("cyrius_adr35_keq");
+    var dmax: f64 = _b4_fbits(0x7FEFFFFFFFFFFFFF);
+    var nd: f64 = -dmax;
+    var t1, v1 = equilibrium_constant(nd, dmax);
+    assert(is_ok(t1) == 1 && v1 == 0x3FF20B7C2DBB7559, "K(−DBL_MAX, DBL_MAX) = e^0.12 = 1.1278 (Rust's e^−0 = 1)");
+    var t2, v2 = equilibrium_constant(dmax, dmax);
+    assert(is_ok(t2) == 1 && v2 == 0x3FEC5FAC74538C31, "K(DBL_MAX, DBL_MAX) = e^−0.12 = 0.8867 (Rust's 1)");
+    var g3: f64 = _b4_fbits(0x80000000000007E8);
+    var t3, v3 = equilibrium_constant(g3, _b4_fbits(0x14));
+    assert(is_ok(t3) == 1 && v3 == 0x410795FD6637A45D, "K(−10⁻³²⁰, 10⁻³²²) = 193,216 (Rust's 197,357: R·T subnormal)");
+    var t4, v4 = equilibrium_constant(_b4_fbits(0x8000000654B669B6), _b4_fbits(0x0000000000464E16));
+    assert(is_err_code(t4, v4, KM_ERR_COMPUTATION_ERROR) == 1, "the port's K overflows: Err (Rust's 1.797687·10³⁰⁸)");
+    var t5, v5 = equilibrium_constant(_b4_fbits(0x800000000000E660), _b4_fbits(10));
+    assert(is_ok(t5) == 1 && v5 == 0x7FE41C66CC049499, "K = 1.1298·10³⁰⁸ where Rust's overflows (ComputationError)");
+    var tk: f64 = _b4_fbits(541658533363376);
+    var r: f64 = KM_GAS_CONSTANT;
+    var rt: f64 = r * tk;
+    assert_eq(_km_bits(rt), 0x0010000000000000, "R·T at T = 541658533363376·2⁻¹⁰⁷⁴ rounds up to 2⁻¹⁰²² from below");
+    var m1022: f64 = _b4_fbits(0x8010000000000000);
+    var t6, v6 = equilibrium_constant(m1022, tk);
+    assert(is_ok(t6) == 1 && v6 == 0x4005BF0A8B14576B, "K(−2⁻¹⁰²², that T) = e^(1 + 2⁻⁵²), the 53-bit R·T's");
+    var xr: f64 = -m1022 / rt;
+    var kr: f64 = _km_cr_exp(xr);
+    assert_eq(_km_bits(kr), 0x4005BF0A8B145769, "Rust's chain there gives e: a 2⁻¹⁰²² bound would have kept it");
+    var u6: f64 = _km_keq_arg_ux(m1022, tk);
+    var k6: f64 = _km_cr_exp(u6);
+    assert_eq(_km_bits(k6), v6, "the slow path's K");
+    var t7, v7 = equilibrium_constant(1.0, 0.0);
+    assert(is_err_code(t7, v7, KM_ERR_INVALID_TEMPERATURE) == 1, "T = 0: Rust's Err");
+    var inf: f64 = 1.0 / 0.0;
+    var t8, v8 = equilibrium_constant(inf, dmax);
+    assert(is_err_code(t8, v8, KM_ERR_INVALID_INPUT) == 1, "ΔG = ∞: Rust's Err, before R·T");
+    var t9, v9 = equilibrium_constant(nd, _b4_fbits(1));
+    assert(is_err_code(t9, v9, KM_ERR_COMPUTATION_ERROR) == 1, "x past DBL_MAX: K = ∞, Rust's ComputationError");
+    var t10, v10 = equilibrium_constant(dmax, _b4_fbits(1));
+    assert(is_ok(t10) == 1 && v10 == 0, "x past −DBL_MAX: K = 0");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var took = 0;
+    var w: f64[2];
+    var k = 0;
+    while (k < 3000) {
+        var j = 0;
+        while (j < 2) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            store64(&w + 8 * j, ((st >> 2) % 0x7FE0000000000000) | ((st & 1) << 63));
+            j = j + 1;
+        }
+        var dg: f64 = load64(&w);
+        var t: f64 = f64_abs(load64(&w + 8));
+        var p: f64 = r * t;
+        if (_km_ux_normal(p) == 1 && t > 0.0) {
+            took = took + 1;
+            var tg, vg = equilibrium_constant(dg, t);
+            var u: f64 = _km_keq_arg_ux(dg, t);
+            var ku: f64 = _km_cr_exp(u);
+            if (_km_is_finite(ku) == 1) {
+                if (is_ok(tg) != 1 || vg != _km_bits(ku)) { bad = bad + 1; }
+            } elif (is_err_code(tg, vg, KM_ERR_COMPUTATION_ERROR) != 1) {
+                bad = bad + 1;
+            }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "Rust's chain = the unbounded-exponent argument's K wherever R·T is normal");
+    assert(took > 2000, "the fast test passes on most seeded inputs");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_gibbs_basic();
@@ -210,6 +286,7 @@ fn main() {
     _t_spontaneous_check();
     _t_cyrius_error_codes();
     _t_cyrius_adr33_gibbs();
+    _t_cyrius_adr35_keq();
     return assert_summary();
 }
 

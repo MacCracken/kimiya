@@ -23,6 +23,14 @@
 #   (its bits there). A term or a partial sum past DBL_MAX that the rest brings back gave ±∞ or NaN although the value
 #   is representable. Rust's checks and Err codes are kept, and a non-finite input of the two unvalidated functions
 #   keeps Rust's expression.
+# - ADR 0002 #35 (the overflow audit's B5; the same decisions): the activity models' log₁₀ γ — the limiting law's
+#   (((−A)·z)·z)·√I, the extended law's ((((−A)·z)·z)·√I)/(1 + (B·å)·√I), Davies' (((−A)·z)·z)·(√I/(1 + √I) − 0.3·I) —
+#   is the argument of one 10^x, and has sums inside, so it gets ADR 0002 #20's semantics: Rust's sequence with an
+#   unbounded exponent, its final quotient or product rounded once into binary64, behind a cheap test that proves
+#   Rust's chain gives that argument (or, for the extended law, one below 2⁻¹⁰²¹ in both, where γ = 1); then the
+#   unchanged correctly rounded 10^x, which of the binary64 argument is the correctly rounded 10^x of the unbounded
+#   53-bit one (ADR 0002 #35's lemma). A·z² past DBL_MAX at I = 0 gave ∞·0 = NaN (γ = 1), and B·å or A·z² past it in
+#   the extended law γ = 1 or 0 although γ is representable. Rust's checks and Err codes are kept.
 # - log10 is src/mathx.cyr's correctly rounded _km_cr_log10 and 10^x its _km_cr_exp10 (the same value as a
 #   correctly rounded pow(10, x), Rust's 10.0_f64.powf(x)), as the Antoine equation's (ADR 0006). With both
 #   sides on correctly rounded primitives in Rust's operation order the class-C rows are compared exactly
@@ -298,7 +306,12 @@ fn _km_validate_ionic_strength_and_a(ionic_str: f64, a_constant: f64): i64 {
 # coefficient γ of an ion of charge z (a Rust i32, as a word) at ionic strength I (mol/L), with the
 # Debye–Hückel A parameter in (L/mol)^½ (KM_DH_A_WATER_25C = 0.509 for water at 25 °C). Ok(γ), or
 # Err(KM_ERR_INVALID_INPUT) if z is outside the i32 range, I is negative or not finite, or A is not finite.
-# Mirrors `solution::debye_huckel_limiting`.
+# ADR 0002 #35 (the overflow audit's B5): log₁₀ γ is Rust's chain where A·z² is finite — a product of a double and an
+# integer is a multiple of 2⁻¹⁰⁷⁴, so exact below 2⁻¹⁰²¹ and the 53-bit rounding above unless it overflows (each of
+# (−A)·z and ·z), √I of a non-negative double is 0 or normal (correctly rounded in both), and the final product of
+# those two operands is then rounded once in both; otherwise the unbounded chain (_km_dh_limiting_arg_ux), whose γ
+# differs from Rust's only at I = 0 (debye_huckel_limiting(100000, 0, 10³⁰⁰) is 1, Rust's ∞·0 = NaN; elsewhere the
+# argument is beyond ±2⁴⁸⁷, so γ is Rust's ∞ or 0). Mirrors `solution::debye_huckel_limiting`, with ADR 0002 #35.
 #must_use
 fn debye_huckel_limiting(charge, ionic_str: f64, a_constant: f64): Result {
     if (_km_is_i32(charge) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -306,17 +319,44 @@ fn debye_huckel_limiting(charge, ionic_str: f64, a_constant: f64): Result {
     if (e != KM_ERR_NONE) { return Err(e); }
     var z: f64 = f64_from(charge);
     var sqrt_i: f64 = f64_sqrt(ionic_str);
-    var log_gamma: f64 = (((-a_constant) * z) * z) * sqrt_i;
+    var az2: f64 = ((-a_constant) * z) * z;
+    var log_gamma: f64 = az2 * sqrt_i;
+    var d: f64 = az2 - az2;
+    if (d != 0.0) { log_gamma = _km_dh_limiting_arg_ux(charge, ionic_str, a_constant); }
     var gamma: f64 = _km_cr_exp10(log_gamma);
     return Ok(gamma);
+}
+
+# debye_huckel_limiting's log₁₀ γ with an unbounded exponent (ADR 0002 #35), for its validated inputs: Rust's
+# ((−A)·z)·z and √I rounded to 53 bits (src/mathx.cyr's _km_ux_*), the final product rounded once into binary64.
+#must_use
+fn _km_dh_limiting_arg_ux(charge, ionic_str: f64, a_constant: f64): f64 {
+    var z: f64 = f64_from(charge);
+    var zs, ze = _km_ux_from(z);
+    var as, ae = _km_ux_from(a_constant);
+    var ns, ne = _km_ux_neg(as, ae);
+    var ps, pe = _km_ux_mul(ns, ne, zs, ze);
+    var qs, qe = _km_ux_mul(ps, pe, zs, ze);
+    var is, ie = _km_ux_from(ionic_str);
+    var rs, re = _km_ux_sqrt(is, ie);
+    var x: f64 = _km_ux_mul_f64(qs, qe, rs, re);
+    return x;
 }
 
 # The extended Debye–Hückel equation log₁₀ γ = −A·z²·√I / (1 + B·å·√I) (valid for I < 0.1 M): γ of an ion of
 # charge z (a word) at ionic strength I (mol/L), with A in (L/mol)^½ (KM_DH_A_WATER_25C), B in Å⁻¹·(mol/L)^−½
 # (KM_DH_B_WATER_25C = 0.328 for water at 25 °C) and the effective ion diameter å in Å (typically 3–9). Ok(γ),
 # or Err(KM_ERR_INVALID_INPUT) if z is outside the i32 range, I is negative or not finite, A is not finite, or B
-# or å is negative or not finite (a negative B·å could make 1 + B·å·√I zero). Mirrors
-# `solution::debye_huckel_extended`.
+# or å is negative or not finite (a negative B·å could make 1 + B·å·√I zero). ADR 0002 #35 (the overflow audit's
+# B5): Rust's chain where the numerator (((−A)·z)·z)·√I and y = (B·å)·√I are finite. Then A·z² is finite, so the
+# 53-bit rounding of its exact value (debye_huckel_limiting's argument), and √I is; the numerator is the 53-bit
+# rounding of its exact value where it is at least 2⁻¹⁰²¹ or an exact zero, and otherwise below 2⁻¹⁰²¹ in both
+# evaluations; B·å is the 53-bit one where it is at least 2⁻¹⁰²¹ or 0, and otherwise y is below 2⁻⁵⁰⁹ in both (√I <
+# 2⁵¹²); so 1 + y, a sum at least 1, is the unbounded one in both (exactly 1 where y < 2⁻⁵³). The final quotient of
+# those operands is then rounded once in both, or both are below 2⁻¹⁰²¹ (the denominator is at least 1), where 10^x
+# is 1. Otherwise the unbounded chain (_km_dh_extended_arg_ux): debye_huckel_extended(1, 1, 10³⁰⁸, 10¹⁵⁵, 10¹⁵⁵) is
+# 0.977, Rust's 10^(−x/∞) = 1, (100000, 1, 10³⁰⁰, 10¹⁵⁴, 10¹⁵⁴) 10⁻¹⁰⁰, Rust's 10^−∞ = 0, and B·å past DBL_MAX at
+# I = 0 gives 1, Rust's ∞·0 = NaN. Mirrors `solution::debye_huckel_extended`, with ADR 0002 #35.
 #must_use
 fn debye_huckel_extended(charge, ionic_str: f64, a_constant: f64, b_constant: f64, ion_size: f64): Result {
     if (_km_is_i32(charge) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -327,16 +367,55 @@ fn debye_huckel_extended(charge, ionic_str: f64, a_constant: f64, b_constant: f6
     var sqrt_i: f64 = f64_sqrt(ionic_str);
     var z: f64 = f64_from(charge);
     var num: f64 = (((-a_constant) * z) * z) * sqrt_i;
-    var den: f64 = 1.0 + ((b_constant * ion_size) * sqrt_i);
+    var y: f64 = (b_constant * ion_size) * sqrt_i;
+    var den: f64 = 1.0 + y;
     var log_gamma: f64 = num / den;
+    var dn: f64 = num - num;
+    var dy: f64 = y - y;
+    if (dn != 0.0 || dy != 0.0) {
+        log_gamma = _km_dh_extended_arg_ux(charge, ionic_str, a_constant, b_constant, ion_size);
+    }
     var gamma: f64 = _km_cr_exp10(log_gamma);
     return Ok(gamma);
+}
+
+# debye_huckel_extended's log₁₀ γ with an unbounded exponent (ADR 0002 #35), for its validated inputs: Rust's
+# numerator (((−A)·z)·z)·√I and denominator 1 + (B·å)·√I rounded to 53 bits (src/mathx.cyr's _km_ux_*; the denominator
+# is at least 1), the quotient rounded once into binary64.
+#must_use
+fn _km_dh_extended_arg_ux(charge, ionic_str: f64, a_constant: f64, b_constant: f64, ion_size: f64): f64 {
+    var z: f64 = f64_from(charge);
+    var zs, ze = _km_ux_from(z);
+    var as, ae = _km_ux_from(a_constant);
+    var ns, ne = _km_ux_neg(as, ae);
+    var ps, pe = _km_ux_mul(ns, ne, zs, ze);
+    var qs, qe = _km_ux_mul(ps, pe, zs, ze);
+    var is, ie = _km_ux_from(ionic_str);
+    var rs, re = _km_ux_sqrt(is, ie);
+    var us, ue = _km_ux_mul(qs, qe, rs, re);
+    var bs, be = _km_ux_from(b_constant);
+    var ks, ke = _km_ux_from(ion_size);
+    var cs, ce = _km_ux_mul(bs, be, ks, ke);
+    var ys, ye = _km_ux_mul(cs, ce, rs, re);
+    var one: f64 = 1.0;
+    var os, oe = _km_ux_from(one);
+    var ds, de = _km_ux_add(os, oe, ys, ye);
+    var x: f64 = _km_ux_div_f64(us, ue, ds, de);
+    return x;
 }
 
 # The Davies equation log₁₀ γ = −A·z²·(√I/(1 + √I) − 0.3·I) (valid for I < 0.5 M; no ion size): γ of an ion of
 # charge z (a word) at ionic strength I (mol/L), with A in (L/mol)^½ (KM_DH_A_WATER_25C for water at 25 °C).
 # Ok(γ), or Err(KM_ERR_INVALID_INPUT) if z is outside the i32 range, I is negative or not finite, or A is not
-# finite. Mirrors `solution::davies_activity`.
+# finite. ADR 0002 #35 (the overflow audit's B5): log₁₀ γ is Rust's chain where A·z² is finite (then the 53-bit
+# rounding of its exact value: debye_huckel_limiting's argument). The bracket is always the unbounded one: √I is 0 or
+# normal, 1 + √I at least 1, √I/(1 + √I) 0 or at least 2⁻⁵³⁸; 0.3·I is the 53-bit rounding of its exact value where it
+# is at least 2⁻¹⁰²¹, and below that (I < 2⁻¹⁰¹⁹) under 2⁻⁴⁸³ of √I/(1 + √I), whose difference with it then rounds to
+# √I/(1 + √I) in both; and the difference of two doubles is exact below 2⁻¹⁰²¹. So the final product of those operands
+# is rounded once in both; otherwise the unbounded chain (_km_davies_arg_ux), whose γ differs from Rust's only where
+# the bracket is 0 (I = 0, or √I/(1 + √I) and 0.3·I the same double): davies_activity(100000, 0, 10³⁰⁰) is 1, Rust's
+# ∞·0 = NaN; a nonzero bracket is at least 2⁻⁵⁴ or 0.19·√I, so the argument is beyond ±2⁴⁸⁴ and γ Rust's ∞ or 0.
+# Mirrors `solution::davies_activity`, with ADR 0002 #35.
 #must_use
 fn davies_activity(charge, ionic_str: f64, a_constant: f64): Result {
     if (_km_is_i32(charge) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -345,9 +424,37 @@ fn davies_activity(charge, ionic_str: f64, a_constant: f64): Result {
     var sqrt_i: f64 = f64_sqrt(ionic_str);
     var z: f64 = f64_from(charge);
     var bracket: f64 = (sqrt_i / (1.0 + sqrt_i)) - (0.3 * ionic_str);
-    var log_gamma: f64 = (((-a_constant) * z) * z) * bracket;
+    var az2: f64 = ((-a_constant) * z) * z;
+    var log_gamma: f64 = az2 * bracket;
+    var d: f64 = az2 - az2;
+    if (d != 0.0) { log_gamma = _km_davies_arg_ux(charge, ionic_str, a_constant); }
     var gamma: f64 = _km_cr_exp10(log_gamma);
     return Ok(gamma);
+}
+
+# davies_activity's log₁₀ γ with an unbounded exponent (ADR 0002 #35), for its validated inputs: Rust's ((−A)·z)·z and
+# bracket √I/(1 + √I) − 0.3·I rounded to 53 bits (src/mathx.cyr's _km_ux_*), the final product rounded once into
+# binary64.
+#must_use
+fn _km_davies_arg_ux(charge, ionic_str: f64, a_constant: f64): f64 {
+    var z: f64 = f64_from(charge);
+    var zs, ze = _km_ux_from(z);
+    var as, ae = _km_ux_from(a_constant);
+    var ns, ne = _km_ux_neg(as, ae);
+    var ps, pe = _km_ux_mul(ns, ne, zs, ze);
+    var qs, qe = _km_ux_mul(ps, pe, zs, ze);
+    var is, ie = _km_ux_from(ionic_str);
+    var rs, re = _km_ux_sqrt(is, ie);
+    var one: f64 = 1.0;
+    var os, oe = _km_ux_from(one);
+    var ds, de = _km_ux_add(os, oe, rs, re);
+    var fs, fe = _km_ux_div(rs, re, ds, de);
+    var c: f64 = 0.3;
+    var cs, ce = _km_ux_from(c);
+    var ts, te = _km_ux_mul(cs, ce, is, ie);
+    var bs, be = _km_ux_sub(fs, fe, ts, te);
+    var x: f64 = _km_ux_mul_f64(qs, qe, bs, be);
+    return x;
 }
 
 # ── conductivity ────────────────────────────────────────────────────────────────────

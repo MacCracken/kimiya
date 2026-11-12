@@ -804,6 +804,106 @@ fn _t_cyrius_adr33_solution() {
     assert(took > 2000, "the fast tests pass on most seeded inputs");
 }
 
+# ADR 0002 #35 (the overflow audit's B5): the activity models' log₁₀ γ with an unbounded exponent — A·z² past DBL_MAX at
+# I = 0 (Rust's ∞·0 = NaN, γ = 1) and against √I (the argument stays beyond ±2⁴⁸⁷: Rust's γ = 0), the extended law's
+# B·å and A·z² past DBL_MAX with the denominator bringing log₁₀ γ back (Rust's 1 and 0), Davies' bracket exactly 0 at
+# I = 1.9404…, the extended law's numerator that IEEE rounds up to 2⁻¹⁰²² from below (γ = 1 in both evaluations, which
+# is why its fast test is "finite"), and the forced slow paths against the fast ones on 3,000 seeded inputs (the
+# limiting law's and Davies' argument bit for bit, the extended law's γ). The values are MPFR's (validate.py,
+# cr_verify.py).
+fn _t_cyrius_adr35_activity() {
+    test_group("cyrius_adr35_activity");
+    var dmax: f64 = fbits(0x7FEFFFFFFFFFFFFF);
+    var e300: f64 = fbits(0x7E37E43C8800759C);
+    var t1, v1 = debye_huckel_limiting(100000, 0.0, e300);
+    assert(is_ok(t1) == 1 && v1 == 0x3FF0000000000000, "limiting(100000, 0, 10³⁰⁰) = 1 (Rust's ∞·0 = NaN)");
+    var t2, v2 = davies_activity(100000, 0.0, e300);
+    assert(is_ok(t2) == 1 && v2 == 0x3FF0000000000000, "davies(100000, 0, 10³⁰⁰) = 1 (Rust's ∞·0 = NaN)");
+    var t3, v3 = debye_huckel_limiting(2, 1.0, dmax);
+    assert(is_ok(t3) == 1 && v3 == 0, "limiting(2, 1, DBL_MAX) = 0: the argument −4·DBL_MAX, Rust's −∞");
+    var e308: f64 = fbits(0x7FE1CCF385EBC8A0);
+    var e155: f64 = fbits(0x601DD55745CBB7ED);
+    var t4, v4 = debye_huckel_extended(1, 1.0, e308, e155, e155);
+    assert(is_ok(t4) == 1 && v4 == 0x3FEF4586FE0E0D60, "extended(1, 1, 10³⁰⁸, 10¹⁵⁵, 10¹⁵⁵) = 0.977 (Rust's 1)");
+    var e154: f64 = fbits(0x5FE7DDDF6B095FF1);
+    var t5, v5 = debye_huckel_extended(100000, 1.0, e300, e154, e154);
+    assert(is_ok(t5) == 1 && v5 == 0x2B2BFF2EE48E042E, "extended(100000, 1, 10³⁰⁰, 10¹⁵⁴, 10¹⁵⁴) = 10⁻¹⁰⁰ (Rust's 0)");
+    var t6, v6 = debye_huckel_extended(1, 0.0, 1.0, dmax, 2.0);
+    assert(is_ok(t6) == 1 && v6 == 0x3FF0000000000000, "extended(1, 0, 1, DBL_MAX, 2) = 1 (Rust's ∞·0 = NaN)");
+    var i0: f64 = 1.940363884733242;
+    var s0: f64 = f64_sqrt(i0);
+    var q0: f64 = s0 / (1.0 + s0);
+    var br: f64 = q0 - (0.3 * i0);
+    assert_eq(_km_bits(br), 0, "Davies' bracket at I = 1.940363884733242 is exactly +0");
+    var t7, v7 = davies_activity(2, i0, dmax);
+    assert(is_ok(t7) == 1 && v7 == 0x3FF0000000000000, "davies(2, that I, DBL_MAX) = 1 (Rust's −∞·0 = NaN)");
+    var ak: f64 = fbits(2014070982048630);
+    var nak: f64 = -ak;
+    var five: f64 = 5.0;
+    var s5: f64 = f64_sqrt(five);
+    var num: f64 = (((-nak) * 1.0) * 1.0) * s5;
+    assert_eq(_km_bits(num), 0x0010000000000000, "(k·2⁻¹⁰⁷⁴)·√5 rounds up to 2⁻¹⁰²² from below");
+    assert_eq(_km_ux_normal(num), 0, "a normal-range test would refuse it");
+    var t8, v8 = debye_huckel_extended(1, five, nak, 0.328, 3.0);
+    var u8: f64 = _km_dh_extended_arg_ux(1, five, nak, 0.328, 3.0);
+    var g8: f64 = _km_cr_exp10(u8);
+    assert(is_ok(t8) == 1 && v8 == 0x3FF0000000000000 && _km_bits(g8) == v8, "γ = 1 in both evaluations");
+    var t9, v9 = debye_huckel_extended(1, five, nak, 0.0, 3.0);
+    assert(is_ok(t9) == 1 && v9 == 0x3FF0000000000000, "and with the denominator 1");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var took = 0;
+    var w: f64[4];
+    var k = 0;
+    while (k < 3000) {
+        var j = 0;
+        while (j < 4) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            store64(&w + 8 * j, ((st >> 2) % 0x7FE0000000000000) | ((st & 1) << 63));
+            j = j + 1;
+        }
+        var z = ((st >> 20) % 9) - 4;
+        if ((st & 7) == 0) { z = ((st >> 24) % 200001) - 100000; }
+        var ii: f64 = f64_abs(load64(&w));
+        var a: f64 = load64(&w + 8);
+        var b: f64 = f64_abs(load64(&w + 16));
+        var c: f64 = f64_abs(load64(&w + 24));
+        var zf: f64 = f64_from(z);
+        var sq: f64 = f64_sqrt(ii);
+        var p: f64 = ((-a) * zf) * zf;
+        var dp: f64 = p - p;
+        if (dp == 0.0) {
+            took = took + 1;
+            var lf: f64 = p * sq;
+            var lu: f64 = _km_dh_limiting_arg_ux(z, ii, a);
+            if (_km_bits(lf) != _km_bits(lu)) { bad = bad + 1; }
+            var tl, vl = debye_huckel_limiting(z, ii, a);
+            var gl: f64 = _km_cr_exp10(lu);
+            if (is_ok(tl) != 1 || vl != _km_bits(gl)) { bad = bad + 1; }
+            var bk: f64 = (sq / (1.0 + sq)) - (0.3 * ii);
+            var df: f64 = p * bk;
+            var du: f64 = _km_davies_arg_ux(z, ii, a);
+            if (_km_bits(df) != _km_bits(du)) { bad = bad + 1; }
+        }
+        var nm: f64 = p * sq;
+        var yv: f64 = (b * c) * sq;
+        var dn: f64 = nm - nm;
+        var dy: f64 = yv - yv;
+        if (dn == 0.0 && dy == 0.0) {
+            took = took + 1;
+            var te, ve = debye_huckel_extended(z, ii, a, b, c);
+            var eu: f64 = _km_dh_extended_arg_ux(z, ii, a, b, c);
+            var ge: f64 = _km_cr_exp10(eu);
+            if (is_ok(te) != 1 || ve != _km_bits(ge)) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "Rust's chain = the unbounded-exponent evaluation wherever the fast tests pass");
+    assert(took > 4000, "the fast tests pass on most seeded inputs");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_pure_water_ph();
@@ -862,6 +962,7 @@ fn main() {
     _t_cyrius_constants();
     _t_cyrius_adr29();
     _t_cyrius_adr33_solution();
+    _t_cyrius_adr35_activity();
     return assert_summary();
 }
 

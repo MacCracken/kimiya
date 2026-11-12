@@ -573,3 +573,38 @@ the flame 3% faster than before (the general evaluation was a call, the row path
 unbounded-exponent chains, 117–587 ns (the Shomate polynomials' per-operation tests before them: 311 and 474 ns).
 `nernst_potential`'s bound moved from 2⁻¹⁰²² to 2⁻¹⁰²¹ with the same inline compares (89 ns; `_km_ux_normal` calls
 measured 99 ns).
+
+## The overflow audit's B5 (2026-11-11)
+
+ADR 0002 #35: the exp / exp10 *arguments* of `equilibrium_constant` and the three activity models with an unbounded
+exponent behind inline fast tests (Rust's chain in range), the argument's final operation rounded once, then the
+unchanged correctly rounded exp / 10^x. None of the four had a bench; `bench_audit_b5` in the new `tests/audit2.bcyr`
+adds four typical and six edge benches (Cyrius-only: `rust-old/benches` has neither function family).
+
+Before: B5's benches as a copy of `tests/audit.bcyr`'s harness (only these benches) on the code before B5 (the committed
+tree); after: the same copy on the code after, two runs each, and `tests/audit2.bcyr`, the same host.
+
+| Bench | Body | Rust | Before | After |
+|---|---|---|---|---|
+| `reaction/equilibrium_constant` | (−5000 J/mol, 298 K): two guards, −ΔG/(R·T) and its range test (R·T normal, inline), `_km_cr_exp` | — | 64 ns | 64 ns |
+| `solution/debye_huckel_limiting` | (2, 0.01 M, 0.509): the checks, (((−A)·z)·z)·√I and its test (A·z² finite), `_km_cr_exp10` | — | 86 ns | 85 ns |
+| `solution/debye_huckel_extended` | (1, 0.05 M, 0.509, 0.328, 3 Å): the checks, log₁₀ γ and its test (the numerator and (B·å)·√I finite) | — | 105 ns | 100 ns |
+| `solution/davies_activity` | (1, 0.1 M, 0.509): the checks, log₁₀ γ and its test (A·z² finite) | — | 98 ns | 96 ns |
+| `reaction/equilibrium_constant_edge` | (−DBL_MAX, DBL_MAX): R·T past DBL_MAX, Rust's e^−0 = 1; the slow path, e^0.12 | — | 26 ns | 151 ns |
+| `reaction/equilibrium_constant_subnormal` | (−10⁻³²⁰, 10⁻³²²): R·T subnormal; the slow path | — | 80 ns | 166 ns |
+| `solution/debye_huckel_limiting_edge` | (100000, 0, 10³⁰⁰): A·z² past DBL_MAX at I = 0, Rust's NaN; the slow path, γ = 1 | — | 30 ns | 93 ns |
+| `solution/debye_huckel_extended_edge` | (1, 1, 10³⁰⁸, 10¹⁵⁵, 10¹⁵⁵): B·å past DBL_MAX, Rust's 1; the slow path, 0.977 | — | 45 ns | 277 ns |
+| `solution/debye_huckel_extended_overflow` | (100000, 1, 10³⁰⁰, 10¹⁵⁴, 10¹⁵⁴): A·z² past DBL_MAX, Rust's 0; the slow path, 10⁻¹⁰⁰ | — | 47 ns | 276 ns |
+| `solution/davies_activity_edge` | (100000, 0, 10³⁰⁰): A·z² past DBL_MAX at I = 0, Rust's NaN; the slow path, γ = 1 | — | 39 ns | 162 ns |
+
+The fast tests are compares on Rust's own intermediates (R·T against two bounds; an intermediate minus itself against
+0), so the typical inputs keep their cost, within a few ns either way (the extended law's 105 → 100 ns was the same in
+both runs; not investigated further). The slow paths are the unbounded-exponent arguments, 93–277 ns (the extended law's
+eight unbounded operations the dearest), then the same exp or 10^x; Rust's own edge results were cheap (exp of ∓0,
+10^NaN).
+
+**The third bench file.** Added to `tests/audit.bcyr`, the ten benches took it to 219 s on this host (189 s before),
+73 % of `cyrius bench`'s 300 s per-file deadline with the audit's B8–B12 still to add theirs, and a loaded host
+stretches every bench; so B5's go into a new `tests/audit2.bcyr` (31 s), the audit's later batches with them, the same
+way B4 split `tests/kimiya.bcyr` (the user's decision then: split rather than raise the deadline). `tests/audit.bcyr` is
+unchanged (189 s); `cyrius bench` runs all three files.

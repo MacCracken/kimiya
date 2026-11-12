@@ -317,14 +317,15 @@ fn _par_got_res(t, v) {
 }
 
 # `reaction` rows: src/reaction.cyr. Every input is an f64. ADR 0002 #33 (the overflow audit's B4): gibbs_free_energy
-# rows noted with the port's unbounded-exponent value are mapped.
+# rows noted with the port's unbounded-exponent value are mapped; ADR 0002 #35 (B5): equilibrium_constant rows noted
+# with the port's K (the argument with an unbounded exponent, then the correctly rounded exp) or its ComputationError.
 fn _par_reaction(fp, fl): i64 {
     var x: f64 = _par_in(0);
     if (_par_eq(fp, fl, "reaction::is_spontaneous") == 1) { _par_got_i(is_spontaneous(x)); return 1; }
     var y: f64 = _par_in(1);
     if (_par_eq(fp, fl, "reaction::equilibrium_constant") == 1) {
         var t, v = equilibrium_constant(x, y);
-        _par_got_res(t, v);
+        _par_got_noted_k(t, v);
         return 1;
     }
     var z: f64 = _par_in(2);
@@ -413,6 +414,49 @@ var _par_adr33_lim = 0;
 var _par_adr33_zoc = 0;
 var _par_adr34_cp = 0;                       # #34: Shomate::cp, Shomate::enthalpy_antiderivative
 var _par_adr34_h = 0;
+# The overflow audit's B5 (ADR 0002 #35): the exp / exp10 arguments' rows noted with the port's value (the argument with
+# an unbounded exponent, its final operation rounded once, then the correctly rounded exp or 10^x), mapped as B1's and
+# counted per function; equilibrium_constant's also where the port's ComputationError or K is Rust's other result.
+var _par_adr35_keq = 0;                      # equilibrium_constant (its ComputationError rows among them)
+var _par_adr35_kerr = 0;                     # equilibrium_constant rows where the port's K overflows: its Err
+var _par_adr35_kok = 0;                      # equilibrium_constant rows where only Rust's K overflows
+var _par_adr35_lim = 0;                      # debye_huckel_limiting
+var _par_adr35_ext = 0;                      # debye_huckel_extended
+var _par_adr35_dav = 0;                      # davies_activity
+
+# ADR 0002 #35 (the overflow audit's B5): the got list for an equilibrium_constant row whose note may name the port's K,
+# `= <x> (f:<bits>)]` (where Rust's is another value, or its ComputationError), or its Err, `= Err(ComputationError)
+# (E:ComputationError)]` (the port's K overflows where Rust's does not). A noted row's port result must be that one
+# (then mapped, accepted under ADR 2, counted); a row without the note is compared with the oracle as usual.
+fn _par_got_noted_k(t, v) {
+    if (_par_note_has("[ADR 0002 #35:") != 1) {
+        _par_got_res(t, v);
+        return 0;
+    }
+    if (_par_note_has("(E:ComputationError)]") == 1) {
+        if (is_ok(t) == 1 || v != KM_ERR_COMPUTATION_ERROR) {
+            _par_got_err(0 - 1);    # the note's Err, and the port gave anything else: "Unknown" matches nothing
+            return 0;
+        }
+        _par_got_err(v);
+        _par_mapped = 35;
+        _par_force_map = 1;
+        _par_hist_on = 0;
+        _par_adr35_keq = _par_adr35_keq + 1;
+        _par_adr35_kerr = _par_adr35_kerr + 1;
+        return 0;
+    }
+    if (is_ok(t) != 1) {
+        _par_got_err(0 - 1);
+        return 0;
+    }
+    _par_map_exact(35, v, 102);
+    if (_par_mapped == 35) {
+        _par_adr35_keq = _par_adr35_keq + 1;
+        if (_par_want_n > 0 && load64(_par_want_k) == 69) { _par_adr35_kok = _par_adr35_kok + 1; }
+    }
+    return 0;
+}
 
 # Counts a gibbs_free_energy row mapped under #33 (src/reaction.cyr's rows come before these counters).
 fn _par_count_gibbs() {
@@ -950,7 +994,8 @@ fn _par_in_ions(k): i64 {
 # `solution` rows: src/solution.cyr. The activity models' first input is the charge (`i:z`). ADR 0002 #29 (the overflow
 # audit's B2): dilution and solution_conductivity rows noted with the port's correctly rounded value are mapped; ADR
 # 0002 #33 (B4): ionic_strength's, kohlrausch_molar_conductivity's and limiting_molar_conductivity's with its
-# unbounded-exponent value.
+# unbounded-exponent value; ADR 0002 #35 (B5): the three activity models' with the port's γ (log₁₀ γ with an unbounded
+# exponent, then the correctly rounded 10^x).
 fn _par_solution(fp, fl): i64 {
     if (_par_eq(fp, fl, "solution::ionic_strength") == 1) {
         var r: f64 = ionic_strength(_par_in_ions(0), _par_in(0));
@@ -962,14 +1007,16 @@ fn _par_solution(fp, fl): i64 {
         var ii: f64 = _par_in(1);
         var a: f64 = _par_in(2);
         var t, v = debye_huckel_limiting(_par_in(0), ii, a);
-        _par_got_res(t, v);
+        _par_got_noted(35, "[ADR 0002 #35:", t, v);
+        if (_par_mapped == 35) { _par_adr35_lim = _par_adr35_lim + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "solution::davies_activity") == 1) {
         var ii: f64 = _par_in(1);
         var a: f64 = _par_in(2);
         var t, v = davies_activity(_par_in(0), ii, a);
-        _par_got_res(t, v);
+        _par_got_noted(35, "[ADR 0002 #35:", t, v);
+        if (_par_mapped == 35) { _par_adr35_dav = _par_adr35_dav + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "solution::debye_huckel_extended") == 1) {
@@ -978,7 +1025,8 @@ fn _par_solution(fp, fl): i64 {
         var b: f64 = _par_in(3);
         var sz: f64 = _par_in(4);
         var t, v = debye_huckel_extended(_par_in(0), ii, a, b, sz);
-        _par_got_res(t, v);
+        _par_got_noted(35, "[ADR 0002 #35:", t, v);
+        if (_par_mapped == 35) { _par_adr35_ext = _par_adr35_ext + 1; }
         return 1;
     }
     var x: f64 = _par_in(0);
@@ -2670,8 +2718,8 @@ fn _par_accepted(fp, fl, ip, il): i64 {
     # #24 … #26 (M4f-2) stoichiometry's exact value, index or whole result; #27, #28 (the overflow audit's B1) thermo's,
     # phase's and kinetics' rounded-once or unbounded-exponent value; #29, #30 (B2) solution's, electrochemistry's and
     # spectroscopy's; #31, #32 (B3) gas's, potential's, inorganic's and nuclear's; #33, #34 (B4) the sums' and the
-    # Shomate polynomials'.
-    if (_par_mapped >= 13 && _par_mapped <= 34) { return 2; }
+    # Shomate polynomials'; #35 (B5) the exp / exp10 arguments'.
+    if (_par_mapped >= 13 && _par_mapped <= 35) { return 2; }
     # ADR 0002 #7 (M4f): an oxidation-state row whose note names the port's exact rational states, or a balancing row
     # whose f64 matrix has no integer counterpart (the oracle's Err(InvalidInput)).
     if (_par_mapped == 7) { return 2; }
@@ -2681,13 +2729,13 @@ fn _par_accepted(fp, fl, ip, il): i64 {
 # 1 for an ADR whose accepted rows are counted but not printed row by row: ADR 0002 #4's Antoine mapping, #13 … #22's
 # exact-value rows (M4c … M4e-3; about 17,000 rows between them), #23's isotope rows (M4e-4), #7's oxidation-state
 # and balancing rows (M4f), #24 … #26's stoichiometry rows (M4f-2), #27 / #28's (the overflow audit's B1), #29 /
-# #30's (B2), #31 / #32's (B3) and #33 / #34's (B4), each
+# #30's (B2), #31 / #32's (B3), #33 / #34's (B4) and #35's (B5), each
 # summarised by _par_module_done with its count; the validate.py proofs check every one of them. ADR 0002 #12's CFSE
 # rows (13) and #3's SEMF rows (23) are printed by name.
 #must_use
 fn _par_accepted_quiet(adr): i64 {
     if (adr == 2 && _par_mapped == 2) { return 1; }
-    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 34) { return 1; }
+    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 35) { return 1; }
     if (adr == 2 && _par_mapped == 7) { return 1; }
     return 0;
 }
@@ -2707,10 +2755,19 @@ fn _par_accepted_bits(adr): i64 {
 # potential, #16's, #20's and #32's (per function, #17's and #18's regions among them); after spectroscopy, #19's, #21's
 # (per function), #22's, #23's (per function) and #30's (per function); after stoichiometry, #7's (the oxidation states,
 # the integer matrix) and #24's (per function), #25's and #26's. The overflow audit's B4: #33's after thermo, reaction,
-# thermochem, solution, kinetics, inorganic and nuclear (per function), #34's after thermochem (per function).
+# thermochem, solution, kinetics, inorganic and nuclear (per function), #34's after thermochem (per function); B5: #35's
+# after reaction and solution (per function).
 fn _par_module_done(mp, ml) {
     if (_par_eq(mp, ml, "reaction") == 1) {
         _par_b4_line(33, _par_adr33_gibbs, "gibbs_free_energy");
+        _par_puts("  ADR 0002 #35 the exp argument unbounded: ");
+        fmt_int(_par_adr35_keq);
+        _par_puts(" equilibrium_constant rows (");
+        fmt_int(_par_adr35_kerr);
+        _par_puts(" of them the port's ComputationError where Rust's K is finite, ");
+        fmt_int(_par_adr35_kok);
+        _par_puts(" the port's K where Rust's overflows) where the port's result differs from Rust's");
+        println(" (accepted, ADR 2, counted, not listed)");
         return 0;
     }
     if (_par_eq(mp, ml, "gas") == 1) {
@@ -2754,6 +2811,16 @@ fn _par_module_done(mp, ml) {
         fmt_int(_par_adr33_lim);
         _par_puts(") where an intermediate of Rust's chain leaves the normal range and the port's result is the");
         println(" noted one (accepted, ADR 2, counted, not listed)");
+        _par_puts("  ADR 0002 #35 the 10^x argument unbounded: ");
+        fmt_int(_par_adr35_lim + _par_adr35_ext + _par_adr35_dav);
+        _par_puts(" rows (debye_huckel_limiting ");
+        fmt_int(_par_adr35_lim);
+        _par_puts(", debye_huckel_extended ");
+        fmt_int(_par_adr35_ext);
+        _par_puts(", davies_activity ");
+        fmt_int(_par_adr35_dav);
+        _par_puts(") where the port's γ differs from Rust's (accepted, ADR 2, counted, not listed)");
+        println("");
         return 0;
     }
     if (_par_eq(mp, ml, "electrochemistry") == 1) {

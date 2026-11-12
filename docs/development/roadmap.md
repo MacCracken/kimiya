@@ -116,7 +116,9 @@ type for average oxidation states, no separate extrapolating Antoine function. I
     `enthalpy_antiderivative` with an unbounded exponent in Rust's summation order; the data-backed Shomate callers
     unchanged) — done in the Cyrius API (ADR 0002 #33, #34), the audit's B4, with #29's fast-path correction and the
     bench split (`tests/audit.bcyr`)
-  - [ ] B7 — F9, exp and exp10 arguments
+  - [x] B7 — F9, exp and exp10 arguments (`equilibrium_constant`'s −ΔG/(R·T), the three activity models' log₁₀ γ with an
+    unbounded exponent, the argument's final operation rounded once, then the unchanged correctly rounded exp / 10^x;
+    no new primitive) — done in the Cyrius API (ADR 0002 #35), the audit's B5
   - [ ] B8 — the FFT (both the magnitudes' re² + im² and the butterflies, hisab 1.4.0's transform without the range
     limit, by the user's answer "Both"), the flame's exact bracket sign test, `find_peaks`' threshold evaluated exactly
   - [ ] B9 — F15, an exact `balance_equation`

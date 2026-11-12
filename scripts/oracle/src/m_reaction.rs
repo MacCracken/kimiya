@@ -12,6 +12,11 @@
 //!   unbounded exponent (the final subtraction rounded once) differs from Rust's value (`audit.rs`), and
 //!   `audit::emit_reaction` appends its edge rows (T·ΔS past DBL_MAX or below 2⁻¹⁰²², ΔH bringing it back) with its own
 //!   seed.
+//! - ADR 0002 #35 (the overflow audit's B5): `equilibrium_constant` rows are noted where the port's K — the argument
+//!   −ΔG/(R·T) with an unbounded exponent (its final quotient rounded once), then the correctly rounded exp, and Rust's
+//!   ComputationError judged on that K — differs from Rust's result (`audit.rs`), and `audit::emit_reaction_b5` appends
+//!   its edge rows (R·T past DBL_MAX or subnormal, R·T at 2⁻¹⁰²² from below, x past ±DBL_MAX or subnormal) with its own
+//!   seed.
 //!
 //! Every input goes through `black_box`, so each row is a run-time call (the transcendental bits
 //! are glibc's, never a compile-time fold).
@@ -23,7 +28,7 @@ use crate::grids::{EXP_SUBNORMAL_X, Rng, specials};
 use crate::tsv::{Class, Module, Tok, b, err, f};
 use kimiya::element::GAS_CONSTANT;
 use kimiya::error::KimiyaError;
-use kimiya::reaction::{equilibrium_constant, is_spontaneous};
+use kimiya::reaction::is_spontaneous;
 
 pub fn res(r: Result<f64, KimiyaError>) -> Tok {
     r.map_or_else(|e| err(&e), f)
@@ -63,10 +68,7 @@ pub fn emit() -> Module {
         gibbs(&mut m, h, t, s);
     }
 
-    let keq = |m: &mut Module, dg: f64, t: f64| {
-        let out = res(equilibrium_constant(bb(dg), bb(t)));
-        m.row("reaction::equilibrium_constant", Class::C, &[f(dg), f(t)], &[out]);
-    };
+    let keq = audit::keq;
     for x in edges() {
         keq(&mut m, -5000.0, x);
         keq(&mut m, x, 298.0);
@@ -125,5 +127,6 @@ pub fn emit() -> Module {
         m.row("reaction::is_spontaneous", Class::A, &[f(x)], &[b(is_spontaneous(bb(x)))]);
     }
     audit::emit_reaction(&mut m);
+    audit::emit_reaction_b5(&mut m);
     m
 }

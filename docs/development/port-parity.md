@@ -1696,6 +1696,72 @@ glibc-matching.**
 === parity summary: 18 modules, 0 failing | rows: 335424 ok, 0 failed, 0 measured, 0 pending, 44235 accepted (ADR 6:
 809), 0 glibc-matching (failed) === ```
 
+## 25. The overflow audit's B5: the exp / exp10 arguments, ADR 0002 #35 (2026-11-11)
+
+B1's decisions unchanged (ADR 0002's B5 addition): `equilibrium_constant`'s K = exp(−ΔG/(R·T)) and the activity models'
+γ = 10^(log₁₀ γ) are no products or quotients of inputs, so their *arguments* get #20's edge fix — Rust's sequence for
+the argument with an unbounded exponent, its final quotient or product rounded once into binary64, then the unchanged
+correctly rounded `_km_cr_exp` / `_km_cr_exp10` — behind inline fast tests that prove Rust's chain gives the result (R·T
+in [2⁻¹⁰²¹, DBL_MAX]; A·z² finite; the extended law's numerator and (B·å)·√I finite), and `equilibrium_constant`'s
+ComputationError judged on the port's K. No new primitive: exp / 10^x of the binary64 argument is the correctly rounded
+exp / 10^x of the 53-bit unbounded one (the ADR's lemma, checked here on every row). Rust's checks, Err codes and order
+are kept. The corpus keeps the oracle's values; `scripts/oracle/src/audit.rs` appends each module's B5 edge rows with
+its own seed: reaction 1,730 → 2,406 (676 rows), solution 29,454 → 30,644 (1,190 rows).
+
+| Function | Class | Rows | Oracle Ok | Oracle Err | Noted (port ≠ oracle) | changing, of the rows before B5 | ulp of the rest |
+|---|---|---|---|---|---|---|---|
+| `reaction::equilibrium_constant` | C | 1,759 | 1,621 | 138 | 326 (#35: 27 the port's Err, 33 its K where Rust's is the Err) | 0 of 1,083 | 0 |
+| `solution::debye_huckel_limiting` | C | 783 | 768 | 15 | 55 (#35) | 0 of 503 | 0 |
+| `solution::debye_huckel_extended` | C | 1,100 | 1,067 | 33 | 385 (#35) | 0 of 538 | 0 |
+| `solution::davies_activity` | C | 851 | 836 | 15 | 79 (#35) | 0 of 503 | 0 |
+
+- **The noted rows** are read by `_par_got_noted_k` (`equilibrium_constant`: the note's K bit for bit, or its
+  `(E:ComputationError)]`, which the port must return) and `_par_got_noted` (γ), and accepted under ADR 2. Every other
+  row is the port's result and its reference at once (0 ulp; the reference is the corrected oracle's where
+  `reaction.cr.tsv` / `solution.cr.tsv` has the row: 3 rows of the four functions, unchanged and unnoted). None of the
+  2,627 rows before B5 changes, as the survey predicted (1,997 chain-normal, 630 out of range with the same result): the
+  parity summary was the same before and after the code change, so B5's rows are all new.
+- **The notes' values** are glibc's `exp` and `10.0_f64.powf` of the port's argument, computed in the generator (as B2's
+  Nernst ln). glibc's are not proven correctly rounded; `validate.py` requires each to be MPFR's (all are), and none of
+  the new rows needs a correction: no oracle value of theirs is misrounded either.
+- **The proofs** (`validate.py` §23). Each row's port result recomputed as #20's target itself: the argument in Rust's
+  sequence on `mpfr_ref.UX` with every operation at 53 bits, the last one too (X), then MPFR's exp or exp10 of X rounded
+  once into binary64 (`mpfr_ref.ux_exp_final`, `ux_exp10_final`, new, with self-checks). The lemma on every row past
+  validation (3,526 rows with X normal, 131 past DBL_MAX, 759 at most 2⁻¹⁰²¹): the port's exp / 10^x of x, X's last
+  operation rounded once into binary64, is that value. Each note sits exactly where the port's result differs from the
+  reference, naming it (or its Err). Every row where the port's fast test passes is unnoted (1,189, 659, 637 and 729
+  rows in the order above), and no row whose f64 chain stays in the normal range is noted (1,220, 582, 541 and 655 rows:
+  B3's strict tracers). The noted rows by kind: 27 where only the port's K overflows (its ComputationError) and 33 where
+  only Rust's does; 307 where Rust's γ is NaN and the value representable (∞·0 at I = ±0 and at Davies' zero bracket,
+  the extended law's ∞·0 and ∞/∞); 114 where Rust's value is 0 or ∞ and the port's representable (a subnormal R·T's K,
+  the extended law's numerator past DBL_MAX that the denominator brings back); 48 where Rust's NaN stands for a γ that
+  is itself out of range (0 or ∞); 283 degraded (the value normal, Rust's more than 2 ulp off: a subnormal R·T, the
+  extended law's B·å past DBL_MAX); 33 within 2 ulp or subnormal.
+- **`cr_verify.py`**: the four families `keq` 144,934, `dhl` 100,012, `dhe` 130,021, `dav` 130,015 (505,982 in all) —
+  the public function, the Rust-chain fast path where its test passes and the unbounded-exponent argument forced on
+  every argument, then the correctly rounded exp / 10^x — against the same MPFR target: 0 mismatches, the same bits and
+  flags on x86_64 ELF, x86_64 PE and aarch64. The fast paths decline on the edge sections only (none on the typical
+  ones).
+
+Tests: `tests/reaction.tcyr`'s `cyrius_adr35_keq` and `tests/solution.tcyr`'s `cyrius_adr35_activity` (the survey's
+examples with MPFR's values, the ComputationError flips, R·T and the extended law's numerator at 2⁻¹⁰²² from below,
+Davies' zero bracket, 3,000 seeded inputs each against the forced slow paths); no Rust test changes.
+
+**Cost** (`bench_audit_b5` in the new `tests/audit2.bcyr`, before → after, the same host;
+`docs/benchmarks-rust-v-cyrius.md`'s B5 section): `reaction/equilibrium_constant` 64 → 64 ns,
+`solution/debye_huckel_limiting` 86 → 85, `debye_huckel_extended` 105 → 100, `davies_activity` 98 → 96 (the tests are
+inline compares); the slow paths `equilibrium_constant_edge` 26 → 151 ns, `equilibrium_constant_subnormal` 80 → 166,
+`debye_huckel_limiting_edge` 30 → 93, `debye_huckel_extended_edge` 45 → 277, `debye_huckel_extended_overflow` 47 → 276,
+`davies_activity_edge` 39 → 162.
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **18 modules, 0 failing; 336,445 ok, 0 failed, 0 measured, 0
+pending, 45,080 accepted (809 under ADR 6; under ADR 2 as §24 plus 845 #35 rows), 0 glibc-matching.**
+
+```text
+=== parity summary: 18 modules, 0 failing | rows: 336445 ok, 0 failed, 0 measured, 0 pending, 45080 accepted (ADR 6:
+809), 0 glibc-matching (failed) ===
+```
+
 ## How to reproduce
 
 ```sh

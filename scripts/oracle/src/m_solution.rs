@@ -35,6 +35,11 @@
 //!   `limiting_molar_conductivity` rows are noted where Rust's sequence with an unbounded exponent (the final product
 //!   or subtraction rounded once) differs from Rust's value (`audit.rs`), and `audit::emit_solution_b4` appends their
 //!   edge rows (terms, sums or products past DBL_MAX or below 2⁻¹⁰²² that the rest brings back) with their own seed.
+//! - ADR 0002 #35 (the overflow audit's B5): `debye_huckel_limiting`, `debye_huckel_extended` and `davies_activity` rows
+//!   are noted where the port's γ — log₁₀ γ with an unbounded exponent (its final product or quotient rounded once),
+//!   then the correctly rounded 10^x — differs from Rust's value (`audit.rs`), and `audit::emit_solution_b5` appends
+//!   their edge rows (A·z², B·å, (B·å)·√I or the numerator past DBL_MAX, at I = 0 or brought back, Davies' bracket 0,
+//!   subnormal products) with their own seed.
 //!
 //! Every input goes through `black_box`; grid inputs use only exact or correctly rounded operations
 //! (`grids.rs`). The near-cancellation pKa values come from `log10_arith`, + − × ÷ only.
@@ -48,8 +53,7 @@ use crate::tsv::{Class, Module, Tok, f, i};
 use kimiya::error::KimiyaError;
 use kimiya::solution::{
     DH_A_WATER_25C, DH_B_WATER_25C, KW_WATER_25C, LAMBDA_CL_MINUS, LAMBDA_H_PLUS, LAMBDA_K_PLUS,
-    LAMBDA_NA_PLUS, LAMBDA_NO3_MINUS, LAMBDA_OH_MINUS, LAMBDA_SO4_2MINUS, davies_activity,
-    debye_huckel_extended, debye_huckel_limiting, h_concentration_from_ph,
+    LAMBDA_NA_PLUS, LAMBDA_NO3_MINUS, LAMBDA_OH_MINUS, LAMBDA_SO4_2MINUS, h_concentration_from_ph,
     henderson_hasselbalch,
     molality, molarity, ph_from_h_concentration, ph_from_poh, poh_from_oh_concentration,
     weak_acid_ph, weak_base_ph,
@@ -490,18 +494,9 @@ pub fn emit() -> Module {
     }
 
     // ── activity coefficients ──
-    let lim = |m: &mut Module, z: i32, ii: f64, a: f64| {
-        let out = res(debye_huckel_limiting(bb(z), bb(ii), bb(a)));
-        m.row("solution::debye_huckel_limiting", Class::C, &[i(z), f(ii), f(a)], &[out]);
-    };
-    let dav = |m: &mut Module, z: i32, ii: f64, a: f64| {
-        let out = res(davies_activity(bb(z), bb(ii), bb(a)));
-        m.row("solution::davies_activity", Class::C, &[i(z), f(ii), f(a)], &[out]);
-    };
-    let ext = |m: &mut Module, z: i32, ii: f64, a: f64, b: f64, s: f64| {
-        let out = res(debye_huckel_extended(bb(z), bb(ii), bb(a), bb(b), bb(s)));
-        m.row("solution::debye_huckel_extended", Class::C, &[i(z), f(ii), f(a), f(b), f(s)], &[out]);
-    };
+    let lim = audit::dh_lim;
+    let dav = audit::davies;
+    let ext = audit::dh_ext;
     let ionic = [0.0, -0.0, 1e-6, 1e-4, 0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 10.0, 1e300];
     for z in CHARGES {
         for ii in ionic {
@@ -612,5 +607,6 @@ pub fn emit() -> Module {
     }
     audit::emit_solution(&mut m);
     audit::emit_solution_b4(&mut m);
+    audit::emit_solution_b5(&mut m);
     m
 }

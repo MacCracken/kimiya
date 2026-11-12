@@ -761,6 +761,34 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   - benches: the audit's Cyrius-only benches (B1–B4) move to the new `tests/audit.bcyr` (the user's decision of
     2026-11-11, "Split the bench file"), names unchanged, B3's back at the standard iteration counts; B4 adds eleven
     typical and twelve edge benches there
+- **The library-wide overflow audit, B5** ([ADR 0002 #35](docs/adr/0002-port-api-divergences.md), B1's decisions
+  unchanged; port plan §6.4 "Decided in the overflow audit's B5"; the behaviour changes are under *Breaking*):
+  - **reaction** — `equilibrium_constant`'s argument −ΔG/(R·T) under #20's semantics: R·T at 53 bits with an unbounded
+    exponent and the quotient rounded once into binary64 (`_km_keq_arg_ux`) where R·T leaves [2⁻¹⁰²¹, DBL_MAX] (the
+    inline fast test; 2⁻¹⁰²² excluded, B4's lesson), then the unchanged `_km_cr_exp`; the ComputationError on that K
+  - **solution** — the activity models' log₁₀ γ likewise (`_km_dh_limiting_arg_ux`, `_km_dh_extended_arg_ux`,
+    `_km_davies_arg_ux`), behind inline "finite" tests (A·z²; the extended law's numerator and (B·å)·√I), then the
+    unchanged `_km_cr_exp10`; the ADR proves the tests and the lemma that exp / 10^x of the binary64 argument is the
+    correctly rounded exp / 10^x of the 53-bit unbounded one (no new primitive)
+  - generator: `scripts/oracle/src/audit.rs`'s B5 (the port's values independently: the argument on `exact::Ux`, glibc's
+    exp and `powf(10, x)` of it, checked against MPFR by `validate.py`; Rust's validation replicated and asserted;
+    `noted_k` for the ComputationError flips), `m_reaction.rs` and `m_solution.rs` through it; edge rows appended with
+    their own seeds: reaction +676, solution +1,190
+  - golden modules `reaction` 2,406 and `solution` 30,644 rows; the oracle's values kept, 845 rows noted with the port's
+    result — 326 `equilibrium_constant` (27 the port's ComputationError where Rust's K is finite, 33 its K where Rust's
+    overflows), 55 `debye_huckel_limiting`, 385 `debye_huckel_extended`, 79 `davies_activity`; the harness maps and
+    counts them per function (`_par_got_noted_k`); none of the 2,627 earlier rows changes
+  - `validate.py` §23: every row of the four functions recomputed as #20's target itself (the 53-bit argument on
+    `mpfr_ref.UX` and MPFR's exp / exp10 of it rounded once: the new `mpfr_ref.ux_exp_final`, `ux_exp10_final`, with
+    self-checks), the lemma checked on every row, each note proven (so every noted glibc value is MPFR's), the port's fast
+    tests proven on the corpus, no in-range row noted (B3's strict tracers), the noted rows counted by class
+  - `cr_verify.py`: the families `keq`, `dhl`, `dhe`, `dav` (505,982 arguments: the public function, the fast path, the
+    slow path forced on every argument) on x86_64 ELF, x86_64 PE and aarch64
+  - tests: `tests/reaction.tcyr` `cyrius_adr35_keq`, `tests/solution.tcyr` `cyrius_adr35_activity` (the survey's examples
+    with MPFR's values, the ComputationError flips, the 2⁻¹⁰²² boundaries, Davies' zero bracket, 3,000 seeded inputs
+    against the slow paths); no Rust test changes
+  - benches: `bench_audit_b5`, four typical and six edge benches, in a new third bench file `tests/audit2.bcyr` (31 s;
+    in `tests/audit.bcyr` they took it to 219 s of the 300 s per-file deadline, so it splits as B4's did)
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -1053,6 +1081,19 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   antiderivative at 5·10⁻³²⁴ K 1.04·10⁻³²², 1.2's NaN), large T (H₂O(g)'s Cp at 10³⁰⁰ K −∞, 1.2's ∞ − ∞ = NaN). T = ±0
   and non-finite inputs keep 1.2's results. *Migration:* none for temperatures within a fit's range.
 
+### Breaking (relative to Rust 1.2.0, ADR 0002 #35)
+- **reaction, solution** — `equilibrium_constant`, `debye_huckel_limiting`, `debye_huckel_extended` and
+  `davies_activity` evaluate the argument of their exp or 10^x in 1.2's operation order with an unbounded exponent, its
+  final quotient or product rounded once, then the correctly rounded exp or 10^x: every input whose 1.2 chain stays in
+  the normal range keeps its result (every physical input), and an argument whose R·T, A·z², B·å, (B·å)·√I or numerator
+  passes DBL_MAX or underflows gives the value (`equilibrium_constant(−DBL_MAX, DBL_MAX)` e^0.12 = 1.1278, 1.2's 1;
+  `(−10⁻³²⁰, 10⁻³²²)` 193,216, 1.2's 197,357; `debye_huckel_limiting(100000, 0, 10³⁰⁰)` and `davies_activity` there 1,
+  1.2's NaN; `debye_huckel_extended(1, 1, 10³⁰⁸, 10¹⁵⁵, 10¹⁵⁵)` 0.977, 1.2's 1; `(100000, 1, 10³⁰⁰, 10¹⁵⁴, 10¹⁵⁴)`
+  10⁻¹⁰⁰, 1.2's 0). `equilibrium_constant`'s ComputationError is decided on the port's K, so at a subnormal T it can be
+  the Err where 1.2's K is finite, or the reverse. The errors and their order are 1.2's.
+  *Migration:* none for code that stays within the normal range (T above about 5·10⁻³⁰⁹ K and below 2·10³⁰⁷ K; |A|·z²,
+  B·å and their products with √I below 10³⁰⁸).
+
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
@@ -1233,6 +1274,12 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   ns; the slow paths 117–587 ns (`hess_law_edge` 162, `reaction_enthalpy_edge` 587, `gibbs_free_energy_edge` 117), the
   Shomate polynomials' 311 and 474 ns. The bench files split (the user's decision): `tests/kimiya.bcyr` 177 s (261 s
   before), the new `tests/audit.bcyr` 189 s, B3's seventeen back at 1,000,000 × 20 calls with the same per-call figures
+- The overflow audit's B5, ADR 0002 #35 (Cyrius before → after, the same host; `bench_audit_b5` in `tests/audit2.bcyr`,
+  no Rust bench): the fast tests are inline compares, so the typical inputs keep their cost —
+  `reaction/equilibrium_constant` 64 → 64 ns, `solution/debye_huckel_limiting` 86 → 85, `debye_huckel_extended` 105 →
+  100, `davies_activity` 98 → 96 ns; the slow paths `equilibrium_constant_edge` 26 → 151 ns (Rust's exp(−0) is trivial),
+  `equilibrium_constant_subnormal` 80 → 166, `debye_huckel_limiting_edge` 30 → 93, `debye_huckel_extended_edge` 45 → 277,
+  `debye_huckel_extended_overflow` 47 → 276, `davies_activity_edge` 39 → 162 ns; `tests/audit2.bcyr` 31 s, `tests/audit.bcyr` unchanged at 189 s (219 s with them)
 
 ## [1.2.0] - 2026-11-08
 

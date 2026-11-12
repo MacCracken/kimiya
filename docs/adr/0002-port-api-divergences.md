@@ -50,6 +50,7 @@ are compared through the stated mapping:
 | 32 *(2026-11-11, the overflow audit's B3)* | `potential::lennard_jones` computes (4·ε)·((σ/r)¹² − (σ/r)⁶) (#17's (ε·d)·4 past 4·ε's overflow), `coulomb` ((k·q₁)·q₂)/r, `coulomb_force` ((k·q₁)·q₂)/(r·r), `morse_width_parameter` ω·(μ/(2·D_e)).sqrt() (#18's (μ·½)/D_e past 2·D_e's overflow), `inorganic::born_lande_lattice_energy` −k·N_A·M·z⁺·z⁻·e·e/r₀·(1 − 1/n) left to right, `nuclear::binding_energy_per_nucleon` ((Z·m_H + N·m_n − M)·931.494…)/A: the monomials round three or four times (1–2 ulp off on a fraction of inputs; the Morse width a √ of a rounded quotient, times ω), and an intermediate that over- or underflows gives ±∞, 0, NaN, the wrong zero or a degraded value although the value is representable (`lennard_jones(10⁻³⁰⁰, 1, 1.72·10⁻²⁶)` +∞, not 5.83·10⁹; at σ/r > 2^170.7 ∞ − ∞ = NaN where the value is +∞ or finite; `coulomb_force(5·10⁻³²⁴, e, 10⁻¹⁰)` 0, not 7.11·10⁻³¹³; `morse_width_parameter(5.634·10¹⁴, DBL_MAX, 7.399·10⁻¹⁹)` ∞, not 6.21·10¹⁷⁷; `born_lande_lattice_energy(DBL_MAX, 1, 1, DBL_MAX, DBL_MAX)` −∞, not −1.39·10⁻⁴; `binding_energy_per_nucleon(1000, 1000, DBL_MAX)` −∞, not −8.37·10³⁰⁷) | `coulomb` and `coulomb_force` **rounded once** — RN(k·q₁·q₂/r), RN(k·q₁·q₂/(r·r)), k as `KM_COULOMB_CONSTANT`'s double — by #27's helper (`_km_mul3_div_fast`, `_km_mul3_div2_fast`), a non-finite charge keeping Rust's expression; `morse_width_parameter` the **correctly rounded ω·√(μ/(2·D_e))** of the exact value, `src/mathx.cyr`'s new `_km_cr_mul_sqrt_ratio` (RN(w·√((x/y)·2^e)): #30's proven double-double root times ω with a rounding test, and an exact integer root on `_km_bn_*`, which rounds the midpoints this value can be, 3ω·2^k, to even); `lennard_jones`, `born_lande_lattice_energy` (whose (1 − 1/n) stays Rust's, M4b's review) and `binding_energy_per_nucleon` (whose mass defect is a sum of inputs) under **#20's semantics**: Rust's operation sequence with an unbounded exponent, the final product or division rounded once, behind range tests (`_km_lj_fast`, `_km_born_lande_fast`, Δm·931.494… finite) that prove Rust's chain stayed normal, so those inputs keep Rust's bits. #17 and #18 are folded in: #17's (ε·d)·4 is the unbounded chain's value wherever Rust's d is normal (all 180 of its rows keep their value); #18's ω·√(RN(μ/(2·D_e))) gives way to the correctly rounded value (128 of its 181 rows keep theirs, 53 move: the B3 addition). Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (582 `lennard_jones`, 244 of them with ε ≥ 2¹⁰²²; 1,860 `morse_width_parameter`, 340 with D_e ≥ 2¹⁰²³; 730 `coulomb`; 679 `coulomb_force`; 175 `born_lande_lattice_energy`; 156 `binding_energy_per_nucleon`: 4,182) |
 | 33 *(2026-11-11, the overflow audit's B4)* | `thermo::hess_law` sums its slice from −0.0, `enthalpy_from_formation` computes Σ products − Σ reactants, thermochem's `reaction_enthalpy`, `reaction_gibbs_energy` and `reaction_entropy` Σ coeff·prop (from +0.0) over the products minus the same over the reactants (#1: × 1000 for the two in J/mol), `nuclear::q_value` (Σ m_r − Σ m_p)·931.494…, `solution::ionic_strength` ½·Σ (c·z)·z, `inorganic::born_haber_lattice_energy` ΔH_f − ΔH_sub − IE − ΔH_diss/2 − EA left to right, `reaction::gibbs_free_energy` ΔH − T·ΔS, `solution::kohlrausch_molar_conductivity` Λ° − K·√c, `limiting_molar_conductivity` ν₊·λ₊ + ν₋·λ₋ and `kinetics::zero_order_concentration` [A]₀ − k·t (0 if negative): sums and differences in which a partial sum or a product term passes DBL_MAX and a later term brings it back, so the result is ±∞ or ∞ − ∞ = NaN although the value is finite (`hess_law([DBL_MAX, DBL_MAX, −DBL_MAX])` +∞, not DBL_MAX; `reaction_enthalpy([Al₂O₃ ×10³⁰⁸] → [Al₂O₃ ×10³⁰⁸])` NaN, not 0; `q_value([M, M], [M, 0.999M])` NaN, not 1.67·10³⁰⁸; `ionic_strength([(0.4·DBL_MAX, 2)])` +∞, not 1.44·10³⁰⁸; `gibbs_free_energy(DBL_MAX, 2, 0.75·DBL_MAX)` −∞, not −8.99·10³⁰⁷), or a subnormal product is rounded before the sum | **#20's semantics** for all twelve: Rust's operation sequence, its summation order included, evaluated with an unbounded exponent (`_km_ux_*`; Rust's `.sum()` from −0.0 and thermochem's `total += coeff * prop` from +0.0, `_km_sum_ux`, `_km_sum_property_ux`), the final operation rounded once into binary64 (the last addition, the difference, ½·Σ, × 931.494… or × 1000), comparisons on the unbounded values (`zero_order_concentration`'s clamp), behind a fast-path test that proves Rust's chain stayed normal, so those inputs keep Rust's bits. For a pure sum the test is "result finite": a sum of two doubles is exact below 2⁻¹⁰²¹ (both are multiples of 2⁻¹⁰⁷⁴) and the 53-bit rounding above, so only overflow can leave the range, and ±∞ or NaN persists to the result (proven in the addition below); a product inside takes `_km_ux_normal` or an exact zero. A non-finite input keeps Rust's expression; Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)` (after #1's note for the two J/mol sums), mapped and counted (28 `hess_law`, 27 `enthalpy_from_formation`, 115 `reaction_enthalpy`, 113 `reaction_gibbs_energy`, 66 `reaction_entropy`, 58 `q_value`, 13 `ionic_strength`, 74 `born_haber_lattice_energy`, 57 `gibbs_free_energy`, 54 `kohlrausch_molar_conductivity`, 31 `limiting_molar_conductivity`, 61 `zero_order_concentration`: 697) |
 | 34 *(2026-11-11, the overflow audit's B4)* | `thermochem::Shomate::cp` computes (((A + B·t) + (C·t)·t) + ((D·t)·t)·t) + E/(t·t) and `enthalpy_antiderivative` 1000·(t·(A + t·(B/2 + t·(C/3 + t·(D/4)))) − E/t), t = T/1000, for any coefficients and T: as T → 0, t·t underflows and E/(t·t) is ±∞, or 0/0 = NaN for E = 0, where Cp is finite (`Shomate{20.786, 0, 0, 0, 0}.cp(10⁻³⁰⁰)` NaN, not 20.786), and t itself underflows in the antiderivative (at 5·10⁻³²⁴ K NaN, not 1.04·10⁻³²²); for large T, C·t², D·t³ and t⁴ overflow and their difference is ∞ − ∞ = NaN where the value is ±∞ (H₂O(g)'s Cp at 10³⁰⁰ K NaN, not −∞) | **#20's semantics** on Rust's exact evaluation order, the final addition (Cp) or product by 1000 (H) rounded once, behind a fast test: a box (\|T\| in [2⁻³⁰, 2³⁰] and every nonzero coefficient in [2⁻²⁰⁰, 2²⁰⁰], where every intermediate is provably normal: every tabulated segment over its range, every physical use) or, outside it, each product and quotient normal or an exact zero and each sum finite; T = ±0 (every product an exact zero, E/0 IEEE's special in both) and non-finite inputs keep Rust's chain. The data-backed callers (`enthalpy_change_cp`, `adiabatic_flame_temperature`) share the evaluation and stay in the box (proven for every SHOMATE_DATA segment over its range, so the table-row path tests T alone; replayed for the flame's 324,925 golden evaluations) | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (185 `cp`, 25 `enthalpy_antiderivative`: 210) |
+| 35 *(2026-11-11, the overflow audit's B5)* | `reaction::equilibrium_constant` computes exp(−ΔG/(R·T)), `solution::debye_huckel_limiting` 10^((((−A)·z)·z)·√I), `debye_huckel_extended` 10^(((((−A)·z)·z)·√I)/(1 + (B·å)·√I)) and `davies_activity` 10^((((−A)·z)·z)·(√I/(1 + √I) − 0.3·I)): an intermediate of the exp or 10^x argument that over- or underflows gives K or γ = 1, 0 or NaN, or a degraded K, although the value is representable (`equilibrium_constant(−DBL_MAX, DBL_MAX)` 1, not e^0.12 = 1.128: R·T overflows; `(−10⁻³²⁰, 10⁻³²²)` 197,357, not 193,216: a subnormal R·T; `debye_huckel_limiting(100000, 0, 10³⁰⁰)` and `davies_activity` there ∞·0 = NaN, not 1; `debye_huckel_extended(1, 1, 10³⁰⁸, 10¹⁵⁵, 10¹⁵⁵)` 1, not 0.977: B·å = ∞; `(100000, 1, 10³⁰⁰, 10¹⁵⁴, 10¹⁵⁴)` 0, not 10⁻¹⁰⁰: A·z² = ∞), and `equilibrium_constant`'s ComputationError decides on that degraded K (Ok where the value overflows, Err where it does not) | **#20's semantics on the argument**: Rust's sequence with an unbounded exponent (`_km_ux_*`), the argument's final quotient or product rounded once into binary64 (`_km_keq_arg_ux`, `_km_dh_limiting_arg_ux`, `_km_dh_extended_arg_ux`, `_km_davies_arg_ux`), then the unchanged correctly rounded `_km_cr_exp` / `_km_cr_exp10`, which of that binary64 argument is the correctly rounded exp / 10^x of the unbounded 53-bit argument (the lemma in the addition below; no new primitive); behind inline fast tests (R·T in [2⁻¹⁰²¹, DBL_MAX]; A·z² finite; the extended law's numerator and (B·å)·√I finite) that prove Rust's chain gives that result, so those inputs keep Rust's bits. `equilibrium_constant`'s ComputationError is Rust's, judged on the port's K; Rust's checks, Err codes and order are kept | class C (the corrected oracle, K = 0); equal rows plain; the others noted `(f:…)` or, where the port's K overflows and Rust's does not, `(E:ComputationError)`, mapped and counted (326 `equilibrium_constant`, 27 of them the port's Err and 33 its K where Rust's overflows; 55 `debye_huckel_limiting`, 385 `debye_huckel_extended`, 79 `davies_activity`: 845) |
 
 Deferred with their modules (port plan §2.2), and decided when they port: #5 `bridge::*` →
 `Result` and removal of `ionization_to_bond_energy_estimate`; #10 soorat `from_molecule` →
@@ -1218,6 +1219,143 @@ deadline.
 `limiting_molar_conductivity` 10 → 24, `zero_order_concentration` 12 → 17, `shomate_enthalpy_antiderivative` 37 → 54 ns;
 the slow paths 117–587 ns (`hess_law_edge` 162, `reaction_enthalpy_edge` 587, `gibbs_free_energy_edge` 117), the Shomate
 polynomials' 311 and 474 ns.
+
+## Addition, 2026-11-11 (audit B5): #35
+
+**The decisions.** B1's section above quotes the user's decisions verbatim; they apply to B5 unchanged. None of B5's
+four functions is a product or quotient of inputs and constants (the round-once decision's scope: "n·R·T/P, ε·l·c, the
+Faraday products"): each is one exp or 10^x of an argument, and the activity models' arguments have sums inside. So each
+gets #20's edge fix on its argument, as B2's `nernst_potential` did around its ln Q (the survey's remedy for its family
+F9): Rust's sequence for the argument with an unbounded exponent, the argument's final operation rounded once into
+binary64, then the unchanged correctly rounded exp or 10^x, behind a fast-path test so in-range rows keep Rust's bits;
+where Rust gives NaN and the value is representable (∞·0 at I = 0, ∞/∞), that value; meaningless edges are fixed too (T
+= DBL_MAX K, A = 10³⁰⁰); every Rust check, Err code and order stays, `equilibrium_constant`'s ComputationError judged on
+the port's K. No new primitive. B5 is the survey's family F9, its proposed B7.
+
+**The treatment, per function** (each checked against `rust-old/src/reaction.rs` and `solution.rs`):
+
+| Function | Rust's formula | The port's argument (then `_km_cr_exp` / `_km_cr_exp10`) | Fast test (inline) |
+|---|---|---|---|
+| `reaction::equilibrium_constant` | exp((−ΔG)/(R·T)), ComputationError where K is not finite | R·T at 53 bits, the quotient rounded once (`_km_keq_arg_ux`); ComputationError on that K | R·T in [2⁻¹⁰²¹, DBL_MAX] |
+| `solution::debye_huckel_limiting` | 10^((((−A)·z)·z)·√I) | ((−A)·z)·z and √I at 53 bits, the product rounded once (`_km_dh_limiting_arg_ux`) | A·z² finite |
+| `solution::debye_huckel_extended` | 10^(((((−A)·z)·z)·√I)/(1 + (B·å)·√I)) | the numerator and 1 + (B·å)·√I at 53 bits, the quotient rounded once (`_km_dh_extended_arg_ux`) | the numerator and (B·å)·√I finite |
+| `solution::davies_activity` | 10^((((−A)·z)·z)·(√I/(1 + √I) − 0.3·I)) | ((−A)·z)·z and the bracket at 53 bits, the product rounded once (`_km_davies_arg_ux`) | A·z² finite |
+
+Every input of the four is validated (ΔG, T, I, A, B and å finite; z an i32), so no non-finite input reaches the
+arithmetic. Signed zeros follow #20 (an exact zero factor gives IEEE's signed zero in both evaluations; the sign of a
+zero argument does not reach K or γ).
+
+**The lemma.** Let v be the exact result of the argument's last operation on its 53-bit operands, X = RN₅₃(v) the
+unbounded chain's argument (#20's target is the correctly rounded e^X or 10^X: the transcendental is its final
+operation) and x = RN(v) in binary64, the port's (`_km_ux_div_f64` / `_km_ux_mul_f64`, or Rust's IEEE operation where
+the fast test passes). Then RN(e^x) = RN(e^X) and RN(10^x) = RN(10^X):
+- |X| in [2⁻¹⁰²¹, DBL_MAX]: |v| exceeds 2⁻¹⁰²² (RN₅₃ is monotone), where binary64's rounding is the 53-bit one, and does
+  not overflow, so x = X;
+- |X| > DBL_MAX, so |X| ≥ 2¹⁰²⁴: IEEE overflow is "the 53-bit rounding passes DBL_MAX", so x = ±∞ with X's sign, and
+  e^X, 10^X lie past either end of binary64 (2¹⁰²⁴ ≫ 709.79 and 308.26; −2¹⁰²⁴ ≪ −745.14 and −323.61): +∞ or +0, which
+  `_km_cr_exp(±∞)` and `_km_cr_exp10(±∞)` return;
+- |X| < 2⁻¹⁰²¹ (zero included): |v| < 2⁻¹⁰²¹ and |x| ≤ 2⁻¹⁰²¹; for |t| ≤ 2⁻¹⁰²¹, e^t and 10^t = e^(t·ln 10) lie within
+  2⁻¹⁰¹⁹ of 1, far inside 1's rounding interval (1 − 2⁻⁵⁴, 1 + 2⁻⁵³), so both round to 1 (`_km_cr_exp` returns 1 for
+  every |t| < 2⁻⁵⁴, `_km_cr_exp10` for every |t| < 2⁻⁵⁶).
+
+So the port needs no exp of an unbounded argument, and the argument's final rounding has no tie that matters: in the
+normal range RN and RN₅₃ break a tie alike (to even), and below 2⁻¹⁰²¹ the result is 1 whatever the argument. (A
+quotient of two 53-bit values is never a 53-bit midpoint, since the dividend's odd part would need 54 bits; products can
+be: `debye_huckel_limiting(1, 9, 2.666…)` with 3·2.666… = (2⁵³ + 1)·2⁻⁵⁰ has the argument −8 in both, the tie rounded to
+even, and γ = 10⁻⁸; golden rows.) `validate.py` checks the lemma on every row, and `cr_verify.py` on every argument, by
+computing e^X and 10^X themselves with MPFR.
+
+**The fast tests, proven.**
+- `equilibrium_constant`: R·T in [2⁻¹⁰²¹, DBL_MAX] (R·T > 0, since T ≥ 2⁻¹⁰⁷⁴). R·T is then the 53-bit rounding of its
+  exact value (B3's `_km_ux_normal` argument, inline), −ΔG is exact, and Rust's IEEE quotient of those operands is x
+  itself. 2⁻¹⁰²² is excluded, as B4 corrected #29: T = 541,658,533,363,376·2⁻¹⁰⁷⁴ has R·T = (2⁵² − 0.27…)·2⁻¹⁰⁷⁴, which
+  IEEE rounds up to 2⁻¹⁰²² and 53-bit rounding to 2⁻¹⁰²² − 2⁻¹⁰⁷⁵; there K(−2⁻¹⁰²²) is e^(1 + 2⁻⁵²) = 2.718281828459046
+  (0x4005bf0a8b14576b), two ulp from Rust's e, which a 2⁻¹⁰²² bound would have kept (golden rows,
+  `tests/reaction.tcyr`).
+- `debye_huckel_limiting` and `davies_activity`: A·z² = ((−A)·z)·z finite. B4's `ionic_strength` argument: a product of
+  a double and an integer-valued double is a multiple of 2⁻¹⁰⁷⁴, so it is exact below 2⁻¹⁰²¹ (k·2⁻¹⁰⁷⁴ with |k| < 2⁵³ is
+  a double) and the 53-bit rounding above unless it overflows; an overflowed (−A)·z stays ±∞ (z ≠ 0), so a finite A·z²
+  proves both products the unbounded ones. √I of a non-negative double is ±0 or at least 2⁻⁵³⁷, normal, correctly
+  rounded in both. Davies' bracket is always the unbounded one: 1 + √I is at least 1 and below 2⁵¹²; √I/(1 + √I) is 0 or
+  at least min(√I, 1)/2 ≥ 2⁻⁵³⁸, normal; 0.3·I is its 53-bit rounding where IEEE's is at least 2⁻¹⁰²¹, and otherwise I <
+  2⁻¹⁰¹⁹ and 0.3·I < 2⁻¹⁰²¹ is below 2⁻⁴⁸³ of √I/(1 + √I), under a quarter of its ulp, so their difference is √I/(1 +
+  √I) in both; and a difference of two doubles is exact below 2⁻¹⁰²¹ (Hauser) and the 53-bit rounding above. So the
+  final product's operands are the unbounded chain's, and IEEE's product is x. Where A·z² overflows, Rust's argument is
+  ±∞ or NaN, but γ differs only where the other factor is 0: √I ≥ 2⁻⁵³⁷, and a nonzero bracket is at least 0.19·√I (I ≤
+  1: √I/(1 + √I) ≥ √I/2 and 0.3·I ≤ 0.3·√I) or 2⁻⁵⁴ (I > 1: two doubles of at least 0.25 differ by a multiple of 2⁻⁵⁴),
+  so |x| is beyond 2⁴⁸⁴ and γ is Rust's +∞ or +0. Only I = ±0 and Davies' exact zero bracket (I = 1.940363884733242 and
+  1.9403638847332425, where √I/(1 + √I) and RN(0.3·I) are the same double) change: Rust's ∞·0 = NaN, γ = 1.
+- `debye_huckel_extended`: the numerator n = A·z²·√I and y = (B·å)·√I finite. A finite n proves A·z² finite (∞·√I is ±∞
+  or NaN), so A·z² and √I are the unbounded ones; n is its 53-bit rounding where |n| ≥ 2⁻¹⁰²¹ or it is an exact zero,
+  and otherwise below 2⁻¹⁰²¹ in both evaluations. A finite y proves B·å finite; B·å is the 53-bit value where it is at
+  least 2⁻¹⁰²¹ or an exact zero, otherwise below 2⁻¹⁰²¹ in both, and then y < 2⁻¹⁰²¹·2⁵¹² = 2⁻⁵⁰⁹ in both; the same for
+  y itself; so the denominator 1 + y (y ≥ 0 or −0) is the unbounded one in both (1 where y < 2⁻⁵³; 1 + DBL_MAX rounds to
+  DBL_MAX in both). The final quotient's operands are then the unbounded chain's (IEEE's quotient is x), or |n| < 2⁻¹⁰²¹
+  with a denominator of at least 1, so both arguments are below 2⁻¹⁰²¹ and γ = 1 in both (the lemma's third case). The
+  test proves Rust's γ, not always Rust's argument: (k·2⁻¹⁰⁷⁴)·√5 with k = 2,014,070,982,048,630 is (2⁵² −
+  0.457…)·2⁻¹⁰⁷⁴, which IEEE rounds up to 2⁻¹⁰²² and RN₅₃ to 2⁻¹⁰²² − 2⁻¹⁰⁷⁵; γ = 1 either way (`tests/solution.tcyr`).
+
+**The machinery** (`src/reaction.cyr`, `src/solution.cyr`) is #20's helpers — `_km_ux_from`, `_km_ux_neg`, `_km_ux_mul`,
+`_km_ux_sqrt`, `_km_ux_add`, `_km_ux_sub`, `_km_ux_div` and the final `_km_ux_div_f64`, `_km_ux_mul_f64` — in four slow
+paths that return the binary64 argument (`_km_keq_arg_ux`, `_km_dh_limiting_arg_ux`, `_km_dh_extended_arg_ux`,
+`_km_davies_arg_ux`); the fast tests are inline compares on Rust's own intermediates. So
+`equilibrium_constant(−DBL_MAX, DBL_MAX)` is 1.1278039728561764 (Rust's 1) and `(DBL_MAX, DBL_MAX)` 0.8866789123534372,
+`(−10⁻³²⁰, 10⁻³²²)` 193,215.67 (0x410795fd6637a45d; Rust's 197,357), `debye_huckel_limiting(100000, 0, 10³⁰⁰)` and
+`davies_activity` there 1 (Rust's NaN), `debye_huckel_extended(1, 1, 10³⁰⁸, 10¹⁵⁵, 10¹⁵⁵)` 0.9772372209558107 (Rust's
+1), `(100000, 1, 10³⁰⁰, 10¹⁵⁴, 10¹⁵⁴)` 9.999999999999673·10⁻¹⁰¹ (Rust's 0) and `(1, 0, 1, DBL_MAX, 2)` 1 (Rust's ∞·0 =
+NaN). A subnormal R·T can move a row across the ComputationError either way: `equilibrium_constant(−1.3434160979·10⁻³¹³,
+2.2764124·10⁻³¹⁷)` is the Err where Rust's K is 1.797687·10³⁰⁸, and `(−2.9138·10⁻³¹⁹, 5·10⁻³²³)`
+1.1297907864949920·10³⁰⁸ where Rust's is the Err.
+
+**Golden comparison** (as #27 … #34). The corpus keeps the oracle's values; where the port's result differs the note
+names it: `[ADR 0002 #35: the port returns the argument evaluated with an unbounded exponent (its final quotient rounded
+once), then the correctly rounded exp = <x> (f:…)]` (`equilibrium_constant`;
+`… = Err(ComputationError) (E:ComputationError)]` where only the port's K overflows), `… (its final product rounded
+once), then the correctly rounded 10^x = <x> (f:…)]` (the limiting law, Davies) and `… (its final quotient rounded
+once), then the correctly rounded 10^x = …` (the extended law). The generator computes them independently of the port
+(`scripts/oracle/src/audit.rs`: the argument on `exact::Ux`, its last operation by `div_f64` / `mul_f64`, then glibc's
+`exp` and `10.0_f64.powf` of it, as B2's Nernst ln; Rust's validation replicated and asserted, the ComputationError
+judged on the port's K) and appends 1,866 edge rows with their own seeds (reaction 676, solution 1,190): R·T past
+DBL_MAX and subnormal, R·T at 2⁻¹⁰²² from below (`KEQ_T_2M1022`) and the boundaries T = DBL_MAX/R and 2⁻¹⁰²¹/R ulp by
+ulp, ΔG subnormal and huge, x past ±DBL_MAX (K = ∞: the Err, or 0, in both) and subnormal (K = 1 in both), a short
+subnormal T with ΔG between the two ends' thresholds as Rust's and the port's R·T place them (the ComputationError flips
+both ways, and 0 against a subnormal K); A·z² past DBL_MAX at I = ±0, at DBL_MAX ulp by ulp, against √I, against a tiny
+or negative bracket and against Davies' zero bracket; A·z² subnormal; B·å and (B·å)·√I past DBL_MAX, with I = ±0; B·å
+past DBL_MAX with the numerator finite (Rust's γ = 1 where log₁₀ γ is ∓L); A·z² and the numerator past DBL_MAX with the
+denominator bringing them back (Rust's γ = 0 or ∞, or ∞/∞ = NaN); the numerator and B·å subnormal; B, å = ±0; the
+limiting law's argument a 53-bit midpoint (in range and past DBL_MAX); every binade of every input. None of the 2,627
+rows that existed before B5 changes (the survey: 1,997 chain-normal, 630 out of range with the same result; the parity
+summary was identical before and after the code change). glibc's exp and pow(10, x), the generator's, are not proven
+correctly rounded: `validate.py` checks every noted value against MPFR (every one agrees), and the corrected oracle
+gains no row (no new row's oracle value is misrounded either). The harness maps a noted row (`_par_got_noted_k`: the
+note's K or its ComputationError; `_par_got_noted` for γ) and counts it per function: **845 #35 rows** (326
+`equilibrium_constant`, 27 of them the port's ComputationError where Rust's K is finite and 33 its K where Rust's
+overflows; 55 `debye_huckel_limiting`, 385 `debye_huckel_extended`, 79 `davies_activity`). `validate.py` §23 recomputes
+every row of the four functions — the argument on `mpfr_ref.UX` with every operation at 53 bits, the last one too (X),
+and MPFR's exp or exp10 of X rounded once (the new `mpfr_ref.ux_exp_final`, `ux_exp10_final`): #20's target itself — and
+proves the lemma on every row past validation (3,526 rows with X normal, 131 past DBL_MAX, 759 at most 2⁻¹⁰²¹), that a
+row is noted exactly where the port's result differs from its reference (the corrected oracle's outputs where one
+exists: 3 rows, none noted), the note naming it bit for bit or its Err, that every row where the port's fast test passes
+is unnoted (1,189, 659, 637 and 729 rows in the order above), and that no row whose f64 chain stays in the normal range
+is noted (1,220, 582, 541 and 655 rows: B3's strict tracers); it counts the noted rows: 27 where only the port's K
+overflows (its ComputationError) and 33 where only Rust's does; 307 where Rust's γ is NaN and the value representable
+(∞·0 at I = ±0 and at Davies' zero bracket, the extended law's ∞·0 and ∞/∞); 114 where Rust's value is 0 or ∞ and the
+port's representable (a subnormal R·T's K, the extended law's numerator past DBL_MAX that the denominator brings back);
+48 where Rust's NaN stands for a γ that is itself out of range (0 or ∞); 283 degraded (the value normal, Rust's more
+than 2 ulp off: a subnormal R·T, the extended law's B·å past DBL_MAX); 33 within 2 ulp or subnormal. `cr_verify.py`'s
+families `keq`, `dhl`, `dhe`, `dav` (505,982 arguments: the public function, the Rust-chain fast path where its test
+passes, the slow path forced on every argument) check the same target against MPFR on x86_64 ELF, x86_64 PE and aarch64.
+
+**Cost** (`bench_audit_b5` in the new `tests/audit2.bcyr`, before → after, the same host;
+`docs/benchmarks-rust-v-cyrius.md`'s B5 section): the fast tests are inline compares on Rust's own intermediates, so
+typical inputs keep their cost — `reaction/equilibrium_constant` 64 → 64 ns, `solution/debye_huckel_limiting` 86 → 85,
+`debye_huckel_extended` 105 → 100, `davies_activity` 98 → 96; the slow paths `equilibrium_constant_edge` 26 → 151 ns
+(R·T past DBL_MAX: Rust's exp(−0) is trivial), `equilibrium_constant_subnormal` 80 → 166, `debye_huckel_limiting_edge`
+30 → 93, `debye_huckel_extended_edge` 45 → 277 (B·å past DBL_MAX), `debye_huckel_extended_overflow` 47 → 276 (A·z² past
+it), `davies_activity_edge` 39 → 162 ns. **The third bench file**: in `tests/audit.bcyr` these benches would have taken
+it to 219 s of `cyrius bench`'s 300 s per-file deadline (189 s before), with the audit's later batches still to come, so
+they open `tests/audit2.bcyr` (31 s), as B4 split `tests/kimiya.bcyr` under the user's decision there (split rather than
+raise the deadline); `tests/audit.bcyr` is unchanged.
 
 ## Consequences
 

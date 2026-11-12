@@ -6,7 +6,8 @@
 # Every expression keeps Rust's operation order: gibbs_free_energy is bit-identical (class B) wherever its chain stays
 # in the normal range (ADR 0002 #33, below);
 # equilibrium_constant's one exp is the correctly rounded _km_cr_exp (src/mathx.cyr, ADR 0006), so its
-# class-C rows are compared exactly against the corrected oracle (docs/development/port-parity.md §10).
+# class-C rows are compared exactly against the corrected oracle (docs/development/port-parity.md §10); its argument
+# −ΔG/(R·T) is ADR 0002 #35's (below) where R·T leaves the normal range.
 
 # Gibbs free energy ΔG = ΔH − T·ΔS in J/mol, from ΔH in J/mol, T in K and ΔS in J/(mol·K):
 # Ok(ΔG), Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite, or
@@ -48,15 +49,41 @@ fn _km_gibbs_ux(enthalpy_j: f64, temperature_k: f64, entropy_j_per_k: f64): f64 
 # ΔG/RT above ≈ 745 it underflows to 0.0. Ok(K), Err(KM_ERR_INVALID_TEMPERATURE) if T is not
 # positive and finite, Err(KM_ERR_INVALID_INPUT) if ΔG is not finite, or
 # Err(KM_ERR_COMPUTATION_ERROR) if K overflows f64 (−ΔG/RT > ≈ 709.8, e.g. ΔG = −2 MJ/mol at
-# 298 K); work with ln K = −ΔG/RT instead. Mirrors `reaction::equilibrium_constant`.
+# 298 K); work with ln K = −ΔG/RT instead. ADR 0002 #35 (the overflow audit's B5): the argument −ΔG/(R·T) is Rust's
+# chain where R·T is the 53-bit rounding of its exact value (normal, src/mathx.cyr's _km_ux_normal range, inline; R·T
+# is never 0, T > 0), so the division by it is the unbounded chain's final quotient rounded once; otherwise the same
+# sequence with an unbounded exponent, the quotient rounded once into binary64 (_km_keq_arg_ux). Then the unchanged
+# correctly rounded exp, which of that binary64 argument is the correctly rounded exp of the unbounded 53-bit one (ADR
+# 0002 #35's lemma), and Rust's ComputationError judged on that K (equilibrium_constant(−DBL_MAX, DBL_MAX) is
+# e^0.12 = 1.12779…, Rust's e^−0 = 1; a subnormal R·T is not rounded twice). Mirrors `reaction::equilibrium_constant`,
+# with ADR 0002 #35.
 #must_use
 fn equilibrium_constant(delta_g_j: f64, temperature_k: f64): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_finite(delta_g_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var x: f64 = -delta_g_j / (KM_GAS_CONSTANT * temperature_k);
+    var rt: f64 = KM_GAS_CONSTANT * temperature_k;
+    var x: f64 = -delta_g_j / rt;
+    var lo: f64 = 0x0020000000000000;       # 2⁻¹⁰²¹ (_km_ux_normal's range, inline)
+    var hi: f64 = 0x7FEFFFFFFFFFFFFF;
+    if (rt < lo || rt > hi) { x = _km_keq_arg_ux(delta_g_j, temperature_k); }
     var k: f64 = _km_cr_exp(x);
     if (_km_is_finite(k) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
     return Ok(k);
+}
+
+# equilibrium_constant's argument −ΔG/(R·T) with an unbounded exponent (ADR 0002 #35), for its validated inputs: Rust's
+# R·T rounded to 53 bits (src/mathx.cyr's _km_ux_*), the quotient rounded once into binary64 (±∞ past DBL_MAX, the
+# subnormal grid below 2⁻¹⁰²²: exp of either is the correctly rounded exp of the 53-bit quotient).
+#must_use
+fn _km_keq_arg_ux(delta_g_j: f64, temperature_k: f64): f64 {
+    var gs, ge = _km_ux_from(delta_g_j);
+    var ns, ne = _km_ux_neg(gs, ge);
+    var r: f64 = KM_GAS_CONSTANT;
+    var rs, re = _km_ux_from(r);
+    var ts, te = _km_ux_from(temperature_k);
+    var ps, pe = _km_ux_mul(rs, re, ts, te);
+    var x: f64 = _km_ux_div_f64(ns, ne, ps, pe);
+    return x;
 }
 
 # 1 if a reaction with this ΔG (any energy unit) is spontaneous, ΔG < 0; 0 otherwise, NaN

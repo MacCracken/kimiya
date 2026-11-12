@@ -32,6 +32,12 @@
 //! polynomial order (#34); and #29's `nernst_potential` rows whose product (R·T)/(n·F)·ln Q IEEE rounds up to 2⁻¹⁰²²
 //! from below ([`NERNST_2M1022`]).
 //!
+//! **B5** (ADR 0002 #35): the exp / exp10 *arguments* of reaction's `equilibrium_constant` (−ΔG/(R·T)) and solution's
+//! `debye_huckel_limiting`, `debye_huckel_extended` and `davies_activity` (log₁₀ γ): Rust's sequence for the argument
+//! with an unbounded exponent, its final quotient or product rounded once into binary64, then the correctly rounded
+//! exp / 10^x of that argument (glibc's here, as B2's ln: `validate.py` checks every noted value against MPFR's exp /
+//! exp10 of the 53-bit unbounded argument), and `equilibrium_constant`'s ComputationError judged on that K.
+//!
 //! Every row of these functions goes through [`noted`]: where the port's value differs from the oracle's (by its bits;
 //! two NaNs are the same) the row is noted `[ADR 0002 #n: the port returns <how> = <x> (f:<bits>)]`. Rust's validation is
 //! replicated here and must agree with the oracle's (asserted on every row). `validate.py` proves every note again,
@@ -50,8 +56,11 @@ use crate::t_thermochem::shomate_fields;
 use kimiya::inorganic::born_haber_lattice_energy;
 use kimiya::kinetics::zero_order_concentration;
 use kimiya::nuclear::q_value;
-use kimiya::reaction::gibbs_free_energy;
-use kimiya::solution::{ionic_strength, kohlrausch_molar_conductivity, limiting_molar_conductivity};
+use kimiya::reaction::{equilibrium_constant, gibbs_free_energy};
+use kimiya::solution::{
+    davies_activity, debye_huckel_extended, debye_huckel_limiting, ionic_strength, kohlrausch_molar_conductivity,
+    limiting_molar_conductivity,
+};
 use kimiya::thermo::{enthalpy_from_formation, hess_law};
 use kimiya::thermochem::{
     Shomate, THERMOCHEM_DATA, lookup_thermochem, reaction_enthalpy, reaction_entropy, reaction_gibbs_energy,
@@ -1007,6 +1016,7 @@ fn err_name(e: &KimiyaError) -> &'static str {
     match e {
         KimiyaError::InvalidTemperature(_) => "InvalidTemperature",
         KimiyaError::InvalidInput(_) => "InvalidInput",
+        KimiyaError::ComputationError(_) => "ComputationError",
         _ => "other",
     }
 }
@@ -2296,5 +2306,425 @@ pub fn emit_thermochem(m: &mut Module) {
                    rng.uniform(-2.0, 2.0));
         let t = if rng.int(0, 1) == 0 { rng.log_uniform(-323.0, -150.0) } else { rng.signed_log_uniform(75.0, 308.0) };
         sh(m, &y, t);
+    }
+}
+
+// ── The overflow audit's B5 (ADR 0002 #35): the exp / exp10 arguments ───────────────────────────────────────────────
+
+/// How the port obtains `equilibrium_constant`'s K (the note's `<how>`).
+pub const KEQ_HOW: &str =
+    "the argument evaluated with an unbounded exponent (its final quotient rounded once), then the correctly rounded exp";
+
+/// How the port obtains the limiting law's and Davies' γ (the note's `<how>`).
+pub const DH_HOW_MUL: &str =
+    "the argument evaluated with an unbounded exponent (its final product rounded once), then the correctly rounded 10^x";
+
+/// How the port obtains the extended law's γ (the note's `<how>`).
+pub const DH_HOW_DIV: &str =
+    "the argument evaluated with an unbounded exponent (its final quotient rounded once), then the correctly rounded 10^x";
+
+/// ADR 0002 #35: `equilibrium_constant`, Rust's checks in Rust's order, then x = −ΔG/(R·T) with R·T rounded to 53 bits
+/// and the quotient rounded once into binary64, K = e^x (glibc's exp, which `validate.py` checks is correctly rounded on
+/// every noted row: the port's `_km_cr_exp`), and Rust's ComputationError where that K is not finite.
+pub fn port_keq(dg: f64, t: f64) -> Port {
+    if !pos(t) {
+        return Err("InvalidTemperature");
+    }
+    if !dg.is_finite() {
+        return Err("InvalidInput");
+    }
+    let x = ux(dg).neg().div_f64(ux(GAS_CONSTANT).mul(ux(t)));
+    let k = bb(x).exp();
+    if k.is_finite() { Ok(k) } else { Err("ComputationError") }
+}
+
+/// Rust's A·z² for the activity models, ((−A)·z)·z, rounded to 53 bits at each product.
+fn az2(z: i32, a: f64) -> Ux {
+    let zf = ux(f64::from(z));
+    ux(a).neg().mul(zf).mul(zf)
+}
+
+/// 10^x as Rust writes it (`10.0_f64.powf(x)`: glibc's, checked against MPFR's exp10 by `validate.py` on every noted row).
+fn exp10(x: f64) -> f64 {
+    10.0_f64.powf(bb(x))
+}
+
+/// ADR 0002 #35: `debye_huckel_limiting`, Rust's checks, then log₁₀ γ = (((−A)·z)·z)·√I with the product A·z² and √I
+/// rounded to 53 bits and the final product rounded once into binary64, γ = 10^x.
+pub fn port_dh_lim(z: i32, ii: f64, a: f64) -> Option<f64> {
+    (nonneg(ii) && a.is_finite()).then(|| exp10(az2(z, a).mul_f64(ux(ii).sqrt())))
+}
+
+/// ADR 0002 #35: `debye_huckel_extended`, Rust's checks in Rust's order, then log₁₀ γ =
+/// ((((−A)·z)·z)·√I)/(1 + (B·å)·√I) with every operation rounded to 53 bits but the final quotient, rounded once.
+pub fn port_dh_ext(z: i32, ii: f64, a: f64, b: f64, s: f64) -> Option<f64> {
+    (nonneg(ii) && a.is_finite() && nonneg(b) && nonneg(s)).then(|| {
+        let sq = ux(ii).sqrt();
+        let num = az2(z, a).mul(sq);
+        let den = ux(1.0).add(ux(b).mul(ux(s)).mul(sq));
+        exp10(num.div_f64(den))
+    })
+}
+
+/// ADR 0002 #35: `davies_activity`, Rust's checks, then log₁₀ γ = (((−A)·z)·z)·(√I/(1 + √I) − 0.3·I) with every
+/// operation rounded to 53 bits but the final product, rounded once.
+pub fn port_davies(z: i32, ii: f64, a: f64) -> Option<f64> {
+    (nonneg(ii) && a.is_finite()).then(|| {
+        let sq = ux(ii).sqrt();
+        let br = sq.div(ux(1.0).add(sq)).sub(ux(0.3).mul(ux(ii)));
+        exp10(az2(z, a).mul_f64(br))
+    })
+}
+
+/// A row of `equilibrium_constant` under B5: plain where the port's result is the oracle's (the same bits, or the same
+/// Err), noted otherwise — `= <x> (f:<bits>)` for the port's K, `= Err(ComputationError) (E:ComputationError)` where the
+/// port's K overflows and Rust's does not. The validation is Rust's, so only ComputationError may differ (asserted).
+#[allow(clippy::too_many_arguments)] // noted_r's
+pub fn noted_k(
+    m: &mut Module,
+    name: &str,
+    cls: Class,
+    ins: &[Tok],
+    oracle: Result<f64, KimiyaError>,
+    port: Port,
+    adr: u32,
+    how: &str,
+) {
+    match (&oracle, port) {
+        (Ok(v), Ok(p)) if same(*v, p) => m.row(name, cls, ins, &[f(*v)]),
+        (Err(e), Err(n)) => {
+            assert_eq!(err_name(e), n, "{name}: the port's Err is not the oracle's: {ins:?}");
+            m.row(name, cls, ins, &[res(oracle)]);
+        }
+        (Ok(_), Ok(p)) => m.row_noted(name, cls, ins, &[res(oracle)], &note(adr, how, p)),
+        (Err(e), Ok(p)) => {
+            assert_eq!(err_name(e), "ComputationError", "{name}: the port is Ok where Rust's validation refuses: {ins:?}");
+            m.row_noted(name, cls, ins, &[res(oracle)], &note(adr, how, p));
+        }
+        (Ok(_), Err(n)) => {
+            assert_eq!(n, "ComputationError", "{name}: the port's validation refuses where the oracle's accepts: {ins:?}");
+            let extra = format!("ADR 0002 #{adr}: the port returns {how} = Err(ComputationError) (E:ComputationError)");
+            m.row_noted(name, cls, ins, &[res(oracle)], &extra);
+        }
+    }
+}
+
+pub fn keq(m: &mut Module, dg: f64, t: f64) {
+    let out = equilibrium_constant(bb(dg), bb(t));
+    noted_k(m, "reaction::equilibrium_constant", Class::C, &[f(dg), f(t)], out, port_keq(dg, t), 35, KEQ_HOW);
+}
+
+pub fn dh_lim(m: &mut Module, z: i32, ii: f64, a: f64) {
+    let out = debye_huckel_limiting(bb(z), bb(ii), bb(a));
+    let name = "solution::debye_huckel_limiting";
+    noted_cls(m, name, Class::C, &[i(z), f(ii), f(a)], out, port_dh_lim(z, ii, a), 35, DH_HOW_MUL);
+}
+
+pub fn dh_ext(m: &mut Module, z: i32, ii: f64, a: f64, b: f64, s: f64) {
+    let out = debye_huckel_extended(bb(z), bb(ii), bb(a), bb(b), bb(s));
+    let (name, ins) = ("solution::debye_huckel_extended", [i(z), f(ii), f(a), f(b), f(s)]);
+    noted_cls(m, name, Class::C, &ins, out, port_dh_ext(z, ii, a, b, s), 35, DH_HOW_DIV);
+}
+
+pub fn davies(m: &mut Module, z: i32, ii: f64, a: f64) {
+    let out = davies_activity(bb(z), bb(ii), bb(a));
+    let name = "solution::davies_activity";
+    noted_cls(m, name, Class::C, &[i(z), f(ii), f(a)], out, port_davies(z, ii, a), 35, DH_HOW_MUL);
+}
+
+// ── B5's edge rows (appended to each module with their own seed, so the rows before keep theirs) ─────────────────
+
+/// T = k·2⁻¹⁰⁷⁴ with R·k = 2⁵² − 0.27…: R·T just below 2⁻¹⁰²², which IEEE rounds up to 2⁻¹⁰²² at the subnormal grid and
+/// 53-bit rounding to 2⁻¹⁰²² − 2⁻¹⁰⁷⁵ (the B4 pitfall of #29: a fast path must not take 2⁻¹⁰²² as normal).
+pub const KEQ_T_2M1022: u64 = 541_658_533_363_376;
+
+/// The two doubles I near 1.9404 where √I/(1 + √I) and 0.3·I round to the same double: Davies' bracket exactly 0.
+pub const DAVIES_ZERO_I: [f64; 2] = [1.940_363_884_733_242, 1.940_363_884_733_242_5];
+
+/// A charge for the activity models' edges: |z| ≥ 2 where `big` (A·z² can pass DBL_MAX), any i32 otherwise.
+fn charge(rng: &mut Rng, big: bool) -> i32 {
+    let mag = match rng.int(0, 3) {
+        0 => rng.int(2, 4),
+        1 => rng.int(5, 1000),
+        2 => rng.int(1001, 100_000),
+        _ => rng.int(100_001, i64::from(i32::MAX)),
+    };
+    let mag = if big { mag } else { mag - 1 };
+    let z = i32::try_from(mag).unwrap_or(2);
+    if rng.int(0, 1) == 0 { z } else { -z }
+}
+
+/// reaction's B5 rows: equilibrium_constant's R·T past DBL_MAX (T > 2.16·10³⁰⁷ K: Rust's x = ∓0, K = 1, where e^x with
+/// |x| < 1/R is the value) and subnormal (T < 2⁻¹⁰²¹/R: Rust's degraded x, K off, or Ok where the port's K overflows
+/// (Err) and the reverse), R·T at 2⁻¹⁰²² from below, subnormal and huge ΔG, x past ±DBL_MAX (K = ∞: Err, K = 0 in both),
+/// x subnormal (K = 1 in both), the boundaries T = DBL_MAX/R and 2⁻¹⁰²¹/R, and every binade of both inputs.
+pub fn emit_reaction_b5(m: &mut Module) {
+    let mut rng = Rng::new(0x6b35);
+    let tk = sub(KEQ_T_2M1022);
+    for (dg, t) in [
+        (-DMAX, DMAX),
+        (DMAX, DMAX),
+        (-1e308, DMAX),
+        (-DMAX, 1e308),
+        (1e308, 1e308),
+        (-DMAX, 2.2e307),
+        (-1e-320, 1e-322),
+        (1e-320, 1e-322),
+        (-1e-320, sub(1)),
+        (0.0, DMAX),
+        (-0.0, DMAX),
+        (0.0, sub(1)),
+        (-0.0, sub(1)),
+        (-DMAX, sub(1)),
+        (DMAX, sub(1)),
+        (-1.0, sub(1)),
+        (sub(1), DMAX),
+        (-sub(1), 1e-300),
+        (-sub(3), 1.0),
+        (-700.0 * pow2(-1022), tk),
+        (-pow2(-1022), tk),
+        (pow2(-1022), tk),
+        (-300.0 * pow2(-1022), tk),
+        (-3.0 * pow2(-1022), tk),
+    ] {
+        keq(m, dg, t);
+    }
+    // the boundaries: T around DBL_MAX/R (R·T at DBL_MAX) and around 2⁻¹⁰²¹/R (R·T at 2⁻¹⁰²¹), ulp by ulp
+    let t_ov = DMAX / GAS_CONSTANT;
+    let t_un = pow2(-1021) / GAS_CONSTANT;
+    for k in -3_i64..=3 {
+        let tv = f64::from_bits(t_ov.to_bits().wrapping_add_signed(k));
+        keq(m, -DMAX, tv);
+        keq(m, -0.5 * DMAX, tv);
+        let tu = f64::from_bits(t_un.to_bits().wrapping_add_signed(k));
+        for x in [1.0, 100.0, 700.0, -700.0] {
+            keq(m, -x * GAS_CONSTANT * tu, tu);
+        }
+    }
+    // R·T at 2⁻¹⁰²² from below, and its neighbours
+    for d in 0_u64..6 {
+        let t = sub(KEQ_T_2M1022 - 2 + d);
+        for x in [0.5, 2.0, 50.0, 709.0, -744.0] {
+            keq(m, -x * pow2(-1022), t);
+        }
+    }
+    for _ in 0..80 {
+        // R·T past DBL_MAX: |x| < 1/R, K in (e^(−1/R), e^(1/R)), Rust's K = 1
+        let t = DMAX * rng.uniform(0.121, 1.0);
+        let sg = if rng.int(0, 1) == 0 { 1.0 } else { -1.0 };
+        keq(m, sg * DMAX * rng.uniform(1e-3, 1.0), t);
+        keq(m, rng.signed_log_uniform(-323.0, 308.0), t);
+        // R·T subnormal: ΔG = −x·R·T for a target x across exp's range
+        let t = rng.log_uniform(-323.3, -308.3);
+        let x = rng.uniform(-750.0, 715.0);
+        keq(m, -x * GAS_CONSTANT * t, t);
+        // near the overflow and underflow ends at a subnormal T: Rust's K Ok where the port's overflows, and the reverse
+        let t = rng.log_uniform(-323.3, -308.3);
+        let x = if rng.int(0, 1) == 0 { rng.uniform(709.0, 710.5) } else { rng.uniform(-746.0, -744.0) };
+        keq(m, -x * GAS_CONSTANT * t, t);
+    }
+    // a short subnormal T = k·2⁻¹⁰⁷⁴ and ΔG = −n·2⁻¹⁰⁷⁴ between the two ends' thresholds as Rust's R·T (k·R rounded to an
+    // integer) and the port's (rounded to 53 bits) place them: K overflows (Err) in one and not the other, or is 0 in
+    // one and subnormal in the other
+    for _ in 0..60 {
+        let k = u64::try_from(rng.int(1, 1 << 24)).unwrap_or(1);
+        #[allow(clippy::cast_precision_loss)] // k < 2²⁴, exact
+        let rk53 = GAS_CONSTANT * k as f64;
+        #[allow(clippy::cast_precision_loss)] // the subnormal's integer, below 2²⁸: exact
+        let rki = (GAS_CONSTANT * sub(k)).to_bits() as f64;
+        let mid = 0.5 * (rk53 + rki);
+        for (xe, sg) in [(709.782_712_893_384, -1.0), (745.133_219_101_941_1, 1.0)] {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // below 2⁴⁰, non-negative
+            let n = (xe * mid).floor() as u64 + u64::try_from(rng.int(0, 1)).unwrap_or(0);
+            keq(m, sg * sub(n), sub(k));
+        }
+    }
+    for _ in 0..40 {
+        // subnormal T against a huge or subnormal ΔG: x past ±DBL_MAX (K = ∞: Err, or 0), or ordinary
+        let t = rng.log_uniform(-323.3, -308.3);
+        keq(m, rng.signed_log_uniform(-323.0, 308.0), t);
+        // x subnormal: K = 1 in both
+        keq(m, rng.signed_log_uniform(-323.3, -300.0), rng.log_uniform(1.0, 300.0));
+    }
+    for _ in 0..60 {
+        // every binade of both inputs
+        keq(m, rng.signed_log_uniform(-323.3, 308.2), rng.log_uniform(-323.3, 308.2));
+    }
+}
+
+/// solution's B5 rows: the limiting law's and Davies' A·z² past DBL_MAX at I = ±0 (Rust's ∞·0 = NaN, γ = 1) and with √I
+/// or the bracket bringing it back (beyond ±2⁴⁸⁴: Rust's γ = ∞ or 0 in both), A·z² at DBL_MAX ulp by ulp, A·z²
+/// subnormal (exact in both), Davies' bracket exactly 0 (I = 1.9404…, Rust's NaN against an overflowing A·z²) and
+/// negative; the extended law's B·å and (B·å)·√I past DBL_MAX (Rust's γ = 1 where log₁₀ γ is finite, or NaN at I = 0),
+/// A·z² and the numerator past DBL_MAX with the denominator bringing them back (Rust's γ = 0 or ∞, or ∞/∞ = NaN), the
+/// numerator and B·å subnormal (γ = 1, or the denominator 1, in both), B and å ±0; and every binade of every input.
+#[allow(clippy::too_many_lines)] // one function after another
+pub fn emit_solution_b5(m: &mut Module) {
+    let mut rng = Rng::new(0x5035);
+    for (z, ii, a) in [
+        (100_000, 0.0, 1e300),
+        (100_000, -0.0, 1e300),
+        (100_000, 0.0, -1e300),
+        (i32::MAX, 0.0, 1e290),
+        (i32::MIN, -0.0, -DMAX),
+        (1, 0.0, DMAX),
+        (-1, 0.0, -DMAX),
+        (2, 0.0, DMAX),
+        (-3, 0.0, -0.25 * DMAX),
+        (2, 1e-300, DMAX),
+        (2, sub(1), DMAX),
+        (2, 1.0, DMAX),
+        (i32::MAX, sub(1), DMAX),
+        (1, 0.01, sub(3)),
+        (3, 0.5, sub(1)),
+        (46_341, 1.0, 1e-320),
+        (0, 0.0, DMAX),
+        (0, 1.0, DMAX),
+    ] {
+        dh_lim(m, z, ii, a);
+        davies(m, z, ii, a);
+    }
+    for ii in DAVIES_ZERO_I {
+        for (z, a) in [(2, DMAX), (-2, -DMAX), (100_000, 1e300), (1, 0.509), (i32::MIN, 1.0)] {
+            davies(m, z, ii, a);
+            dh_lim(m, z, ii, a);
+        }
+    }
+    // A·z² at DBL_MAX, ulp by ulp, at I = 0 (Rust's NaN only past it)
+    for z in [2_i32, 3, 46_341, 100_000] {
+        let zf = f64::from(z);
+        let a0 = DMAX / zf / zf;
+        for k in -2_i64..=2 {
+            let a = f64::from_bits(a0.to_bits().wrapping_add_signed(k));
+            dh_lim(m, z, 0.0, a);
+            davies(m, -z, -0.0, -a);
+        }
+    }
+    for _ in 0..80 {
+        // A·z² past DBL_MAX: at I = ±0 (Rust's NaN), past it (the argument beyond ±2⁴⁸⁴: Rust's γ in both)
+        let z = charge(&mut rng, true);
+        let zf = f64::from(z);
+        let lo = (DMAX / zf / zf).min(DMAX);
+        let sg = if rng.int(0, 1) == 0 { 1.0 } else { -1.0 };
+        let a = sg * (lo * rng.uniform(1.0001, 4.0)).min(DMAX);
+        let ii = match rng.int(0, 3) {
+            0 => 0.0,
+            1 => -0.0,
+            2 => DAVIES_ZERO_I[usize::try_from(rng.int(0, 1)).unwrap_or(0)],
+            _ => rng.log_uniform(-323.3, 308.2),
+        };
+        dh_lim(m, z, ii, a);
+        davies(m, z, ii, a);
+        // Davies' bracket negative (I past 1.94) or tiny, against an ordinary or overflowing A·z²
+        let z = charge(&mut rng, false);
+        let ii = if rng.int(0, 1) == 0 { rng.uniform(1.9, 2.0) } else { rng.log_uniform(0.3, 308.2) };
+        davies(m, z, ii, rng.signed_log_uniform(-1.0, 308.2));
+        // A·z² subnormal (exact in both)
+        let z = charge(&mut rng, false);
+        dh_lim(m, z, rng.log_uniform(-10.0, 10.0), rng.signed_log_uniform(-323.3, -310.0));
+        davies(m, z, rng.log_uniform(-10.0, 10.0), rng.signed_log_uniform(-323.3, -310.0));
+    }
+    for _ in 0..60 {
+        // every binade of every input
+        let z = charge(&mut rng, false);
+        let (ii, a) = (rng.log_uniform(-323.3, 308.2), rng.signed_log_uniform(-323.3, 308.2));
+        dh_lim(m, z, ii, a);
+        davies(m, z, ii, a);
+    }
+
+    for (z, ii, a, b, s) in [
+        (1, 1.0, 1e308, 1e155, 1e155),
+        (100_000, 1.0, 1e300, 1e154, 1e154),
+        (1, 0.0, 1.0, DMAX, 2.0),
+        (1, -0.0, 0.509, 1e200, 1e200),
+        (1, 0.0, 0.509, 1e200, 1e200),
+        (1, 1e20, 1e300, 1e298, 1.0),
+        (2, 1.0, DMAX, DMAX, DMAX),
+        (1, 1e-300, 1e300, 1e300, 1e300),
+        (1, 1.0, 1e300, 1e155, 1e155),
+        (100_000, 0.0, 1e300, 0.328, 3.0),
+        (100_000, -0.0, -1e300, 1e200, 1e200),
+        (1, 1.0, 1e308, 1e300, 1e300),
+        (1, 4.0, DMAX, DMAX, 1.0),
+        (1, 0.01, 0.509, -0.0, 3.0),
+        (1, 0.01, 0.509, 0.328, -0.0),
+        (1, -0.0, 0.509, -0.0, -0.0),
+        (1, 0.01, sub(1), 0.328, 3.0),
+        (2, sub(1), 1.0, 0.328, 3.0),
+        (1, 0.01, 0.509, sub(1), sub(1)),
+        (1, 1e300, 0.509, sub(5), 1e-300),
+        (0, 0.0, DMAX, DMAX, DMAX),
+        (0, 1.0, DMAX, DMAX, DMAX),
+    ] {
+        dh_ext(m, z, ii, a, b, s);
+    }
+    for _ in 0..80 {
+        // B·å past DBL_MAX, the numerator finite: log₁₀ γ ≈ ∓A·z²/(B·å) = ∓L (Rust's 10^(x/∞) = 1): A·z² = P in
+        // [10⁻⁵·DBL_MAX, DBL_MAX), L below P/DBL_MAX (so B·å = P/L passes DBL_MAX), split as r·u and r/u, √I ≤ 1
+        let z = charge(&mut rng, false);
+        let zf = f64::from(z);
+        let p = DMAX * rng.log_uniform(-5.0, 0.0);
+        let a = p / zf / zf * if rng.int(0, 1) == 0 { 1.0 } else { -1.0 };
+        let l = p / DMAX * rng.log_uniform(-6.0, 0.0);
+        let r = p.sqrt() / l.sqrt();
+        let u = rng.log_uniform(-3.0, 3.0);
+        dh_ext(m, z, rng.log_uniform(-100.0, 0.0), a, r * u, r / u);
+        // A·z² past DBL_MAX by a factor w below 100, the denominator finite and bringing it back (Rust's 10^(±∞/y) =
+        // ∞ or 0): B·å = |A|·z²/L = DBL_MAX·w/L with L over (w, 320), and √I in [1, L/w) so that (B·å)·√I is finite
+        let z = i32::try_from(rng.int(2, 10)).unwrap_or(2) * if rng.int(0, 1) == 0 { 1 } else { -1 };
+        let zf = f64::from(z);
+        let w = rng.uniform(1.01, 100.0);
+        let a = (DMAX / zf / zf * w).min(DMAX) * if rng.int(0, 1) == 0 { 1.0 } else { -1.0 };
+        let w = a.abs() / DMAX * zf * zf;
+        let l = rng.uniform(w * 1.01, 320.0);
+        let sq = rng.uniform(1.0, l / (1.01 * w));
+        let r = DMAX.sqrt() * (w / l).sqrt();
+        let u = rng.log_uniform(-3.0, 3.0);
+        dh_ext(m, z, sq * sq, a, r * u, r / u);
+        // A·z² past DBL_MAX, the denominator bringing it back: B·å·√I ≈ |A|·z²/L
+        let z = charge(&mut rng, true);
+        let zf = f64::from(z);
+        let a = DMAX * rng.uniform(0.3, 1.0) * if rng.int(0, 1) == 0 { 1.0 } else { -1.0 };
+        let ii = rng.log_uniform(-50.0, 50.0);
+        let l = rng.log_uniform(-3.0, 2.5);
+        let r = (a.abs().sqrt() * zf.abs()) / (l * ii.sqrt()).sqrt();
+        let u = rng.log_uniform(-3.0, 3.0);
+        if (r * u).is_finite() && (r / u).is_finite() {
+            dh_ext(m, z, ii, a, r * u, r / u);
+        }
+        // the numerator past DBL_MAX with A·z² finite: (A·z²)·√I overflows, B·å·√I brings it back
+        let z = charge(&mut rng, false);
+        let zf = f64::from(z);
+        let a = (DMAX / zf / zf) * rng.uniform(0.01, 1.0) * if rng.int(0, 1) == 0 { 1.0 } else { -1.0 };
+        let ii = rng.log_uniform(1.0, 300.0);
+        let b = rng.log_uniform(-1.0, 308.0);
+        dh_ext(m, z, ii, a, b, rng.log_uniform(-1.0, 308.0));
+        // I = ±0 with B·å or A·z² past DBL_MAX (Rust's ∞·0 = NaN, γ = 1)
+        let z = charge(&mut rng, true);
+        let ii = if rng.int(0, 1) == 0 { 0.0 } else { -0.0 };
+        let a = rng.signed_log_uniform(250.0, 308.2);
+        dh_ext(m, z, ii, a, rng.log_uniform(154.5, 308.2), rng.log_uniform(154.5, 308.2));
+    }
+    for _ in 0..40 {
+        // the numerator or B·å subnormal (γ = 1, or the denominator 1, in both)
+        let z = charge(&mut rng, false);
+        let ii = rng.log_uniform(-323.3, 0.0);
+        dh_ext(m, z, ii, rng.signed_log_uniform(-323.3, -300.0), rng.log_uniform(-10.0, 1.0), rng.log_uniform(0.0, 1.0));
+        dh_ext(m, z, rng.log_uniform(-5.0, 300.0), 0.509, rng.log_uniform(-323.3, -310.0), rng.log_uniform(-10.0, 0.0));
+    }
+    for _ in 0..60 {
+        // every binade of every input
+        let z = charge(&mut rng, false);
+        let ii = rng.log_uniform(-323.3, 308.2);
+        let a = rng.signed_log_uniform(-323.3, 308.2);
+        dh_ext(m, z, ii, a, rng.log_uniform(-323.3, 308.2), rng.log_uniform(-323.3, 308.2));
+    }
+    // the argument's final product a 53-bit midpoint (A·z²·√I = (2⁵³ + 1)·2^k with √I = 3·2^j, A = y·2^i, 3y = 2⁵³ + 1):
+    // in range, Rust's own tie (rounded to even in both evaluations); past DBL_MAX, the slow path's tie (γ = ∞ or 0)
+    let y = 3_002_399_751_580_331.0;
+    for (z, i, j) in [(1, -50, 0), (1, -52, 1), (-1, -49, -1), (2, -54, 2), (2, 971, -400), (-2, 970, -500)] {
+        let (a, sq) = (y * pow2(i), 3.0 * pow2(j));
+        dh_lim(m, z, sq * sq, a);
+        dh_lim(m, z, sq * sq, -a);
     }
 }
