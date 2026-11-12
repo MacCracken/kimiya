@@ -1254,6 +1254,103 @@ fn _t_cyrius_shomate_struct() {
     assert_eq(ulp_is_inf(cp0), 1, "CO2 at T = 0: E/0 is infinite");
 }
 
+# The f64 whose bit pattern is `bits`.
+#must_use
+fn _b4_fbits(bits): f64 {
+    var x: f64 = 0.0;
+    store64(&x, bits);
+    return x;
+}
+
+# ADR 0002 #33 (the overflow audit's B4): the reaction sums' products past DBL_MAX that cancel (Rust's ∞ − ∞ = NaN, the
+# golden rows the survey found), a subnormal product rounded twice by Rust (then × 1000), a non-finite coefficient
+# (Rust's), and Rust's Err order.
+fn _t_cyrius_adr33_reaction_sums() {
+    test_group("cyrius_adr33_reaction_sums");
+    var big: f64 = _b4_fbits(0x7FE1CCF385EBC8A0);   # 1e308
+    var p = sp1("Al2O3(s)", big);
+    var t1, v1 = reaction_enthalpy(p, 1, p, 1);
+    assert(is_ok(t1) == 1 && v1 == 0, "[Al₂O₃ ×10³⁰⁸] → [Al₂O₃ ×10³⁰⁸]: ΔH = +0 (Rust's ∞ − ∞ = NaN)");
+    var t2, v2 = reaction_gibbs_energy(p, 1, p, 1);
+    assert(is_ok(t2) == 1 && v2 == 0, "… ΔG = +0");
+    var e306: f64 = _b4_fbits(0x7F96C8E5CA239029);  # 4e306: × 50.92 J/(mol·K) is past DBL_MAX
+    var q = sp2("Al2O3(s)", e306, "Al2O3(s)", e306);
+    var t3, v3 = reaction_entropy(q, 2, q, 2);
+    assert(is_ok(t3) == 1 && v3 == 0, "ΔS of two equal sums past DBL_MAX: +0");
+    var s1: f64 = _b4_fbits(1);
+    var c = sp1("CO2(g)", s1);
+    var t4, v4 = reaction_enthalpy(c, 1, c, 0);
+    var msg4 = "5·10⁻³²⁴·(−393.51)·1000 rounded once (Rust rounds the product first)";
+    assert(is_ok(t4) == 1 && v4 == 0x8000000000060126, msg4);
+    var inf: f64 = 1.0 / 0.0;
+    var i = sp1("CO2(g)", inf);
+    var t5, v5 = reaction_enthalpy(i, 1, i, 1);
+    assert(is_ok(t5) == 1 && ulp_is_nan(v5) == 1, "a non-finite coefficient: Rust's ∞ − ∞ = NaN");
+    var x = sp2("XeF6(g)", 1.0, "CO2(g)", big);
+    var t6, v6 = reaction_enthalpy(x, 2, p, 1);
+    assert(is_ok(t6) != 1 && v6 == KM_ERR_INVALID_REACTION, "an unknown formula: Rust's Err, first");
+}
+
+# ADR 0002 #34 (the overflow audit's B4): the Shomate polynomials with user coefficients — T → 0 (Rust's 0/0 = NaN where
+# Cp = A), a subnormal T (Rust's NaN where H is 1.04·10⁻³²²), large T (Rust's ∞ − ∞ = NaN where the value is −∞), an
+# exact cancellation of two terms past DBL_MAX at t = 2⁶⁰⁰ (Rust's sequence: A is absorbed first, so +0), T = 0 and
+# non-finite T (Rust's), and every SHOMATE_DATA segment over its range in the fast path (the box), equal to the
+# unbounded evaluation.
+fn _t_cyrius_adr34_shomate() {
+    test_group("cyrius_adr34_shomate");
+    var ar = KmShomate { a: 20.786, b: 0.0, c: 0.0, d: 0.0, e: 0.0, t_min: 298.0, t_max: 6000.0 };
+    var tiny: f64 = _b4_fbits(0x01A56E1FC2F8F359);  # 1e-300
+    var c1: f64 = ar.cp(tiny);
+    assert_eq(_km_bits(c1), 0x4034C9374BC6A7F0, "Cp(10⁻³⁰⁰ K) = 20.786 (Rust's 0/0 = NaN)");
+    var s1: f64 = _b4_fbits(1);
+    var h1: f64 = ar.enthalpy_antiderivative(s1);
+    assert_eq(_km_bits(h1), 0x0000000000000015, "H(5·10⁻³²⁴ K) = 20.786·5·10⁻³²⁴ = 1.04·10⁻³²² (Rust's NaN)");
+    var c0: f64 = ar.cp(0.0);
+    assert_eq(ulp_is_nan(_km_bits(c0)), 1, "Cp(0) = A + 0/0: Rust's NaN (exact in both evaluations)");
+    var w = shomate_of("H2O(g)");
+    var big: f64 = _b4_fbits(0x7E37E43C8800759C);   # 1e300
+    var c2: f64 = w.cp(big);
+    assert_eq(_km_bits(c2), 0xFFF0000000000000, "H₂O(g)'s Cp at 10³⁰⁰ K: −∞ (Rust's ∞ − ∞ = NaN)");
+    var p600: f64 = _b4_fbits(0x1A70000000000000);  # 2⁻⁶⁰⁰
+    var np600: f64 = -p600;
+    var x = KmShomate { a: 5.0, b: 0.0, c: 1.0, d: np600, e: 0.0, t_min: 298.0, t_max: 6000.0 };
+    var t600: f64 = _b4_fbits(0x660F400000000000);  # 125·2⁶⁰³: t = 2⁶⁰⁰ exactly
+    var c3: f64 = x.cp(t600);
+    assert_eq(_km_bits(c3), 0, "t = 2⁶⁰⁰: (5 + t²) − t² = +0 in Rust's order with 53 bits (Rust's ∞ − ∞ = NaN)");
+    var inf: f64 = 1.0 / 0.0;
+    var c4: f64 = w.cp(inf);
+    var r4: f64 = _km_shomate_cp_ux(30.092, 6.832514, 6.793435, -2.53448, 0.082139, 1000.0);
+    assert(ulp_is_nan(_km_bits(c4)) == 1 && r4 > 0.0, "T = ∞: Rust's chain (its NaN)");
+    var bad = 0;
+    var slow = 0;
+    var h = 1;
+    while (h <= KM_SHOMATE_COUNT) {
+        var s = shomate_data_coeffs(h);
+        var lo: f64 = s.t_min;
+        var hi: f64 = s.t_max;
+        var k = 0;
+        while (k <= 64) {
+            var kf: f64 = f64_from(k);
+            var t: f64 = lo + ((hi - lo) * kf) / 64.0;
+            var inb = _km_shomate_box(s.a, s.b, s.c, s.d, s.e, t);
+            if (inb != 1) { slow = slow + 1; }
+            var ra: f64 = _km_shomate_row_cp(h - 1, t);
+            var rb: f64 = _km_shomate_row_h(h - 1, t);
+            var fa, oa = _km_shomate_cp_fast(s.a, s.b, s.c, s.d, s.e, t);
+            var fb, ob = _km_shomate_h_fast(s.a, s.b, s.c, s.d, s.e, t);
+            if (oa != 1 || ob != 1) { slow = slow + 1; }
+            var ua: f64 = _km_shomate_cp_ux(s.a, s.b, s.c, s.d, s.e, t);
+            var ub: f64 = _km_shomate_h_ux(s.a, s.b, s.c, s.d, s.e, t);
+            if (_km_bits(fa) != _km_bits(ua) || _km_bits(fb) != _km_bits(ub)) { bad = bad + 1; }
+            if (_km_bits(ra) != _km_bits(ua) || _km_bits(rb) != _km_bits(ub)) { bad = bad + 1; }
+            k = k + 1;
+        }
+        h = h + 1;
+    }
+    assert_eq(slow, 0, "every SHOMATE_DATA segment over its range is in the box (the table-row path's inline test)");
+    assert_eq(bad, 0, "… where Rust's chain, the row path's included, is the unbounded-exponent evaluation");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_lookup_water_liquid();
@@ -1324,6 +1421,8 @@ fn main() {
     _t_cyrius_flame_solver();
     _t_cyrius_long_product_list();
     _t_cyrius_shomate_struct();
+    _t_cyrius_adr33_reaction_sums();
+    _t_cyrius_adr34_shomate();
     return assert_summary();
 }
 

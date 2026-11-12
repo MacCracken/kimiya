@@ -8,17 +8,22 @@
 //!   ends and zero, the Rust tests' values, and a seeded sweep of x over −760…720; then (ADR 0006
 //!   item 6, M3c-3) the subnormal results densely, on targets at five temperatures and seeded.
 //! - `reaction::is_spontaneous` (class A, `i:0/1`): the special values and both signs.
+//! - ADR 0002 #33 (the overflow audit's B4): `gibbs_free_energy` rows are noted where Rust's ΔH − T·ΔS with an
+//!   unbounded exponent (the final subtraction rounded once) differs from Rust's value (`audit.rs`), and
+//!   `audit::emit_reaction` appends its edge rows (T·ΔS past DBL_MAX or below 2⁻¹⁰²², ΔH bringing it back) with its own
+//!   seed.
 //!
 //! Every input goes through `black_box`, so each row is a run-time call (the transcendental bits
 //! are glibc's, never a compile-time fold).
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::grids::{EXP_SUBNORMAL_X, Rng, specials};
 use crate::tsv::{Class, Module, Tok, b, err, f};
 use kimiya::element::GAS_CONSTANT;
 use kimiya::error::KimiyaError;
-use kimiya::reaction::{equilibrium_constant, gibbs_free_energy, is_spontaneous};
+use kimiya::reaction::{equilibrium_constant, is_spontaneous};
 
 pub fn res(r: Result<f64, KimiyaError>) -> Tok {
     r.map_or_else(|e| err(&e), f)
@@ -34,10 +39,7 @@ pub fn edges() -> Vec<f64> {
 
 pub fn emit() -> Module {
     let mut m = Module::new("reaction");
-    let gibbs = |m: &mut Module, h: f64, t: f64, s: f64| {
-        let out = res(gibbs_free_energy(bb(h), bb(t), bb(s)));
-        m.row("reaction::gibbs_free_energy", Class::B, &[f(h), f(t), f(s)], &[out]);
-    };
+    let gibbs = audit::gibbs;
     for x in edges() {
         gibbs(&mut m, -100_000.0, x, -200.0);
         gibbs(&mut m, x, 298.0, -200.0);
@@ -122,5 +124,6 @@ pub fn emit() -> Module {
     for x in probes {
         m.row("reaction::is_spontaneous", Class::A, &[f(x)], &[b(is_spontaneous(bb(x)))]);
     }
+    audit::emit_reaction(&mut m);
     m
 }

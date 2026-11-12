@@ -742,6 +742,68 @@ fn _t_cyrius_adr29() {
     assert_eq(bad, 0, "dilution and solution_conductivity = the exact path on 5,000 seeded triples");
 }
 
+# ADR 0002 #33 (the overflow audit's B4): ionic_strength's term past DBL_MAX whose half is finite (Rust's ∞), terms of
+# opposite infinities (Rust's NaN, the value 0); kohlrausch_molar_conductivity's K·√c past DBL_MAX (Rust's −∞);
+# limiting_molar_conductivity's products past DBL_MAX that cancel (Rust's ∞); the fast paths against the slow paths on
+# 3,000 seeded inputs.
+fn _t_cyrius_adr33_solution() {
+    test_group("cyrius_adr33_solution");
+    var dmax: f64 = fbits(0x7FEFFFFFFFFFFFFF);
+    var ions: i64[6];
+    var c: f64 = 0.4 * dmax;
+    store64(&ions, _km_bits(c));
+    store64(&ions + 8, 2);
+    var i1: f64 = ionic_strength(&ions, 1);
+    assert_eq(_km_bits(i1), 0x7FE9999999999999, "½·(0.4·DBL_MAX)·2² = 1.44·10³⁰⁸ (Rust's ∞)");
+    var nd: f64 = -dmax;
+    store64(&ions, _km_bits(dmax));
+    store64(&ions + 16, _km_bits(nd));
+    store64(&ions + 24, 2);
+    var i2: f64 = ionic_strength(&ions, 2);
+    assert_eq(_km_bits(i2), 0, "½·(4·DBL_MAX − 4·DBL_MAX) = +0 (Rust's ∞ − ∞ = NaN)");
+    var t1, v1 = kohlrausch_molar_conductivity(dmax, dmax, 1.21);
+    assert(is_ok(t1) == 1 && v1 == 0xFFB9999999999998, "DBL_MAX − 1.1·DBL_MAX = −1.80·10³⁰⁷ (Rust's −∞)");
+    var l1: f64 = limiting_molar_conductivity(dmax, 1.5, nd, 1.0);
+    assert_eq(_km_bits(l1), 0x7FDFFFFFFFFFFFFE, "1.5·DBL_MAX − DBL_MAX = 8.99·10³⁰⁷ (Rust's ∞)");
+    var inf: f64 = 1.0 / 0.0;
+    var l2: f64 = limiting_molar_conductivity(inf, 0.0, 1.0, 1.0);
+    assert_eq(ulp_is_nan(_km_bits(l2)), 1, "0·∞: Rust's NaN (a non-finite input keeps Rust's expression)");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var took = 0;
+    var w: f64[4];
+    var k = 0;
+    while (k < 3000) {
+        var j = 0;
+        while (j < 4) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            store64(&w + 8 * j, ((st >> 2) % 0x7FE0000000000000) | ((st & 1) << 63));
+            j = j + 1;
+        }
+        var a: f64 = load64(&w);
+        var b: f64 = load64(&w + 8);
+        var cc: f64 = f64_abs(load64(&w + 16));
+        var d: f64 = load64(&w + 24);
+        var kf, ko = _km_kohlrausch_fast(a, b, cc);
+        if (ko == 1) {
+            took = took + 1;
+            var ku: f64 = _km_kohlrausch_ux(a, b, cc);
+            if (_km_bits(kf) != _km_bits(ku)) { bad = bad + 1; }
+        }
+        var lf, lo = _km_limiting_fast(a, b, cc, d);
+        if (lo == 1) {
+            took = took + 1;
+            var lu: f64 = _km_limiting_ux(a, b, cc, d);
+            if (_km_bits(lf) != _km_bits(lu)) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "Rust's chain = the unbounded-exponent evaluation wherever the fast tests pass");
+    assert(took > 2000, "the fast tests pass on most seeded inputs");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_pure_water_ph();
@@ -799,6 +861,7 @@ fn main() {
     _t_cyrius_henderson_log10();
     _t_cyrius_constants();
     _t_cyrius_adr29();
+    _t_cyrius_adr33_solution();
     return assert_summary();
 }
 

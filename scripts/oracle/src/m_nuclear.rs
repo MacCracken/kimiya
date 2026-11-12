@@ -28,6 +28,9 @@
 //!   with an unbounded exponent (the final division rounded once) differs from Rust's value (`audit.rs`: none of the
 //!   rows above), and `audit::emit_nuclear` appends its edge rows (Δm·931.494… past DBL_MAX, A bringing it back) with its
 //!   own seed.
+//! - ADR 0002 #33 (the overflow audit's B4): `q_value` rows are noted where Rust's two sums and their difference with an
+//!   unbounded exponent (the final subtraction rounded once) differ from Rust's value (`audit.rs`), and
+//!   `audit::emit_nuclear_b4` appends its edge rows (sums past DBL_MAX that cancel) with its own seed.
 //!
 //! Every input goes through `black_box`; grid inputs use only exact or correctly rounded operations (`grids.rs`).
 
@@ -42,7 +45,7 @@ use kimiya::error::KimiyaError;
 use kimiya::nuclear::{
     ISOTOPES, Isotope, activity, atoms_after_half_lives, atoms_remaining, binding_energy_mev,
     decay_chain_two_step, decay_constant, is_secular_equilibrium, lookup_isotope,
-    mass_defect, q_value, semi_empirical_binding_energy, time_for_fraction,
+    mass_defect, semi_empirical_binding_energy, time_for_fraction,
 };
 
 /// An isotope's five fields, in declaration order.
@@ -586,12 +589,11 @@ pub fn emit() -> Module {
 
     // ── q_value ──
     let qv = |m: &mut Module, r: &[f64], p: &[f64]| {
-        let out = q_value(bb(r), bb(p));
         let mut ins = vec![Tok::V(r.len())];
         ins.extend(r.iter().map(|&x| f(x)));
         ins.push(Tok::V(p.len()));
         ins.extend(p.iter().map(|&x| f(x)));
-        m.row("nuclear::q_value", Class::B, &ins, &[f(out)]);
+        audit::qv(m, &ins, r, p);
     };
     qv(&mut m, &[2.014_10, 3.016_05], &[4.002_60, 1.008_66]); // the Rust tests: D + T → He-4 + n, and back
     qv(&mut m, &[4.002_60, 1.008_66], &[2.014_10, 3.016_05]);
@@ -854,5 +856,6 @@ pub fn emit() -> Module {
         lookup(&mut m, sym);
     }
     audit::emit_nuclear(&mut m);
+    audit::emit_nuclear_b4(&mut m);
     m
 }

@@ -641,6 +641,37 @@ fn _t_cyrius_adr32_born_lande() {
     assert_eq(bad, 0, "the fast path takes every in-range salt and equals the unbounded slow path (5,000)");
 }
 
+# The f64 whose bit pattern is `bits`.
+#must_use
+fn _b4_fbits(bits): f64 {
+    var x: f64 = 0.0;
+    store64(&x, bits);
+    return x;
+}
+
+# ADR 0002 #33 (the overflow audit's B4): born_haber_lattice_energy's differences past DBL_MAX that later terms bring
+# back (Rust's +∞), an odd subnormal ΔH_diss whose half Rust rounds (to even) before the subtraction, the sign of a
+# zero.
+fn _t_cyrius_adr33_born_haber() {
+    test_group("cyrius_adr33_born_haber");
+    var dmax: f64 = _b4_fbits(0x7FEFFFFFFFFFFFFF);
+    var nd: f64 = -dmax;
+    var u1: f64 = born_haber_lattice_energy(dmax, nd, dmax, 0.0, 0.0);
+    assert_eq(_km_bits(u1), 0x7FEFFFFFFFFFFFFF, "DBL_MAX + DBL_MAX − DBL_MAX = DBL_MAX (Rust's +∞)");
+    var s1: f64 = _b4_fbits(1);
+    var s5: f64 = _b4_fbits(5);
+    var u2: f64 = born_haber_lattice_energy(s1, 0.0, 0.0, s5, 0.0);
+    assert_eq(_km_bits(u2), 0x8000000000000002, "2⁻¹⁰⁷⁴ − 2.5·2⁻¹⁰⁷⁴ = −1.5·2⁻¹⁰⁷⁴: −2·2⁻¹⁰⁷⁴ (Rust's −2⁻¹⁰⁷⁴)");
+    var u3: f64 = born_haber_lattice_energy(0.0, 0.0, 0.0, s1, 0.0);
+    assert_eq(_km_bits(u3), 0x8000000000000000, "−2⁻¹⁰⁷⁵ rounds to −0 (Rust's +0: its half is +0)");
+    var u4: f64 = born_haber_lattice_energy(-411.2, 107.3, 495.8, 243.4, -349.0);
+    var want: f64 = (((-411.2 - 107.3) - 495.8) - 121.7) + 349.0;
+    assert_eq(_km_bits(u4), _km_bits(want), "NaCl's cycle: Rust's chain");
+    var inf: f64 = 1.0 / 0.0;
+    var u5: f64 = born_haber_lattice_energy(inf, inf, 0.0, 0.0, 0.0);
+    assert_eq(ulp_is_nan(_km_bits(u5)), 1, "∞ − ∞ of non-finite inputs: Rust's NaN");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_cfse_d0();
@@ -681,6 +712,7 @@ fn main() {
     _t_cyrius_cfse_exact();
     _t_cyrius_exact_delta_tet();
     _t_cyrius_adr32_born_lande();
+    _t_cyrius_adr33_born_haber();
     return assert_summary();
 }
 

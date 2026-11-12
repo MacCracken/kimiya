@@ -713,6 +713,54 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     `cyrius_adr32_born_lande`, `tests/nuclear.tcyr` `cyrius_adr32_bea` (the survey's edges, 1-ulp in-range cases, the
     co-volume flips, 5,000 seeded inputs against the slow paths); no Rust test changes; Cyrius-only benches for the nine
     functions without a Rust bench and eight edge and tie benches
+- **The library-wide overflow audit, B4** ([ADR 0002 #33 and #34](docs/adr/0002-port-api-divergences.md), B1's decisions
+  unchanged; port plan §6.4 "Decided in the overflow audit's B4"; the behaviour changes are under *Breaking*, #29's
+  correction under *Fixed*):
+  - **thermo** — `hess_law` and `enthalpy_from_formation` under #20's semantics: Rust's sums in Rust's order, from −0.0,
+    with an unbounded exponent (`_km_sum_ux`, `_km_sum_ux_f64`, `_km_formation_ux`), the final operation rounded once,
+    behind the pure-sum fast test "result finite" (a sum of doubles is exact below 2⁻¹⁰²¹, so only overflow leaves the
+    range; proven in the ADR) (#33)
+  - **thermochem** — `reaction_enthalpy`, `reaction_gibbs_energy` (#1's × 1000 the last operation) and
+    `reaction_entropy` likewise (`_km_sum_property` reports whether every product agreed; `_km_sum_property_ux`,
+    `_km_reaction_j_ux`, `_km_reaction_s_ux`) (#33); `KmShomate.cp` and `enthalpy_antiderivative` under #20's semantics
+    on Rust's evaluation order, a box test first (`_km_shomate_box`: |T| in [2⁻³⁰, 2³⁰], the coefficients in [2⁻²⁰⁰,
+    2²⁰⁰], every tabulated segment), then per-operation tests (`_km_shomate_cp_fast`, `_km_shomate_h_fast`) and the slow
+    paths (`_km_shomate_cp_ux`, `_km_shomate_h_ux`); the data-backed callers share the evaluation and stay in the box
+    (#34)
+  - **nuclear** — `q_value` (`_km_q_value_ux`); **solution** — `ionic_strength` (`_km_ionic_strength_ux`),
+    `kohlrausch_molar_conductivity` (`_km_kohlrausch_fast`, `_km_kohlrausch_ux`), `limiting_molar_conductivity`
+    (`_km_limiting_fast`, `_km_limiting_ux`); **inorganic** — `born_haber_lattice_energy` (`_km_born_haber_ux`);
+    **reaction** — `gibbs_free_energy` (`_km_gibbs_ux`); **kinetics** — `zero_order_concentration` (`_km_zero_order_ux`,
+    the clamp on the unbounded difference) (#33)
+  - generator: `scripts/oracle/src/audit.rs`'s B4 (the port's values independently: `exact::Ux` in Rust's summation
+    orders; Rust's validation replicated and asserted; #33's notes after #1's for the two J/mol sums; each module's B4
+    edge rows appended with their own seed: thermo +184, reaction +172, nuclear +88, solution +430, inorganic +170,
+    kinetics +171, thermochem +1,292; electrochemistry +23 for #29's correction)
+  - golden modules `thermo` 1,828, `reaction` 1,730, `nuclear` 54,312, `solution` 29,454, `inorganic` 15,586, `kinetics`
+    31,381, `thermochem` 11,149, `electrochemistry` 19,420 rows; the oracle's values kept, 924 rows noted with the
+    port's value — #33: 28 `hess_law`, 27 `enthalpy_from_formation`, 115 `reaction_enthalpy`, 113
+    `reaction_gibbs_energy`, 66 `reaction_entropy`, 58 `q_value`, 13 `ionic_strength`, 74 `born_haber_lattice_energy`,
+    57 `gibbs_free_energy`, 54 `kohlrausch_molar_conductivity`, 31 `limiting_molar_conductivity`, 61
+    `zero_order_concentration`; #34: 185 `cp`, 25 `enthalpy_antiderivative`; #29: 17 more `nernst_potential`; the
+    harness maps and counts them per function
+  - `validate.py` §22: every row of the fourteen functions recomputed through `mpfr_ref.UX` and the new `ux_sum` /
+    `ux_sum_final` (Rust's summation orders; `mpfr_ref.py` self-checks them), each note proven, no in-range row noted,
+    the pure-sum lemma checked partial sum by partial sum on 786 rows, the data-backed Shomate callers in the port's box
+    (every SHOMATE_DATA segment; the flame rows' 324,925 evaluations replayed); the shared tracer `_t_chk` (§16, §19,
+    §20) exact at 2⁻¹⁰²² (#29's correction)
+  - `cr_verify.py`: the twelve families `hess`, `eff`, `rsum`, `qv`, `ionic`, `haber`, `gibbs`, `kohl`, `lim`, `zoc`,
+    `shcp`, `shh` (1,250,069 arguments: the public function, the fast path, the slow path forced) and `nernst`'s
+    products at 2⁻¹⁰²² (2,800), on x86_64 ELF, x86_64 PE and aarch64; the probe includes `src/reaction.cyr` and
+    thermochem
+  - tests: `tests/thermo.tcyr` `cyrius_adr33_sums`, `tests/reaction.tcyr` `cyrius_adr33_gibbs`, `tests/nuclear.tcyr`
+    `cyrius_adr33_q_value`, `tests/solution.tcyr` `cyrius_adr33_solution`, `tests/inorganic.tcyr`
+    `cyrius_adr33_born_haber`, `tests/kinetics.tcyr` `cyrius_adr33_zero_order`, `tests/thermochem.tcyr`
+    `cyrius_adr33_reaction_sums` and `cyrius_adr34_shomate` (the survey's edges, Rust's results for non-finite inputs,
+    3,000 seeded inputs against the slow paths, every SHOMATE_DATA segment in the fast path),
+    `tests/electrochemistry.tcyr` `cyrius_adr29_2m1022`; no Rust test changes
+  - benches: the audit's Cyrius-only benches (B1–B4) move to the new `tests/audit.bcyr` (the user's decision of
+    2026-11-11, "Split the bench file"), names unchanged, B3's back at the standard iteration counts; B4 adds eleven
+    typical and twelve edge benches there
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -980,6 +1028,31 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   −8.37·10³⁰⁷, 1.2's −∞). The errors and their order are 1.2's throughout.
   *Migration:* none for code that compares with a tolerance or stays within the normal range.
 
+### Breaking (relative to Rust 1.2.0, ADR 0002 #33)
+- **thermo, thermochem, nuclear, solution, inorganic, reaction, kinetics** — `hess_law`, `enthalpy_from_formation`,
+  `reaction_enthalpy`, `reaction_gibbs_energy`, `reaction_entropy`, `q_value`, `ionic_strength`,
+  `born_haber_lattice_energy`, `gibbs_free_energy`, `kohlrausch_molar_conductivity`, `limiting_molar_conductivity` and
+  `zero_order_concentration` evaluate 1.2's operation sequence (its summation order, `.sum()` from −0.0 and
+  thermochem's `+=` from +0.0) with an unbounded exponent, the final operation rounded once: every input whose 1.2 chain
+  stays in the normal range keeps its bits (every physical input), and a partial sum or product past DBL_MAX that the
+  rest brings back gives the value (`hess_law([DBL_MAX, DBL_MAX, −DBL_MAX])` DBL_MAX, 1.2's +∞;
+  `reaction_enthalpy([Al₂O₃ ×10³⁰⁸] → [Al₂O₃ ×10³⁰⁸])` +0, 1.2's NaN; `q_value([M, M], [M, 0.999M])` 1.67·10³⁰⁸, 1.2's
+  NaN; `ionic_strength([(0.4·DBL_MAX, 2)])` 1.44·10³⁰⁸, 1.2's +∞; `gibbs_free_energy(DBL_MAX, 2, 0.75·DBL_MAX)`
+  −8.99·10³⁰⁷, 1.2's −∞; `zero_order_concentration(−DBL_MAX, −DBL_MAX, 1.5)` 8.99·10³⁰⁷, 1.2's +∞); a subnormal product
+  is not rounded twice (`reaction_enthalpy` of 5·10⁻³²⁴ CO₂ is 5·10⁻³²⁴·(−393.51)·1000 rounded once), and a zero keeps
+  the unbounded value's sign (`born_haber_lattice_energy(0, 0, 0, 2⁻¹⁰⁷⁴, 0)` −0, 1.2's +0; `zero_order_concentration`'s
+  clamp decides on the unbounded difference). A non-finite input keeps 1.2's result; the errors and their order are
+  1.2's.
+  *Migration:* none for code that compares with a tolerance or stays within the normal range.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #34)
+- **thermochem** — `KmShomate.cp` and `enthalpy_antiderivative` evaluate 1.2's polynomials in 1.2's order with an
+  unbounded exponent, the final addition (Cp) or product by 1000 (H) rounded once: every tabulated segment over its
+  range and every physical use keeps its bits (so `enthalpy_change_cp` and `adiabatic_flame_temperature` are unchanged),
+  and the edges of user coefficients are right — T → 0 (`Shomate{20.786, 0, 0, 0, 0}.cp(10⁻³⁰⁰)` 20.786, 1.2's NaN; its
+  antiderivative at 5·10⁻³²⁴ K 1.04·10⁻³²², 1.2's NaN), large T (H₂O(g)'s Cp at 10³⁰⁰ K −∞, 1.2's ∞ − ∞ = NaN). T = ±0
+  and non-finite inputs keep 1.2's results. *Migration:* none for temperatures within a fit's range.
+
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
@@ -1024,6 +1097,17 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   Their tests moved to the replacements (`tests/gas.tcyr`), their benches and `cr_verify.py`'s comparison went with them
 - **stoichiometry** (private, M4f-2): `_km_empirical_close`, Rust's |scaled − round(scaled)| ≤ 0.1 on a rounded ratio,
   replaced by ADR 0002 #26's exact tolerance test; its Cyrius-only test group became `cyrius_adr26_exact_tolerance`
+
+### Fixed
+- **electrochemistry** — `nernst_potential`'s fast path (ADR 0002 #29, the overflow audit's B2) accepted an intermediate
+  of exactly 2⁻¹⁰²², which can be the IEEE rounding of an exact value just below it: for a product c·ln Q in
+  [2⁻¹⁰²² − 2⁻¹⁰⁷⁵, 2⁻¹⁰²² − 2⁻¹⁰⁷⁶) it returned 1.2's value where #20's semantics differ (with E° an odd multiple of
+  2⁻¹⁰⁷⁴: `nernst_potential(5·10⁻³²⁴, 1, 5.1625987955063826·10⁻³⁰³, 1.0512872158898858)` is −0x0.ffffffffffffep-1022, B2
+  returned −0x0.fffffffffffffp-1022). The test's bound is now 2⁻¹⁰²¹, `_km_ux_normal`'s; 23 golden edge rows (17 noted)
+  and `tests/electrochemistry.tcyr`'s `cyrius_adr29_2m1022` cover it, and `validate.py`'s shared tracer is exact there.
+  B1's to B3's other fast paths were audited for the same bound: none has it (ADR 0002's B4 addition)
+- **mathx** — a comment on `osmotic_pressure`'s factors said R's odd part has 53 bits; it has 51 (the conclusion, no
+  midpoint, holds: with 1000's 7 bits the product has at least 57)
 
 ### Performance
 - `molecule/molecular_weight_glucose`: 121 ns → 26.7 ns (−78%; Rust 3.63 ns) by walking the atom buffer and
@@ -1138,6 +1222,17 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   217 → 187, Born–Landé 67 → 50; inlining `_km_ux_normal`'s bit test was measured (147 → 156 ns) and not kept. B3's
   seventeen benches run 100,000 × 20 calls in `tests/kimiya.bcyr`: at 1,000,000 × 20 the file passed `cyrius bench`'s
   default 300 s deadline (255 s before B3, 279 s now)
+- The overflow audit's B4, ADR 0002 #33 and #34 (Cyrius before → after, the same host): `reaction/gibbs_free_energy` 17
+  → 18 ns (Rust 1.75), `thermochem/reaction_enthalpy_ch4` 259 → 293 ns (Rust 38.58), `thermochem/shomate_cp` 15 → 32 ns
+  (Rust 2.34: the box test, inlining it measured 34 and 39 ns and not kept), `thermochem/enthalpy_change_cp` 171 → 171
+  ns (Rust 24.00) and `thermochem/adiabatic_flame_ch4_air` 3.40 → 3.29 µs (Rust 301.48 ns: the table-row path tests T
+  alone, inline), `electrochemistry/nernst_potential` 90 → 89 ns (Rust 6.42; #29's bound); Cyrius-only `hess_law` 13 →
+  15, `enthalpy_from_formation` 20 → 24, `reaction_gibbs_energy` 259 → 299, `reaction_entropy` 259 → 286, `q_value` 24 →
+  26, `ionic_strength` 24 → 31, `born_haber_lattice_energy` 10 → 14, `kohlrausch_molar_conductivity` 22 → 28,
+  `limiting_molar_conductivity` 10 → 24, `zero_order_concentration` 12 → 17, `shomate_enthalpy_antiderivative` 37 → 54
+  ns; the slow paths 117–587 ns (`hess_law_edge` 162, `reaction_enthalpy_edge` 587, `gibbs_free_energy_edge` 117), the
+  Shomate polynomials' 311 and 474 ns. The bench files split (the user's decision): `tests/kimiya.bcyr` 177 s (261 s
+  before), the new `tests/audit.bcyr` 189 s, B3's seventeen back at 1,000,000 × 20 calls with the same per-call figures
 
 ## [1.2.0] - 2026-11-08
 

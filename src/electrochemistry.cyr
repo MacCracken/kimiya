@@ -131,16 +131,22 @@ fn nernst_potential(standard_potential: f64, n_electrons, temperature_k: f64, re
 }
 
 # (E° − ((R·T)/(n·F))·l, 1), Rust's chain on validated inputs (n the electron count as a double, l = RN(ln Q)), when it
-# stays in the normal range: R·T in [2⁻¹⁰²², DBL_MAX], (R·T)/(n·F) at least 2⁻¹⁰²² (it is below DBL_MAX/F) and the
-# product with l at least 2⁻¹⁰²² in magnitude or l = 0 (the product an exact +0; it is below 1.2·10³⁰⁷, so finite). n·F
-# is always normal. Each operation is then the same one on the same operands as in the unbounded chain, and the final
-# subtraction of two doubles is rounded once in both (IEEE's overflow is the rounding past DBL_MAX, a subnormal
-# difference exact), so the result is _km_nernst_ux's. Otherwise (0, 0).
+# stays in the normal range: R·T, (R·T)/(n·F) and, unless l = 0, the product with l in [2⁻¹⁰²¹, DBL_MAX] in magnitude
+# (src/mathx.cyr's _km_ux_normal's range, tested inline; c is below DBL_MAX/F: an IEEE product or quotient that large is
+# the 53-bit rounding of an exact value above 2⁻¹⁰²², where binary64's rounding is the 53-bit one; 2⁻¹⁰²² itself is not,
+# since an exact value just below it rounds there at the subnormal grid but below it at 53 bits). l = 0 makes the
+# product an exact +0; it is below 1.2·10³⁰⁷, so finite; n·F is always normal. Each operation is then the same one on
+# the same operands as in the unbounded chain, and the final subtraction of two doubles is rounded once in both (IEEE's
+# overflow is the rounding past DBL_MAX, a subnormal difference exact), so the result is _km_nernst_ux's. Otherwise
+# (0, 0). B2's tests took 2⁻¹⁰²² itself as normal, so a product c·l in [2⁻¹⁰²² − 2⁻¹⁰⁷⁵, 2⁻¹⁰²² − 2⁻¹⁰⁷⁶), which IEEE
+# rounds up to 2⁻¹⁰²² and 53-bit rounding to 2⁻¹⁰²² − 2⁻¹⁰⁷⁵, kept Rust's value where #20's differs
+# (nernst_potential(5·10⁻³²⁴, 1, 5.1625987955063826·10⁻³⁰³, 1.0512872158898858) is −0x0.ffffffffffffep-1022, Rust's
+# −0x0.fffffffffffffp-1022): ADR 0002 #29's B4 correction.
 #must_use
 fn _km_nernst_fast(e0: f64, n: f64, t: f64, l: f64): (f64, i64) {
     var r: f64 = KM_GAS_CONSTANT;
     var f: f64 = KM_FARADAY;
-    var nmin: f64 = 0x0010000000000000;     # 2⁻¹⁰²²
+    var nmin: f64 = 0x0020000000000000;     # 2⁻¹⁰²¹, _km_ux_normal's bound (inline: R·T and c are positive)
     var dmax: f64 = 0x7FEFFFFFFFFFFFFF;
     var a: f64 = r * t;
     if (a < nmin || a > dmax) { return (0.0, 0); }

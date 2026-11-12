@@ -26,6 +26,10 @@
 //!   with an unbounded exponent (the final product rounded once) differs from Rust's value (`audit.rs`), and
 //!   `audit::emit_inorganic` appends its edge rows (the prefix past DBL_MAX or below 2⁻¹⁰²², brought back by e² and r₀)
 //!   with its own seed.
+//! - ADR 0002 #33 (the overflow audit's B4): `born_haber_lattice_energy` rows are noted where Rust's differences with
+//!   an unbounded exponent (the final subtraction rounded once) differ from Rust's value (`audit.rs`), and
+//!   `audit::emit_inorganic_b4` appends its edge rows (partial differences past ±DBL_MAX that later terms bring back)
+//!   with their own seed.
 //!
 //! Every input goes through `black_box`.
 
@@ -37,7 +41,7 @@ use crate::m_reaction::{edges, res};
 use crate::tsv::{Class, Module, Tok, b, e, err, f, i, s};
 use kimiya::inorganic::{
     BORN_EXP_AR, BORN_EXP_HE, BORN_EXP_KR, BORN_EXP_NE, BORN_EXP_XE, IONIC_RADII, IonicRadius, Ligand, MADELUNG_CSCL,
-    MADELUNG_FLUORITE, MADELUNG_NACL, MADELUNG_RUTILE, MADELUNG_ZNS, born_haber_lattice_energy,
+    MADELUNG_FLUORITE, MADELUNG_NACL, MADELUNG_RUTILE, MADELUNG_ZNS,
     cfse_octahedral, delta_tet_from_oct, lookup_ionic_radius, spin_only_moment,
     unpaired_electrons_oct,
 };
@@ -85,9 +89,7 @@ fn lande(m: &mut Module, madelung: f64, zc: u32, za: u32, r0: f64, n: f64) {
 }
 
 fn haber(m: &mut Module, x: [f64; 5]) {
-    let u = born_haber_lattice_energy(bb(x[0]), bb(x[1]), bb(x[2]), bb(x[3]), bb(x[4]));
-    let ins: Vec<Tok> = x.iter().map(|&v| f(v)).collect();
-    m.row("inorganic::born_haber_lattice_energy", Class::B, &ins, &[f(u)]);
+    audit::haber(m, x);
 }
 
 #[allow(clippy::too_many_lines)] // one function after another, in source order
@@ -281,5 +283,6 @@ pub fn emit() -> Module {
         }
     }
     audit::emit_inorganic(&mut m);
+    audit::emit_inorganic_b4(&mut m);
     m
 }

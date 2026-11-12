@@ -32,6 +32,11 @@
 //! - Class C: `vant_hoff_k` (one `exp`): each argument over the edges, the Rust tests' values, exp's
 //!   overflow and underflow, and a seeded sweep; and (ADR 0006 item 6, M3c-3) the hard rows where the exp
 //!   result is subnormal and K₁ scales it back into the normal range, hand-picked and seeded.
+//! - ADR 0002 #33 and #34 (the overflow audit's B4): `reaction_enthalpy`, `reaction_gibbs_energy` and
+//!   `reaction_entropy` rows (#33: Rust's sums with an unbounded exponent, the final subtraction rounded once, then
+//!   ADR 0002 #1's × 1000) and `Shomate::cp` and `Shomate::enthalpy_antiderivative` rows (#34: Rust's polynomial order
+//!   with an unbounded exponent, the final addition or product rounded once) are noted where the port's value differs
+//!   from Rust's (`audit.rs`), and `audit::emit_thermochem` appends their edge rows with their own seed.
 //!
 //! **Solver paths.** `flame_replica` re-implements the flame solver from the public API (`SHOMATE_DATA`,
 //! `Shomate::cp`, `Shomate::enthalpy_antiderivative`, and hisab 1.4.0's `newton_raphson` and `bisection`
@@ -41,6 +46,7 @@
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::grids::{EXP_SUBNORMAL_X, Rng, specials, subnormal_prefactors};
 use crate::m_reaction::{edges, res};
 use crate::t_thermochem::shomate_fields;
@@ -49,8 +55,7 @@ use kimiya::element::GAS_CONSTANT;
 use kimiya::error::KimiyaError;
 use kimiya::thermochem::{
     SHOMATE_DATA, Shomate, THERMOCHEM_DATA, adiabatic_flame_temperature, enthalpy_change_cp,
-    lookup_shomate, lookup_shomate_at, lookup_thermochem, reaction_enthalpy, reaction_entropy,
-    reaction_gibbs_energy, vant_hoff_k,
+    lookup_shomate, lookup_shomate_at, lookup_thermochem, reaction_enthalpy, vant_hoff_k,
 };
 
 type Species = Vec<(String, f64)>;
@@ -282,18 +287,11 @@ fn flame(m: &mut Module, paths: &mut Paths, dh: f64, products: &Species, t0: f64
 
 // ── reaction sums ───────────────────────────────────────────────────────────────────
 
-const ADR1: &str = "J/mol: the oracle's kJ/mol result × 1000.0 (ADR 0002 #1)";
-
 fn sums(m: &mut Module, prod: &Species, reac: &Species) {
     let (p, r) = (borrow(prod), borrow(reac));
     let mut ins = species_toks(prod);
     ins.extend(species_toks(reac));
-    let h = res(reaction_enthalpy(bb(&p), bb(&r)).map(|kj| kj * 1000.0));
-    m.row_noted("thermochem::reaction_enthalpy", Class::B, &ins, &[h], ADR1);
-    let g = res(reaction_gibbs_energy(bb(&p), bb(&r)).map(|kj| kj * 1000.0));
-    m.row_noted("thermochem::reaction_gibbs_energy", Class::B, &ins, &[g], ADR1);
-    let e = res(reaction_entropy(bb(&p), bb(&r)));
-    m.row("thermochem::reaction_entropy", Class::B, &ins, &[e]);
+    audit::sums(m, &ins, &p, &r);
 }
 
 fn coefficient(rng: &mut Rng) -> f64 {
@@ -350,10 +348,7 @@ fn shomate_rows(m: &mut Module, x: &Shomate, temps: &[f64]) {
     for &t in temps {
         let mut ins = shomate_toks(x);
         ins.push(f(t));
-        let cp = bb(x).cp(bb(t));
-        m.row("Shomate::cp", Class::B, &ins, &[f(cp)]);
-        let h = bb(x).enthalpy_antiderivative(bb(t));
-        m.row("Shomate::enthalpy_antiderivative", Class::B, &ins, &[f(h)]);
+        audit::shomate(m, &ins, x, t);
     }
 }
 
@@ -830,5 +825,6 @@ pub fn emit() -> Module {
         "thermochem: adiabatic_flame_temperature rows: {} newton, {} bisection, {} Err",
         paths.newton, paths.bisection, paths.err
     );
+    audit::emit_thermochem(&mut m);
     m
 }

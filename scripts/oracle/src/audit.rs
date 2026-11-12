@@ -11,7 +11,6 @@
 //! - a formula with a sum inside is **Rust's sequence evaluated with an unbounded exponent**, every operation rounded to
 //!   53 bits and the final division once into binary64 ([`exact::Ux`]).
 //!
-//!
 //! **B2** (ADR 0002 #29, #30): solution's `dilution` and `solution_conductivity`, electrochemistry's
 //! `faraday_mass_deposited`, `faraday_charge_required`, `faraday_mass_ratio` (#29, rounded once) and `nernst_potential`
 //! (#29, #20's semantics: Rust's E° − ((R·T)/(n·F))·ln Q with an unbounded exponent and the final subtraction rounded
@@ -19,6 +18,19 @@
 //! `concentration_from_absorbance`, `rigid_rotor_energy`, `rotational_constant`, `diatomic_moment_of_inertia` (#30,
 //! rounded once; π as its double each time Rust uses it, 8, 1000 and J + 1 exact) and `vibrational_frequency` (#30, the
 //! correctly rounded √ of the exact k/μ, [`cr_sqrt_ratio`]).
+//!
+//! **B3** (ADR 0002 #31, #32): gas's ideal gas law, `gas_density` and the three equations of state (#31), and
+//! potential's `lennard_jones`, `coulomb`, `coulomb_force`, `morse_width_parameter`, inorganic's
+//! `born_lande_lattice_energy` and nuclear's `binding_energy_per_nucleon` (#32), with their own section below.
+//!
+//! **B4** (ADR 0002 #33, #34, and a correction of #29): #20's semantics, Rust's sequence (its order of operations and
+//! summation) with an unbounded exponent and the final operation rounded once, for thermo's `hess_law` and
+//! `enthalpy_from_formation`, thermochem's `reaction_enthalpy`, `reaction_gibbs_energy` (ADR 0002 #1's (Σ kJ)·1000) and
+//! `reaction_entropy`, nuclear's `q_value`, solution's `ionic_strength`, `kohlrausch_molar_conductivity` and
+//! `limiting_molar_conductivity`, inorganic's `born_haber_lattice_energy`, reaction's `gibbs_free_energy` and kinetics'
+//! `zero_order_concentration` (#33), and `Shomate::cp` and `Shomate::enthalpy_antiderivative` on Rust's exact
+//! polynomial order (#34); and #29's `nernst_potential` rows whose product (R·T)/(n·F)·ln Q IEEE rounds up to 2⁻¹⁰²²
+//! from below ([`NERNST_2M1022`]).
 //!
 //! Every row of these functions goes through [`noted`]: where the port's value differs from the oracle's (by its bits;
 //! two NaNs are the same) the row is noted `[ADR 0002 #n: the port returns <how> = <x> (f:<bits>)]`. Rust's validation is
@@ -30,9 +42,19 @@ use std::hint::black_box as bb;
 use crate::exact::{Ux, cr_monomial, cr_sqrt_monomial, cr_sqrt_ratio};
 use crate::grids::{Rng, pow2};
 use crate::m_reaction::res;
-use crate::tsv::{Class, Module, Tok, f, i};
+use crate::tsv::{Class, Module, Tok, f, i, s};
 use kimiya::electrochemistry::{
     ELEMENTARY_CHARGE, FARADAY, faraday_charge_required, faraday_mass_deposited, faraday_mass_ratio, nernst_potential,
+};
+use crate::t_thermochem::shomate_fields;
+use kimiya::inorganic::born_haber_lattice_energy;
+use kimiya::kinetics::zero_order_concentration;
+use kimiya::nuclear::q_value;
+use kimiya::reaction::gibbs_free_energy;
+use kimiya::solution::{ionic_strength, kohlrausch_molar_conductivity, limiting_molar_conductivity};
+use kimiya::thermo::{enthalpy_from_formation, hess_law};
+use kimiya::thermochem::{
+    Shomate, THERMOCHEM_DATA, lookup_thermochem, reaction_enthalpy, reaction_entropy, reaction_gibbs_energy,
 };
 use kimiya::element::{AVOGADRO, GAS_CONSTANT};
 use kimiya::error::KimiyaError;
@@ -702,7 +724,8 @@ pub fn emit_solution(m: &mut Module) {
 /// electrochemistry's B2 rows: nernst_potential's R·T past DBL_MAX (T > 2.16·10³⁰⁷ K: Rust's ±∞, or NaN at Q = 1) and
 /// its subnormal (R·T)/(n·F) for tiny T (Rust's degraded or zero product), E° against an overflowing or underflowing
 /// product, and the true overflow ends; Faraday's partial products past either end, an equivalent weight M/n
-/// underflowing, the true ends, and the 53-bit midpoints 3F·y/F and y·3·F/F (3F is exact: F's odd part has 51 bits).
+/// underflowing, the true ends, and the 53-bit midpoints 3F·y/F and y·3·F/F (3F is exact: F's odd part has 51 bits);
+/// then B4's correction of #29 ([`NERNST_2M1022`]: a product c·l that IEEE rounds up to 2⁻¹⁰²² from below).
 #[allow(clippy::too_many_lines)] // one function after another
 pub fn emit_electrochemistry(m: &mut Module) {
     let mut rng = Rng::new(0xec29);
@@ -791,7 +814,42 @@ pub fn emit_electrochemistry(m: &mut Module) {
         fratio(m, rng.signed_log_uniform(154.0, 308.0), rng.log_uniform(154.0, 308.0), n, rng.log_uniform(154.0, 308.0), nb);
         fratio(m, y * scale(&mut rng, -600, 600), 7.0, 3, 7.0 * f64::from(nb), nb);
     }
+    // B4's correction of #29 (appended after B2's rows, so they keep theirs): nernst_potential where the product
+    // c·l = ((R·T)/(n·F))·ln Q lies in [2⁻¹⁰²² − 2⁻¹⁰⁷⁵, 2⁻¹⁰²² − 2⁻¹⁰⁷⁶), which IEEE rounds up to 2⁻¹⁰²² and 53-bit
+    // rounding to 2⁻¹⁰²² − 2⁻¹⁰⁷⁵. B2's fast path took 2⁻¹⁰²² itself as normal and kept Rust's value; with E° an odd
+    // multiple of 2⁻¹⁰⁷⁴ (±1, 3) #20's value differs (a subnormal tie, to even), with an even one (0, 2) it does not.
+    for &(e0, n, t, q) in &NERNST_2M1022 {
+        nernst(m, f64::from_bits(e0), n, f64::from_bits(t), f64::from_bits(q));
+    }
 }
+
+/// ADR 0002 #29's B4 correction: (E°, n, T, Q) bits with c·l in [2⁻¹⁰²² − 2⁻¹⁰⁷⁵, 2⁻¹⁰²² − 2⁻¹⁰⁷⁶) (found by a seeded
+/// search with MPFR's log, which glibc's equals on each; the first three are the regression the main session found).
+const NERNST_2M1022: [(u64, u8, u64, u64); 23] = [
+    (0x0000_0000_0000_0001, 1, 0x012c_5299_aebb_56a1, 0x3ff0_d212_8b2f_3300),
+    (0x0000_0000_0000_0001, 1, 0x015d_a605_365d_ec16, 0x3ff0_1889_2f90_2b00),
+    (0x0000_0000_0000_0001, 1, 0x013b_5b45_c314_13cc, 0x3ff0_6b6f_0367_5a00),
+    (0x8000_0000_0000_0001, 7, 0x012d_4ef9_5f21_0a80, 0x3fe6_d090_03db_9e8a),
+    (0x8000_0000_0000_0001, 1, 0x0136_0e4f_6050_3912, 0x3fee_fd1b_c883_8237),
+    (0x8000_0000_0000_0001, 255, 0x0184_59b4_eaac_df85, 0x3fe8_3fd3_5aa3_b4ff),
+    (0x8000_0000_0000_0001, 255, 0x0191_b54b_d246_5e98, 0x3feb_4932_0184_af3e),
+    (0x0000_0000_0000_0001, 2, 0x011f_cd71_eb55_3fde, 0x3ff3_1ed6_b393_7b45),
+    (0x0000_0000_0000_0001, 3, 0x015a_f517_7370_7b06, 0x3ff0_5183_cbac_8628),
+    (0x8000_0000_0000_0001, 7, 0x012b_48b8_639e_6baa, 0x3fe6_3fc4_c95c_fefc),
+    (0x0000_0000_0000_0001, 1, 0x0111_b58b_7e7f_1aa1, 0x3ff2_c69c_5171_ec09),
+    (0x8000_0000_0000_0001, 1, 0x0122_3118_d417_935f, 0x3fed_9a4e_14f8_84e7),
+    (0x0000_0000_0000_0001, 3, 0x012c_c67d_7a4b_bdf0, 0x3ff2_8bdf_0a3b_5122),
+    (0x0000_0000_0000_0001, 255, 0x0179_1b07_966e_9d3b, 0x3ff9_1571_2636_d1db),
+    (0x0000_0000_0000_0003, 1, 0x012c_5299_aebb_56a1, 0x3ff0_d212_8b2f_3300),
+    (0x0000_0000_0000_0002, 1, 0x012c_5299_aebb_56a1, 0x3ff0_d212_8b2f_3300),
+    (0x0000_0000_0000_0000, 1, 0x012c_5299_aebb_56a1, 0x3ff0_d212_8b2f_3300),
+    (0x0000_0000_0000_0003, 1, 0x015d_a605_365d_ec16, 0x3ff0_1889_2f90_2b00),
+    (0x0000_0000_0000_0002, 1, 0x015d_a605_365d_ec16, 0x3ff0_1889_2f90_2b00),
+    (0x0000_0000_0000_0000, 1, 0x015d_a605_365d_ec16, 0x3ff0_1889_2f90_2b00),
+    (0x0000_0000_0000_0003, 1, 0x013b_5b45_c314_13cc, 0x3ff0_6b6f_0367_5a00),
+    (0x0000_0000_0000_0002, 1, 0x013b_5b45_c314_13cc, 0x3ff0_6b6f_0367_5a00),
+    (0x0000_0000_0000_0000, 1, 0x013b_5b45_c314_13cc, 0x3ff0_6b6f_0367_5a00),
+];
 
 /// spectroscopy's B2 rows: absorbance's and the moment of inertia's partial products past either end, the true ends, 0
 /// against an overflowing product, signs, midpoints (3·y·1, 3·r·r with 3r² of 54 bits) and subnormal ties;
@@ -1615,5 +1673,628 @@ pub fn emit_nuclear(m: &mut Module) {
         let z = u32::try_from(rng.int(0, 600)).unwrap_or(0);
         let n = u32::try_from(rng.int(1, 600)).unwrap_or(1);
         bea(m, z, n, rng.log_uniform(305.0, 308.25));
+    }
+}
+
+// ── The overflow audit's B4 (ADR 0002 #33, #34) ─────────────────────────────────────────────────────────────────
+
+/// How the port obtains a #20-style value whose final operation is an addition (the note's `<how>`).
+pub const UX_HOW_ADD: &str = "Rust's sequence evaluated with an unbounded exponent (the final addition rounded once)";
+
+const ADR1: &str = "J/mol: the oracle's kJ/mol result × 1000.0 (ADR 0002 #1)";
+
+fn finite_all(xs: &[f64]) -> bool {
+    xs.iter().all(|x| x.is_finite())
+}
+
+/// Rust's `iter().sum()` with an unbounded exponent: from −0.0 in order, every addition rounded to 53 bits.
+fn sum_ux(xs: &[f64]) -> Ux {
+    xs.iter().fold(ux(-0.0), |s, &x| s.add(ux(x)))
+}
+
+/// ADR 0002 #33: `hess_law`, Rust's Σ from −0.0 with an unbounded exponent, the last addition rounded once (−0.0 for no
+/// steps); Rust's sum for a non-finite step.
+pub fn port_hess(xs: &[f64]) -> f64 {
+    if !finite_all(xs) || xs.is_empty() {
+        return hess_law(xs);
+    }
+    let (head, last) = xs.split_at(xs.len() - 1);
+    sum_ux(head).add_f64(ux(last[0]))
+}
+
+/// ADR 0002 #33: `enthalpy_from_formation`, Rust's Σp − Σr with an unbounded exponent, the difference rounded once;
+/// Rust's for a non-finite value.
+pub fn port_formation(p: &[f64], r: &[f64]) -> f64 {
+    if !finite_all(p) || !finite_all(r) {
+        return enthalpy_from_formation(p, r);
+    }
+    sum_ux(p).sub_f64(sum_ux(r))
+}
+
+/// ADR 0002 #33: `q_value`, Rust's (Σr − Σp)·931.494… with an unbounded exponent, the product rounded once; Rust's for
+/// a non-finite mass.
+pub fn port_q(r: &[f64], p: &[f64]) -> f64 {
+    if !finite_all(r) || !finite_all(p) {
+        return q_value(r, p);
+    }
+    sum_ux(r).sub(sum_ux(p)).mul_f64(ux(AMU_MEV))
+}
+
+/// ADR 0002 #33: `ionic_strength`, Rust's ½·Σ (c·z)·z from −0.0 with an unbounded exponent, the product by ½ rounded
+/// once; Rust's for a non-finite concentration.
+pub fn port_ionic(xs: &[(f64, i32)]) -> f64 {
+    if !xs.iter().all(|(c, _)| c.is_finite()) {
+        return ionic_strength(xs);
+    }
+    let s = xs.iter().fold(ux(-0.0), |s, &(c, z)| {
+        let zf = ux(f64::from(z));
+        s.add(ux(c).mul(zf).mul(zf))
+    });
+    ux(0.5).mul_f64(s)
+}
+
+/// ADR 0002 #33: `born_haber_lattice_energy`, Rust's ΔH_f − ΔH_sub − IE − ΔH_diss/2 − EA left to right with an unbounded
+/// exponent, the last difference rounded once; Rust's for a non-finite input.
+pub fn port_haber(x: [f64; 5]) -> f64 {
+    if !finite_all(&x) {
+        return born_haber_lattice_energy(x[0], x[1], x[2], x[3], x[4]);
+    }
+    ux(x[0]).sub(ux(x[1])).sub(ux(x[2])).sub(ux(x[3]).div(ux(2.0))).sub_f64(ux(x[4]))
+}
+
+/// ADR 0002 #33: `gibbs_free_energy`, Rust's ΔH − T·ΔS with an unbounded exponent, the difference rounded once, after
+/// Rust's checks.
+pub fn port_gibbs(h: f64, t: f64, s: f64) -> Option<f64> {
+    (pos(t) && h.is_finite() && s.is_finite()).then(|| ux(h).sub_f64(ux(t).mul(ux(s))))
+}
+
+/// ADR 0002 #33: `kohlrausch_molar_conductivity`, Rust's Λ° − K·√c with an unbounded exponent, the difference rounded
+/// once, after Rust's checks.
+pub fn port_kohlrausch(l0: f64, k: f64, c: f64) -> Option<f64> {
+    (nonneg(c) && l0.is_finite() && k.is_finite()).then(|| ux(l0).sub_f64(ux(k).mul(ux(c).sqrt())))
+}
+
+/// ADR 0002 #33: `limiting_molar_conductivity`, Rust's ν₊·λ₊ + ν₋·λ₋ with an unbounded exponent, the sum rounded once;
+/// Rust's for a non-finite input.
+pub fn port_limiting(cat: f64, nc: f64, an: f64, na: f64) -> f64 {
+    if !finite_all(&[cat, nc, an, na]) {
+        return limiting_molar_conductivity(cat, nc, an, na);
+    }
+    ux(nc).mul(ux(cat)).add_f64(ux(na).mul(ux(an)))
+}
+
+/// ADR 0002 #33: `zero_order_concentration`, Rust's [A]₀ − k·t with an unbounded exponent, 0 where that difference is
+/// negative (the comparison on the unbounded value), otherwise the difference rounded once; Rust's for a non-finite
+/// input.
+pub fn port_zero_conc(c0: f64, k: f64, t: f64) -> f64 {
+    if !finite_all(&[c0, k, t]) {
+        return zero_order_concentration(c0, k, t);
+    }
+    let p = ux(k).mul(ux(t));
+    if ux(c0).sub(p).cmp(ux(0.0)) == std::cmp::Ordering::Less {
+        return 0.0;
+    }
+    ux(c0).sub_f64(p)
+}
+
+/// The thermochem column a reaction sum reads: 0 ΔH_f°, 1 ΔG_f°, 2 S°.
+fn tc_prop(formula: &str, col: u8) -> Option<f64> {
+    lookup_thermochem(formula).map(|d| match col {
+        0 => d.delta_hf_kj,
+        1 => d.delta_gf_kj,
+        _ => d.s_standard_j,
+    })
+}
+
+/// Rust's `sum_property` with an unbounded exponent: from +0.0, `total += coeff * prop`, every operation rounded to 53
+/// bits; `None` for an unknown formula (Rust's Err).
+fn sum_property_ux(species: &[(&str, f64)], col: u8) -> Option<Ux> {
+    let mut total = ux(0.0);
+    for &(fo, c) in species {
+        total = total.add(ux(c).mul(ux(tc_prop(fo, col)?)));
+    }
+    Some(total)
+}
+
+/// ADR 0002 #33: thermochem's reaction sums, the port's J/mol (`col` 0, 1: ADR 0002 #1's Σp − Σr × 1000) or J/(mol·K)
+/// (`col` 2: Σp − Σr) with an unbounded exponent, the final operation rounded once; Rust's value (× 1000) for a
+/// non-finite coefficient; `None` where Rust errs (an unknown formula, the products first).
+pub fn port_reaction(p: &[(&str, f64)], r: &[(&str, f64)], col: u8) -> Option<f64> {
+    if p.iter().chain(r).any(|(fo, _)| tc_prop(fo, col).is_none()) {
+        return None;
+    }
+    if !p.iter().chain(r).all(|(_, c)| c.is_finite()) {
+        let kj = match col {
+            0 => reaction_enthalpy(p, r),
+            1 => reaction_gibbs_energy(p, r),
+            _ => return reaction_entropy(p, r).ok(),
+        };
+        return kj.ok().map(|v| v * 1000.0);
+    }
+    let sp = sum_property_ux(p, col)?;
+    let sr = sum_property_ux(r, col)?;
+    Some(if col == 2 { sp.sub_f64(sr) } else { sp.sub(sr).mul_f64(ux(1000.0)) })
+}
+
+/// ADR 0002 #34: `Shomate::cp`, Rust's (((A + B·t) + (C·t)·t) + ((D·t)·t)·t) + E/(t·t), t = T/1000, with an unbounded
+/// exponent, the last addition rounded once; Rust's for a non-finite coefficient or T, and for T = ±0 (every product an
+/// exact zero and E/0 IEEE's special in both evaluations).
+pub fn port_cp(x: &Shomate, temp: f64) -> f64 {
+    if !finite_all(&[x.a, x.b, x.c, x.d, x.e, temp]) || temp == 0.0 {
+        return x.cp(temp);
+    }
+    let t = ux(temp).div(ux(1000.0));
+    let s = ux(x.a).add(ux(x.b).mul(t)).add(ux(x.c).mul(t).mul(t)).add(ux(x.d).mul(t).mul(t).mul(t));
+    s.add_f64(ux(x.e).div(t.mul(t)))
+}
+
+/// ADR 0002 #34: `Shomate::enthalpy_antiderivative`, Rust's 1000·(t·(A + t·(B/2 + t·(C/3 + t·(D/4)))) − E/t) with an
+/// unbounded exponent, the product by 1000 rounded once; Rust's as [`port_cp`].
+pub fn port_h(x: &Shomate, temp: f64) -> f64 {
+    if !finite_all(&[x.a, x.b, x.c, x.d, x.e, temp]) || temp == 0.0 {
+        return x.enthalpy_antiderivative(temp);
+    }
+    let t = ux(temp).div(ux(1000.0));
+    let inner3 = ux(x.c).div(ux(3.0)).add(t.mul(ux(x.d).div(ux(4.0))));
+    let inner2 = ux(x.b).div(ux(2.0)).add(t.mul(inner3));
+    let inner = t.mul(ux(x.a).add(t.mul(inner2)));
+    ux(1000.0).mul_f64(inner.sub(ux(x.e).div(t)))
+}
+
+pub fn hess(m: &mut Module, ins: &[Tok], xs: &[f64]) {
+    let out = hess_law(bb(xs));
+    noted_f(m, "thermo::hess_law", ins, out, port_hess(xs), 33, UX_HOW_ADD);
+}
+
+pub fn formation(m: &mut Module, ins: &[Tok], p: &[f64], r: &[f64]) {
+    let out = enthalpy_from_formation(bb(p), bb(r));
+    noted_f(m, "thermo::enthalpy_from_formation", ins, out, port_formation(p, r), 33, UX_HOW_SUB);
+}
+
+pub fn qv(m: &mut Module, ins: &[Tok], r: &[f64], p: &[f64]) {
+    let out = q_value(bb(r), bb(p));
+    noted_f(m, "nuclear::q_value", ins, out, port_q(r, p), 33, UX_HOW_MUL);
+}
+
+pub fn ionic(m: &mut Module, ins: &[Tok], xs: &[(f64, i32)]) {
+    let out = ionic_strength(bb(xs));
+    noted_f(m, "solution::ionic_strength", ins, out, port_ionic(xs), 33, UX_HOW_MUL);
+}
+
+pub fn haber(m: &mut Module, x: [f64; 5]) {
+    let out = born_haber_lattice_energy(bb(x[0]), bb(x[1]), bb(x[2]), bb(x[3]), bb(x[4]));
+    let ins: Vec<Tok> = x.iter().map(|&v| f(v)).collect();
+    noted_f(m, "inorganic::born_haber_lattice_energy", &ins, out, port_haber(x), 33, UX_HOW_SUB);
+}
+
+pub fn gibbs(m: &mut Module, h: f64, t: f64, s: f64) {
+    let out = gibbs_free_energy(bb(h), bb(t), bb(s));
+    noted(m, "reaction::gibbs_free_energy", &[f(h), f(t), f(s)], out, port_gibbs(h, t, s), 33, UX_HOW_SUB);
+}
+
+pub fn kohl(m: &mut Module, l0: f64, k: f64, c: f64) {
+    let out = kohlrausch_molar_conductivity(bb(l0), bb(k), bb(c));
+    let (name, ins) = ("solution::kohlrausch_molar_conductivity", [f(l0), f(k), f(c)]);
+    noted(m, name, &ins, out, port_kohlrausch(l0, k, c), 33, UX_HOW_SUB);
+}
+
+pub fn limiting(m: &mut Module, cat: f64, nc: f64, an: f64, na: f64) {
+    let out = limiting_molar_conductivity(bb(cat), bb(nc), bb(an), bb(na));
+    let (name, ins) = ("solution::limiting_molar_conductivity", [f(cat), f(nc), f(an), f(na)]);
+    noted_f(m, name, &ins, out, port_limiting(cat, nc, an, na), 33, UX_HOW_ADD);
+}
+
+pub fn zero_conc(m: &mut Module, c0: f64, k: f64, t: f64) {
+    let out = zero_order_concentration(bb(c0), bb(k), bb(t));
+    let (name, ins) = ("kinetics::zero_order_concentration", [f(c0), f(k), f(t)]);
+    noted_f(m, name, &ins, out, port_zero_conc(c0, k, t), 33, UX_HOW_SUB);
+}
+
+/// thermochem's three reaction-sum rows of one reaction (`ins` its tokens): reaction_enthalpy and reaction_gibbs_energy
+/// with ADR 0002 #1's note (the oracle's kJ/mol × 1000.0), and #33's after it where the port's value differs; and
+/// reaction_entropy.
+pub fn sums(m: &mut Module, ins: &[Tok], p: &[(&str, f64)], r: &[(&str, f64)]) {
+    for (col, name) in [(0_u8, "thermochem::reaction_enthalpy"), (1, "thermochem::reaction_gibbs_energy")] {
+        let oracle = if col == 0 { reaction_enthalpy(bb(p), bb(r)) } else { reaction_gibbs_energy(bb(p), bb(r)) };
+        let oracle = oracle.map(|kj| kj * 1000.0);
+        let port = port_reaction(p, r, col);
+        assert_eq!(oracle.is_ok(), port.is_some(), "{name}: the port's validation differs from the oracle's: {ins:?}");
+        match (&oracle, port) {
+            (Ok(v), Some(pv)) if !same(*v, pv) => {
+                let extra = format!("{ADR1}] [{}", note(33, UX_HOW_MUL, pv));
+                m.row_noted(name, Class::B, ins, &[f(*v)], &extra);
+            }
+            _ => m.row_noted(name, Class::B, ins, &[res(oracle)], ADR1),
+        }
+    }
+    let out = reaction_entropy(bb(p), bb(r));
+    noted(m, "thermochem::reaction_entropy", ins, out, port_reaction(p, r, 2), 33, UX_HOW_SUB);
+}
+
+/// thermochem's Shomate rows at T (`ins` the seven fields and T).
+pub fn shomate(m: &mut Module, ins: &[Tok], x: &Shomate, t: f64) {
+    let cp = bb(x).cp(bb(t));
+    noted_f(m, "Shomate::cp", ins, cp, port_cp(x, t), 34, UX_HOW_ADD);
+    let h = bb(x).enthalpy_antiderivative(bb(t));
+    noted_f(m, "Shomate::enthalpy_antiderivative", ins, h, port_h(x, t), 34, UX_HOW_MUL);
+}
+
+// ── B4's edge rows (appended to each module with their own seed, so the rows before keep theirs) ─────────────────
+
+fn seq_toks(xs: &[f64]) -> Vec<Tok> {
+    let mut v = vec![Tok::V(xs.len())];
+    v.extend(xs.iter().map(|&x| f(x)));
+    v
+}
+
+/// A signed value near DBL_MAX: ±DBL_MAX·u, u in [lo, hi].
+fn big(rng: &mut Rng, lo: f64, hi: f64) -> f64 {
+    let s = if rng.int(0, 1) == 0 { 1.0 } else { -1.0 };
+    s * DMAX * rng.uniform(lo, hi)
+}
+
+/// thermo's B4 rows: hess_law's partial sums past ±DBL_MAX that later steps bring back (Rust's ±∞, or ∞ − ∞ = NaN), the
+/// rounding past DBL_MAX itself (DBL_MAX + 2⁹⁷⁰), sums that are themselves out of range (±∞ in both), subnormal sums
+/// (exact: Rust's bits); enthalpy_from_formation's two sums past DBL_MAX that cancel, one past it against a finite one,
+/// a difference past DBL_MAX.
+pub fn emit_thermo_b4(m: &mut Module) {
+    let mut rng = Rng::new(0x7433);
+    let h970 = pow2(970);
+    for xs in [
+        vec![DMAX, DMAX, -DMAX],
+        vec![DMAX, DMAX, -DMAX, -DMAX],
+        vec![-DMAX, -DMAX, DMAX],
+        vec![DMAX, 1e308, -1e308],
+        vec![1e308, 1e308, -1e308, 1.0],
+        vec![DMAX, DMAX],
+        vec![DMAX, DMAX, -DMAX, -DMAX, sub(1)],
+        vec![DMAX, h970],
+        vec![DMAX, h970, -DMAX],
+        vec![DMAX, h970, -h970],
+        vec![-DMAX, -h970, DMAX, 1.0],
+        vec![sub(1), sub(1), -sub(3)],
+        vec![sub(5), -sub(5)],
+        vec![DMAX, -DMAX],
+        vec![0.9 * DMAX, 0.9 * DMAX, -0.9 * DMAX, -0.9 * DMAX, 0.5],
+    ] {
+        hess(m, &seq_toks(&xs), &xs);
+    }
+    for _ in 0..80 {
+        let n = usize::try_from(rng.int(2, 8)).unwrap_or(2);
+        let xs: Vec<f64> = (0..n).map(|_| big(&mut rng, 0.3, 1.0)).collect();
+        hess(m, &seq_toks(&xs), &xs);
+    }
+    for (p, r) in [
+        (vec![DMAX, DMAX], vec![DMAX, DMAX]),
+        (vec![DMAX, DMAX], vec![DMAX]),
+        (vec![DMAX, DMAX, -DMAX], vec![]),
+        (vec![], vec![DMAX, DMAX, -DMAX]),
+        (vec![1e308, 1e308], vec![1e308, 0.999e308]),
+        (vec![DMAX], vec![-DMAX]),
+        (vec![-DMAX, -DMAX], vec![-DMAX, -DMAX, 1.0]),
+        (vec![DMAX, h970], vec![DMAX]),
+        (vec![sub(3)], vec![sub(1), sub(1)]),
+    ] {
+        let mut ins = seq_toks(&p);
+        ins.extend(seq_toks(&r));
+        formation(m, &ins, &p, &r);
+    }
+    for _ in 0..80 {
+        let np = usize::try_from(rng.int(0, 5)).unwrap_or(0);
+        let nr = usize::try_from(rng.int(0, 5)).unwrap_or(0);
+        let p: Vec<f64> = (0..np).map(|_| big(&mut rng, 0.3, 1.0)).collect();
+        let r: Vec<f64> = (0..nr).map(|_| big(&mut rng, 0.3, 1.0)).collect();
+        let mut ins = seq_toks(&p);
+        ins.extend(seq_toks(&r));
+        formation(m, &ins, &p, &r);
+    }
+}
+
+/// reaction's B4 rows: gibbs_free_energy's T·ΔS past DBL_MAX with ΔH bringing it back (Rust's ±∞), the true ends, T·ΔS
+/// subnormal against a tiny ΔH (Rust's rounding at the subnormal grid twice), and T·ΔS below 2⁻¹⁰⁷⁵ (Rust's 0).
+pub fn emit_reaction(m: &mut Module) {
+    let mut rng = Rng::new(0x6b33);
+    for (h, t, s) in [
+        (DMAX, 2.0, 0.75 * DMAX),
+        (-DMAX, 2.0, -0.75 * DMAX),
+        (DMAX, DMAX, 1.0),
+        (0.0, 1e-300, 1e-20),
+        (sub(3), 1.5, sub(1)),
+        (sub(1), 0.75, sub(1)),
+        (-sub(3), 1.5, -sub(1)),
+        (0.0, 1e-200, 1e-200),
+        (-0.0, 1e-200, 1e-200),
+        (1.0, 1e-200, -1e-200),
+        (1e300, 1e300, 1e10),
+        (DMAX, 1.5, DMAX),
+    ] {
+        gibbs(m, h, t, s);
+    }
+    for _ in 0..80 {
+        // T·ΔS in (DBL_MAX, 2·DBL_MAX), ΔH of the same sign: the value ±DBL_MAX·(v − u) is finite
+        let t = rng.log_uniform(0.31, 10.0);
+        let sg = if rng.int(0, 1) == 0 { 1.0 } else { -1.0 };
+        let s = sg * (DMAX / t) * rng.uniform(1.0, 1.99);
+        gibbs(m, sg * DMAX * rng.uniform(0.2, 1.0), t, s);
+        // T·ΔS subnormal, ΔH tiny or zero
+        let t = rng.log_uniform(-3.0, 5.0);
+        let s = rng.signed_log_uniform(-323.0, -305.0) / t;
+        let h = if rng.int(0, 2) == 0 { 0.0 } else { rng.signed_log_uniform(-323.0, -300.0) };
+        gibbs(m, h, t, s);
+    }
+}
+
+/// nuclear's B4 rows: q_value's two sums past DBL_MAX that cancel (Rust's ∞ − ∞ = NaN), one past it against a finite one,
+/// the difference past DBL_MAX with the product beyond it (±∞ in both), and subnormal sums (exact: Rust's bits).
+pub fn emit_nuclear_b4(m: &mut Module) {
+    let mut rng = Rng::new(0x2e33);
+    let toks = |r: &[f64], p: &[f64]| {
+        let mut ins = seq_toks(r);
+        ins.extend(seq_toks(p));
+        ins
+    };
+    let mm1 = f64::from_bits(DMAX.to_bits() - 1);
+    for (r, p) in [
+        (vec![DMAX, DMAX], vec![DMAX, 0.999 * DMAX]),
+        (vec![DMAX, DMAX], vec![DMAX, DMAX]),
+        (vec![DMAX, DMAX], vec![DMAX, mm1]),
+        (vec![DMAX, DMAX, -DMAX], vec![]),
+        (vec![], vec![DMAX, DMAX, -DMAX]),
+        (vec![1e308, 1e308], vec![1e308, 1e308, 1e-10]),
+        (vec![DMAX, 1e308], vec![DMAX]),
+        (vec![sub(3)], vec![sub(1)]),
+    ] {
+        qv(m, &toks(&r, &p), &r, &p);
+    }
+    for _ in 0..80 {
+        let nr = usize::try_from(rng.int(1, 4)).unwrap_or(1);
+        let np = usize::try_from(rng.int(1, 4)).unwrap_or(1);
+        let r: Vec<f64> = (0..nr).map(|_| DMAX * rng.uniform(0.5, 1.0)).collect();
+        let mut p: Vec<f64> = (0..np).map(|_| DMAX * rng.uniform(0.5, 1.0)).collect();
+        // the products' sum close to the reactants' (cancellation of two overflowing sums)
+        let sr: f64 = r.iter().map(|x| x / 8.0).sum::<f64>() * 8.0;
+        let spp: f64 = p.iter().map(|x| x / 8.0).sum::<f64>() * 8.0;
+        if sr.is_finite() && spp.is_finite() && np > 0 {
+            p[0] += (sr - spp) * rng.uniform(0.999, 1.0);
+        }
+        qv(m, &toks(&r, &p), &r, &p);
+    }
+}
+
+/// solution's B4 rows: ionic_strength's term (c·z)·z or its sum past DBL_MAX while ½·Σ is finite (Rust's ∞), terms of
+/// opposite infinities (Rust's NaN, the value 0), the true overflow ends, subnormal terms (exact); kohlrausch's K·√c past
+/// DBL_MAX with Λ° bringing it back, K·√c subnormal (Rust's rounding twice); limiting_molar_conductivity's products past
+/// DBL_MAX that cancel or that the other brings back, subnormal products.
+#[allow(clippy::too_many_lines)] // one function after another
+pub fn emit_solution_b4(m: &mut Module) {
+    let mut rng = Rng::new(0x5033);
+    let ions_toks = |xs: &[(f64, i32)]| {
+        let mut v = vec![Tok::V(xs.len())];
+        for &(c, z) in xs {
+            v.push(f(c));
+            v.push(i(z));
+        }
+        v
+    };
+    for xs in [
+        vec![(0.4 * DMAX, 2)],
+        vec![(0.4 * DMAX, -2)],
+        vec![(DMAX, 1), (DMAX, 1)],
+        vec![(DMAX, 1), (DMAX, -1), (-DMAX, 1)],
+        vec![(DMAX, 2), (-DMAX, 2)],
+        vec![(0.3 * DMAX, 2), (-0.3 * DMAX, 2), (1.0, 1)],
+        vec![(0.6 * DMAX, 2)],
+        vec![(1e300, 46341)],
+        vec![(sub(3), 3), (-sub(1), 1)],
+        vec![(DMAX, i32::MAX), (-DMAX, i32::MIN)],
+        vec![(0.3 * DMAX, 1), (0.3 * DMAX, 1), (0.3 * DMAX, 1), (0.3 * DMAX, 1)],
+    ] {
+        ionic(m, &ions_toks(&xs), &xs);
+    }
+    for _ in 0..80 {
+        let n = usize::try_from(rng.int(1, 5)).unwrap_or(1);
+        let xs: Vec<(f64, i32)> = (0..n)
+            .map(|_| {
+                let z = i32::try_from(rng.int(1, 4)).unwrap_or(1) * if rng.int(0, 1) == 0 { 1 } else { -1 };
+                (big(&mut rng, 0.05, 0.5) / f64::from(z * z), z)
+            })
+            .collect();
+        ionic(m, &ions_toks(&xs), &xs);
+    }
+    for (l0, k, c) in [
+        (DMAX, DMAX, 1.21),
+        (-DMAX, -DMAX, 1.21),
+        (DMAX, 1e300, 1e20),
+        (1e300, 1e300, 1e10),
+        (sub(3), sub(3), 0.25),
+        (sub(2), sub(3), 0.25),
+        (0.0, sub(1), 0.25),
+        (sub(1), 1e-300, 1e-30),
+        (0.0, 1e-200, 1e-250),
+        (DMAX, DMAX, 4.0),
+    ] {
+        kohl(m, l0, k, c);
+    }
+    for _ in 0..80 {
+        // K·√c in (DBL_MAX, 2·DBL_MAX), Λ° of the same sign
+        let c = rng.log_uniform(0.61, 10.0);
+        let sg = if rng.int(0, 1) == 0 { 1.0 } else { -1.0 };
+        let k = sg * (DMAX / c.sqrt()) * rng.uniform(1.0, 1.99);
+        kohl(m, sg * DMAX * rng.uniform(0.2, 1.0), k, c);
+        // K·√c subnormal, Λ° tiny or zero
+        let c = rng.log_uniform(-6.0, 6.0);
+        let k = rng.signed_log_uniform(-323.0, -306.0) / c.sqrt();
+        let l0 = if rng.int(0, 2) == 0 { 0.0 } else { rng.signed_log_uniform(-323.0, -305.0) };
+        kohl(m, l0, k, c);
+    }
+    for (cat, nc, an, na) in [
+        (DMAX, 1.5, -DMAX, 1.0),
+        (DMAX, 2.0, -DMAX, 1.5),
+        (-DMAX, 1.5, DMAX, 1.0),
+        (DMAX, 2.0, DMAX, -2.0),
+        (DMAX, 2.0, 1.0, 1.0),
+        (sub(3), 0.2, sub(3), 0.2),
+        (sub(1), 0.75, sub(1), 0.5),
+        (1e-200, 1e-200, 1e-200, 1e-200),
+        (1e-200, 1e-200, -1e-200, 1e-200),
+    ] {
+        limiting(m, cat, nc, an, na);
+    }
+    for _ in 0..80 {
+        let (cat, an) = (big(&mut rng, 0.3, 1.0), big(&mut rng, 0.3, 1.0));
+        limiting(m, cat, rng.uniform(0.5, 3.0), an, rng.uniform(0.5, 3.0));
+        let (cat, an) = (rng.signed_log_uniform(-323.0, -300.0), rng.signed_log_uniform(-323.0, -300.0));
+        limiting(m, cat, rng.log_uniform(-10.0, 1.0), an, rng.log_uniform(-10.0, 1.0));
+    }
+}
+
+/// inorganic's B4 rows: born_haber_lattice_energy's partial differences past ±DBL_MAX that later terms bring back (Rust's
+/// ±∞ or NaN), the true ends, and ΔH_diss/2 inexact (an odd subnormal ΔH_diss: Rust's half rounds to even).
+pub fn emit_inorganic_b4(m: &mut Module) {
+    let mut rng = Rng::new(0x1033);
+    for x in [
+        [DMAX, -DMAX, DMAX, 0.0, 0.0],
+        [-DMAX, DMAX, -DMAX, 0.0, 0.0],
+        [DMAX, -DMAX, 0.0, 0.0, DMAX],
+        [DMAX, -DMAX, 0.0, DMAX, 0.5 * DMAX],
+        [DMAX, -DMAX, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, sub(1), 0.0],
+        [sub(1), 0.0, 0.0, sub(5), 0.0],
+        [sub(2), 0.0, 0.0, sub(7), -sub(1)],
+        [0.0, 0.0, 0.0, sub(3), sub(1)],
+        [-DMAX, 0.5 * DMAX, 0.6 * DMAX, -2.0 * 0.9 * DMAX, 0.0],
+    ] {
+        haber(m, x);
+    }
+    for _ in 0..80 {
+        let x = [big(&mut rng, 0.3, 1.0), big(&mut rng, 0.3, 1.0), big(&mut rng, 0.3, 1.0), big(&mut rng, 0.3, 1.0), big(&mut rng, 0.3, 1.0)];
+        haber(m, x);
+        let k = u64::try_from(rng.int(0, 1 << 20)).unwrap_or(0) * 2 + 1;
+        let y = [sub(u64::try_from(rng.int(0, 1 << 20)).unwrap_or(0)), 0.0, 0.0, sub(k), -sub(u64::try_from(rng.int(0, 8)).unwrap_or(0))];
+        haber(m, y);
+    }
+}
+
+/// kinetics' B4 rows: zero_order_concentration's k·t past DBL_MAX with a negative [A]₀ bringing it back (Rust's +∞), the
+/// true ends, k·t subnormal (Rust's rounding twice) and below 2⁻¹⁰⁷⁵ against ±0 (the sign of the clamp's zero).
+pub fn emit_kinetics_b4(m: &mut Module) {
+    let mut rng = Rng::new(0x4b33);
+    for (c0, k, t) in [
+        (-DMAX, -DMAX, 1.5),
+        (DMAX, DMAX, 1.5),
+        (-DMAX, DMAX, -1.5),
+        (sub(3), 1.5, sub(1)),
+        (sub(1), 0.75, sub(1)),
+        (sub(5), 0.5, sub(5)),
+        (0.0, 1e-200, -1e-200),
+        (-0.0, 1e-200, 1e-200),
+        (-0.0, 1e-200, -1e-200),
+        (0.0, 1e-200, 1e-200),
+        (-DMAX, -2.0, DMAX),
+    ] {
+        zero_conc(m, c0, k, t);
+    }
+    for _ in 0..80 {
+        // k·t in (−2·DBL_MAX, −DBL_MAX), [A]₀ negative: the value DBL_MAX·(u − v) can be positive and finite
+        let t = rng.log_uniform(0.31, 10.0);
+        let k = -(DMAX / t) * rng.uniform(1.0, 1.99);
+        zero_conc(m, -DMAX * rng.uniform(0.2, 1.0), k, t);
+        let t = rng.log_uniform(-3.0, 5.0);
+        let k = rng.signed_log_uniform(-323.0, -305.0) / t;
+        let c0 = if rng.int(0, 2) == 0 { 0.0 } else { rng.signed_log_uniform(-323.0, -305.0) };
+        zero_conc(m, c0, k, t);
+    }
+}
+
+/// A reaction side, (formula, coefficient) pairs.
+type Side<'a> = Vec<(&'a str, f64)>;
+
+/// thermochem's B4 rows: the reaction sums' products past DBL_MAX whose sums cancel (Rust's ∞ − ∞ = NaN), subnormal
+/// products coeff·prop (Rust's subnormal rounding, then × 1000); and Shomate polynomials with user coefficients at any
+/// T: T → 0 (t·t underflowing: E/(t·t) = ±∞ or 0/0 = NaN where Cp is finite, the antiderivative's t subnormal or 0),
+/// large T (C·t², D·t³ and t⁴ overflowing: ∞ − ∞ = NaN where the value is ±∞, and an exact cancellation of two such
+/// terms at t = 2⁶⁰⁰), subnormal coefficients, and seeded coefficient sets over every binade.
+#[allow(clippy::too_many_lines)] // one function after another
+pub fn emit_thermochem(m: &mut Module) {
+    let mut rng = Rng::new(0x3c33);
+    let sp_toks = |p: &[(&str, f64)], r: &[(&str, f64)]| {
+        let mut v = vec![Tok::V(p.len())];
+        for (fo, c) in p {
+            v.push(s(*fo));
+            v.push(f(*c));
+        }
+        v.push(Tok::V(r.len()));
+        for (fo, c) in r {
+            v.push(s(*fo));
+            v.push(f(*c));
+        }
+        v
+    };
+    let a2 = "Al2O3(s)";
+    let cases: Vec<(Side, Side)> = vec![
+        (vec![(a2, 1e305), (a2, 1e305)], vec![(a2, 1e305), (a2, 0.999e305)]),
+        (vec![(a2, 1e306), (a2, -1e306)], vec![]),
+        (vec![(a2, 2e305), ("CO2(g)", 1.0)], vec![(a2, 2e305)]),
+        (vec![("CO2(g)", 5e-324)], vec![]),
+        (vec![("CO2(g)", 1e-320)], vec![("H2O(l)", 1e-321)]),
+        (vec![("H2(g)", 1.0), ("CO2(g)", sub(3))], vec![("H2(g)", 1.0)]),
+        (vec![("CO2(g)", 4e306), ("CO2(g)", 4e306)], vec![("CO2(g)", 4e306), ("CO2(g)", 3.99e306)]),
+        (vec![("CH4(g)", 1e-310)], vec![("CO2(g)", 1e-311)]),
+    ];
+    for (p, r) in &cases {
+        sums(m, &sp_toks(p, r), p, r);
+    }
+    let formulas: Vec<&str> = THERMOCHEM_DATA.iter().map(|d| d.formula).collect();
+    let pick = |rng: &mut Rng| formulas[usize::try_from(rng.int(0, i64::try_from(formulas.len()).unwrap_or(1) - 1)).unwrap_or(0)];
+    for _ in 0..80 {
+        // products past DBL_MAX: coefficients near DBL_MAX/|prop|, the two sides' sums close
+        let f1 = pick(&mut rng);
+        let pr = lookup_thermochem(f1).map_or(1.0, |d| d.delta_hf_kj.abs().max(1.0));
+        let c1 = DMAX / pr * rng.uniform(0.5, 1.0);
+        let c2 = c1 * rng.uniform(0.999, 1.001);
+        let p = vec![(f1, c1), (f1, c1)];
+        let r = vec![(f1, c2), (f1, c1)];
+        sums(m, &sp_toks(&p, &r), &p, &r);
+        // subnormal products
+        let p = vec![(pick(&mut rng), rng.signed_log_uniform(-323.0, -308.0))];
+        let r = vec![(pick(&mut rng), rng.signed_log_uniform(-323.0, -308.0))];
+        sums(m, &sp_toks(&p, &r), &p, &r);
+    }
+
+    let sh = |m: &mut Module, x: &Shomate, t: f64| {
+        let mut ins: Vec<Tok> = shomate_fields(x).iter().map(|&v| f(v)).collect();
+        ins.push(f(t));
+        shomate(m, &ins, x, t);
+    };
+    let mk = |a: f64, b: f64, c: f64, d: f64, e: f64| Shomate { a, b, c, d, e, t_min: 298.0, t_max: 6000.0 };
+    let t600 = 125.0 * pow2(603); // T/1000 = 2⁶⁰⁰ exactly
+    let sets = [
+        mk(20.786, 0.0, 0.0, 0.0, 0.0),
+        mk(1.0, 0.0, 0.0, 0.0, 1e-310),
+        mk(1.0, 2.0, 3.0, 4.0, 1e-300),
+        mk(0.0, 0.0, 1.0, -1.0, 0.0),
+        mk(0.0, 0.0, 1.0, -pow2(-600), 0.0),
+        mk(5.0, 0.0, 1.0, -pow2(-600), 0.0),
+        mk(1e300, -1e300, 1e300, -1e300, 0.0),
+        mk(sub(3), sub(1), 0.0, 0.0, 0.0),
+        mk(30.092, 6.832514, 6.793435, -2.53448, 0.082139),
+        mk(0.0, 0.0, 0.0, 1.0, 0.0),
+        mk(1e-300, 1e-300, 1e-300, 1e-300, 1e-300),
+    ];
+    for x in &sets {
+        for t in [1e-300, 5e-324, 1e-160, 1e-163, 1e-155, 2.2e-305, 1e200, 1e300, -1e300, DMAX, t600, -t600, 1e-10, 1e10] {
+            sh(m, x, t);
+        }
+    }
+    for _ in 0..120 {
+        let co = |rng: &mut Rng| if rng.int(0, 4) == 0 { 0.0 } else { rng.signed_log_uniform(-320.0, 308.0) };
+        let x = mk(co(&mut rng), co(&mut rng), co(&mut rng), co(&mut rng), co(&mut rng));
+        let t = rng.signed_log_uniform(-323.0, 308.0);
+        sh(m, &x, t);
+        // physical coefficients, extreme T
+        let y = mk(rng.uniform(-50.0, 50.0), rng.uniform(-50.0, 50.0), rng.uniform(-20.0, 20.0), rng.uniform(-5.0, 5.0),
+                   rng.uniform(-2.0, 2.0));
+        let t = if rng.int(0, 1) == 0 { rng.log_uniform(-323.0, -150.0) } else { rng.signed_log_uniform(75.0, 308.0) };
+        sh(m, &y, t);
     }
 }

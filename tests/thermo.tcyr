@@ -212,6 +212,66 @@ fn _t_cyrius_adr27_rounded_once() {
     assert_eq(bad, 0, "heat_transfer and specific_heat_from_calorimetry = the exact path on 5,000 seeded triples");
 }
 
+# ADR 0002 #33 (the overflow audit's B4): hess_law and enthalpy_from_formation under #20's semantics — partial sums past
+# DBL_MAX that later steps bring back (Rust's +∞ and ∞ − ∞ = NaN), the true overflow (+∞ in both), non-finite steps
+# (Rust's), and the fast path (Rust's sum where it is finite) against the unbounded slow path on 3,000 seeded slices.
+fn _t_cyrius_adr33_sums() {
+    test_group("cyrius_adr33_sums");
+    var dmax: f64 = fbits(0x7FEFFFFFFFFFFFFF);
+    var ndmax: f64 = -dmax;
+    var xs: f64[4];
+    xs[0] = dmax;
+    xs[1] = dmax;
+    xs[2] = ndmax;
+    xs[3] = ndmax;
+    var h1: f64 = hess_law(&xs, 3);
+    assert_eq(_km_bits(h1), 0x7FEFFFFFFFFFFFFF, "DBL_MAX + DBL_MAX − DBL_MAX = DBL_MAX (Rust's +∞)");
+    var h2: f64 = hess_law(&xs, 4);
+    assert_eq(_km_bits(h2), 0, "DBL_MAX + DBL_MAX − DBL_MAX − DBL_MAX = +0 (Rust's +∞)");
+    var h3: f64 = hess_law(&xs, 2);
+    assert_eq(_km_bits(h3), 0x7FF0000000000000, "DBL_MAX + DBL_MAX: +∞ in both (the value overflows)");
+    var ys: f64[2];
+    ys[0] = dmax;
+    ys[1] = 0.5;
+    var e1: f64 = enthalpy_from_formation(&xs, 2, &ys, 2);
+    assert_eq(_km_bits(e1), 0x7FEFFFFFFFFFFFFF, "(2·DBL_MAX) − (DBL_MAX + 0.5) = DBL_MAX (Rust's +∞)");
+    var e2: f64 = enthalpy_from_formation(&xs, 2, &xs, 2);
+    assert_eq(_km_bits(e2), 0, "two sums past DBL_MAX that cancel: +0 (Rust's ∞ − ∞ = NaN)");
+    var inf: f64 = 1.0 / 0.0;
+    ys[0] = inf;
+    ys[1] = -inf;
+    var h4: f64 = hess_law(&ys, 2);
+    assert_eq(ulp_is_nan(_km_bits(h4)), 1, "∞ − ∞ of non-finite steps: Rust's NaN");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var took = 0;
+    var w: f64[5];
+    var k = 0;
+    while (k < 3000) {
+        var j = 0;
+        while (j < 5) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            store64(&w + 8 * j, ((st >> 2) % 0x7FE0000000000000) | ((st & 1) << 63));
+            j = j + 1;
+        }
+        var n = 1 + ((st >> 9) % 5);
+        var s: f64 = _km_sum(&w, n);
+        var ds: f64 = s - s;
+        if (ds == 0.0) {
+            took = took + 1;
+            var u: f64 = _km_sum_ux_f64(&w, n);
+            if (_km_bits(u) != _km_bits(s)) { bad = bad + 1; }
+            var hl: f64 = hess_law(&w, n);
+            if (_km_bits(hl) != _km_bits(s)) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "a finite sum of finite doubles is the unbounded one (the fast path's lemma)");
+    assert(took > 1500, "the fast test passes on most seeded slices");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_heat_1kg_water_1c();
@@ -226,6 +286,7 @@ fn main() {
     _t_nan_calorimetry_is_error();
     _t_cyrius_slices_and_threshold();
     _t_cyrius_adr27_rounded_once();
+    _t_cyrius_adr33_sums();
     return assert_summary();
 }
 

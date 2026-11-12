@@ -17,6 +17,10 @@
 //!   `steady_state_intermediate`, `pre_equilibrium_rate` and `michaelis_menten` rows are noted where the port's value
 //!   (the correctly rounded monomial, or Rust's sequence with an unbounded exponent; `audit.rs`) differs from Rust's,
 //!   and `audit::emit_kinetics` appends their edge rows with their own seed.
+//! - ADR 0002 #33 (the overflow audit's B4): `zero_order_concentration` rows are noted where Rust's [A]₀ − k·t with an
+//!   unbounded exponent (the final subtraction rounded once, then Rust's clamp at 0) differs from Rust's value
+//!   (`audit.rs`), and `audit::emit_kinetics_b4` appends its edge rows (k·t past DBL_MAX or below 2⁻¹⁰²², [A]₀ bringing
+//!   it back) with its own seed.
 //! - Class C, `exp_m1` and `powf`: `nth_order_half_life` — orders on a fine grid around 1 (the 10⁻¹² tolerance
 //!   and the ulps either side of it, from both sides), integer and fractional orders out to ±300, [A]₀ and k over
 //!   many decades, the extreme-order overflow and underflow Err rows, **rows where [A]₀^(n−1) is subnormal and the
@@ -34,7 +38,7 @@ use crate::tsv::{Class, Module, err, f};
 use kimiya::element::GAS_CONSTANT;
 use kimiya::kinetics::{
     arrhenius_rate, collision_theory_rate, eyring_rate, eyring_rate_from_activation, first_order_concentration,
-    half_life_first_order, lineweaver_burk, nth_order_half_life, steady_state_rate, zero_order_concentration,
+    half_life_first_order, lineweaver_burk, nth_order_half_life, steady_state_rate,
 };
 
 /// `x` moved `d` ulps (up for d > 0).
@@ -287,10 +291,7 @@ pub fn emit() -> Module {
     }
 
     // ── zero_order_concentration ──
-    let zoc = |m: &mut Module, c0: f64, k: f64, t: f64| {
-        let out = zero_order_concentration(bb(c0), bb(k), bb(t));
-        m.row("kinetics::zero_order_concentration", Class::B, &[f(c0), f(k), f(t)], &[f(out)]);
-    };
+    let zoc = audit::zero_conc;
     for x in edges() {
         zoc(&mut m, x, 0.1, 5.0);
         zoc(&mut m, 1.0, x, 5.0);
@@ -785,5 +786,6 @@ pub fn emit() -> Module {
         eya(&mut m, dh, ds, t);
     }
     audit::emit_kinetics(&mut m);
+    audit::emit_kinetics_b4(&mut m);
     m
 }

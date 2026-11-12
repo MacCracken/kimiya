@@ -1599,6 +1599,103 @@ Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **18 modules, 0 faili
 === parity summary: 18 modules, 0 failing | rows: 333818 ok, 0 failed, 0 measured, 0 pending, 43311 accepted (ADR 6: 809), 0 glibc-matching (failed) ===
 ```
 
+## 24. The overflow audit's B4: sums with cancellation and the Shomate polynomials, ADR 0002 #33 and #34; #29 corrected (2026-11-11)
+
+B1's decisions unchanged (ADR 0002's B4 addition): every function here has a sum inside, so each gets #20's edge fix —
+Rust's operation sequence, its summation order included (`.sum()` from −0.0, thermochem's `total += coeff * prop` from
++0.0), with an unbounded exponent and the final operation rounded once, behind a fast-path test that proves Rust's chain
+stayed normal (Rust's bits there); Rust's NaN for an out-of-range value (∞ − ∞) becomes the correctly rounded ±∞, and an
+∞ − ∞ whose true value is finite gives that value. B4 is the survey's F7 (#33: `hess_law`, `enthalpy_from_formation`,
+the three thermochem reaction sums, `q_value`, `ionic_strength`, `born_haber_lattice_energy`, `gibbs_free_energy`,
+`kohlrausch_molar_conductivity`, `limiting_molar_conductivity`, `zero_order_concentration`) and F8 (#34: `Shomate::cp`,
+`enthalpy_antiderivative`). For a pure sum the fast test is "result finite" (a sum of doubles is exact below 2⁻¹⁰²¹, so
+only overflow leaves the range: proven in the ADR, checked here row by row); a product inside takes `_km_ux_normal` or
+an exact zero. Rust's checks, Err codes and order are kept. The corpus keeps the oracle's values;
+`scripts/oracle/src/audit.rs` appends each module's B4 edge rows with its own seed: thermo 1,644 → 1,828, reaction 1,558
+→ 1,730, nuclear 54,224 → 54,312, solution 29,024 → 29,454, inorganic 15,416 → 15,586, kinetics 31,210 → 31,381,
+thermochem 9,857 → 11,149 (2,507 rows), and electrochemistry 19,397 → 19,420 for #29's correction (23 rows).
+
+| Function | Class | Rows | Oracle Ok | Oracle Err | Noted (port ≠ oracle) | changing, of the rows before B4 | ulp of the rest |
+|---|---|---|---|---|---|---|---|
+| `thermo::hess_law` | B | 310 | 310 | 0 | 28 (#33) | 0 of 215 | 0 |
+| `thermo::enthalpy_from_formation` | B | 248 | 248 | 0 | 27 (#33) | 0 of 159 | 0 |
+| `thermochem::reaction_enthalpy` | B | 597 | 590 | 7 | 115 (#33, after #1's note) | 2 of 429 | 0 |
+| `thermochem::reaction_gibbs_energy` | B | 597 | 590 | 7 | 113 (#33, after #1's note) | 2 of 429 | 0 |
+| `thermochem::reaction_entropy` | B | 597 | 590 | 7 | 66 (#33) | 2 of 429 | 0 |
+| `nuclear::q_value` | B | 474 | 474 | 0 | 58 (#33) | 0 of 386 | 0 |
+| `solution::ionic_strength` | B | 411 | 411 | 0 | 13 (#33) | 0 of 320 | 0 |
+| `inorganic::born_haber_lattice_energy` | B | 666 | 666 | 0 | 74 (#33) | 0 of 496 | 0 |
+| `reaction::gibbs_free_energy` | B | 632 | 615 | 17 | 57 (#33) | 0 of 460 | 0 |
+| `solution::kohlrausch_molar_conductivity` | B | 428 | 412 | 16 | 54 (#33) | 0 of 258 | 0 |
+| `solution::limiting_molar_conductivity` | B | 439 | 439 | 0 | 31 (#33) | 0 of 270 | 0 |
+| `kinetics::zero_order_concentration` | B | 673 | 673 | 0 | 61 (#33) | 0 of 502 | 0 |
+| `Shomate::cp` | B | 1,582 | 1,582 | 0 | 185 (#34) | 70 of 1,188 | 0 |
+| `Shomate::enthalpy_antiderivative` | B | 1,582 | 1,582 | 0 | 25 (#34) | 6 of 1,188 | 0 |
+| `electrochemistry::nernst_potential` | C | 1,764 | 1,709 | 55 | 136 (#29: 17 more) | 0 of 1,741 | 0 |
+
+- **The noted rows** are read by `_par_got_noted` / `_par_got_noted_f` (for the two J/mol sums after ADR 0002 #1's note,
+  `… [J/mol: … (ADR 0002 #1)] [ADR 0002 #33: … (f:…)]`): the port's value must be the note's bit for bit, and the row is
+  accepted under ADR 2. Every other row is the port's value and the oracle's at once (0 ulp). "Changing" counts the rows
+  that existed before B4 whose expected port value moves: the survey's six thermochem rows (two per sum: Al₂O₃ ×10³⁰⁸
+  both sides, NaN → +0) and its 76 Shomate rows (`cp` 70: 10 at T → 0 for the 20.786-only set, NaN → 20.786, and 60 at
+  T = 10³⁰⁰ and DBL_MAX for the tabulated segments, NaN → ±∞; `enthalpy_antiderivative` 6: at 5·10⁻³²⁴ K NaN →
+  1.04·10⁻³²², and three at 2⁻¹⁰²² K degraded). The survey counted 93 NaN-for-∞ Shomate rows; 33 of them are
+  `enthalpy_antiderivative` at T = −0, where its replica lost the zero's sign: there Rust's +sign(E)·∞ is IEEE's E/(−0)
+  and the unbounded evaluation's too, so they stay. The other F7 functions had no failing golden row.
+- **#29's correction.** B2's `_km_nernst_fast` took 2⁻¹⁰²² itself as normal, so a product c·ln Q in
+  [2⁻¹⁰²² − 2⁻¹⁰⁷⁵, 2⁻¹⁰²² − 2⁻¹⁰⁷⁶), which IEEE rounds up to 2⁻¹⁰²² and 53-bit rounding to 2⁻¹⁰²² − 2⁻¹⁰⁷⁵, kept Rust's
+  value; the bound is now `_km_ux_normal`'s 2⁻¹⁰²¹. The 23 new rows (`NERNST_2M1022`: the three the main session found,
+  eleven more from a seeded search, and the first three again with E° = 3, 2 and 0 units of 2⁻¹⁰⁷⁴) are noted where E°
+  is an odd multiple of 2⁻¹⁰⁷⁴ (17 rows: #20's value is the subnormal tie's even neighbour, −0x0.ffffffffffffep-1022 for
+  Rust's −0x0.fffffffffffffp-1022) and plain where it is even. No earlier row changes (the 1,455 rows whose chain is
+  normal are the same).
+- **The proofs** (`validate.py` §22). Each row's port value recomputed through `mpfr_ref.UX` and the new `ux_sum` /
+  `ux_sum_final` (Rust's summation orders), the final operations by `ux_add_final`, `ux_sub_final`, `ux_mul_final`, and
+  each note proven to sit exactly where it differs from the oracle's, naming it. No row whose f64 chain stays in the
+  normal range is noted (245 `hess_law`, 184 `enthalpy_from_formation`, 448, 458 and 448 for the reaction sums, 372
+  `q_value`, 389 `ionic_strength`, 507 `born_haber_lattice_energy`, 453 `gibbs_free_energy`, 252
+  `kohlrausch_molar_conductivity`, 270 `limiting_molar_conductivity`, 496 `zero_order_concentration`, 947 `cp`, 1,076
+  `enthalpy_antiderivative` rows: Rust's bits). The pure-sum lemma: on 786 rows of the three pure sums with finite
+  inputs and finite sums every partial sum is exactly MPFR's (226 more have a sum past DBL_MAX). The data-backed Shomate
+  callers: every SHOMATE_DATA segment is in the port's box, and the 1,937 golden flame rows' 324,925 polynomial
+  evaluations are all inside it. §16's, §19's and §20's shared tracer `_t_chk` now flags a product or quotient of
+  exactly 2⁻¹⁰²² that is not its exact value's 53-bit rounding (#29's correction; no count moves). The noted rows by
+  kind: 522 where Rust's value is 0, ±∞ or NaN and the port's representable, 165 where Rust's NaN is the value ±∞, 1
+  where Rust's other special differs from an out-of-range value, 5 where only a zero's sign differs
+  (`born_haber_lattice_energy`'s −2⁻¹⁰⁷⁵, `zero_order_concentration`'s clamp on the unbounded difference), 34 degraded
+  (the value normal, Rust's more than 2 ulp off), 180 within 2 ulp or subnormal.
+- **`cr_verify.py`**: the twelve families `hess` 110,008, `eff` 110,005, `rsum` 110,005, `qv` 110,005, `ionic` 100,006,
+  `haber` 110,005, `gibbs` 100,006, `kohl` 100,006, `lim` 100,004, `zoc` 100,005, `shcp` 100,007, `shh` 100,007
+  (1,250,069 in all) — the public function, the Rust-chain fast path where its test passes and the unbounded-exponent
+  slow path forced, against `mpfr_ref.UX` with `ux_sum` — and `nernst`'s new region of 2,800 products at 2⁻¹⁰²² (202,809
+  in all): 0 mismatches, the same bits and flags on x86_64 ELF, x86_64 PE and aarch64. The fast paths decline on the
+  edge and subnormal sections only (none on the typical ones).
+
+Tests: `tests/thermo.tcyr`'s `cyrius_adr33_sums`, `tests/reaction.tcyr`'s `cyrius_adr33_gibbs`, `tests/nuclear.tcyr`'s
+`cyrius_adr33_q_value`, `tests/solution.tcyr`'s `cyrius_adr33_solution`, `tests/inorganic.tcyr`'s
+`cyrius_adr33_born_haber`, `tests/kinetics.tcyr`'s `cyrius_adr33_zero_order`, `tests/thermochem.tcyr`'s
+`cyrius_adr33_reaction_sums` and `cyrius_adr34_shomate`, `tests/electrochemistry.tcyr`'s `cyrius_adr29_2m1022` (the
+23 rows; it fails on B2's code); no Rust test changes.
+
+**Cost** (`tests/kimiya.bcyr` and the new `tests/audit.bcyr`, before → after, the same host;
+`docs/benchmarks-rust-v-cyrius.md`'s B4 section): `reaction/gibbs_free_energy` 17 → 18 ns (Rust 1.75),
+`thermochem/reaction_enthalpy_ch4` 259 → 293 ns (Rust 38.58), `thermochem/shomate_cp` 15 → 32 ns (Rust 2.34: the box
+test), `thermochem/enthalpy_change_cp` 171 → 171 ns (Rust 24.00) and `thermochem/adiabatic_flame_ch4_air` 3.40 → 3.29 µs
+(Rust 301.48 ns: the table-row path tests T alone, inline), `electrochemistry/nernst_potential` 90 → 89 ns (Rust 6.42;
+#29's bound); Cyrius-only `hess_law` 13 → 15, `enthalpy_from_formation` 20 → 24, `reaction_gibbs_energy` 259 → 299,
+`reaction_entropy` 259 → 286, `q_value` 24 → 26, `ionic_strength` 24 → 31, `born_haber_lattice_energy` 10 → 14,
+`kohlrausch_molar_conductivity` 22 → 28, `limiting_molar_conductivity` 10 → 24, `zero_order_concentration` 12 → 17,
+`shomate_enthalpy_antiderivative` 37 → 54 ns; the slow paths 117–587 ns (`hess_law_edge` 162, `reaction_enthalpy_edge`
+587, `gibbs_free_energy_edge` 117), the Shomate polynomials' 311 and 474 ns.
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **18 modules, 0 failing; 335,424 ok, 0 failed, 0 measured,
+0 pending, 44,235 accepted (809 under ADR 6; under ADR 2 as §23 plus 697 #33, 210 #34 and 17 more #29 rows), 0
+glibc-matching.**
+
+```text
+=== parity summary: 18 modules, 0 failing | rows: 335424 ok, 0 failed, 0 measured, 0 pending, 44235 accepted (ADR 6:
+809), 0 glibc-matching (failed) === ```
+
 ## How to reproduce
 
 ```sh

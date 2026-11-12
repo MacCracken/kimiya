@@ -31,6 +31,10 @@
 //! - ADR 0002 #29 (the overflow audit's B2): `dilution` and `solution_conductivity` rows are noted where the port's
 //!   correctly rounded M₁·V₁/V₂ or Λ·c/1000 differs from Rust's value (`audit.rs`), and `audit::emit_solution` appends
 //!   their edge rows (partial products past DBL_MAX or below 2⁻¹⁰²², midpoints and subnormal ties) with their own seed.
+//! - ADR 0002 #33 (the overflow audit's B4): `ionic_strength`, `kohlrausch_molar_conductivity` and
+//!   `limiting_molar_conductivity` rows are noted where Rust's sequence with an unbounded exponent (the final product
+//!   or subtraction rounded once) differs from Rust's value (`audit.rs`), and `audit::emit_solution_b4` appends their
+//!   edge rows (terms, sums or products past DBL_MAX or below 2⁻¹⁰²² that the rest brings back) with their own seed.
 //!
 //! Every input goes through `black_box`; grid inputs use only exact or correctly rounded operations
 //! (`grids.rs`). The near-cancellation pKa values come from `log10_arith`, + − × ÷ only.
@@ -46,7 +50,7 @@ use kimiya::solution::{
     DH_A_WATER_25C, DH_B_WATER_25C, KW_WATER_25C, LAMBDA_CL_MINUS, LAMBDA_H_PLUS, LAMBDA_K_PLUS,
     LAMBDA_NA_PLUS, LAMBDA_NO3_MINUS, LAMBDA_OH_MINUS, LAMBDA_SO4_2MINUS, davies_activity,
     debye_huckel_extended, debye_huckel_limiting, h_concentration_from_ph,
-    henderson_hasselbalch, ionic_strength, kohlrausch_molar_conductivity, limiting_molar_conductivity,
+    henderson_hasselbalch,
     molality, molarity, ph_from_h_concentration, ph_from_poh, poh_from_oh_concentration,
     weak_acid_ph, weak_base_ph,
 };
@@ -451,10 +455,7 @@ pub fn emit() -> Module {
     );
 
     // ── ionic strength ──
-    let ion = |m: &mut Module, xs: &[(f64, i32)]| {
-        let out = ionic_strength(bb(xs));
-        m.row("solution::ionic_strength", Class::B, &ions_toks(xs), &[f(out)]);
-    };
+    let ion = |m: &mut Module, xs: &[(f64, i32)]| audit::ionic(m, &ions_toks(xs), xs);
     let lists: Vec<Vec<(f64, i32)>> = vec![
         vec![],
         vec![(0.1, 1), (0.1, -1)],
@@ -554,10 +555,7 @@ pub fn emit() -> Module {
     }
 
     // ── conductivity ──
-    let kohl = |m: &mut Module, l0: f64, k: f64, c: f64| {
-        let out = res(kohlrausch_molar_conductivity(bb(l0), bb(k), bb(c)));
-        m.row("solution::kohlrausch_molar_conductivity", Class::B, &[f(l0), f(k), f(c)], &[out]);
-    };
+    let kohl = audit::kohl;
     for x in edges() {
         kohl(&mut m, x, 10.0, 0.01);
         kohl(&mut m, 126.4, x, 0.01);
@@ -581,10 +579,7 @@ pub fn emit() -> Module {
         LAMBDA_NO3_MINUS,
         LAMBDA_SO4_2MINUS,
     ];
-    let lmc = |m: &mut Module, a: f64, b: f64, c: f64, d: f64| {
-        let out = limiting_molar_conductivity(bb(a), bb(b), bb(c), bb(d));
-        m.row("solution::limiting_molar_conductivity", Class::B, &[f(a), f(b), f(c), f(d)], &[f(out)]);
-    };
+    let lmc = audit::limiting;
     for &cat in &lambdas[..4] {
         for &an in &[lambdas[1], lambdas[4], lambdas[5], lambdas[6]] {
             for (nc, na) in [(1.0, 1.0), (2.0, 1.0), (1.0, 2.0)] {
@@ -616,5 +611,6 @@ pub fn emit() -> Module {
         cond(&mut m, a, c);
     }
     audit::emit_solution(&mut m);
+    audit::emit_solution_b4(&mut m);
     m
 }

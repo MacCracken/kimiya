@@ -3,21 +3,45 @@
 #
 # SI units throughout: J/mol, J/(mol·K), K. Fallible functions return a value-form Result whose
 # Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs instead of returning Ok(NaN).
-# Every expression keeps Rust's operation order: gibbs_free_energy is bit-identical (class B);
+# Every expression keeps Rust's operation order: gibbs_free_energy is bit-identical (class B) wherever its chain stays
+# in the normal range (ADR 0002 #33, below);
 # equilibrium_constant's one exp is the correctly rounded _km_cr_exp (src/mathx.cyr, ADR 0006), so its
 # class-C rows are compared exactly against the corrected oracle (docs/development/port-parity.md §10).
 
 # Gibbs free energy ΔG = ΔH − T·ΔS in J/mol, from ΔH in J/mol, T in K and ΔS in J/(mol·K):
 # Ok(ΔG), Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite, or
-# Err(KM_ERR_INVALID_INPUT) if ΔH or ΔS is not finite. Mirrors `reaction::gibbs_free_energy`.
+# Err(KM_ERR_INVALID_INPUT) if ΔH or ΔS is not finite. ADR 0002 #33 (the overflow audit's B4): ΔH − T·ΔS has a sum
+# inside, so it gets ADR 0002 #20's semantics: Rust's chain where T·ΔS is the 53-bit rounding of its exact value
+# (normal, src/mathx.cyr's _km_ux_normal, or an exact zero: ΔS = 0; T > 0), so the final difference is rounded once in
+# both; otherwise the same sequence with an unbounded exponent and the difference rounded once
+# (gibbs_free_energy(DBL_MAX, 2, 0.75·DBL_MAX) is −8.99·10³⁰⁷, Rust's −∞; a subnormal T·ΔS is not rounded twice).
+# Mirrors `reaction::gibbs_free_energy`, with ADR 0002 #33.
 #must_use
 fn gibbs_free_energy(enthalpy_j: f64, temperature_k: f64, entropy_j_per_k: f64): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_finite(enthalpy_j) != 1 || _km_is_finite(entropy_j_per_k) != 1) {
         return Err(KM_ERR_INVALID_INPUT);
     }
-    var g: f64 = enthalpy_j - (temperature_k * entropy_j_per_k);
-    return Ok(g);
+    var p: f64 = temperature_k * entropy_j_per_k;
+    var g: f64 = enthalpy_j - p;
+    var ap: f64 = f64_abs(p);
+    var lo: f64 = 0x0020000000000000;       # 2⁻¹⁰²¹ (_km_ux_normal's range, inline)
+    var hi: f64 = 0x7FEFFFFFFFFFFFFF;
+    if ((ap >= lo && ap <= hi) || entropy_j_per_k == 0.0) { return Ok(g); }
+    var u: f64 = _km_gibbs_ux(enthalpy_j, temperature_k, entropy_j_per_k);
+    return Ok(u);
+}
+
+# gibbs_free_energy with an unbounded exponent (ADR 0002 #33), for its validated inputs: Rust's ΔH − T·ΔS with T·ΔS
+# rounded to 53 bits (src/mathx.cyr's _km_ux_*), the difference rounded once into binary64.
+#must_use
+fn _km_gibbs_ux(enthalpy_j: f64, temperature_k: f64, entropy_j_per_k: f64): f64 {
+    var hs, he = _km_ux_from(enthalpy_j);
+    var ts, te = _km_ux_from(temperature_k);
+    var ss, se = _km_ux_from(entropy_j_per_k);
+    var ps, pe = _km_ux_mul(ts, te, ss, se);
+    var u: f64 = _km_ux_sub_f64(hs, he, ps, pe);
+    return u;
 }
 
 # Equilibrium constant K = exp(−ΔG / (R·T)), dimensionless, from ΔG in J/mol and T in K. For

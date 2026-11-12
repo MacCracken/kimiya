@@ -6,7 +6,7 @@
 # KM_DH_B_WATER_25C and the seven KM_LAMBDA_* — are src/constants.cyr's (generated; solution has no data file
 # of its own). Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and
 # reject NaN and ±∞ inputs. Every expression keeps Rust's operation order, so the arithmetic functions are
-# bit-identical (class B), except the two below; the log10 and 10^x functions are class C
+# bit-identical (class B), except the five below; the log10 and 10^x functions are class C
 # (docs/development/port-parity.md §7, §10).
 #
 # - ADR 0002 #29 (the overflow audit's B2; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide audit" and
@@ -16,6 +16,13 @@
 #   M₁·V₁ or Λ·c that over- or underflows gives ±∞, 0 or a degraded subnormal although the value is representable
 #   (solution_conductivity(126.4, DBL_MAX) is ∞ in Rust, 2.27·10³⁰⁷ here). Rust's checks and Err codes are kept;
 #   solution_conductivity, which validates nothing, keeps Rust's expression for a non-finite input.
+# - ADR 0002 #33 (the overflow audit's B4; the same decisions): ionic_strength's ½·Σ c·z²,
+#   kohlrausch_molar_conductivity's Λ° − K·√c and limiting_molar_conductivity's ν₊λ₊ + ν₋λ₋ have sums inside, so they
+#   get ADR 0002 #20's semantics: Rust's operation sequence with an unbounded exponent (src/mathx.cyr's _km_ux_*), the
+#   final operation rounded once into binary64, behind a cheap test that proves Rust's chain stayed in the normal range
+#   (its bits there). A term or a partial sum past DBL_MAX that the rest brings back gave ±∞ or NaN although the value
+#   is representable. Rust's checks and Err codes are kept, and a non-finite input of the two unvalidated functions
+#   keeps Rust's expression.
 # - log10 is src/mathx.cyr's correctly rounded _km_cr_log10 and 10^x its _km_cr_exp10 (the same value as a
 #   correctly rounded pow(10, x), Rust's 10.0_f64.powf(x)), as the Antoine equation's (ADR 0006). With both
 #   sides on correctly rounded primitives in Rust's operation order the class-C rows are compared exactly
@@ -221,12 +228,18 @@ fn weak_base_ph(kb: f64, concentration: f64): Result {
 # the concentration's f64 bits (mol/L), then the charge zᵢ as an i64 word. The charge is squared in f64, so any
 # i32 charge is accepted; the terms (c·z)·z are summed in list order from −0.0 (Rust's `.sum()`), so no ions give
 # 0.5 × −0.0 = −0.0. Concentrations are not validated: negative or non-finite ones propagate. NaN if (ions, n)
-# is no list or a charge is outside the i32 range (Rust's type), since there is no error channel. Mirrors
-# `solution::ionic_strength`.
+# is no list or a charge is outside the i32 range (Rust's type), since there is no error channel. ADR 0002 #33: Rust's
+# chain where the sum is finite, otherwise for finite concentrations the same sequence with an unbounded exponent and
+# the final ½·Σ rounded once (a sum or a term past DBL_MAX whose half is finite: ionic_strength([(0.4·DBL_MAX, 2)]) is
+# 1.44·10³⁰⁸, Rust's ∞). A term c·z·z of a finite c and an integer z ≠ 0 is a multiple of 2⁻¹⁰⁷⁴ and so exact below
+# 2⁻¹⁰²¹, the 53-bit rounding above, and z = 0 gives an exact zero: only overflow leaves the range, which makes the
+# sum ±∞ or NaN, and a finite sum of such terms is the unbounded one (src/thermo.cyr's comment on #33's sums). Mirrors
+# `solution::ionic_strength`, with ADR 0002 #33.
 #must_use
 fn ionic_strength(ions, n): f64 {
     if (n < 0 || (n > 0 && ions == 0)) { return _km_nan(); }
     var s: f64 = -0.0;
+    var fin = 1;
     var k = 0;
     while (k < n) {
         var c: f64 = load64(ions + k * 16);
@@ -235,10 +248,40 @@ fn ionic_strength(ions, n): f64 {
         var z: f64 = f64_from(zi);
         var term: f64 = (c * z) * z;
         s = s + term;
+        if (_km_is_finite(c) != 1) { fin = 0; }
         k = k + 1;
     }
     var i: f64 = 0.5 * s;
-    return i;
+    var ds: f64 = s - s;
+    if (ds == 0.0 || fin != 1) { return i; }
+    var u: f64 = _km_ionic_strength_ux(ions, n);
+    return u;
+}
+
+# ionic_strength with an unbounded exponent (ADR 0002 #33), for a valid list of finite concentrations and i32 charges:
+# Rust's ½·Σ (c·z)·z from −0.0, every product and addition rounded to 53 bits (src/mathx.cyr's _km_ux_*), the final
+# product by ½ rounded once into binary64 (_km_ux_mul_f64).
+#must_use
+fn _km_ionic_strength_ux(ions, n): f64 {
+    var z0: f64 = -0.0;
+    var ss, se = _km_ux_from(z0);
+    var k = 0;
+    while (k < n) {
+        var c: f64 = load64(ions + k * 16);
+        var z: f64 = f64_from(load64(ions + k * 16 + 8));
+        var cs, ce = _km_ux_from(c);
+        var zs, ze = _km_ux_from(z);
+        var ps, pe = _km_ux_mul(cs, ce, zs, ze);
+        var ts, te = _km_ux_mul(ps, pe, zs, ze);
+        var ns, ne = _km_ux_add(ss, se, ts, te);
+        ss = ns;
+        se = ne;
+        k = k + 1;
+    }
+    var h: f64 = 0.5;
+    var hs, he = _km_ux_from(h);
+    var r: f64 = _km_ux_mul_f64(hs, he, ss, se);
+    return r;
 }
 
 # The checks shared by the activity-coefficient models: KM_ERR_INVALID_INPUT if the ionic strength is negative
@@ -312,24 +355,93 @@ fn davies_activity(charge, ionic_str: f64, a_constant: f64): Result {
 # Kohlrausch's law Λ_m = Λ°_m − K·√c: the molar conductivity (S·cm²/mol) at concentration c (mol/L), from the
 # limiting molar conductivity at infinite dilution Λ°_m (S·cm²/mol) and the Kohlrausch constant K
 # (S·cm²·L^½/mol^(3/2)). Ok(Λ_m); Err(KM_ERR_INVALID_CONCENTRATION) if c is negative or not finite;
-# Err(KM_ERR_INVALID_INPUT) if Λ°_m or K is not finite. Mirrors `solution::kohlrausch_molar_conductivity`.
+# Err(KM_ERR_INVALID_INPUT) if Λ°_m or K is not finite. ADR 0002 #33: Rust's chain where K·√c is the 53-bit rounding of
+# its exact value (normal, _km_ux_normal, or an exact zero: K = 0 or c = 0; √c itself, of a non-negative double, is 0
+# or normal and correctly rounded in both), so the final difference is rounded once in both; otherwise the same
+# sequence with an unbounded exponent and the difference rounded once (kohlrausch_molar_conductivity(DBL_MAX, DBL_MAX,
+# 1.21) is −1.80·10³⁰⁷, Rust's −∞). Mirrors `solution::kohlrausch_molar_conductivity`, with ADR 0002 #33.
 #must_use
 fn kohlrausch_molar_conductivity(lambda_zero: f64, k_kohlrausch: f64, concentration: f64): Result {
     if (_km_is_non_negative(concentration) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
     if (_km_is_finite(lambda_zero) != 1 || _km_is_finite(k_kohlrausch) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var lm, ok = _km_kohlrausch_fast(lambda_zero, k_kohlrausch, concentration);
+    if (ok == 1) { return Ok(lm); }
+    var u: f64 = _km_kohlrausch_ux(lambda_zero, k_kohlrausch, concentration);
+    return Ok(u);
+}
+
+# kohlrausch_molar_conductivity's fast path, for its validated inputs: (Rust's Λ° − K·√c, 1) where K·√c is the 53-bit
+# rounding of its exact value (normal, _km_ux_normal, or an exact zero: K = 0 or c = 0), otherwise (0, 0).
+#must_use
+fn _km_kohlrausch_fast(lambda_zero: f64, k_kohlrausch: f64, concentration: f64): (f64, i64) {
     var sq: f64 = f64_sqrt(concentration);
-    var lm: f64 = lambda_zero - (k_kohlrausch * sq);
-    return Ok(lm);
+    var p: f64 = k_kohlrausch * sq;
+    var lm: f64 = lambda_zero - p;
+    if (_km_ux_normal(p) == 1 || k_kohlrausch == 0.0 || sq == 0.0) { return (lm, 1); }
+    return (0.0, 0);
+}
+
+# kohlrausch_molar_conductivity with an unbounded exponent (ADR 0002 #33), for its validated inputs: Rust's Λ° − K·√c
+# with √c and K·√c rounded to 53 bits (_km_ux_*), the difference rounded once into binary64.
+#must_use
+fn _km_kohlrausch_ux(lambda_zero: f64, k_kohlrausch: f64, concentration: f64): f64 {
+    var ls, le = _km_ux_from(lambda_zero);
+    var ks, ke = _km_ux_from(k_kohlrausch);
+    var cs, ce = _km_ux_from(concentration);
+    var qs, qe = _km_ux_sqrt(cs, ce);
+    var ps, pe = _km_ux_mul(ks, ke, qs, qe);
+    var u: f64 = _km_ux_sub_f64(ls, le, ps, pe);
+    return u;
 }
 
 # Kohlrausch's law of independent ion migration Λ°_m = ν₊·λ°₊ + ν₋·λ°₋ in S·cm²/mol, from the cation's and
 # anion's limiting ionic conductivities λ° (S·cm²/mol, e.g. KM_LAMBDA_NA_PLUS) and stoichiometric numbers ν.
-# Non-finite input propagates to the result. Mirrors `solution::limiting_molar_conductivity`.
+# Non-finite input propagates to the result. ADR 0002 #33: Rust's chain where both products are the 53-bit roundings of
+# their exact values (normal, _km_ux_normal, or an exact zero: a zero factor), the final sum rounded once in both;
+# otherwise, for finite inputs, the same sequence with an unbounded exponent and the sum rounded once
+# (limiting_molar_conductivity(DBL_MAX, 1.5, −DBL_MAX, 1) is 8.99·10³⁰⁷, Rust's ∞); a non-finite input keeps Rust's
+# expression. Mirrors `solution::limiting_molar_conductivity`, with ADR 0002 #33.
 #must_use
 fn limiting_molar_conductivity(cation_conductivity: f64, cation_stoich: f64, anion_conductivity: f64,
     anion_stoich: f64): f64 {
-    var l: f64 = (cation_stoich * cation_conductivity) + (anion_stoich * anion_conductivity);
-    return l;
+    var l, ok = _km_limiting_fast(cation_conductivity, cation_stoich, anion_conductivity, anion_stoich);
+    if (ok == 1) { return l; }
+    var nf = _km_is_finite(cation_conductivity) + _km_is_finite(cation_stoich) + _km_is_finite(anion_conductivity);
+    if (nf + _km_is_finite(anion_stoich) != 4) {
+        var r: f64 = (cation_stoich * cation_conductivity) + (anion_stoich * anion_conductivity);
+        return r;
+    }
+    var u: f64 = _km_limiting_ux(cation_conductivity, cation_stoich, anion_conductivity, anion_stoich);
+    return u;
+}
+
+# limiting_molar_conductivity's fast path: (Rust's ν₊·λ₊ + ν₋·λ₋, 1) where both products are the 53-bit roundings of
+# their exact values (normal, _km_ux_normal, or an exact zero: a zero factor), otherwise (0, 0). For a non-finite input
+# that passes it, the value is Rust's expression too.
+#must_use
+fn _km_limiting_fast(cation_conductivity: f64, cation_stoich: f64, anion_conductivity: f64,
+    anion_stoich: f64): (f64, i64) {
+    var p1: f64 = cation_stoich * cation_conductivity;
+    var p2: f64 = anion_stoich * anion_conductivity;
+    var l: f64 = p1 + p2;
+    var ok1 = 0;
+    if (_km_ux_normal(p1) == 1 || cation_stoich == 0.0 || cation_conductivity == 0.0) { ok1 = 1; }
+    if (ok1 == 1 && (_km_ux_normal(p2) == 1 || anion_stoich == 0.0 || anion_conductivity == 0.0)) { return (l, 1); }
+    return (0.0, 0);
+}
+
+# limiting_molar_conductivity with an unbounded exponent (ADR 0002 #33), for finite inputs: Rust's ν₊·λ₊ + ν₋·λ₋ with
+# the products rounded to 53 bits (_km_ux_*), the sum rounded once into binary64.
+#must_use
+fn _km_limiting_ux(cation_conductivity: f64, cation_stoich: f64, anion_conductivity: f64, anion_stoich: f64): f64 {
+    var vs, ve = _km_ux_from(cation_stoich);
+    var cs, ce = _km_ux_from(cation_conductivity);
+    var ws, we = _km_ux_from(anion_stoich);
+    var as1, ae = _km_ux_from(anion_conductivity);
+    var ps, pe = _km_ux_mul(vs, ve, cs, ce);
+    var qs, qe = _km_ux_mul(ws, we, as1, ae);
+    var u: f64 = _km_ux_add_f64(ps, pe, qs, qe);
+    return u;
 }
 
 # The solution conductivity κ = Λ_m × c / 1000 in S/cm, from the molar conductivity Λ_m (S·cm²/mol) and the

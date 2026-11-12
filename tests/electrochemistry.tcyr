@@ -555,6 +555,66 @@ fn _t_cyrius_adr29() {
     assert(took > 4500, "the fast test passes on in-range inputs");
 }
 
+# ADR 0002 #29's B4 correction: B2's fast path refused only values below 2⁻¹⁰²², so where the product c·l =
+# ((R·T)/(n·F))·ln Q lies in [2⁻¹⁰²² − 2⁻¹⁰⁷⁵, 2⁻¹⁰²² − 2⁻¹⁰⁷⁶), which IEEE rounds up to 2⁻¹⁰²² and 53-bit rounding to
+# 2⁻¹⁰²² − 2⁻¹⁰⁷⁵, it returned Rust's E° − 2⁻¹⁰²² where #20's semantics round E° − (2⁻¹⁰²² − 2⁻¹⁰⁷⁵), a subnormal tie
+# for E° an odd multiple of 2⁻¹⁰⁷⁴, to even (nernst_potential(5·10⁻³²⁴, 1, 5.1625987955063826·10⁻³⁰³,
+# 1.0512872158898858) is −0x0.ffffffffffffep-1022, Rust's −0x0.fffffffffffffp-1022; for E° = 0 or 2·2⁻¹⁰⁷⁴ the two
+# agree). Each row: E°, n, T and Q, then the #20 value, as bits (the golden edge rows of scripts/oracle/src/audit.rs's
+# NERNST_2M1022): the fast path declines every one, and nernst_potential returns the unbounded-exponent value.
+var _T_NERNST_2M1022: i64[115] = {
+    0x0000000000000001, 1, 0x012c5299aebb56a1, 0x3ff0d2128b2f3300, 0x800ffffffffffffe,
+    0x0000000000000001, 1, 0x015da605365dec16, 0x3ff018892f902b00, 0x800ffffffffffffe,
+    0x0000000000000001, 1, 0x013b5b45c31413cc, 0x3ff06b6f03675a00, 0x800ffffffffffffe,
+    0x8000000000000001, 7, 0x012d4ef95f210a80, 0x3fe6d09003db9e8a, 0x000ffffffffffffe,
+    0x8000000000000001, 1, 0x01360e4f60503912, 0x3feefd1bc8838237, 0x000ffffffffffffe,
+    0x8000000000000001, 255, 0x018459b4eaacdf85, 0x3fe83fd35aa3b4ff, 0x000ffffffffffffe,
+    0x8000000000000001, 255, 0x0191b54bd2465e98, 0x3feb49320184af3e, 0x000ffffffffffffe,
+    0x0000000000000001, 2, 0x011fcd71eb553fde, 0x3ff31ed6b3937b45, 0x800ffffffffffffe,
+    0x0000000000000001, 3, 0x015af51773707b06, 0x3ff05183cbac8628, 0x800ffffffffffffe,
+    0x8000000000000001, 7, 0x012b48b8639e6baa, 0x3fe63fc4c95cfefc, 0x000ffffffffffffe,
+    0x0000000000000001, 1, 0x0111b58b7e7f1aa1, 0x3ff2c69c5171ec09, 0x800ffffffffffffe,
+    0x8000000000000001, 1, 0x01223118d417935f, 0x3fed9a4e14f884e7, 0x000ffffffffffffe,
+    0x0000000000000001, 3, 0x012cc67d7a4bbdf0, 0x3ff28bdf0a3b5122, 0x800ffffffffffffe,
+    0x0000000000000001, 255, 0x01791b07966e9d3b, 0x3ff915712636d1db, 0x800ffffffffffffe,
+    0x0000000000000003, 1, 0x012c5299aebb56a1, 0x3ff0d2128b2f3300, 0x800ffffffffffffc,
+    0x0000000000000002, 1, 0x012c5299aebb56a1, 0x3ff0d2128b2f3300, 0x800ffffffffffffe,
+    0x0000000000000000, 1, 0x012c5299aebb56a1, 0x3ff0d2128b2f3300, 0x8010000000000000,
+    0x0000000000000003, 1, 0x015da605365dec16, 0x3ff018892f902b00, 0x800ffffffffffffc,
+    0x0000000000000002, 1, 0x015da605365dec16, 0x3ff018892f902b00, 0x800ffffffffffffe,
+    0x0000000000000000, 1, 0x015da605365dec16, 0x3ff018892f902b00, 0x8010000000000000,
+    0x0000000000000003, 1, 0x013b5b45c31413cc, 0x3ff06b6f03675a00, 0x800ffffffffffffc,
+    0x0000000000000002, 1, 0x013b5b45c31413cc, 0x3ff06b6f03675a00, 0x800ffffffffffffe,
+    0x0000000000000000, 1, 0x013b5b45c31413cc, 0x3ff06b6f03675a00, 0x8010000000000000 };
+fn _t_cyrius_adr29_2m1022() {
+    test_group("cyrius_adr29_2m1022");
+    var bad = 0;
+    var took = 0;
+    var k = 0;
+    while (k < 23) {
+        var w = &_T_NERNST_2M1022 + 40 * k;
+        var e0: f64 = fbits(load64(w));
+        var n = load64(w + 8);
+        var t: f64 = fbits(load64(w + 16));
+        var q: f64 = fbits(load64(w + 24));
+        var tr, v = nernst_potential(e0, n, t, q);
+        if (is_ok(tr) != 1 || v != load64(w + 32)) { bad = bad + 1; }
+        var nf: f64 = f64_from(n);
+        var l: f64 = _km_cr_ln(q);
+        var ef, eok = _km_nernst_fast(e0, nf, t, l);
+        took = took + eok;
+        var eu: f64 = _km_nernst_ux(e0, nf, t, l);
+        if (_km_bits(eu) != load64(w + 32)) { bad = bad + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "c·l rounded up to 2⁻¹⁰²² by IEEE: #20's value (the slow path), on all 23 rows");
+    assert_eq(took, 0, "the fast path declines a product of exactly 2⁻¹⁰²²");
+    var tiny: f64 = fbits(0x0010000000000000);     # 2⁻¹⁰²²: _km_ux_normal refuses it and accepts 2⁻¹⁰²¹
+    assert_eq(_km_ux_normal(tiny), 0, "_km_ux_normal(2⁻¹⁰²²) = 0");
+    var up: f64 = fbits(0x0020000000000000);
+    assert_eq(_km_ux_normal(up), 1, "_km_ux_normal(2⁻¹⁰²¹) = 1");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_faraday_constant_value();
@@ -596,6 +656,7 @@ fn main() {
     _t_cyrius_u8_electrons();
     _t_cyrius_nernst_ln();
     _t_cyrius_adr29();
+    _t_cyrius_adr29_2m1022();
     return assert_summary();
 }
 

@@ -4140,7 +4140,8 @@ fn _km_dd_div_cr(nh: f64, nl: f64, dh: f64, dl: f64): (f64, i64) {
 #   sum of TwoProducts and exact power-of-two scalings, so N − D·μ is an exact sum of at most ten doubles, and its sign
 #   decides (_km_mono_tie): F > μ gives z₂, F < μ gives z₁, F = μ (a tie) the even one. Midpoints are common with small
 #   integer factors (3·y with 3y of 54 bits). Otherwise (cn > 3 or cd > 2, e.g. osmotic_pressure's five factors, whose R
-#   and 1000 have odd parts of 53 and 7 bits, so that its value is never a midpoint, nor exact) the exact path decides.
+#   and 1000 have odd parts of 51 and 7 bits, whose product has at least 57, so that its value is never a midpoint, nor
+#   exact) the exact path decides.
 # - The scale: y = RN(F) = s_y·2^(e_y) with e_y in [−cd, cn], and K = k + e_y. For K ≥ −1021 the exact value exceeds
 #   2⁻¹⁰²² (F ≥ y(1 − 2⁻⁵³)), where the binary64 grid is the 53-bit grid scaled, so RN(F·2^k) = y·2^k: y's bits with k
 #   added to the exponent field when K ≤ 1023, and ±∞ for K ≥ 1024 (the 53-bit rounding y·2^k ≥ 2¹⁰²⁴ exceeds DBL_MAX:

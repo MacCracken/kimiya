@@ -22,7 +22,8 @@
 //!   rounded value differs from Rust's, and `nernst_potential`'s where Rust's sequence with an unbounded exponent (the
 //!   final subtraction rounded once) does (`audit.rs`; in-range rows keep Rust's bits); `audit::emit_electrochemistry`
 //!   appends their edge rows (R·T past DBL_MAX, a subnormal (R·T)/(n·F), partial products past either end, an
-//!   equivalent weight underflowing, midpoints) with their own seed.
+//!   equivalent weight underflowing, midpoints) with their own seed. The B4 correction of #29 appends, after them, the
+//!   rows whose (R·T)/(n·F)·ln Q IEEE rounds up to 2⁻¹⁰²² from below (`audit::NERNST_2M1022`).
 //!
 //! Every input goes through `black_box`; grid inputs use only exact or correctly rounded operations (`grids.rs`).
 

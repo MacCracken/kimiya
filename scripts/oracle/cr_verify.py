@@ -3,8 +3,8 @@ src/mathx.cyr against MPFR (ADR 0006), and its unbounded-exponent final operatio
 #20); and the exact rationals of spectroscopy (#21, #22), stoichiometry (#24 ... #26) and the overflow audit's B1 (#27,
 #28: the correctly rounded monomial, thermo's, phase's and kinetics' rationals), B2 (#29, #30: solution's,
 electrochemistry's and spectroscopy's, and the correctly rounded square root of a quotient) and B3 (#31, #32: gas's,
-potential's, inorganic's and nuclear's, and the correctly rounded w·√(x/y·2^e)) against Fraction, exact integer square
-roots and MPFR.
+potential's, inorganic's and nuclear's, and the correctly rounded w·√(x/y·2^e)) and B4 (#33, #34: the sums with
+cancellation and the Shomate polynomials) against Fraction, exact integer square roots and MPFR.
 
 For each primitive it generates seeded arguments (deterministic: random.Random with fixed seeds), builds
 a probe program that calls the Cyrius function on every argument, runs it on each target, and compares
@@ -101,6 +101,14 @@ vdw, prp, rkp, lj, lande, bea (van_der_waals_pressure, peng_robinson_pressure, r
 born_lande_lattice_energy, binding_energy_per_nucleon: the public function, its Rust-chain fast path where the range
 test passes, the unbounded-exponent slow path forced on every argument; reference mpfr_ref.UX, Tc^2.5 by UX.pow), each
 on binade-uniform, typical, past-the-range, co-volume (V near n·b or b), midpoint, subnormal and Err arguments.
+The overflow audit's B4 (ADR 0002 #33, #34) adds the twelve families of the sums with cancellation and the Shomate
+polynomials: hess, eff, rsum, qv, ionic, haber, gibbs, kohl, lim, zoc (hess_law, enthalpy_from_formation, thermochem's
+reaction_enthalpy / reaction_gibbs_energy / reaction_entropy, q_value, ionic_strength, born_haber_lattice_energy,
+gibbs_free_energy, kohlrausch_molar_conductivity, limiting_molar_conductivity, zero_order_concentration) and shcp, shh
+(Shomate::cp, enthalpy_antiderivative): the public function, its Rust-chain fast path where the test passes, the
+unbounded-exponent slow path forced on every argument; reference mpfr_ref.UX with mpfr_ref.ux_sum in Rust's summation
+order; each on binade-uniform, typical, partial-sums-past-DBL_MAX, subnormal and special arguments. B4 also adds to
+nernst the products c·l that IEEE rounds up to 2^-1022 from below (ADR 0002 #29's correction).
 Through each function's _km_cr_<f>_fast entry it reports the fast path's fallback rate per region, and
 checks the fast path's result equals the function's wherever its test passes. It checks that the three
 targets give identical bits and flags.
@@ -116,7 +124,9 @@ Usage, from the repo root:
                                                            # heat shc boil frz osm zhl ssi pre soc mm monotie
                                                            # sqrtdiv dil cond fmass fcharge fratio nernst abs
                                                            # conc vib rotor rot moment wsqrt igp igv dens
-                                                           # vdw prp rkp lj width coul force lande bea)
+                                                           # vdw prp rkp lj width coul force lande bea
+                                                           # hess eff rsum qv ionic haber gibbs kohl lim zoc
+                                                           # shcp shh)
     python3 -I scripts/oracle/cr_verify.py --work DIR      # probe sources and binaries in DIR
                                                            # (default build/cr-verify, gitignored)
 Exit status 1 on any mismatch or cross-target difference, 2 on a build or run failure.
@@ -1533,13 +1543,16 @@ AUDIT = [(33, "mono"), (34, "heat"), (35, "shc"), (36, "boil"), (37, "frz"), (38
          (45, "sqrtdiv"), (46, "dil"), (47, "cond"), (48, "fmass"), (49, "fcharge"), (50, "fratio"), (51, "nernst"),
          (52, "abs"), (53, "conc"), (54, "vib"), (55, "rotor"), (56, "rot"), (57, "moment"),
          (58, "wsqrt"), (59, "igp"), (60, "igv"), (61, "dens"), (62, "vdw"), (63, "prp"), (64, "rkp"), (65, "lj"),
-         (66, "width"), (67, "coul"), (68, "force"), (69, "lande"), (70, "bea")]
+         (66, "width"), (67, "coul"), (68, "force"), (69, "lande"), (70, "bea"),
+         (71, "hess"), (72, "eff"), (73, "rsum"), (74, "qv"), (75, "ionic"), (76, "haber"), (77, "gibbs"), (78, "kohl"),
+         (79, "lim"), (80, "zoc"), (81, "shcp"), (82, "shh")]
 AUDIT_NAMES = tuple(name for _, name in AUDIT)
 AUDIT2_NAMES = ("sqrtdiv", "dil", "cond", "fmass", "fcharge", "fratio", "nernst", "abs", "conc", "vib", "rotor", "rot",
                 "moment")
 ARITY.update({33: 12, 34: 3, 35: 3, 36: 3, 37: 3, 38: 3, 39: 2, 40: 3, 41: 4, 42: 3, 43: 3, 44: 8})
 ARITY.update({45: 2, 46: 3, 47: 2, 48: 3, 49: 3, 50: 5, 51: 4, 52: 3, 53: 3, 54: 2, 55: 2, 56: 1, 57: 2})
 ARITY.update({58: 4, 59: 3, 60: 3, 61: 3, 62: 5, 63: 5, 64: 4, 65: 3, 66: 3, 67: 3, 68: 3, 69: 5, 70: 3})
+ARITY.update({71: 6, 72: 8, 73: 11, 74: 8, 75: 7, 76: 5, 77: 3, 78: 3, 79: 4, 80: 3, 81: 6, 82: 6})
 F_CONST = _const("src/constants.cyr", "KM_FARADAY")
 H_CONST = _const("src/constants.cyr", "KM_PLANCK")
 R_GAS = _const("src/constants.cyr", "KM_GAS_CONSTANT")
@@ -1659,6 +1672,8 @@ def ref_audit(name, a):
         return ref_audit2(name, a)
     if name in AUDIT3_NAMES:
         return ref_audit3(name, a)
+    if name in AUDIT4_NAMES:
+        return ref_audit4(name, a)
     fin = all(math.isfinite(v) for v in a if isinstance(v, float))
     if name == "mono":
         nn, nd = a[0], a[1]
@@ -2234,7 +2249,64 @@ def args_nernst(rng):
                          _pp(rng)))
     bad = [(0.342, 2, 0.0, 0.1), (0.342, 0, 298.15, 0.1), (0.342, 2, 298.15, 0.0), (NAN, 2, 298.15, 0.1),
            (0.342, 2, INF, 0.1), (0.342, 2, DMAX, 1.0), (-0.0, 1, fb(1), 1.0), (0.0, 1, DMAX, 1.0), (0.342, 256, 298.15, 0.1)]
-    return [("binade-uniform", rand), ("typical", typical), ("the chain past the range", edge), ("Err and specials", bad)]
+    return [("binade-uniform", rand), ("typical", typical), ("the chain past the range", edge), ("Err and specials", bad),
+            ("the product at 2^-1022 (B4)", args_nernst_2m1022(rng))]
+
+
+# B4's correction of ADR 0002 #29 (the golden rows' NERNST_2M1022 in scripts/oracle/src/audit.rs, then a seeded search):
+# (E°, n, T, Q) whose product c·l = ((R·T)/(n·F))·ln Q lies in [2^-1022 − 2^-1075, 2^-1022 − 2^-1076), which IEEE rounds
+# up to 2^-1022 and 53-bit rounding to 2^-1022 − 2^-1075; B2's fast path took 2^-1022 as normal. E° an odd or even
+# multiple of 2^-1074 (#20's value differs from Rust's for an odd one: a subnormal tie, to even), 0, or normal.
+NERNST_2M1022 = [
+    (0x0000000000000001, 1, 0x012c5299aebb56a1, 0x3ff0d2128b2f3300),
+    (0x0000000000000001, 1, 0x015da605365dec16, 0x3ff018892f902b00),
+    (0x0000000000000001, 1, 0x013b5b45c31413cc, 0x3ff06b6f03675a00),
+    (0x8000000000000001, 7, 0x012d4ef95f210a80, 0x3fe6d09003db9e8a),
+    (0x8000000000000001, 1, 0x01360e4f60503912, 0x3feefd1bc8838237),
+    (0x8000000000000001, 255, 0x018459b4eaacdf85, 0x3fe83fd35aa3b4ff),
+    (0x8000000000000001, 255, 0x0191b54bd2465e98, 0x3feb49320184af3e),
+    (0x0000000000000001, 2, 0x011fcd71eb553fde, 0x3ff31ed6b3937b45),
+    (0x0000000000000001, 3, 0x015af51773707b06, 0x3ff05183cbac8628),
+    (0x8000000000000001, 7, 0x012b48b8639e6baa, 0x3fe63fc4c95cfefc),
+    (0x0000000000000001, 1, 0x0111b58b7e7f1aa1, 0x3ff2c69c5171ec09),
+    (0x8000000000000001, 1, 0x01223118d417935f, 0x3fed9a4e14f884e7),
+    (0x0000000000000001, 3, 0x012cc67d7a4bbdf0, 0x3ff28bdf0a3b5122),
+    (0x0000000000000001, 255, 0x01791b07966e9d3b, 0x3ff915712636d1db),
+]
+
+
+def args_nernst_2m1022(rng):
+    """(E°, n, T, Q) with c·l in the window above: the fixed rows, then a seeded search (T over the binades where c is
+    about 2^-1018, Q within 60 ulps of e^(l*) for the target l*), each with E° from {±2^-1074, ±3·2^-1074, 0, ±2^-1073,
+    a normal one}."""
+    lo = Fraction(2) ** -1022 - Fraction(2) ** -1075
+    hi = Fraction(2) ** -1022 - Fraction(2) ** -1076
+    base = [(n, fb(t), fb(q)) for _, n, t, q in NERNST_2M1022]
+    tries = 0
+    while len(base) < 400 and tries < 200_000:
+        tries += 1
+        n = rng.choice((1, 1, 2, 3, 7, 96, 255))
+        sg = rng.choice((1.0, -1.0))
+        t = math.ldexp(rng.uniform(1.0, 2.0), rng.randint(-1006, -990))
+        c = (R_GAS * t) / (float(n) * F_CONST)
+        if not c >= 2.0 ** -1021:
+            continue
+        ls = sg * float(lo / Fraction(c))
+        if not abs(ls) < 700.0:
+            continue
+        q = ulps(math.exp(ls), -60)
+        for _ in range(121):
+            p = abs(Fraction(c) * Fraction(mpfr_ref.log(q)))
+            if lo <= p < hi:
+                base.append((n, t, q))
+                break
+            q = math.nextafter(q, INF)
+    out = []
+    for n, t, q in base:
+        for k in (1, 3, 0, 2, -1, -3):
+            out.append((fb(abs(k)) if k >= 0 else -fb(-k), n, t, q))
+        out.append((rng.uniform(-3.0, 3.0), n, t, q))
+    return out
 
 
 def args_conc(rng):
@@ -2756,8 +2828,330 @@ def args_bea(rng):
     return [("binade-uniform", rand), ("typical", typical), ("Δm·931.494 past DBL_MAX", edge), ("Err and specials", bad)]
 
 
+# ── The overflow audit's B4 (ADR 0002 #33, #34): the sums with cancellation and the Shomate polynomials ─────────────────
+# ids 71 … 82: hess (hess_law: n ≤ 5, then five value words), eff (enthalpy_from_formation: np, nr ≤ 3, three product and
+# three reactant words), rsum (thermochem's reaction sums: col 0 reaction_enthalpy, 1 reaction_gibbs_energy,
+# 2 reaction_entropy; np, nr ≤ 2; then two (formula, coefficient) pairs a side, a formula as its THERMOCHEM_DATA row,
+# 76 or more an unknown formula: Rust's Err), qv (q_value: as eff), ionic (ionic_strength: n ≤ 3, then (c, z) pairs, z an
+# integer word), haber (born_haber_lattice_energy), gibbs (gibbs_free_energy), kohl (kohlrausch_molar_conductivity), lim
+# (limiting_molar_conductivity), zoc (zero_order_concentration), shcp and shh (Shomate::cp and enthalpy_antiderivative:
+# A … E, T): mode 0 the public function, its Rust-chain fast path where the test passes and the flag; mode 1 the
+# unbounded-exponent slow path forced (the _km_*_ux functions). Reference: mpfr_ref.UX with mpfr_ref.ux_sum in Rust's
+# order (from −0.0, thermochem's `+=` from +0.0) and the final operation rounded once; Rust's own expression for a
+# non-finite input, and the Shomate polynomials' at T = ±0 (exact in both). An Err is the NaN word in both slots.
+AUDIT4_NAMES = ("hess", "eff", "rsum", "qv", "ionic", "haber", "gibbs", "kohl", "lim", "zoc", "shcp", "shh")
+AMU4 = _const("src/constants.cyr", "KM_AMU_MEV")
+
+
+def _tc_column(name):
+    """A THERMOCHEM_DATA f64 column of src/thermochem_data.cyr (generated), in row order."""
+    import re
+    text = (_ROOT / "src/thermochem_data.cyr").read_text()
+    body = text[text.index(f"var {name}: f64[76] = {{"):]
+    body = body[:body.index("};")]
+    return [float(v) for v in re.findall(r"^\s+(-?[0-9.]+),", body, re.M)]
+
+
+TC_COLS = [_tc_column(n) for n in ("KM_THERMOCHEM_DELTA_HF_KJ", "KM_THERMOCHEM_DELTA_GF_KJ", "KM_THERMOCHEM_S_STANDARD_J")]
+assert all(len(c) == 76 for c in TC_COLS)
+
+
+def _fin(*xs):
+    return all(math.isfinite(x) for x in xs)
+
+
+def _rsum(xs, start=-0.0):
+    s = start
+    for x in xs:
+        s = s + x
+    return s
+
+
+def _shomate_rust(is_cp, a, b, c, d, e, temp):
+    t = temp / 1000.0
+    if is_cp:
+        return a + b * t + c * t * t + d * t * t * t + _ieee_div(e, t * t)
+    return 1000.0 * (t * (a + t * (b / 2.0 + t * (c / 3.0 + t * (d / 4.0)))) - _ieee_div(e, t))
+
+
+def ref_audit4(name, a):
+    """The reference word of ids 71 … 82 (NANW for an Err)."""
+    UX = mpfr_ref.UX
+    with mpfr_ref.unbounded():
+        if name == "hess":
+            xs = list(a[1:1 + a[0]])
+            return bits(mpfr_ref.ux_sum_final(xs) if _fin(*xs) else _rsum(xs))
+        if name in ("eff", "qv"):
+            p, r = list(a[2:2 + a[0]]), list(a[5:5 + a[1]])
+            if not _fin(*p, *r):
+                d = _rsum(p) - _rsum(r)
+                return bits(d if name == "eff" else d * AMU4)
+            if name == "eff":
+                return bits(mpfr_ref.ux_sub_final(mpfr_ref.ux_sum(p), mpfr_ref.ux_sum(r)))
+            return bits(mpfr_ref.ux_mul_final(mpfr_ref.ux_sum(p) - mpfr_ref.ux_sum(r), UX(AMU4)))
+        if name == "rsum":
+            col, np_, nr = a[0], a[1], a[2]
+            prod = [(a[3 + 2 * j], a[4 + 2 * j]) for j in range(np_)]
+            reac = [(a[7 + 2 * j], a[8 + 2 * j]) for j in range(nr)]
+            if any(f >= 76 for f, _ in prod + reac):
+                return NANW
+            v = TC_COLS[col]
+            if not _fin(*[c for _, c in prod + reac]):
+                d = _rsum([c * v[f] for f, c in prod], 0.0) - _rsum([c * v[f] for f, c in reac], 0.0)
+                return bits(d * 1000.0 if col != 2 else d)
+            sp = mpfr_ref.ux_sum([UX(c) * UX(v[f]) for f, c in prod], 0.0)
+            sr = mpfr_ref.ux_sum([UX(c) * UX(v[f]) for f, c in reac], 0.0)
+            return bits(mpfr_ref.ux_sub_final(sp, sr) if col == 2 else mpfr_ref.ux_mul_final(sp - sr, UX(1000.0)))
+        if name == "ionic":
+            ions = [(a[1 + 2 * j], a[2 + 2 * j]) for j in range(a[0])]
+            if not _fin(*[c for c, _ in ions]):
+                return bits(0.5 * _rsum([c * float(z) * float(z) for c, z in ions]))
+            terms = [UX(c) * UX(float(z)) * UX(float(z)) for c, z in ions]
+            return bits(mpfr_ref.ux_mul_final(UX(0.5), mpfr_ref.ux_sum(terms)))
+        if name == "haber":
+            f_, s, ie, d, ea = a
+            if not _fin(*a):
+                return bits(f_ - s - ie - d / 2.0 - ea)
+            return bits(mpfr_ref.ux_sub_final(UX(f_) - UX(s) - UX(ie) - UX(d) / UX(2.0), UX(ea)))
+        if name == "gibbs":
+            h, t, s = a
+            if not (_pos(t) and _fin(h, s)):
+                return NANW
+            return bits(mpfr_ref.ux_sub_final(UX(h), UX(t) * UX(s)))
+        if name == "kohl":
+            l0, k, c = a
+            if not (_nonneg(c) and _fin(l0, k)):
+                return NANW
+            return bits(mpfr_ref.ux_sub_final(UX(l0), UX(k) * UX(c).sqrt()))
+        if name == "lim":
+            cat, nc, an, na = a
+            if not _fin(*a):
+                return bits(nc * cat + na * an)
+            return bits(mpfr_ref.ux_add_final(UX(nc) * UX(cat), UX(na) * UX(an)))
+        if name == "zoc":
+            c0, k, t = a
+            if not _fin(*a):
+                rem = c0 - k * t
+                return bits(0.0 if rem < 0.0 else rem)
+            p = UX(k) * UX(t)
+            if (UX(c0) - p).cmp(UX(0.0)) < 0:
+                return bits(0.0)
+            return bits(mpfr_ref.ux_sub_final(UX(c0), p))
+        aa, bb, cc, dd, ee, temp = a                    # shcp, shh
+        if not _fin(*a) or temp == 0.0:
+            return bits(_shomate_rust(name == "shcp", aa, bb, cc, dd, ee, temp))
+        t = UX(temp) / UX(1000.0)
+        if name == "shcp":
+            return bits(mpfr_ref.ux_add_final(UX(aa) + UX(bb) * t + UX(cc) * t * t + UX(dd) * t * t * t,
+                                              UX(ee) / (t * t)))
+        inner = t * (UX(aa) + t * (UX(bb) / UX(2.0) + t * (UX(cc) / UX(3.0) + t * (UX(dd) / UX(4.0)))))
+        return bits(mpfr_ref.ux_mul_final(UX(1000.0), inner - UX(ee) / t))
+
+
+def _bigs(rng, lo=0.3, hi=1.0):
+    return DMAX * rng.uniform(lo, hi) * rng.choice((1.0, -1.0))
+
+
+def _slice_args(rng, n_max, width, gen):
+    """(n, x1 … x_width) with n ≤ n_max values from gen, the unused words 0."""
+    n = rng.randint(0, n_max)
+    xs = [gen() for _ in range(n)]
+    return (n, *xs, *([0.0] * (width - n)))
+
+
+def args_hess(rng):
+    rand = [_slice_args(rng, 5, 5, lambda: _spp(rng)) for _ in range(40_000)]
+    typical = [_slice_args(rng, 5, 5, lambda: rng.uniform(-1e6, 1e6)) for _ in range(20_000)]
+    edge = [_slice_args(rng, 5, 5, lambda: _bigs(rng)) for _ in range(40_000)]
+    sub = [_slice_args(rng, 5, 5, lambda: _spp(rng, -1074, -1015)) for _ in range(10_000)]
+    bad = [(2, DMAX, DMAX, 0.0, 0.0, 0.0), (3, DMAX, DMAX, -DMAX, 0.0, 0.0), (2, INF, -INF, 0.0, 0.0, 0.0),
+           (1, NAN, 0.0, 0.0, 0.0, 0.0), (0, 0.0, 0.0, 0.0, 0.0, 0.0), (2, -0.0, -0.0, 0.0, 0.0, 0.0),
+           (3, DMAX, 2.0 ** 970, -DMAX, 0.0, 0.0), (2, DMAX, 2.0 ** 970, 0.0, 0.0, 0.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("partial sums past DBL_MAX", edge), ("subnormal", sub),
+            ("specials", bad)]
+
+
+def _two_slices(rng, gen):
+    np_, nr = rng.randint(0, 3), rng.randint(0, 3)
+    p = [gen() for _ in range(np_)] + [0.0] * (3 - np_)
+    r = [gen() for _ in range(nr)] + [0.0] * (3 - nr)
+    return (np_, nr, *p, *r)
+
+
+def args_eff(rng):
+    rand = [_two_slices(rng, lambda: _spp(rng)) for _ in range(40_000)]
+    typical = [_two_slices(rng, lambda: rng.uniform(-5e6, 5e6)) for _ in range(20_000)]
+    edge = [_two_slices(rng, lambda: _bigs(rng)) for _ in range(40_000)]
+    sub = [_two_slices(rng, lambda: _spp(rng, -1074, -1015)) for _ in range(10_000)]
+    bad = [(2, 2, DMAX, DMAX, 0.0, DMAX, DMAX, 0.0), (1, 1, INF, 0.0, 0.0, INF, 0.0, 0.0), (0, 0, 0, 0, 0, 0, 0, 0),
+           (1, 0, -0.0, 0.0, 0.0, 0.0, 0.0, 0.0), (1, 1, NAN, 0.0, 0.0, 1.0, 0.0, 0.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("sums past DBL_MAX", edge), ("subnormal", sub),
+            ("specials", bad)]
+
+
+def args_qv(rng):
+    rand = [_two_slices(rng, lambda: _pp(rng)) for _ in range(40_000)]
+    typical = [_two_slices(rng, lambda: rng.uniform(1.0, 250.0)) for _ in range(20_000)]
+    edge = []
+    for _ in range(40_000):
+        x = _two_slices(rng, lambda: DMAX * rng.uniform(0.3, 1.0))
+        edge.append(x)
+    sub = [_two_slices(rng, lambda: _pp(rng, -1074, -1015)) for _ in range(10_000)]
+    bad = [(2, 2, DMAX, DMAX, 0.0, DMAX, 0.999 * DMAX, 0.0), (2, 2, DMAX, DMAX, 0.0, DMAX, DMAX, 0.0),
+           (1, 1, INF, 0.0, 0.0, INF, 0.0, 0.0), (0, 0, 0, 0, 0, 0, 0, 0), (1, 0, NAN, 0.0, 0.0, 0.0, 0.0, 0.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("sums past DBL_MAX", edge), ("subnormal", sub),
+            ("specials", bad)]
+
+
+def args_rsum(rng):
+    def side(gen):
+        n = rng.randint(0, 2)
+        out = []
+        for j in range(2):
+            out += [rng.randint(0, 75), gen()] if j < n else [0, 0.0]
+        return n, out
+    def mk(gen):
+        np_, p = side(gen)
+        nr, r = side(gen)
+        return (rng.randint(0, 2), np_, nr, *p, *r)
+    rand = [mk(lambda: _spp(rng)) for _ in range(40_000)]
+    typical = [mk(lambda: rng.choice((1.0, 2.0, 0.5, 3.0)) * rng.uniform(0.5, 2.0)) for _ in range(20_000)]
+    edge = []
+    for _ in range(40_000):                         # products past DBL_MAX: both sides close, the same formula
+        col, f = rng.randint(0, 2), rng.randint(0, 75)
+        v = abs(TC_COLS[col][f]) or 1.0
+        c = DMAX / max(v, 1.0) * rng.uniform(0.5, 1.0)
+        edge.append((col, 2, 2, f, c, f, c, f, c * rng.uniform(0.999, 1.001), f, c))
+    sub = [mk(lambda: _spp(rng, -1074, -1010)) for _ in range(10_000)]
+    bad = [(0, 1, 0, 76, 1.0, 0, 0.0, 0, 0.0, 0, 0.0), (2, 1, 1, 3, 1.0, 0, 0.0, 80, 1.0, 0, 0.0),
+           (0, 1, 1, 3, INF, 0, 0.0, 3, INF, 0, 0.0), (1, 1, 0, 0, NAN, 0, 0.0, 0, 0.0, 0, 0.0),
+           (0, 0, 0, 0, 0.0, 0, 0.0, 0, 0.0, 0, 0.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("products past DBL_MAX, cancelling", edge),
+            ("subnormal products", sub), ("Err and specials", bad)]
+
+
+def args_ionic(rng):
+    def mk(gen):
+        n = rng.randint(0, 3)
+        out = []
+        for j in range(3):
+            if j < n:
+                z = rng.choice((1, -1, 2, -2, 3, rng.randint(-1000, 1000), rng.choice((2 ** 31 - 1, -2 ** 31))))
+                out += [gen(z), z]
+            else:
+                out += [0.0, 0]
+        return (n, *out)
+    rand = [mk(lambda z: _spp(rng)) for _ in range(40_000)]
+    typical = [mk(lambda z: rng.uniform(0.0, 2.0)) for _ in range(20_000)]
+    edge = [mk(lambda z: _bigs(rng, 0.05, 1.0) / max(1.0, float(z) * float(z))) for _ in range(40_000)]
+    bad = [(1, 0.4 * DMAX, 2, 0.0, 0, 0.0, 0), (2, DMAX, 2, -DMAX, 2, 0.0, 0), (1, INF, 1, 0.0, 0, 0.0, 0),
+           (1, NAN, 1, 0.0, 0, 0.0, 0), (0, 0.0, 0, 0.0, 0, 0.0, 0), (1, fb(3), 3, 0.0, 0, 0.0, 0)]
+    return [("binade-uniform", rand), ("typical", typical), ("terms past DBL_MAX", edge), ("specials", bad)]
+
+
+def args_haber(rng):
+    rand = [tuple(_spp(rng) for _ in range(5)) for _ in range(40_000)]
+    typical = [(rng.uniform(-1000, 0), rng.uniform(50, 200), rng.uniform(300, 1000), rng.uniform(100, 500),
+                rng.uniform(-400, 0)) for _ in range(20_000)]
+    edge = [tuple(_bigs(rng) for _ in range(5)) for _ in range(40_000)]
+    sub = [(fb(rng.randrange(0, 1 << 20)), 0.0, 0.0, fb(rng.randrange(0, 1 << 20) | 1), -fb(rng.randrange(0, 8)))
+           for _ in range(10_000)]
+    bad = [(DMAX, -DMAX, DMAX, 0.0, 0.0), (0.0, 0.0, 0.0, fb(1), 0.0), (INF, 0.0, 0.0, 0.0, 0.0), (NAN, 1, 1, 1, 1),
+           (1.0, 1.0, 1.0, INF, 1.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("differences past DBL_MAX", edge),
+            ("an odd subnormal ΔH_diss", sub), ("specials", bad)]
+
+
+def args_gibbs(rng):
+    rand = [(_spp(rng), _pp(rng), _spp(rng)) for _ in range(40_000)]
+    typical = [(rng.uniform(-1e6, 1e6), rng.uniform(1.0, 5000.0), rng.uniform(-500.0, 500.0)) for _ in range(20_000)]
+    edge = []
+    for _ in range(40_000):
+        kind = rng.randint(0, 1)
+        if kind == 0:                               # T·ΔS in (DBL_MAX, 2·DBL_MAX), ΔH of the same sign
+            t = _pp(rng, 1, 60)
+            sg = rng.choice((1.0, -1.0))
+            edge.append((sg * DMAX * rng.uniform(0.2, 1.0), t, sg * (DMAX / t) * rng.uniform(1.0, 1.99)))
+        else:                                       # T·ΔS subnormal, ΔH tiny or 0
+            t = _pp(rng, -10, 20)
+            edge.append((rng.choice((0.0, _spp(rng, -1074, -1000))), t, _spp(rng, -1074, -1015) / t))
+    bad = [(1.0, 0.0, 1.0), (1.0, -1.0, 1.0), (NAN, 1.0, 1.0), (1.0, 1.0, INF), (1.0, INF, 1.0), (DMAX, DMAX, 1.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("T·ΔS past the range", edge), ("Err and specials", bad)]
+
+
+def args_kohl(rng):
+    rand = [(_spp(rng), _spp(rng), _pp(rng)) for _ in range(40_000)]
+    typical = [(rng.uniform(50, 450), rng.uniform(0, 200), rng.uniform(0, 1)) for _ in range(20_000)]
+    edge = []
+    for _ in range(40_000):
+        kind = rng.randint(0, 1)
+        if kind == 0:
+            c = _pp(rng, 2, 60)
+            sg = rng.choice((1.0, -1.0))
+            edge.append((sg * DMAX * rng.uniform(0.2, 1.0), sg * (DMAX / math.sqrt(c)) * rng.uniform(1.0, 1.99), c))
+        else:
+            c = _pp(rng, -40, 40)
+            edge.append((rng.choice((0.0, _spp(rng, -1074, -1000))), _spp(rng, -1074, -1015) / math.sqrt(c), c))
+    bad = [(1.0, 1.0, -1.0), (1.0, 1.0, NAN), (NAN, 1.0, 1.0), (1.0, INF, 1.0), (1.0, 1.0, -0.0), (1.0, 0.0, 0.0)]
+    return [("binade-uniform", rand), ("typical", typical), ("K·√c past the range", edge), ("Err and specials", bad)]
+
+
+def args_lim(rng):
+    rand = [tuple(_spp(rng) for _ in range(4)) for _ in range(40_000)]
+    typical = [(rng.uniform(10, 350), rng.choice((1.0, 2.0, 3.0)), rng.uniform(10, 200), rng.choice((1.0, 2.0, 3.0)))
+               for _ in range(20_000)]
+    edge = [(_bigs(rng), rng.uniform(0.5, 3.0), _bigs(rng), rng.uniform(0.5, 3.0)) for _ in range(30_000)]
+    edge += [(_spp(rng, -1074, -1000), _pp(rng, -40, 1), _spp(rng, -1074, -1000), _pp(rng, -40, 1))
+             for _ in range(10_000)]
+    bad = [(INF, 0.0, 1.0, 1.0), (NAN, 1.0, 1.0, 1.0), (1.0, INF, 1.0, 1.0), (DMAX, 2.0, -DMAX, 1.5)]
+    return [("binade-uniform", rand), ("typical", typical), ("products past the range", edge), ("specials", bad)]
+
+
+def args_zoc(rng):
+    rand = [(_spp(rng), _spp(rng), _spp(rng)) for _ in range(40_000)]
+    typical = [(rng.uniform(0, 2), rng.uniform(0, 0.1), rng.uniform(0, 100)) for _ in range(20_000)]
+    edge = []
+    for _ in range(40_000):
+        kind = rng.randint(0, 1)
+        if kind == 0:                               # k·t in (−2·DBL_MAX, −DBL_MAX), [A]₀ negative
+            t = _pp(rng, 1, 60)
+            edge.append((-DMAX * rng.uniform(0.2, 1.0), -(DMAX / t) * rng.uniform(1.0, 1.99), t))
+        else:                                       # k·t subnormal or below 2^-1075, [A]₀ tiny or ±0
+            t = _pp(rng, -30, 20)
+            edge.append((rng.choice((0.0, -0.0, _spp(rng, -1074, -1000))), _spp(rng, -1074, -1015) / t, t))
+    bad = [(NAN, 1.0, 1.0), (1.0, INF, 1.0), (-0.0, 1e-200, 1e-200), (0.0, 1e-200, -1e-200), (-DMAX, -DMAX, 1.5)]
+    return [("binade-uniform", rand), ("typical", typical), ("k·t past the range", edge), ("specials", bad)]
+
+
+def args_shomate(rng):
+    def co():
+        return 0.0 if rng.random() < 0.25 else _spp(rng)
+    rand = [(co(), co(), co(), co(), co(), _spp(rng)) for _ in range(40_000)]
+    typical = [(rng.uniform(-50, 50), rng.uniform(-50, 50), rng.uniform(-20, 20), rng.uniform(-5, 5), rng.uniform(-2, 2),
+                rng.uniform(100, 6000)) for _ in range(20_000)]
+    edge = []
+    for _ in range(40_000):
+        kind = rng.randint(0, 3)
+        phys = (rng.uniform(-50, 50), rng.uniform(-50, 50), rng.uniform(-20, 20), rng.uniform(-5, 5),
+                rng.choice((0.0, rng.uniform(-2, 2), _spp(rng, -1074, -900))))
+        if kind == 0:                               # T → 0: t·t underflowing
+            edge.append((*phys, _spp(rng, -1074, -150)))
+        elif kind == 1:                             # large T: C·t², D·t³, t⁴ overflowing
+            edge.append((*phys, _spp(rng, 150, 1023)))
+        elif kind == 2:                             # an exact cancellation of two overflowing terms at t = 2^k
+            k = rng.randint(400, 1000)
+            edge.append((rng.uniform(-50, 50), 0.0, 1.0, -(2.0 ** -k), 0.0, 125.0 * 2.0 ** (k + 3)))
+        else:                                       # every binade of the coefficients at a tiny or huge T
+            edge.append((co(), co(), co(), co(), co(), rng.choice((_spp(rng, -1074, -100), _spp(rng, 100, 1023)))))
+    bad = [(1.0, 1.0, 1.0, 1.0, 1.0, 0.0), (20.786, 0.0, 0.0, 0.0, 0.0, -0.0), (1.0, 1.0, 1.0, 1.0, 1.0, INF),
+           (NAN, 1.0, 1.0, 1.0, 1.0, 300.0), (20.786, 0.0, 0.0, 0.0, 0.0, 1e-300), (20.786, 0.0, 0.0, 0.0, 0.0, fb(1)),
+           (0.0, 0.0, 1.0, -1.0, 0.0, 1e200)]
+    return [("binade-uniform", rand), ("typical", typical), ("T → 0, T large, cancellation", edge),
+            ("T = ±0 and specials", bad)]
+
+
 def audit_checks(work, targets, which):
-    """Ids 33 … 70 against their exact references on every target, the exact path forced; True if anything failed."""
+    """Ids 33 … 82 against their exact references on every target, the exact path forced; True if anything failed."""
     failed = False
     gens = {"mono": args_mono, "heat": args_mul3, "shc": args_shc, "boil": args_mul3, "frz": args_mul3, "osm": args_osm,
             "zhl": args_zhl, "ssi": args_ssi, "pre": args_pre, "soc": args_soc, "mm": args_mm, "monotie": args_monotie,
@@ -2767,7 +3161,10 @@ def audit_checks(work, targets, which):
             "moment": lambda r: args_mul3_30(r, True),
             "wsqrt": args_wsqrt, "igp": args_ideal, "igv": args_ideal, "dens": args_dens, "vdw": args_vdw,
             "prp": args_prp, "rkp": args_rkp, "lj": args_lj, "width": args_width, "coul": args_coul, "force": args_coul,
-            "lande": args_lande, "bea": args_bea}
+            "lande": args_lande, "bea": args_bea,
+            "hess": args_hess, "eff": args_eff, "rsum": args_rsum, "qv": args_qv, "ionic": args_ionic, "haber": args_haber,
+            "gibbs": args_gibbs, "kohl": args_kohl, "lim": args_lim, "zoc": args_zoc, "shcp": args_shomate,
+            "shh": args_shomate}
 
     def eq(a, b):
         return a == b or (math.isnan(fb(a)) and math.isnan(fb(b)))
@@ -2875,8 +3272,11 @@ include "src/validate.cyr"
 include "src/element_data.cyr"
 include "src/element.cyr"
 include "src/molecule.cyr"
+include "src/reaction.cyr"
 include "src/stoichiometry.cyr"
 include "src/thermo.cyr"
+include "src/thermochem_data.cyr"
+include "src/thermochem.cyr"
 include "src/phase_data.cyr"
 include "src/phase.cyr"
 include "src/gas_data.cyr"
@@ -2924,6 +3324,13 @@ fn arity(fid): i64 {
     if (fid == 58 || fid == 64) { return 4; }
     if (fid == 62 || fid == 63 || fid == 69) { return 5; }
     if (fid >= 59 && fid <= 70) { return 3; }
+    if (fid == 71 || fid == 81 || fid == 82) { return 6; }
+    if (fid == 72 || fid == 74) { return 8; }
+    if (fid == 73) { return 11; }
+    if (fid == 75) { return 7; }
+    if (fid == 76) { return 5; }
+    if (fid == 79) { return 4; }
+    if (fid >= 77 && fid <= 80) { return 3; }
     return 1;
 }
 
@@ -3554,6 +3961,247 @@ fn run_audit3(fid, mode, a): (i64, i64, i64) {
     return (pw2, _km_bits(ff), fo2);
 }
 
+# The overflow audit's B4 (ADR 0002 #33, #34): ids 71 … 82 (cr_verify.py's AUDIT4_NAMES has the argument layouts): mode 0
+# the public function (an Err as the NaN word), Rust's chain where the function's fast test passes and the flag (the
+# pure sums' "finite", _km_reaction_property's flag, the inline normal-range tests, _km_kohlrausch_fast,
+# _km_limiting_fast, _km_shomate_cp_fast, _km_shomate_h_fast); mode 1 the unbounded-exponent slow path forced (the
+# _km_*_ux functions). A non-finite input keeps Rust's expression: the public result in both slots and modes.
+#must_use
+fn run_audit4(fid, mode, a): (i64, i64, i64) {
+    var nanw = 0x7FF8000000000001;
+    if (fid == 71) {
+        var n71 = load64(a);
+        var r71: f64 = hess_law(a + 8, n71);
+        if (_km_finite_slice(a + 8, n71) != 1) { return (_km_bits(r71), _km_bits(r71), 1); }
+        if (mode == 1) {
+            var u71: f64 = _km_sum_ux_f64(a + 8, n71);
+            return (_km_bits(u71), _km_bits(u71), 0);
+        }
+        var s71: f64 = _km_sum(a + 8, n71);
+        var d71: f64 = s71 - s71;
+        if (d71 == 0.0) { return (_km_bits(r71), _km_bits(s71), 1); }
+        return (_km_bits(r71), 0, 0);
+    }
+    if (fid == 72 || fid == 74) {
+        var np = load64(a);
+        var nr = load64(a + 8);
+        var pp = a + 16;
+        var rp = a + 40;
+        var r72: f64 = 0.0;
+        if (fid == 72) { r72 = enthalpy_from_formation(pp, np, rp, nr); } else { r72 = q_value(pp, np, rp, nr); }
+        if (_km_finite_slice(pp, np) != 1 || _km_finite_slice(rp, nr) != 1) {
+            return (_km_bits(r72), _km_bits(r72), 1);
+        }
+        if (mode == 1) {
+            var u72: f64 = 0.0;
+            if (fid == 72) { u72 = _km_formation_ux(pp, np, rp, nr); } else { u72 = _km_q_value_ux(pp, np, rp, nr); }
+            return (_km_bits(u72), _km_bits(u72), 0);
+        }
+        var sp: f64 = _km_sum(pp, np);
+        var sr: f64 = _km_sum(rp, nr);
+        var d72: f64 = sp - sr;
+        var dd72: f64 = d72 - d72;
+        if (fid == 72) {
+            var dp: f64 = sp - sp;
+            var dr: f64 = sr - sr;
+            if (dp == 0.0 && dr == 0.0) { return (_km_bits(r72), _km_bits(d72), 1); }
+            return (_km_bits(r72), 0, 0);
+        }
+        if (dd72 == 0.0) {
+            var q74: f64 = d72 * KM_AMU_MEV;
+            return (_km_bits(r72), _km_bits(q74), 1);
+        }
+        return (_km_bits(r72), 0, 0);
+    }
+    if (fid == 73) {
+        var col = load64(a);
+        var np3 = load64(a + 8);
+        var nr3 = load64(a + 16);
+        var sp3[32];
+        var sr3[32];
+        var j = 0;
+        while (j < 2) {
+            var fp = load64(a + 24 + 16 * j);
+            var fr = load64(a + 56 + 16 * j);
+            var np_ = "XeF6(g)";
+            var nr_ = "XeF6(g)";
+            if (fp >= 0 && fp < KM_THERMOCHEM_COUNT) { np_ = thermochem_data_formula(fp + 1); }
+            if (fr >= 0 && fr < KM_THERMOCHEM_COUNT) { nr_ = thermochem_data_formula(fr + 1); }
+            store64(&sp3 + 16 * j, np_);
+            store64(&sp3 + 16 * j + 8, load64(a + 32 + 16 * j));
+            store64(&sr3 + 16 * j, nr_);
+            store64(&sr3 + 16 * j + 8, load64(a + 64 + 16 * j));
+            j = j + 1;
+        }
+        var colp = &KM_THERMOCHEM_DELTA_HF_KJ;
+        if (col == 1) { colp = &KM_THERMOCHEM_DELTA_GF_KJ; }
+        if (col == 2) { colp = &KM_THERMOCHEM_S_STANDARD_J; }
+        var t73 = 0;
+        var v73 = 0;
+        if (col == 0) {
+            var t0, v0 = reaction_enthalpy(&sp3, np3, &sr3, nr3);
+            t73 = t0;
+            v73 = v0;
+        } elif (col == 1) {
+            var t1, v1 = reaction_gibbs_energy(&sp3, np3, &sr3, nr3);
+            t73 = t1;
+            v73 = v1;
+        } else {
+            var t2, v2 = reaction_entropy(&sp3, np3, &sr3, nr3);
+            t73 = t2;
+            v73 = v2;
+        }
+        if (is_ok(t73) != 1) { return (nanw, nanw, 1); }
+        var e73, d73, f73 = _km_reaction_property(&sp3, np3, &sr3, nr3, colp);
+        if (f73 == 2) { return (v73, v73, 1); }
+        if (mode == 1) {
+            var u73: f64 = 0.0;
+            if (col == 2) { u73 = _km_reaction_s_ux(&sp3, np3, &sr3, nr3); } else {
+                u73 = _km_reaction_j_ux(&sp3, np3, &sr3, nr3, colp);
+            }
+            return (_km_bits(u73), _km_bits(u73), 0);
+        }
+        var dd73: f64 = d73 - d73;
+        if (col == 2) {
+            if (f73 == 1) { return (v73, _km_bits(d73), 1); }
+            return (v73, 0, 0);
+        }
+        if (f73 == 1 && dd73 == 0.0) {
+            var j73: f64 = d73 * 1000.0;
+            return (v73, _km_bits(j73), 1);
+        }
+        return (v73, 0, 0);
+    }
+    if (fid == 75) {
+        var n75 = load64(a);
+        var ions[48];
+        var k = 0;
+        var fin = 1;
+        while (k < n75) {
+            var c75: f64 = load64(a + 8 + 16 * k);
+            store64(&ions + 16 * k, load64(a + 8 + 16 * k));
+            store64(&ions + 16 * k + 8, load64(a + 16 + 16 * k));
+            if (_km_is_finite(c75) != 1) { fin = 0; }
+            k = k + 1;
+        }
+        var r75: f64 = ionic_strength(&ions, n75);
+        if (fin != 1) { return (_km_bits(r75), _km_bits(r75), 1); }
+        if (mode == 1) {
+            var u75: f64 = _km_ionic_strength_ux(&ions, n75);
+            return (_km_bits(u75), _km_bits(u75), 0);
+        }
+        var s75: f64 = -0.0;
+        k = 0;
+        while (k < n75) {
+            var c: f64 = load64(&ions + 16 * k);
+            var z: f64 = f64_from(load64(&ions + 16 * k + 8));
+            var term: f64 = (c * z) * z;
+            s75 = s75 + term;
+            k = k + 1;
+        }
+        var ds75: f64 = s75 - s75;
+        if (ds75 == 0.0) {
+            var i75: f64 = 0.5 * s75;
+            return (_km_bits(r75), _km_bits(i75), 1);
+        }
+        return (_km_bits(r75), 0, 0);
+    }
+    var x: f64 = load64(a);
+    var y: f64 = load64(a + 8);
+    var z3: f64 = load64(a + 16);
+    var w: f64 = load64(a + 24);
+    var v: f64 = load64(a + 32);
+    var t6: f64 = load64(a + 40);
+    if (fid == 76) {
+        var r76: f64 = born_haber_lattice_energy(x, y, z3, w, v);
+        if (_km_finite6(x, y, z3, w, v, 1.0) != 1) { return (_km_bits(r76), _km_bits(r76), 1); }
+        if (mode == 1) {
+            var u76: f64 = _km_born_haber_ux(x, y, z3, w, v);
+            return (_km_bits(u76), _km_bits(u76), 0);
+        }
+        var u: f64 = x - y;
+        u = u - z3;
+        var half: f64 = w / 2.0;
+        u = u - half;
+        u = u - v;
+        var du: f64 = u - u;
+        var h2: f64 = half * 2.0;
+        if (du == 0.0 && h2 == w) { return (_km_bits(r76), _km_bits(u), 1); }
+        return (_km_bits(r76), 0, 0);
+    }
+    if (fid == 77) {
+        var t77, v77 = gibbs_free_energy(x, y, z3);
+        if (is_ok(t77) != 1) { return (nanw, nanw, 1); }
+        if (mode == 1) {
+            var u77: f64 = _km_gibbs_ux(x, y, z3);
+            return (_km_bits(u77), _km_bits(u77), 0);
+        }
+        var p77: f64 = y * z3;
+        if (_km_ux_normal(p77) == 1 || z3 == 0.0) {
+            var g77: f64 = x - p77;
+            return (v77, _km_bits(g77), 1);
+        }
+        return (v77, 0, 0);
+    }
+    if (fid == 78) {
+        var t78, v78 = kohlrausch_molar_conductivity(x, y, z3);
+        if (is_ok(t78) != 1) { return (nanw, nanw, 1); }
+        if (mode == 1) {
+            var u78: f64 = _km_kohlrausch_ux(x, y, z3);
+            return (_km_bits(u78), _km_bits(u78), 0);
+        }
+        var f78, o78 = _km_kohlrausch_fast(x, y, z3);
+        return (v78, _km_bits(f78), o78);
+    }
+    if (fid == 79) {
+        var r79: f64 = limiting_molar_conductivity(x, y, z3, w);
+        if (_km_finite6(x, y, z3, w, 1.0, 1.0) != 1) { return (_km_bits(r79), _km_bits(r79), 1); }
+        if (mode == 1) {
+            var u79: f64 = _km_limiting_ux(x, y, z3, w);
+            return (_km_bits(u79), _km_bits(u79), 0);
+        }
+        var f79, o79 = _km_limiting_fast(x, y, z3, w);
+        return (_km_bits(r79), _km_bits(f79), o79);
+    }
+    if (fid == 80) {
+        var r80: f64 = zero_order_concentration(x, y, z3);
+        if (_km_finite6(x, y, z3, 1.0, 1.0, 1.0) != 1) { return (_km_bits(r80), _km_bits(r80), 1); }
+        if (mode == 1) {
+            var u80: f64 = _km_zero_order_ux(x, y, z3);
+            return (_km_bits(u80), _km_bits(u80), 0);
+        }
+        var p80: f64 = y * z3;
+        if (_km_ux_normal(p80) == 1 || y == 0.0 || z3 == 0.0) {
+            var rem: f64 = x - p80;
+            if (rem < 0.0) { rem = 0.0; }
+            return (_km_bits(r80), _km_bits(rem), 1);
+        }
+        return (_km_bits(r80), 0, 0);
+    }
+    var sh = KmShomate { a: x, b: y, c: z3, d: w, e: v, t_min: 298.0, t_max: 6000.0 };
+    var r81: f64 = 0.0;
+    if (fid == 81) { r81 = sh.cp(t6); } else { r81 = sh.enthalpy_antiderivative(t6); }
+    if (t6 == 0.0 || _km_finite6(x, y, z3, w, v, t6) != 1) { return (_km_bits(r81), _km_bits(r81), 1); }
+    if (mode == 1) {
+        var u81: f64 = 0.0;
+        if (fid == 81) { u81 = _km_shomate_cp_ux(x, y, z3, w, v, t6); } else { u81 = _km_shomate_h_ux(x, y, z3, w, v, t6); }
+        return (_km_bits(u81), _km_bits(u81), 0);
+    }
+    var f81: f64 = 0.0;
+    var o81 = 0;
+    if (fid == 81) {
+        var fa, oa = _km_shomate_cp_fast(x, y, z3, w, v, t6);
+        f81 = fa;
+        o81 = oa;
+    } else {
+        var fb, ob = _km_shomate_h_fast(x, y, z3, w, v, t6);
+        f81 = fb;
+        o81 = ob;
+    }
+    return (_km_bits(r81), _km_bits(f81), o81);
+}
+
+
 # The overflow audit's B1 (ADR 0002 #27, #28): ids 33 … 44 as result words (cr_verify.py's AUDIT): mode 0 the public
 # function (an Err as the NaN word 0x7FF8000000000001), the fast path's result at the function's factors and its flag
 # (the monomial's _km_cr_mono_fast; for second_order_concentration and michaelis_menten their Rust-chain fast path);
@@ -3563,6 +4211,10 @@ fn run_audit3(fid, mode, a): (i64, i64, i64) {
 #must_use
 fn run_audit(fid, mode, a): (i64, i64, i64) {
     var nanw = 0x7FF8000000000001;
+    if (fid >= 71) {
+        var d0, d1, df = run_audit4(fid, mode, a);
+        return (d0, d1, df);
+    }
     if (fid >= 58) {
         var c0, c1, cf = run_audit3(fid, mode, a);
         return (c0, c1, cf);

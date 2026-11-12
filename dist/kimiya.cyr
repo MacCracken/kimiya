@@ -6231,7 +6231,8 @@ fn _km_dd_div_cr(nh: f64, nl: f64, dh: f64, dl: f64): (f64, i64) {
 #   sum of TwoProducts and exact power-of-two scalings, so N − D·μ is an exact sum of at most ten doubles, and its sign
 #   decides (_km_mono_tie): F > μ gives z₂, F < μ gives z₁, F = μ (a tie) the even one. Midpoints are common with small
 #   integer factors (3·y with 3y of 54 bits). Otherwise (cn > 3 or cd > 2, e.g. osmotic_pressure's five factors, whose R
-#   and 1000 have odd parts of 53 and 7 bits, so that its value is never a midpoint, nor exact) the exact path decides.
+#   and 1000 have odd parts of 51 and 7 bits, whose product has at least 57, so that its value is never a midpoint, nor
+#   exact) the exact path decides.
 # - The scale: y = RN(F) = s_y·2^(e_y) with e_y in [−cd, cn], and K = k + e_y. For K ≥ −1021 the exact value exceeds
 #   2⁻¹⁰²² (F ≥ y(1 − 2⁻⁵³)), where the binary64 grid is the 53-bit grid scaled, so RN(F·2^k) = y·2^k: y's bits with k
 #   added to the exponent field when K ≤ 1023, and ±∞ for K ≥ 1024 (the 53-bit rounding y·2^k ≥ 2¹⁰²⁴ exceeds DBL_MAX:
@@ -9337,21 +9338,45 @@ impl KmMolecule {
 #
 # SI units throughout: J/mol, J/(mol·K), K. Fallible functions return a value-form Result whose
 # Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs instead of returning Ok(NaN).
-# Every expression keeps Rust's operation order: gibbs_free_energy is bit-identical (class B);
+# Every expression keeps Rust's operation order: gibbs_free_energy is bit-identical (class B) wherever its chain stays
+# in the normal range (ADR 0002 #33, below);
 # equilibrium_constant's one exp is the correctly rounded _km_cr_exp (src/mathx.cyr, ADR 0006), so its
 # class-C rows are compared exactly against the corrected oracle (docs/development/port-parity.md §10).
 
 # Gibbs free energy ΔG = ΔH − T·ΔS in J/mol, from ΔH in J/mol, T in K and ΔS in J/(mol·K):
 # Ok(ΔG), Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite, or
-# Err(KM_ERR_INVALID_INPUT) if ΔH or ΔS is not finite. Mirrors `reaction::gibbs_free_energy`.
+# Err(KM_ERR_INVALID_INPUT) if ΔH or ΔS is not finite. ADR 0002 #33 (the overflow audit's B4): ΔH − T·ΔS has a sum
+# inside, so it gets ADR 0002 #20's semantics: Rust's chain where T·ΔS is the 53-bit rounding of its exact value
+# (normal, src/mathx.cyr's _km_ux_normal, or an exact zero: ΔS = 0; T > 0), so the final difference is rounded once in
+# both; otherwise the same sequence with an unbounded exponent and the difference rounded once
+# (gibbs_free_energy(DBL_MAX, 2, 0.75·DBL_MAX) is −8.99·10³⁰⁷, Rust's −∞; a subnormal T·ΔS is not rounded twice).
+# Mirrors `reaction::gibbs_free_energy`, with ADR 0002 #33.
 #must_use
 fn gibbs_free_energy(enthalpy_j: f64, temperature_k: f64, entropy_j_per_k: f64): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
     if (_km_is_finite(enthalpy_j) != 1 || _km_is_finite(entropy_j_per_k) != 1) {
         return Err(KM_ERR_INVALID_INPUT);
     }
-    var g: f64 = enthalpy_j - (temperature_k * entropy_j_per_k);
-    return Ok(g);
+    var p: f64 = temperature_k * entropy_j_per_k;
+    var g: f64 = enthalpy_j - p;
+    var ap: f64 = f64_abs(p);
+    var lo: f64 = 0x0020000000000000;       # 2⁻¹⁰²¹ (_km_ux_normal's range, inline)
+    var hi: f64 = 0x7FEFFFFFFFFFFFFF;
+    if ((ap >= lo && ap <= hi) || entropy_j_per_k == 0.0) { return Ok(g); }
+    var u: f64 = _km_gibbs_ux(enthalpy_j, temperature_k, entropy_j_per_k);
+    return Ok(u);
+}
+
+# gibbs_free_energy with an unbounded exponent (ADR 0002 #33), for its validated inputs: Rust's ΔH − T·ΔS with T·ΔS
+# rounded to 53 bits (src/mathx.cyr's _km_ux_*), the difference rounded once into binary64.
+#must_use
+fn _km_gibbs_ux(enthalpy_j: f64, temperature_k: f64, entropy_j_per_k: f64): f64 {
+    var hs, he = _km_ux_from(enthalpy_j);
+    var ts, te = _km_ux_from(temperature_k);
+    var ss, se = _km_ux_from(entropy_j_per_k);
+    var ps, pe = _km_ux_mul(ts, te, ss, se);
+    var u: f64 = _km_ux_sub_f64(hs, he, ps, pe);
+    return u;
 }
 
 # Equilibrium constant K = exp(−ΔG / (R·T)), dimensionless, from ΔG in J/mol and T in K. For
@@ -9395,6 +9420,13 @@ fn is_spontaneous(delta_g: f64): i64 {
 #   representable (specific_heat_from_calorimetry(4184, 1000, DBL_MAX) is 0 in Rust, 2.33·10⁻³⁰⁸ here; m·c = ∞ with
 #   ΔT = 0 is Rust's NaN, here the exact 0). Rust's checks and Err codes are kept, and heat_transfer's non-finite
 #   inputs keep Rust's expression (IEEE's ±∞ and NaN).
+# - ADR 0002 #33 (the overflow audit's B4; the same decisions): hess_law's Σ and enthalpy_from_formation's Σ − Σ are
+#   sums, so they get ADR 0002 #20's semantics: Rust's operation sequence (its summation order, from −0.0) with an
+#   unbounded exponent (src/mathx.cyr's _km_ux_*), the final operation rounded once into binary64. A partial sum past
+#   DBL_MAX that later terms bring back gave ±∞ or NaN (∞ − ∞) although the value is representable (hess_law of
+#   [DBL_MAX, DBL_MAX, −DBL_MAX] is +∞ in Rust, DBL_MAX here). The fast path is Rust's chain wherever its sums are
+#   finite (_km_sum_exact below: a sum of doubles is exact where it is subnormal, so only overflow can leave the range);
+#   non-finite inputs keep Rust's sums.
 # - A Rust slice `&[f64]` is a pointer to n f64 values and the count n. Rust's f64 `sum` folds from
 #   −0.0, so the sum of no values is −0.0, as here. A count below 0, or a null pointer with values,
 #   is no slice: the result is NaN (these functions have no error channel).
@@ -9435,25 +9467,104 @@ fn heat_transfer(mass_g: f64, specific_heat: f64, delta_t: f64): f64 {
     return r;
 }
 
-# Hess's law: the total enthalpy change, the sum of the n step enthalpies at `enthalpies_j` in
-# order, in their unit (e.g. J/mol); −0.0 for no steps, NaN if (enthalpies_j, n) is no slice.
-# Mirrors `thermo::hess_law`.
+# 1 if (xs, n) is a slice whose n values are all finite.
+#must_use
+fn _km_finite_slice(xs, n): i64 {
+    if (n < 0 || (n > 0 && xs == 0)) { return 0; }
+    var k = 0;
+    while (k < n) {
+        var x: f64 = load64(xs + k * 8);
+        if (_km_is_finite(x) != 1) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# ADR 0002 #33's sums (the overflow audit's B4). A sum of two doubles x + y is exact wherever |x + y| < 2⁻¹⁰²¹: x and y
+# are multiples of 2⁻¹⁰⁷⁴, so x + y is one, and below 2⁻¹⁰²¹ = 2⁵³·2⁻¹⁰⁷⁴ such a multiple is a double (Hauser).
+# Elsewhere IEEE's sum is the 53-bit rounding of the exact one, ±∞ exactly where that rounding passes DBL_MAX. So in a
+# chain of additions of finite doubles every partial sum is the unbounded-exponent one (#20's) until one is ±∞; past
+# that the chain stays ±∞ or NaN (∞ + finite = ∞, ∞ − ∞ = NaN). Hence: a finite result of finite inputs is exactly the
+# unbounded chain's, and the fast path's test for a pure sum is "result finite". (Products inside a sum take the usual
+# normal-range test, _km_ux_normal.)
+
+# Σ of the n finite values at xs from −0.0 in order (Rust's `iter().sum()`), every addition rounded to 53 bits with an
+# unbounded exponent (_km_ux_add): (s, e). (xs, n) is a slice of finite values.
+#must_use
+fn _km_sum_ux(xs, n): (f64, i64) {
+    var z: f64 = -0.0;
+    var ss, se = _km_ux_from(z);
+    var k = 0;
+    while (k < n) {
+        var x: f64 = load64(xs + k * 8);
+        var xs1, xe1 = _km_ux_from(x);
+        var ns, ne = _km_ux_add(ss, se, xs1, xe1);
+        ss = ns;
+        se = ne;
+        k = k + 1;
+    }
+    return (ss, se);
+}
+
+# Σ of the n finite values at xs from −0.0 in order, every addition but the last rounded to 53 bits with an unbounded
+# exponent and the last rounded once into binary64 (_km_ux_add_f64); −0.0 for no values. (xs, n) is a slice of finite
+# values.
+#must_use
+fn _km_sum_ux_f64(xs, n): f64 {
+    if (n == 0) {
+        var z: f64 = -0.0;
+        return z;
+    }
+    var ps, pe = _km_sum_ux(xs, n - 1);
+    var x: f64 = load64(xs + (n - 1) * 8);
+    var xs1, xe1 = _km_ux_from(x);
+    var r: f64 = _km_ux_add_f64(ps, pe, xs1, xe1);
+    return r;
+}
+
+# Hess's law: the total enthalpy change, the sum of the n step enthalpies at `enthalpies_j` in order, in their unit
+# (e.g. J/mol); −0.0 for no steps, NaN if (enthalpies_j, n) is no slice. ADR 0002 #33: Rust's sum where it is finite
+# (its bits: the comment above), otherwise for finite steps the same sum with an unbounded exponent and the last
+# addition rounded once (a partial sum past DBL_MAX that later steps bring back is the value, not ±∞ or NaN); a
+# non-finite step keeps Rust's sum. Mirrors `thermo::hess_law`, with ADR 0002 #33.
 #must_use
 fn hess_law(enthalpies_j, n): f64 {
     var s: f64 = _km_sum(enthalpies_j, n);
-    return s;
+    var ds: f64 = s - s;
+    if (ds == 0.0) { return s; }
+    if (_km_finite_slice(enthalpies_j, n) != 1) { return s; }
+    var u: f64 = _km_sum_ux_f64(enthalpies_j, n);
+    return u;
 }
 
 # Enthalpy of reaction from formation enthalpies, ΔH_rxn = Σ ΔH_f(products) − Σ ΔH_f(reactants):
 # `products_hf` holds np values and `reactants_hf` nr, each ΔH_f already multiplied by its
 # stoichiometric coefficient (e.g. J/mol of reaction); the result is in the same unit. NaN if
-# either is no slice. Mirrors `thermo::enthalpy_from_formation`.
+# either is no slice. ADR 0002 #33: Rust's chain where both sums are finite (they are then the unbounded ones, and the
+# difference is rounded once in both), otherwise for finite values the two sums with an unbounded exponent and the
+# difference rounded once; a non-finite value keeps Rust's. Mirrors `thermo::enthalpy_from_formation`, with ADR 0002
+# #33.
 #must_use
 fn enthalpy_from_formation(products_hf, np, reactants_hf, nr): f64 {
     var sum_products: f64 = _km_sum(products_hf, np);
     var sum_reactants: f64 = _km_sum(reactants_hf, nr);
     var d: f64 = sum_products - sum_reactants;
-    return d;
+    var dp: f64 = sum_products - sum_products;
+    var dr: f64 = sum_reactants - sum_reactants;
+    if (dp == 0.0 && dr == 0.0) { return d; }
+    if (_km_finite_slice(products_hf, np) != 1 || _km_finite_slice(reactants_hf, nr) != 1) { return d; }
+    var u: f64 = _km_formation_ux(products_hf, np, reactants_hf, nr);
+    return u;
+}
+
+# enthalpy_from_formation with an unbounded exponent (ADR 0002 #33), for two slices of finite values: the two sums from
+# −0.0 in order, every addition rounded to 53 bits, the difference rounded once into binary64.
+#must_use
+fn _km_formation_ux(products_hf, np, reactants_hf, nr): f64 {
+    var ps, pe = _km_sum_ux(products_hf, np);
+    var rs, re = _km_sum_ux(reactants_hf, nr);
+    var u: f64 = _km_ux_sub_f64(ps, pe, rs, re);
+    return u;
 }
 
 # Specific heat at constant pressure from calorimetry, c_p = q / (m × ΔT) in J/(g·°C), from q in J,
@@ -10510,6 +10621,14 @@ var KM_SHOMATE_T_MAX: f64[34] = {
 # _km_cr_exp (src/mathx.cyr, ADR 0006), so its class-C rows are compared exactly against the corrected
 # oracle (docs/development/port-parity.md §10).
 #
+# - ADR 0002 #33 and #34 (the overflow audit's B4; the user's decisions of 2026-11-09 and 2026-11-10): the reaction sums
+#   (#33) and the Shomate polynomials (#34) have sums inside, so they get ADR 0002 #20's semantics: Rust's operation
+#   sequence, its summation order included, evaluated with an unbounded exponent (src/mathx.cyr's _km_ux_*), the final
+#   operation rounded once into binary64, behind fast tests that prove Rust's chain stayed in the normal range (its bits
+#   there: every physical input, every tabulated segment over its range). A product past DBL_MAX whose sums cancel, or a
+#   Shomate term that over- or underflows, gave ±∞ or NaN although the value is finite or ±∞; here it is that value.
+#   Rust's checks, Err codes and order are kept; a non-finite input keeps Rust's result.
+#
 # Units: reaction_enthalpy and reaction_gibbs_energy return **J/mol** (ADR 0002 #1: Rust 1.2 returns
 # kJ/mol; here Rust's kJ difference is multiplied by 1000.0 once, so the value is the oracle's × 1000
 # exactly); reaction_entropy returns J/(mol·K); enthalpy_change_cp returns J/mol; vant_hoff_k and
@@ -10616,75 +10735,153 @@ fn thermochem_data_s_standard_j(h): f64 {
 # Σ coefficient × property over the n (formula, coefficient) records at `species`, in list order,
 # reading the property from the THERMOCHEM_DATA f64 column `col` (Rust's private sum_property): from
 # +0.0 with `total += coeff * prop`, as Rust (not `.sum()`), and no coefficient guard (a NaN
-# coefficient gives NaN, as Rust). (code, Σ): KM_ERR_INVALID_REACTION for the first formula with no
-# row, KM_ERR_INVALID_INPUT if (species, n) is no list.
+# coefficient gives NaN, as Rust). (code, Σ, chain): KM_ERR_INVALID_REACTION for the first formula with no
+# row, KM_ERR_INVALID_INPUT if (species, n) is no list. chain (ADR 0002 #33) is 1 when every product coeff·prop is the
+# 53-bit rounding of its exact value — normal (_km_ux_normal: at least 2⁻¹⁰²¹ and finite) or an exact zero (a zero
+# factor) —, 2 when a coefficient is not finite (Rust's value stands), 0 otherwise.
 #must_use
-fn _km_sum_property(species, n, col): (i64, f64) {
-    if (n < 0 || (n > 0 && species == 0)) { return (KM_ERR_INVALID_INPUT, 0.0); }
+fn _km_sum_property(species, n, col): (i64, f64, i64) {
+    if (n < 0 || (n > 0 && species == 0)) { return (KM_ERR_INVALID_INPUT, 0.0, 0); }
     var total: f64 = 0.0;
+    var chain = 1;
     var k = 0;
     while (k < n) {
         var h = lookup_thermochem(load64(species + k * 16));
-        if (h == 0) { return (KM_ERR_INVALID_REACTION, 0.0); }
+        if (h == 0) { return (KM_ERR_INVALID_REACTION, 0.0, 0); }
         var coeff: f64 = load64(species + k * 16 + 8);
         var prop: f64 = load64(col + (h - 1) * 8);
-        total = total + (coeff * prop);
+        var p: f64 = coeff * prop;
+        total = total + p;
+        var pb = load64(&p) & 0x7FFFFFFFFFFFFFFF;          # _km_ux_normal's test, inline
+        if (chain == 1 && (pb < 0x0020000000000000 || pb > 0x7FEFFFFFFFFFFFFF) && coeff != 0.0 && prop != 0.0) {
+            chain = 0;
+        }
+        if ((load64(&coeff) & 0x7FF0000000000000) == 0x7FF0000000000000) { chain = 2; }
         k = k + 1;
     }
-    return (KM_ERR_NONE, total);
+    return (KM_ERR_NONE, total, chain);
 }
 
-# Σ over the products minus Σ over the reactants of the column `col`: (code, difference).
+# _km_sum_property's Σ with an unbounded exponent (ADR 0002 #33): from +0.0, every product and addition rounded to 53
+# bits (src/mathx.cyr's _km_ux_*), for a valid list whose formulas all have rows and whose coefficients are finite.
 #must_use
-fn _km_reaction_property(products, np, reactants, nr, col): (i64, f64) {
-    var ep, sum_products = _km_sum_property(products, np, col);
-    if (ep != KM_ERR_NONE) { return (ep, 0.0); }
-    var er, sum_reactants = _km_sum_property(reactants, nr, col);
-    if (er != KM_ERR_NONE) { return (er, 0.0); }
+fn _km_sum_property_ux(species, n, col): (f64, i64) {
+    var z: f64 = 0.0;
+    var ts, te = _km_ux_from(z);
+    var k = 0;
+    while (k < n) {
+        var h = lookup_thermochem(load64(species + k * 16));
+        var coeff: f64 = load64(species + k * 16 + 8);
+        var prop: f64 = load64(col + (h - 1) * 8);
+        var cs, ce = _km_ux_from(coeff);
+        var qs, qe = _km_ux_from(prop);
+        var ps, pe = _km_ux_mul(cs, ce, qs, qe);
+        var ns, ne = _km_ux_add(ts, te, ps, pe);
+        ts = ns;
+        te = ne;
+        k = k + 1;
+    }
+    return (ts, te);
+}
+
+# Σ over the products minus Σ over the reactants of the column `col`: (code, difference, fast). fast (ADR 0002 #33) is 1
+# when Rust's chain is provably the unbounded-exponent one: every product the 53-bit rounding of its exact value
+# (_km_sum_property's chain = 1) and both sums finite, so each partial sum is the unbounded one too (src/thermo.cyr's
+# comment on #33's sums) and the difference of the two is rounded once in both; 2 when a coefficient is not finite
+# (Rust's value stands); 0 otherwise (the caller's slow path on _km_sum_property_ux).
+#must_use
+fn _km_reaction_property(products, np, reactants, nr, col): (i64, f64, i64) {
+    var ep, sum_products, cp = _km_sum_property(products, np, col);
+    if (ep != KM_ERR_NONE) { return (ep, 0.0, 0); }
+    var er, sum_reactants, cr = _km_sum_property(reactants, nr, col);
+    if (er != KM_ERR_NONE) { return (er, 0.0, 0); }
     var d: f64 = sum_products - sum_reactants;
-    return (KM_ERR_NONE, d);
+    if (cp == 2 || cr == 2) { return (KM_ERR_NONE, d, 2); }
+    var dp: f64 = sum_products - sum_products;
+    var dr: f64 = sum_reactants - sum_reactants;
+    var fast = 0;
+    if (cp == 1 && cr == 1 && dp == 0.0 && dr == 0.0) { fast = 1; }
+    return (KM_ERR_NONE, d, fast);
 }
 
-# The standard reaction enthalpy at 298.15 K from formation enthalpies,
-# ΔH°_rxn = Σ n_i·ΔH_f°(products) − Σ n_j·ΔH_f°(reactants), in **J/mol** (per mole of reaction as
-# written), from np product and nr reactant (formula, coefficient) records. Ok(ΔH);
-# Err(KM_ERR_INVALID_REACTION) if a formula has no THERMOCHEM_DATA row (the products are read
-# first); Err(KM_ERR_INVALID_INPUT) if either list is no list. Mirrors
-# `thermochem::reaction_enthalpy` with ADR 0002 #1: Rust returns the kJ/mol difference; this
-# returns it × 1000.0, the one multiply after Rust's subtraction (so vant_hoff_k and
-# adiabatic_flame_temperature take it as it is).
+# reaction_enthalpy's and reaction_gibbs_energy's J/mol value: Rust's kJ difference × 1000.0 (ADR 0002 #1), under ADR
+# 0002 #33. Rust's chain where it is provably the unbounded one (fast, and the difference finite: the product with 1000
+# is then rounded once in both), and Rust's value for a non-finite coefficient; otherwise the sums and their difference
+# with an unbounded exponent (_km_sum_property_ux) and the product with 1000 rounded once into binary64 (two sums past
+# DBL_MAX that cancel are their difference's value, not ∞ − ∞ = NaN).
 #must_use
-fn reaction_enthalpy(products, np, reactants, nr): Result {
-    var e, d = _km_reaction_property(products, np, reactants, nr, &KM_THERMOCHEM_DELTA_HF_KJ);
+fn _km_reaction_j(products, np, reactants, nr, col): Result {
+    var e, d, fast = _km_reaction_property(products, np, reactants, nr, col);
     if (e != KM_ERR_NONE) { return Err(e); }
     var kj: f64 = d;
     var j: f64 = kj * 1000.0;
-    return Ok(j);
+    var dd: f64 = kj - kj;
+    if (fast == 2 || (fast == 1 && dd == 0.0)) { return Ok(j); }
+    var u: f64 = _km_reaction_j_ux(products, np, reactants, nr, col);
+    return Ok(u);
+}
+
+# _km_reaction_j's slow path (ADR 0002 #33), for valid lists with known formulas and finite coefficients: the two sums
+# (_km_sum_property_ux) and their difference rounded to 53 bits, the product with 1000 rounded once into binary64.
+#must_use
+fn _km_reaction_j_ux(products, np, reactants, nr, col): f64 {
+    var ps, pe = _km_sum_property_ux(products, np, col);
+    var rs, re = _km_sum_property_ux(reactants, nr, col);
+    var ds, de = _km_ux_sub(ps, pe, rs, re);
+    var k: f64 = 1000.0;
+    var ks, ke = _km_ux_from(k);
+    var u: f64 = _km_ux_mul_f64(ds, de, ks, ke);
+    return u;
+}
+
+# reaction_entropy's slow path (ADR 0002 #33), as _km_reaction_j_ux: the two sums, their difference rounded once.
+#must_use
+fn _km_reaction_s_ux(products, np, reactants, nr): f64 {
+    var ps, pe = _km_sum_property_ux(products, np, &KM_THERMOCHEM_S_STANDARD_J);
+    var rs, re = _km_sum_property_ux(reactants, nr, &KM_THERMOCHEM_S_STANDARD_J);
+    var u: f64 = _km_ux_sub_f64(ps, pe, rs, re);
+    return u;
+}
+
+# The standard reaction enthalpy at 298.15 K from formation enthalpies, ΔH°_rxn = Σ n_i·ΔH_f°(products) − Σ
+# n_j·ΔH_f°(reactants), in **J/mol** (per mole of reaction as written), from np product and nr reactant (formula,
+# coefficient) records. Ok(ΔH); Err(KM_ERR_INVALID_REACTION) if a formula has no THERMOCHEM_DATA row (the products are
+# read first); Err(KM_ERR_INVALID_INPUT) if either list is no list. Mirrors `thermochem::reaction_enthalpy` with ADR
+# 0002 #1: Rust returns the kJ/mol difference; this returns it × 1000.0, the one multiply after Rust's subtraction (so
+# vant_hoff_k and adiabatic_flame_temperature take it as it is). ADR 0002 #33: Rust's sequence (with that multiply)
+# where its chain stays in the normal range, otherwise with an unbounded exponent and the product with 1000 rounded once
+# (_km_reaction_j).
+#must_use
+fn reaction_enthalpy(products, np, reactants, nr): Result {
+    var t, v = _km_reaction_j(products, np, reactants, nr, &KM_THERMOCHEM_DELTA_HF_KJ);
+    if (is_ok(t) == 1) { return Ok(v); }
+    return Err(v);
 }
 
 # The standard reaction Gibbs energy at 298.15 K,
 # ΔG°_rxn = Σ n_i·ΔG_f°(products) − Σ n_j·ΔG_f°(reactants), in **J/mol**; arguments and errors as
 # reaction_enthalpy. Mirrors `thermochem::reaction_gibbs_energy` with ADR 0002 #1 (Rust's kJ/mol
-# difference × 1000.0).
+# difference × 1000.0) and #33 (as reaction_enthalpy).
 #must_use
 fn reaction_gibbs_energy(products, np, reactants, nr): Result {
-    var e, d = _km_reaction_property(products, np, reactants, nr, &KM_THERMOCHEM_DELTA_GF_KJ);
-    if (e != KM_ERR_NONE) { return Err(e); }
-    var kj: f64 = d;
-    var j: f64 = kj * 1000.0;
-    return Ok(j);
+    var t, v = _km_reaction_j(products, np, reactants, nr, &KM_THERMOCHEM_DELTA_GF_KJ);
+    if (is_ok(t) == 1) { return Ok(v); }
+    return Err(v);
 }
 
 # The standard reaction entropy change at 298.15 K,
 # ΔS°_rxn = Σ n_i·S°(products) − Σ n_j·S°(reactants), in J/(mol·K) (unchanged from Rust; with the
 # J/mol reaction_enthalpy, ΔG = ΔH − TΔS needs no unit factor); arguments and errors as
-# reaction_enthalpy. Mirrors `thermochem::reaction_entropy`.
+# reaction_enthalpy. ADR 0002 #33: Rust's difference where its chain stays in the normal range, otherwise the sums with
+# an unbounded exponent and the difference rounded once. Mirrors `thermochem::reaction_entropy`, with ADR 0002 #33.
 #must_use
 fn reaction_entropy(products, np, reactants, nr): Result {
-    var e, d = _km_reaction_property(products, np, reactants, nr, &KM_THERMOCHEM_S_STANDARD_J);
+    var e, d, fast = _km_reaction_property(products, np, reactants, nr, &KM_THERMOCHEM_S_STANDARD_J);
     if (e != KM_ERR_NONE) { return Err(e); }
     var ds: f64 = d;
-    return Ok(ds);
+    if (fast != 0) { return Ok(ds); }
+    var u: f64 = _km_reaction_s_ux(products, np, reactants, nr);
+    return Ok(u);
 }
 
 # ── van 't Hoff equation ────────────────────────────────────────────────────────────
@@ -10711,22 +10908,223 @@ fn vant_hoff_k(k_ref: f64, delta_h_j: f64, t_ref_k: f64, t_new_k: f64): Result {
 
 # ── Shomate heat capacities ─────────────────────────────────────────────────────────
 
-# Cp = A + B·t + C·t² + D·t³ + E/t² in J/(mol·K), t = T/1000, in Rust's order: the one evaluation
-# behind KmShomate.cp and the table-row path.
+# ADR 0002 #34 (the overflow audit's B4): the Shomate polynomials under ADR 0002 #20's semantics. Rust's operation
+# sequence (below) evaluated with an unbounded exponent (src/mathx.cyr's _km_ux_*), the final operation rounded once
+# into binary64, wherever Rust's chain may have left the normal range; elsewhere Rust's chain itself, whose bits are
+# then the unbounded one's. For user coefficients and any T: as T → 0, t·t underflows and E/(t·t) is ±∞ (or 0/0 = NaN
+# for E = 0) where Cp is finite; for large T, C·t², D·t³ and t⁴ overflow and their difference is ∞ − ∞ = NaN where the
+# value is ±∞. A chain agrees with the unbounded one when every product and quotient is the 53-bit rounding of its exact
+# value (normal, _km_ux_normal, or an exact zero: a zero factor or dividend) and every sum is finite (a sum of doubles
+# is exact below 2⁻¹⁰²¹: src/thermo.cyr's comment on #33's sums); its final operation is then rounded once in both. T =
+# ±0 makes every product an exact zero and E/0 IEEE's special in both evaluations: Rust's value. A non-finite
+# coefficient or T keeps Rust's chain. The box: T and every nonzero coefficient within [2⁻³⁰, 2³⁰] and [2⁻²⁰⁰, 2²⁰⁰] in
+# magnitude (every tabulated segment over its range, every physical use) proves the test without running it
+# (_km_shomate_box, which the evaluation tests first; the table-row path, whose coefficients are all in the box, tests
+# T alone, inline: _km_shomate_row_cp).
+
+# 1 if |T| is in [2⁻³⁰, 2³⁰] and each of a … e is 0 or in [2⁻²⁰⁰, 2²⁰⁰] in magnitude. Then t = T/1000 is in [2⁻⁴⁰, 2²¹]
+# and every product and quotient of either polynomial is normal or an exact zero: in Cp, B·t, C·t·t, D·t·t·t, t·t and
+# E/(t·t) are in [2⁻³²⁰, 2²⁸¹]; in the antiderivative D/4, C/3, B/2 are in [2⁻²⁰², 2¹⁹⁹], and each nested sum is 0 or at
+# least an ulp of its smaller term (a multiple of it), so t·(D/4) ≥ 2⁻²⁴², C/3 + t·D/4 is 0 or ≥ 2⁻²⁹⁴, its product with
+# t ≥ 2⁻³³⁴, B/2 + … 0 or ≥ 2⁻³⁸⁶, × t ≥ 2⁻⁴²⁶, A + … 0 or ≥ 2⁻⁴⁷⁸, × t ≥ 2⁻⁵¹⁸, E/t ≥ 2⁻²²¹, every value below 2²⁹⁷
+# (the bounds include each step's rounding, a factor 1 ± 2⁻⁵³), and every sum finite.
+#must_use
+fn _km_shomate_box(a: f64, b: f64, c: f64, d: f64, e: f64, temperature_k: f64): i64 {
+    var lo = 0x3370000000000000;            # 2⁻²⁰⁰
+    var hi = 0x4C70000000000000;            # 2²⁰⁰
+    var bt = load64(&temperature_k) & 0x7FFFFFFFFFFFFFFF;
+    if (bt < 0x3E10000000000000 || bt > 0x41D0000000000000) { return 0; }     # 2⁻³⁰, 2³⁰
+    var ba = load64(&a) & 0x7FFFFFFFFFFFFFFF;
+    var bb = load64(&b) & 0x7FFFFFFFFFFFFFFF;
+    var bc = load64(&c) & 0x7FFFFFFFFFFFFFFF;
+    var bd = load64(&d) & 0x7FFFFFFFFFFFFFFF;
+    var be = load64(&e) & 0x7FFFFFFFFFFFFFFF;
+    if (ba != 0 && (ba < lo || ba > hi)) { return 0; }
+    if (bb != 0 && (bb < lo || bb > hi)) { return 0; }
+    if (bc != 0 && (bc < lo || bc > hi)) { return 0; }
+    if (bd != 0 && (bd < lo || bd > hi)) { return 0; }
+    if (be != 0 && (be < lo || be > hi)) { return 0; }
+    return 1;
+}
+
+# 1 if the IEEE product x·y = p of two agreeing operands is the 53-bit rounding of the exact one: normal, or an exact
+# zero from a zero factor.
+#must_use
+fn _km_mul_agrees(p: f64, x: f64, y: f64): i64 {
+    if (_km_ux_normal(p) == 1 || x == 0.0 || y == 0.0) { return 1; }
+    return 0;
+}
+
+# 1 if each of the six values is finite.
+#must_use
+fn _km_finite6(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64): i64 {
+    var n = _km_is_finite(a) + _km_is_finite(b) + _km_is_finite(c);
+    n = n + _km_is_finite(d) + _km_is_finite(e) + _km_is_finite(f);
+    if (n == 6) { return 1; }
+    return 0;
+}
+
+# Cp = A + B·t + C·t² + D·t³ + E/t² in J/(mol·K), t = T/1000, in Rust's order: the one evaluation behind KmShomate.cp
+# and the table-row path. ADR 0002 #34 (the comment above): Rust's chain where it provably agrees with the unbounded one
+# (_km_shomate_cp_fast), otherwise the unbounded-exponent sequence with the final addition rounded once
+# (_km_shomate_cp_ux).
 #must_use
 fn _km_shomate_cp5(a: f64, b: f64, c: f64, d: f64, e: f64, temperature_k: f64): f64 {
     var t: f64 = temperature_k / 1000.0;
     var r: f64 = (((a + (b * t)) + ((c * t) * t)) + (((d * t) * t) * t)) + (e / (t * t));
+    if (_km_shomate_box(a, b, c, d, e, temperature_k) == 1) { return r; }
+    var f, ok = _km_shomate_cp_fast(a, b, c, d, e, temperature_k);
+    if (ok == 1) { return f; }
+    var u: f64 = _km_shomate_cp_ux(a, b, c, d, e, temperature_k);
+    return u;
+}
+
+# Cp's fast path: (Rust's (((A + B·t) + (C·t)·t) + ((D·t)·t)·t) + E/(t·t), 1) inside the box, for T = ±0 or a
+# non-finite input (Rust's value stands), or where each product and quotient is the 53-bit rounding of its exact value
+# and the sums are finite; otherwise (0, 0).
+#must_use
+fn _km_shomate_cp_fast(a: f64, b: f64, c: f64, d: f64, e: f64, temperature_k: f64): (f64, i64) {
+    var t: f64 = temperature_k / 1000.0;
+    var p1: f64 = b * t;
+    var s1: f64 = a + p1;
+    var p2: f64 = c * t;
+    var p3: f64 = p2 * t;
+    var s2: f64 = s1 + p3;
+    var p4: f64 = d * t;
+    var p5: f64 = p4 * t;
+    var p6: f64 = p5 * t;
+    var s3: f64 = s2 + p6;
+    var q1: f64 = t * t;
+    var q2: f64 = e / q1;
+    var r: f64 = s3 + q2;
+    if (_km_shomate_box(a, b, c, d, e, temperature_k) == 1) { return (r, 1); }
+    if (temperature_k == 0.0 || _km_finite6(a, b, c, d, e, temperature_k) != 1) { return (r, 1); }
+    if (_km_ux_normal(t) == 1 && _km_mul_agrees(p1, b, t) == 1 && _km_mul_agrees(p2, c, t) == 1) {
+        if (_km_mul_agrees(p3, p2, t) == 1 && _km_mul_agrees(p4, d, t) == 1 && _km_mul_agrees(p5, p4, t) == 1) {
+            if (_km_mul_agrees(p6, p5, t) == 1 && _km_ux_normal(q1) == 1) {
+                var ds3: f64 = s3 - s3;
+                if (ds3 == 0.0 && (_km_ux_normal(q2) == 1 || e == 0.0)) { return (r, 1); }
+            }
+        }
+    }
+    return (0.0, 0);
+}
+
+# Cp with an unbounded exponent (ADR 0002 #34), for finite coefficients and a finite T ≠ 0: Rust's
+# (((A + B·t) + (C·t)·t) + ((D·t)·t)·t) + E/(t·t), t = T/1000, every operation rounded to 53 bits (_km_ux_*), the last
+# addition rounded once into binary64 (_km_ux_add_f64).
+#must_use
+fn _km_shomate_cp_ux(a: f64, b: f64, c: f64, d: f64, e: f64, temperature_k: f64): f64 {
+    var k: f64 = 1000.0;
+    var ks, ke = _km_ux_from(k);
+    var xs, xe = _km_ux_from(temperature_k);
+    var ts, te = _km_ux_div(xs, xe, ks, ke);
+    var as1, ae = _km_ux_from(a);
+    var bs, be = _km_ux_from(b);
+    var cs, ce = _km_ux_from(c);
+    var ds, de = _km_ux_from(d);
+    var es, ee = _km_ux_from(e);
+    var p1s, p1e = _km_ux_mul(bs, be, ts, te);
+    var s1s, s1e = _km_ux_add(as1, ae, p1s, p1e);
+    var p2s, p2e = _km_ux_mul(cs, ce, ts, te);
+    var p3s, p3e = _km_ux_mul(p2s, p2e, ts, te);
+    var s2s, s2e = _km_ux_add(s1s, s1e, p3s, p3e);
+    var p4s, p4e = _km_ux_mul(ds, de, ts, te);
+    var p5s, p5e = _km_ux_mul(p4s, p4e, ts, te);
+    var p6s, p6e = _km_ux_mul(p5s, p5e, ts, te);
+    var s3s, s3e = _km_ux_add(s2s, s2e, p6s, p6e);
+    var q1s, q1e = _km_ux_mul(ts, te, ts, te);
+    var q2s, q2e = _km_ux_div(es, ee, q1s, q1e);
+    var r: f64 = _km_ux_add_f64(s3s, s3e, q2s, q2e);
     return r;
 }
 
 # ∫Cp dT = 1000·(A·t + B·t²/2 + C·t³/3 + D·t⁴/4 − E/t) in J/mol, t = T/1000, in Rust's nested
-# order: the one evaluation behind KmShomate.enthalpy_antiderivative and the table-row path.
+# order: the one evaluation behind KmShomate.enthalpy_antiderivative and the table-row path. ADR 0002 #34 (the comment
+# above): Rust's chain where it provably agrees with the unbounded one (_km_shomate_h_fast), otherwise the
+# unbounded-exponent sequence with the final product by 1000 rounded once (_km_shomate_h_ux).
 #must_use
 fn _km_shomate_h5(a: f64, b: f64, c: f64, d: f64, e: f64, temperature_k: f64): f64 {
     var t: f64 = temperature_k / 1000.0;
     var inner: f64 = t * (a + (t * ((b / 2.0) + (t * ((c / 3.0) + (t * (d / 4.0)))))));
     var r: f64 = 1000.0 * (inner - (e / t));
+    if (_km_shomate_box(a, b, c, d, e, temperature_k) == 1) { return r; }
+    var f, ok = _km_shomate_h_fast(a, b, c, d, e, temperature_k);
+    if (ok == 1) { return f; }
+    var u: f64 = _km_shomate_h_ux(a, b, c, d, e, temperature_k);
+    return u;
+}
+
+# The antiderivative's fast path: (Rust's 1000·(t·(A + t·(B/2 + t·(C/3 + t·(D/4)))) − E/t), 1) inside the box, for
+# T = ±0 or a non-finite input (Rust's value stands), or where each product and quotient is the 53-bit rounding of its
+# exact value and the sums are finite; otherwise (0, 0).
+#must_use
+fn _km_shomate_h_fast(a: f64, b: f64, c: f64, d: f64, e: f64, temperature_k: f64): (f64, i64) {
+    var t: f64 = temperature_k / 1000.0;
+    var h1: f64 = d / 4.0;
+    var h2: f64 = t * h1;
+    var h3: f64 = c / 3.0;
+    var h4: f64 = h3 + h2;
+    var h5: f64 = t * h4;
+    var h6: f64 = b / 2.0;
+    var h7: f64 = h6 + h5;
+    var h8: f64 = t * h7;
+    var h9: f64 = a + h8;
+    var inner: f64 = t * h9;
+    var q: f64 = e / t;
+    var diff: f64 = inner - q;
+    var r: f64 = 1000.0 * diff;
+    if (_km_shomate_box(a, b, c, d, e, temperature_k) == 1) { return (r, 1); }
+    if (temperature_k == 0.0 || _km_finite6(a, b, c, d, e, temperature_k) != 1) { return (r, 1); }
+    if (_km_ux_normal(t) == 1 && (_km_ux_normal(h1) == 1 || d == 0.0) && _km_mul_agrees(h2, t, h1) == 1) {
+        if ((_km_ux_normal(h3) == 1 || c == 0.0) && (_km_ux_normal(h6) == 1 || b == 0.0)) {
+            var dh4: f64 = h4 - h4;
+            var dh7: f64 = h7 - h7;
+            var dh9: f64 = h9 - h9;
+            if (dh4 == 0.0 && dh7 == 0.0 && dh9 == 0.0 && _km_mul_agrees(h5, t, h4) == 1) {
+                if (_km_mul_agrees(h8, t, h7) == 1 && _km_mul_agrees(inner, t, h9) == 1) {
+                    var dd: f64 = diff - diff;
+                    if (dd == 0.0 && (_km_ux_normal(q) == 1 || e == 0.0)) { return (r, 1); }
+                }
+            }
+        }
+    }
+    return (0.0, 0);
+}
+
+# The antiderivative with an unbounded exponent (ADR 0002 #34), for finite coefficients and a finite T ≠ 0: Rust's
+# 1000·(t·(A + t·(B/2 + t·(C/3 + t·(D/4)))) − E/t), t = T/1000, every operation rounded to 53 bits (_km_ux_*), the
+# product by 1000 rounded once into binary64 (_km_ux_mul_f64).
+#must_use
+fn _km_shomate_h_ux(a: f64, b: f64, c: f64, d: f64, e: f64, temperature_k: f64): f64 {
+    var k: f64 = 1000.0;
+    var ks, ke = _km_ux_from(k);
+    var xs, xe = _km_ux_from(temperature_k);
+    var ts, te = _km_ux_div(xs, xe, ks, ke);
+    var two: f64 = 2.0;
+    var three: f64 = 3.0;
+    var four: f64 = 4.0;
+    var w2s, w2e = _km_ux_from(two);
+    var w3s, w3e = _km_ux_from(three);
+    var w4s, w4e = _km_ux_from(four);
+    var as1, ae = _km_ux_from(a);
+    var bs, be = _km_ux_from(b);
+    var cs, ce = _km_ux_from(c);
+    var ds, de = _km_ux_from(d);
+    var es, ee = _km_ux_from(e);
+    var h1s, h1e = _km_ux_div(ds, de, w4s, w4e);
+    var h2s, h2e = _km_ux_mul(ts, te, h1s, h1e);
+    var h3s, h3e = _km_ux_div(cs, ce, w3s, w3e);
+    var h4s, h4e = _km_ux_add(h3s, h3e, h2s, h2e);
+    var h5s, h5e = _km_ux_mul(ts, te, h4s, h4e);
+    var h6s, h6e = _km_ux_div(bs, be, w2s, w2e);
+    var h7s, h7e = _km_ux_add(h6s, h6e, h5s, h5e);
+    var h8s, h8e = _km_ux_mul(ts, te, h7s, h7e);
+    var h9s, h9e = _km_ux_add(as1, ae, h8s, h8e);
+    var is1, ie = _km_ux_mul(ts, te, h9s, h9e);
+    var qs, qe = _km_ux_div(es, ee, ts, te);
+    var fs, fe = _km_ux_sub(is1, ie, qs, qe);
+    var r: f64 = _km_ux_mul_f64(ks, ke, fs, fe);
     return r;
 }
 
@@ -10750,20 +11148,46 @@ impl KmShomate {
     }
 }
 
-# Cp of SHOMATE_DATA row `row` at temperature_k (the row's KmShomate.cp, read from the columns).
+# Cp of SHOMATE_DATA row `row` at temperature_k (the row's KmShomate.cp, read from the columns). Every row's
+# coefficients are 0 or in [2⁻²⁰⁰, 2²⁰⁰] (validate.py checks the generated table, tests/thermochem.tcyr every row), so
+# _km_shomate_box reduces to its test on T, inline here: Rust's chain wherever |T| is in [2⁻³⁰, 2³⁰] (every temperature
+# enthalpy_change_cp evaluates, every Newton iterate of the flame on the corpus), _km_shomate_cp5 elsewhere (ADR 0002
+# #34).
 #must_use
 fn _km_shomate_row_cp(row, temperature_k: f64): f64 {
-    var r: f64 = _km_shomate_cp5(KM_SHOMATE_A[row], KM_SHOMATE_B[row], KM_SHOMATE_C[row], KM_SHOMATE_D[row],
-        KM_SHOMATE_E[row], temperature_k);
-    return r;
+    var a: f64 = KM_SHOMATE_A[row];
+    var b: f64 = KM_SHOMATE_B[row];
+    var c: f64 = KM_SHOMATE_C[row];
+    var d: f64 = KM_SHOMATE_D[row];
+    var e: f64 = KM_SHOMATE_E[row];
+    var bt = load64(&temperature_k) & 0x7FFFFFFFFFFFFFFF;
+    if (bt >= 0x3E10000000000000 && bt <= 0x41D0000000000000) {     # the box's T: the table's coefficients are in it
+        var t: f64 = temperature_k / 1000.0;
+        var r: f64 = (((a + (b * t)) + ((c * t) * t)) + (((d * t) * t) * t)) + (e / (t * t));
+        return r;
+    }
+    var u: f64 = _km_shomate_cp5(a, b, c, d, e, temperature_k);
+    return u;
 }
 
-# The antiderivative of SHOMATE_DATA row `row` at temperature_k (its enthalpy_antiderivative).
+# The antiderivative of SHOMATE_DATA row `row` at temperature_k (its enthalpy_antiderivative), with _km_shomate_row_cp's
+# inline box test.
 #must_use
 fn _km_shomate_row_h(row, temperature_k: f64): f64 {
-    var r: f64 = _km_shomate_h5(KM_SHOMATE_A[row], KM_SHOMATE_B[row], KM_SHOMATE_C[row], KM_SHOMATE_D[row],
-        KM_SHOMATE_E[row], temperature_k);
-    return r;
+    var a: f64 = KM_SHOMATE_A[row];
+    var b: f64 = KM_SHOMATE_B[row];
+    var c: f64 = KM_SHOMATE_C[row];
+    var d: f64 = KM_SHOMATE_D[row];
+    var e: f64 = KM_SHOMATE_E[row];
+    var bt = load64(&temperature_k) & 0x7FFFFFFFFFFFFFFF;
+    if (bt >= 0x3E10000000000000 && bt <= 0x41D0000000000000) {     # the box's T: the table's coefficients are in it
+        var t: f64 = temperature_k / 1000.0;
+        var inner: f64 = t * (a + (t * ((b / 2.0) + (t * ((c / 3.0) + (t * (d / 4.0)))))));
+        var r: f64 = 1000.0 * (inner - (e / t));
+        return r;
+    }
+    var u: f64 = _km_shomate_h5(a, b, c, d, e, temperature_k);
+    return u;
 }
 
 # 1 if SHOMATE_DATA row `row`'s formula is the C string `formula` of length n, whose first byte is c0.
@@ -12399,7 +12823,7 @@ fn joule_thomson_ideal(): f64 {
 # KM_DH_B_WATER_25C and the seven KM_LAMBDA_* — are src/constants.cyr's (generated; solution has no data file
 # of its own). Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and
 # reject NaN and ±∞ inputs. Every expression keeps Rust's operation order, so the arithmetic functions are
-# bit-identical (class B), except the two below; the log10 and 10^x functions are class C
+# bit-identical (class B), except the five below; the log10 and 10^x functions are class C
 # (docs/development/port-parity.md §7, §10).
 #
 # - ADR 0002 #29 (the overflow audit's B2; the user's decisions of 2026-11-09 and 2026-11-10, "library-wide audit" and
@@ -12409,6 +12833,13 @@ fn joule_thomson_ideal(): f64 {
 #   M₁·V₁ or Λ·c that over- or underflows gives ±∞, 0 or a degraded subnormal although the value is representable
 #   (solution_conductivity(126.4, DBL_MAX) is ∞ in Rust, 2.27·10³⁰⁷ here). Rust's checks and Err codes are kept;
 #   solution_conductivity, which validates nothing, keeps Rust's expression for a non-finite input.
+# - ADR 0002 #33 (the overflow audit's B4; the same decisions): ionic_strength's ½·Σ c·z²,
+#   kohlrausch_molar_conductivity's Λ° − K·√c and limiting_molar_conductivity's ν₊λ₊ + ν₋λ₋ have sums inside, so they
+#   get ADR 0002 #20's semantics: Rust's operation sequence with an unbounded exponent (src/mathx.cyr's _km_ux_*), the
+#   final operation rounded once into binary64, behind a cheap test that proves Rust's chain stayed in the normal range
+#   (its bits there). A term or a partial sum past DBL_MAX that the rest brings back gave ±∞ or NaN although the value
+#   is representable. Rust's checks and Err codes are kept, and a non-finite input of the two unvalidated functions
+#   keeps Rust's expression.
 # - log10 is src/mathx.cyr's correctly rounded _km_cr_log10 and 10^x its _km_cr_exp10 (the same value as a
 #   correctly rounded pow(10, x), Rust's 10.0_f64.powf(x)), as the Antoine equation's (ADR 0006). With both
 #   sides on correctly rounded primitives in Rust's operation order the class-C rows are compared exactly
@@ -12614,12 +13045,18 @@ fn weak_base_ph(kb: f64, concentration: f64): Result {
 # the concentration's f64 bits (mol/L), then the charge zᵢ as an i64 word. The charge is squared in f64, so any
 # i32 charge is accepted; the terms (c·z)·z are summed in list order from −0.0 (Rust's `.sum()`), so no ions give
 # 0.5 × −0.0 = −0.0. Concentrations are not validated: negative or non-finite ones propagate. NaN if (ions, n)
-# is no list or a charge is outside the i32 range (Rust's type), since there is no error channel. Mirrors
-# `solution::ionic_strength`.
+# is no list or a charge is outside the i32 range (Rust's type), since there is no error channel. ADR 0002 #33: Rust's
+# chain where the sum is finite, otherwise for finite concentrations the same sequence with an unbounded exponent and
+# the final ½·Σ rounded once (a sum or a term past DBL_MAX whose half is finite: ionic_strength([(0.4·DBL_MAX, 2)]) is
+# 1.44·10³⁰⁸, Rust's ∞). A term c·z·z of a finite c and an integer z ≠ 0 is a multiple of 2⁻¹⁰⁷⁴ and so exact below
+# 2⁻¹⁰²¹, the 53-bit rounding above, and z = 0 gives an exact zero: only overflow leaves the range, which makes the
+# sum ±∞ or NaN, and a finite sum of such terms is the unbounded one (src/thermo.cyr's comment on #33's sums). Mirrors
+# `solution::ionic_strength`, with ADR 0002 #33.
 #must_use
 fn ionic_strength(ions, n): f64 {
     if (n < 0 || (n > 0 && ions == 0)) { return _km_nan(); }
     var s: f64 = -0.0;
+    var fin = 1;
     var k = 0;
     while (k < n) {
         var c: f64 = load64(ions + k * 16);
@@ -12628,10 +13065,40 @@ fn ionic_strength(ions, n): f64 {
         var z: f64 = f64_from(zi);
         var term: f64 = (c * z) * z;
         s = s + term;
+        if (_km_is_finite(c) != 1) { fin = 0; }
         k = k + 1;
     }
     var i: f64 = 0.5 * s;
-    return i;
+    var ds: f64 = s - s;
+    if (ds == 0.0 || fin != 1) { return i; }
+    var u: f64 = _km_ionic_strength_ux(ions, n);
+    return u;
+}
+
+# ionic_strength with an unbounded exponent (ADR 0002 #33), for a valid list of finite concentrations and i32 charges:
+# Rust's ½·Σ (c·z)·z from −0.0, every product and addition rounded to 53 bits (src/mathx.cyr's _km_ux_*), the final
+# product by ½ rounded once into binary64 (_km_ux_mul_f64).
+#must_use
+fn _km_ionic_strength_ux(ions, n): f64 {
+    var z0: f64 = -0.0;
+    var ss, se = _km_ux_from(z0);
+    var k = 0;
+    while (k < n) {
+        var c: f64 = load64(ions + k * 16);
+        var z: f64 = f64_from(load64(ions + k * 16 + 8));
+        var cs, ce = _km_ux_from(c);
+        var zs, ze = _km_ux_from(z);
+        var ps, pe = _km_ux_mul(cs, ce, zs, ze);
+        var ts, te = _km_ux_mul(ps, pe, zs, ze);
+        var ns, ne = _km_ux_add(ss, se, ts, te);
+        ss = ns;
+        se = ne;
+        k = k + 1;
+    }
+    var h: f64 = 0.5;
+    var hs, he = _km_ux_from(h);
+    var r: f64 = _km_ux_mul_f64(hs, he, ss, se);
+    return r;
 }
 
 # The checks shared by the activity-coefficient models: KM_ERR_INVALID_INPUT if the ionic strength is negative
@@ -12705,24 +13172,93 @@ fn davies_activity(charge, ionic_str: f64, a_constant: f64): Result {
 # Kohlrausch's law Λ_m = Λ°_m − K·√c: the molar conductivity (S·cm²/mol) at concentration c (mol/L), from the
 # limiting molar conductivity at infinite dilution Λ°_m (S·cm²/mol) and the Kohlrausch constant K
 # (S·cm²·L^½/mol^(3/2)). Ok(Λ_m); Err(KM_ERR_INVALID_CONCENTRATION) if c is negative or not finite;
-# Err(KM_ERR_INVALID_INPUT) if Λ°_m or K is not finite. Mirrors `solution::kohlrausch_molar_conductivity`.
+# Err(KM_ERR_INVALID_INPUT) if Λ°_m or K is not finite. ADR 0002 #33: Rust's chain where K·√c is the 53-bit rounding of
+# its exact value (normal, _km_ux_normal, or an exact zero: K = 0 or c = 0; √c itself, of a non-negative double, is 0
+# or normal and correctly rounded in both), so the final difference is rounded once in both; otherwise the same
+# sequence with an unbounded exponent and the difference rounded once (kohlrausch_molar_conductivity(DBL_MAX, DBL_MAX,
+# 1.21) is −1.80·10³⁰⁷, Rust's −∞). Mirrors `solution::kohlrausch_molar_conductivity`, with ADR 0002 #33.
 #must_use
 fn kohlrausch_molar_conductivity(lambda_zero: f64, k_kohlrausch: f64, concentration: f64): Result {
     if (_km_is_non_negative(concentration) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
     if (_km_is_finite(lambda_zero) != 1 || _km_is_finite(k_kohlrausch) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var lm, ok = _km_kohlrausch_fast(lambda_zero, k_kohlrausch, concentration);
+    if (ok == 1) { return Ok(lm); }
+    var u: f64 = _km_kohlrausch_ux(lambda_zero, k_kohlrausch, concentration);
+    return Ok(u);
+}
+
+# kohlrausch_molar_conductivity's fast path, for its validated inputs: (Rust's Λ° − K·√c, 1) where K·√c is the 53-bit
+# rounding of its exact value (normal, _km_ux_normal, or an exact zero: K = 0 or c = 0), otherwise (0, 0).
+#must_use
+fn _km_kohlrausch_fast(lambda_zero: f64, k_kohlrausch: f64, concentration: f64): (f64, i64) {
     var sq: f64 = f64_sqrt(concentration);
-    var lm: f64 = lambda_zero - (k_kohlrausch * sq);
-    return Ok(lm);
+    var p: f64 = k_kohlrausch * sq;
+    var lm: f64 = lambda_zero - p;
+    if (_km_ux_normal(p) == 1 || k_kohlrausch == 0.0 || sq == 0.0) { return (lm, 1); }
+    return (0.0, 0);
+}
+
+# kohlrausch_molar_conductivity with an unbounded exponent (ADR 0002 #33), for its validated inputs: Rust's Λ° − K·√c
+# with √c and K·√c rounded to 53 bits (_km_ux_*), the difference rounded once into binary64.
+#must_use
+fn _km_kohlrausch_ux(lambda_zero: f64, k_kohlrausch: f64, concentration: f64): f64 {
+    var ls, le = _km_ux_from(lambda_zero);
+    var ks, ke = _km_ux_from(k_kohlrausch);
+    var cs, ce = _km_ux_from(concentration);
+    var qs, qe = _km_ux_sqrt(cs, ce);
+    var ps, pe = _km_ux_mul(ks, ke, qs, qe);
+    var u: f64 = _km_ux_sub_f64(ls, le, ps, pe);
+    return u;
 }
 
 # Kohlrausch's law of independent ion migration Λ°_m = ν₊·λ°₊ + ν₋·λ°₋ in S·cm²/mol, from the cation's and
 # anion's limiting ionic conductivities λ° (S·cm²/mol, e.g. KM_LAMBDA_NA_PLUS) and stoichiometric numbers ν.
-# Non-finite input propagates to the result. Mirrors `solution::limiting_molar_conductivity`.
+# Non-finite input propagates to the result. ADR 0002 #33: Rust's chain where both products are the 53-bit roundings of
+# their exact values (normal, _km_ux_normal, or an exact zero: a zero factor), the final sum rounded once in both;
+# otherwise, for finite inputs, the same sequence with an unbounded exponent and the sum rounded once
+# (limiting_molar_conductivity(DBL_MAX, 1.5, −DBL_MAX, 1) is 8.99·10³⁰⁷, Rust's ∞); a non-finite input keeps Rust's
+# expression. Mirrors `solution::limiting_molar_conductivity`, with ADR 0002 #33.
 #must_use
 fn limiting_molar_conductivity(cation_conductivity: f64, cation_stoich: f64, anion_conductivity: f64,
     anion_stoich: f64): f64 {
-    var l: f64 = (cation_stoich * cation_conductivity) + (anion_stoich * anion_conductivity);
-    return l;
+    var l, ok = _km_limiting_fast(cation_conductivity, cation_stoich, anion_conductivity, anion_stoich);
+    if (ok == 1) { return l; }
+    var nf = _km_is_finite(cation_conductivity) + _km_is_finite(cation_stoich) + _km_is_finite(anion_conductivity);
+    if (nf + _km_is_finite(anion_stoich) != 4) {
+        var r: f64 = (cation_stoich * cation_conductivity) + (anion_stoich * anion_conductivity);
+        return r;
+    }
+    var u: f64 = _km_limiting_ux(cation_conductivity, cation_stoich, anion_conductivity, anion_stoich);
+    return u;
+}
+
+# limiting_molar_conductivity's fast path: (Rust's ν₊·λ₊ + ν₋·λ₋, 1) where both products are the 53-bit roundings of
+# their exact values (normal, _km_ux_normal, or an exact zero: a zero factor), otherwise (0, 0). For a non-finite input
+# that passes it, the value is Rust's expression too.
+#must_use
+fn _km_limiting_fast(cation_conductivity: f64, cation_stoich: f64, anion_conductivity: f64,
+    anion_stoich: f64): (f64, i64) {
+    var p1: f64 = cation_stoich * cation_conductivity;
+    var p2: f64 = anion_stoich * anion_conductivity;
+    var l: f64 = p1 + p2;
+    var ok1 = 0;
+    if (_km_ux_normal(p1) == 1 || cation_stoich == 0.0 || cation_conductivity == 0.0) { ok1 = 1; }
+    if (ok1 == 1 && (_km_ux_normal(p2) == 1 || anion_stoich == 0.0 || anion_conductivity == 0.0)) { return (l, 1); }
+    return (0.0, 0);
+}
+
+# limiting_molar_conductivity with an unbounded exponent (ADR 0002 #33), for finite inputs: Rust's ν₊·λ₊ + ν₋·λ₋ with
+# the products rounded to 53 bits (_km_ux_*), the sum rounded once into binary64.
+#must_use
+fn _km_limiting_ux(cation_conductivity: f64, cation_stoich: f64, anion_conductivity: f64, anion_stoich: f64): f64 {
+    var vs, ve = _km_ux_from(cation_stoich);
+    var cs, ce = _km_ux_from(cation_conductivity);
+    var ws, we = _km_ux_from(anion_stoich);
+    var as1, ae = _km_ux_from(anion_conductivity);
+    var ps, pe = _km_ux_mul(vs, ve, cs, ce);
+    var qs, qe = _km_ux_mul(ws, we, as1, ae);
+    var u: f64 = _km_ux_add_f64(ps, pe, qs, qe);
+    return u;
 }
 
 # The solution conductivity κ = Λ_m × c / 1000 in S/cm, from the molar conductivity Λ_m (S·cm²/mol) and the
@@ -13291,16 +13827,22 @@ fn nernst_potential(standard_potential: f64, n_electrons, temperature_k: f64, re
 }
 
 # (E° − ((R·T)/(n·F))·l, 1), Rust's chain on validated inputs (n the electron count as a double, l = RN(ln Q)), when it
-# stays in the normal range: R·T in [2⁻¹⁰²², DBL_MAX], (R·T)/(n·F) at least 2⁻¹⁰²² (it is below DBL_MAX/F) and the
-# product with l at least 2⁻¹⁰²² in magnitude or l = 0 (the product an exact +0; it is below 1.2·10³⁰⁷, so finite). n·F
-# is always normal. Each operation is then the same one on the same operands as in the unbounded chain, and the final
-# subtraction of two doubles is rounded once in both (IEEE's overflow is the rounding past DBL_MAX, a subnormal
-# difference exact), so the result is _km_nernst_ux's. Otherwise (0, 0).
+# stays in the normal range: R·T, (R·T)/(n·F) and, unless l = 0, the product with l in [2⁻¹⁰²¹, DBL_MAX] in magnitude
+# (src/mathx.cyr's _km_ux_normal's range, tested inline; c is below DBL_MAX/F: an IEEE product or quotient that large is
+# the 53-bit rounding of an exact value above 2⁻¹⁰²², where binary64's rounding is the 53-bit one; 2⁻¹⁰²² itself is not,
+# since an exact value just below it rounds there at the subnormal grid but below it at 53 bits). l = 0 makes the
+# product an exact +0; it is below 1.2·10³⁰⁷, so finite; n·F is always normal. Each operation is then the same one on
+# the same operands as in the unbounded chain, and the final subtraction of two doubles is rounded once in both (IEEE's
+# overflow is the rounding past DBL_MAX, a subnormal difference exact), so the result is _km_nernst_ux's. Otherwise
+# (0, 0). B2's tests took 2⁻¹⁰²² itself as normal, so a product c·l in [2⁻¹⁰²² − 2⁻¹⁰⁷⁵, 2⁻¹⁰²² − 2⁻¹⁰⁷⁶), which IEEE
+# rounds up to 2⁻¹⁰²² and 53-bit rounding to 2⁻¹⁰²² − 2⁻¹⁰⁷⁵, kept Rust's value where #20's differs
+# (nernst_potential(5·10⁻³²⁴, 1, 5.1625987955063826·10⁻³⁰³, 1.0512872158898858) is −0x0.ffffffffffffep-1022, Rust's
+# −0x0.fffffffffffffp-1022): ADR 0002 #29's B4 correction.
 #must_use
 fn _km_nernst_fast(e0: f64, n: f64, t: f64, l: f64): (f64, i64) {
     var r: f64 = KM_GAS_CONSTANT;
     var f: f64 = KM_FARADAY;
-    var nmin: f64 = 0x0010000000000000;     # 2⁻¹⁰²²
+    var nmin: f64 = 0x0020000000000000;     # 2⁻¹⁰²¹, _km_ux_normal's bound (inline: R·T and c are positive)
     var dmax: f64 = 0x7FEFFFFFFFFFFFFF;
     var a: f64 = r * t;
     if (a < nmin || a > dmax) { return (0.0, 0); }
@@ -13501,6 +14043,8 @@ fn moles_electrons_to_charge(moles: f64): f64 {
 #   unbounded exponent (src/mathx.cyr's _km_ux_*), the final division rounded once into binary64, behind a cheap test
 #   that proves Rust's chain stayed in the normal range, so every such input keeps Rust's bits. Rust's checks, Err codes
 #   and order are kept.
+# - ADR 0002 #33 (the overflow audit's B4; the same decisions): zero_order_concentration's [A]₀ − k·t has a sum inside,
+#   so it gets #20's semantics too (the comparison with 0 on the unbounded difference), mapped the same way.
 # - lineweaver_burk's (slope, intercept) tuple becomes the caller's buffer of two f64 (16 bytes,
 #   `var lb[16];`), as peng_robinson_z_roots's Vec: Ok(2), the count written, with the slope at out and the
 #   intercept at out + 8; on Err the buffer is untouched.
@@ -13602,12 +14146,40 @@ fn _km_second_order_ux(initial: f64, rate_constant: f64, time: f64): f64 {
 # The zero-order concentration [A] = [A]₀ − k·t in mol/L, from [A]₀ in mol/L, k in mol·L⁻¹·s⁻¹ and t in s, or
 # +0.0 if that would be negative (the reaction is complete). Inputs are not validated: NaN propagates (Rust's
 # `if remaining < 0.0 { 0.0 } else { remaining }`, not f64::max, which would turn NaN into 0.0), and −0.0
-# stays −0.0. Mirrors `kinetics::zero_order_concentration`.
+# stays −0.0. ADR 0002 #33 (the overflow audit's B4): [A]₀ − k·t has a sum inside, so it gets ADR 0002 #20's
+# semantics: Rust's chain where k·t is the 53-bit rounding of its exact value (normal, src/mathx.cyr's _km_ux_normal,
+# or an exact zero: a zero factor), where the difference is rounded once in both and its sign is the exact one (a
+# nonzero difference of doubles never rounds to 0); otherwise, for finite inputs, the same sequence with an unbounded
+# exponent, the comparison with 0 on the unbounded difference and the difference rounded once
+# (zero_order_concentration(−DBL_MAX, −DBL_MAX, 1.5) is 8.99·10³⁰⁷, Rust's +∞); a non-finite input keeps Rust's
+# expression. Mirrors `kinetics::zero_order_concentration`, with ADR 0002 #33.
 #must_use
 fn zero_order_concentration(initial: f64, rate_constant: f64, time: f64): f64 {
-    var remaining: f64 = initial - (rate_constant * time);
+    var p: f64 = rate_constant * time;
+    var remaining: f64 = initial - p;
+    var fast = 0;
+    if (_km_ux_normal(p) == 1 || rate_constant == 0.0 || time == 0.0) { fast = 1; }
+    if (fast != 1 && _km_is_finite(initial) + _km_is_finite(rate_constant) + _km_is_finite(time) == 3) {
+        var u: f64 = _km_zero_order_ux(initial, rate_constant, time);
+        return u;
+    }
     if (remaining < 0.0) { return 0.0; }
     return remaining;
+}
+
+# zero_order_concentration with an unbounded exponent (ADR 0002 #33), for finite inputs: Rust's [A]₀ − k·t with k·t and
+# the difference rounded to 53 bits (src/mathx.cyr's _km_ux_*): +0.0 where that difference is negative (Rust's clamp, on
+# the unbounded value), otherwise the difference rounded once into binary64.
+#must_use
+fn _km_zero_order_ux(initial: f64, rate_constant: f64, time: f64): f64 {
+    var cs, ce = _km_ux_from(initial);
+    var ks, ke = _km_ux_from(rate_constant);
+    var ts, te = _km_ux_from(time);
+    var ps, pe = _km_ux_mul(ks, ke, ts, te);
+    var rs, re = _km_ux_sub(cs, ce, ps, pe);
+    if (rs < 0.0) { return 0.0; }
+    var u: f64 = _km_ux_sub_f64(cs, ce, ps, pe);
+    return u;
 }
 
 # The zero-order half-life t½ = [A]₀/(2k) in s, from [A]₀ in mol/L and k in mol·L⁻¹·s⁻¹. Ok(t½);
@@ -15938,7 +16510,8 @@ var KM_IONIC_RADII_RADIUS_PM: f64[30] = {
 # correctly rounded 4Δ/9 also where Rust's Δ·4 overflows (ADR 0002 #15, mapped the same way). ADR 0002 #32 (the overflow
 # audit's B3, #20's semantics): born_lande_lattice_energy is Rust's chain where it stays in the normal range (Rust's
 # bits) and otherwise Rust's sequence with an unbounded exponent, the final product rounded once (mapped the same way);
-# its (1 − 1/n) stays Rust's (M4b's review).
+# its (1 − 1/n) stays Rust's (M4b's review). ADR 0002 #33 (the audit's B4, #20's semantics): born_haber_lattice_energy's
+# chain of differences likewise, the last difference rounded once.
 #
 # - Rust's integers are words here, never wrapped (port plan §6.4). A d-electron or unpaired-electron count (`u8`)
 #   outside 0 ..= 255, an ion charge (`u32`) outside 0 ..= u32::MAX, an ionic-radius charge (`i8`) outside
@@ -16160,8 +16733,13 @@ fn _km_born_lande_ux(madelung: f64, zc: f64, za: f64, r0_m: f64, born_exponent: 
 # The Born–Haber lattice energy U = ΔH_f° − ΔH_sub − IE − ΔH_diss/2 − EA in kJ/mol (negative = stable), from the
 # compound's formation enthalpy, the metal's sublimation enthalpy and ionization energy, the full X₂ → 2X
 # dissociation enthalpy (halved here, for MX) and the nonmetal's electron affinity (negative = energy released), all
-# in kJ/mol. Computed in Rust's order, left to right; inputs are not validated (NaN and ±∞ propagate). Mirrors
-# `inorganic::born_haber_lattice_energy`.
+# in kJ/mol. Computed in Rust's order, left to right; inputs are not validated (NaN and ±∞ propagate). ADR 0002 #33:
+# Rust's chain where its result is finite and ΔH_diss/2 exact (the halving rounds only for an odd multiple of 2⁻¹⁰⁷⁴
+# below 2⁻¹⁰²¹; the differences of doubles are then exact below 2⁻¹⁰²¹ and the 53-bit roundings above, so a finite
+# result of finite inputs is the unbounded chain's: src/thermo.cyr's comment on #33's sums); otherwise, for finite
+# inputs, the same sequence with an unbounded exponent and the last difference rounded once
+# (born_haber_lattice_energy(DBL_MAX, −DBL_MAX, DBL_MAX, 0, 0) is DBL_MAX, Rust's ∞). Mirrors
+# `inorganic::born_haber_lattice_energy`, with ADR 0002 #33.
 #must_use
 fn born_haber_lattice_energy(formation_enthalpy_kj: f64, sublimation_enthalpy_kj: f64, ionization_energy_kj: f64,
     dissociation_enthalpy_kj: f64, electron_affinity_kj: f64): f64 {
@@ -16170,7 +16748,35 @@ fn born_haber_lattice_energy(formation_enthalpy_kj: f64, sublimation_enthalpy_kj
     var half: f64 = dissociation_enthalpy_kj / 2.0;
     u = u - half;
     u = u - electron_affinity_kj;
-    return u;
+    var du: f64 = u - u;
+    var h2: f64 = half * 2.0;
+    if (du == 0.0 && h2 == dissociation_enthalpy_kj) { return u; }
+    var nf = _km_is_finite(formation_enthalpy_kj) + _km_is_finite(sublimation_enthalpy_kj);
+    nf = nf + _km_is_finite(ionization_energy_kj) + _km_is_finite(dissociation_enthalpy_kj);
+    if (nf + _km_is_finite(electron_affinity_kj) != 5) { return u; }
+    var r: f64 = _km_born_haber_ux(formation_enthalpy_kj, sublimation_enthalpy_kj, ionization_energy_kj,
+        dissociation_enthalpy_kj, electron_affinity_kj);
+    return r;
+}
+
+# born_haber_lattice_energy with an unbounded exponent (ADR 0002 #33), for finite inputs: Rust's differences left to
+# right and the halving rounded to 53 bits (_km_ux_*), the last difference rounded once into binary64.
+#must_use
+fn _km_born_haber_ux(formation_enthalpy_kj: f64, sublimation_enthalpy_kj: f64, ionization_energy_kj: f64,
+    dissociation_enthalpy_kj: f64, electron_affinity_kj: f64): f64 {
+    var fs, fe = _km_ux_from(formation_enthalpy_kj);
+    var ss, se = _km_ux_from(sublimation_enthalpy_kj);
+    var is1, ie = _km_ux_from(ionization_energy_kj);
+    var ds, de = _km_ux_from(dissociation_enthalpy_kj);
+    var es, ee = _km_ux_from(electron_affinity_kj);
+    var two: f64 = 2.0;
+    var ts, te = _km_ux_from(two);
+    var a1, b1 = _km_ux_sub(fs, fe, ss, se);
+    var a2, b2 = _km_ux_sub(a1, b1, is1, ie);
+    var hs, he = _km_ux_div(ds, de, ts, te);
+    var a3, b3 = _km_ux_sub(a2, b2, hs, he);
+    var r: f64 = _km_ux_sub_f64(a3, b3, es, ee);
+    return r;
 }
 
 # ── ionic radii ─────────────────────────────────────────────────────────────────────
@@ -17109,6 +17715,9 @@ var _KM_ISOTOPES_DECAY_MODE_BYTES: u8[84] = {
 #   semantics: Rust's chain where Δm·931.494… is finite (Rust's bits), Rust's sequence with an unbounded exponent and
 #   the final division rounded once past it (masses above about 1.93·10³⁰⁵ u, physically meaningless and fixed too),
 #   mapped the same way.
+# - ADR 0002 #33 (the overflow audit's B4): q_value's (Σ m_r − Σ m_p)·931.494… has sums inside, so it gets #20's
+#   semantics too: Rust's chain where Σ m_r − Σ m_p is finite (Rust's bits), the unbounded-exponent sequence with the
+#   final product rounded once past it (two sums past DBL_MAX that cancel: Rust's ∞ − ∞ = NaN), mapped the same way.
 # - Rust's std::f64::consts::LN_2, its private EQUAL_RATE_REL_TOL (10⁻¹²) and SEMF_* coefficients and the asymmetry
 #   term's 4 are typed formula constants inline (port plan §6.4): LN_2 by its bits, as src/kinetics.cyr writes it. Each
 #   is pinned by golden rows (validate.py perturbs it one ulp, the tolerance also by halving and doubling, and requires
@@ -17348,14 +17957,35 @@ fn semi_empirical_binding_energy(z, a): Result {
 # The Q-value of a nuclear reaction, Q = (Σ m_reactants − Σ m_products)·c², in MeV (positive: exothermic), from the
 # nr reactant and np product atomic masses in u at `reactant_masses_u` and `product_masses_u`. Each sum is Rust's
 # `.sum()`, from −0.0 in order (src/thermo.cyr's _km_sum); NaN if either is no slice (a negative count, or a null
-# pointer with values). Mirrors `nuclear::q_value`.
+# pointer with values). ADR 0002 #33: Rust's chain where the difference of the sums is finite (the sums and the
+# difference are then the unbounded-exponent ones: src/thermo.cyr's comment on #33's sums), otherwise for finite masses
+# the same sequence with an unbounded exponent and the final product rounded once (two sums past DBL_MAX that cancel
+# give their difference's value, not ∞ − ∞ = NaN); a non-finite mass keeps Rust's. Mirrors `nuclear::q_value`, with
+# ADR 0002 #33.
 #must_use
 fn q_value(reactant_masses_u, nr, product_masses_u, np): f64 {
     var sum_r: f64 = _km_sum(reactant_masses_u, nr);
     var sum_p: f64 = _km_sum(product_masses_u, np);
     var d: f64 = sum_r - sum_p;
     var q: f64 = d * KM_AMU_MEV;
-    return q;
+    var dd: f64 = d - d;
+    if (dd == 0.0) { return q; }
+    if (_km_finite_slice(reactant_masses_u, nr) != 1 || _km_finite_slice(product_masses_u, np) != 1) { return q; }
+    var u: f64 = _km_q_value_ux(reactant_masses_u, nr, product_masses_u, np);
+    return u;
+}
+
+# q_value with an unbounded exponent (ADR 0002 #33), for two slices of finite masses: the sums from −0.0 in order and
+# their difference rounded to 53 bits, the product with 931.494… rounded once into binary64.
+#must_use
+fn _km_q_value_ux(reactant_masses_u, nr, product_masses_u, np): f64 {
+    var rs, re = _km_sum_ux(reactant_masses_u, nr);
+    var ps, pe = _km_sum_ux(product_masses_u, np);
+    var ds, de = _km_ux_sub(rs, re, ps, pe);
+    var amu: f64 = KM_AMU_MEV;
+    var as1, ae = _km_ux_from(amu);
+    var u: f64 = _km_ux_mul_f64(ds, de, as1, ae);
+    return u;
 }
 
 # ── decay chains ────────────────────────────────────────────────────────────────────

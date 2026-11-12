@@ -12,7 +12,8 @@
 # correctly rounded 4Δ/9 also where Rust's Δ·4 overflows (ADR 0002 #15, mapped the same way). ADR 0002 #32 (the overflow
 # audit's B3, #20's semantics): born_lande_lattice_energy is Rust's chain where it stays in the normal range (Rust's
 # bits) and otherwise Rust's sequence with an unbounded exponent, the final product rounded once (mapped the same way);
-# its (1 − 1/n) stays Rust's (M4b's review).
+# its (1 − 1/n) stays Rust's (M4b's review). ADR 0002 #33 (the audit's B4, #20's semantics): born_haber_lattice_energy's
+# chain of differences likewise, the last difference rounded once.
 #
 # - Rust's integers are words here, never wrapped (port plan §6.4). A d-electron or unpaired-electron count (`u8`)
 #   outside 0 ..= 255, an ion charge (`u32`) outside 0 ..= u32::MAX, an ionic-radius charge (`i8`) outside
@@ -234,8 +235,13 @@ fn _km_born_lande_ux(madelung: f64, zc: f64, za: f64, r0_m: f64, born_exponent: 
 # The Born–Haber lattice energy U = ΔH_f° − ΔH_sub − IE − ΔH_diss/2 − EA in kJ/mol (negative = stable), from the
 # compound's formation enthalpy, the metal's sublimation enthalpy and ionization energy, the full X₂ → 2X
 # dissociation enthalpy (halved here, for MX) and the nonmetal's electron affinity (negative = energy released), all
-# in kJ/mol. Computed in Rust's order, left to right; inputs are not validated (NaN and ±∞ propagate). Mirrors
-# `inorganic::born_haber_lattice_energy`.
+# in kJ/mol. Computed in Rust's order, left to right; inputs are not validated (NaN and ±∞ propagate). ADR 0002 #33:
+# Rust's chain where its result is finite and ΔH_diss/2 exact (the halving rounds only for an odd multiple of 2⁻¹⁰⁷⁴
+# below 2⁻¹⁰²¹; the differences of doubles are then exact below 2⁻¹⁰²¹ and the 53-bit roundings above, so a finite
+# result of finite inputs is the unbounded chain's: src/thermo.cyr's comment on #33's sums); otherwise, for finite
+# inputs, the same sequence with an unbounded exponent and the last difference rounded once
+# (born_haber_lattice_energy(DBL_MAX, −DBL_MAX, DBL_MAX, 0, 0) is DBL_MAX, Rust's ∞). Mirrors
+# `inorganic::born_haber_lattice_energy`, with ADR 0002 #33.
 #must_use
 fn born_haber_lattice_energy(formation_enthalpy_kj: f64, sublimation_enthalpy_kj: f64, ionization_energy_kj: f64,
     dissociation_enthalpy_kj: f64, electron_affinity_kj: f64): f64 {
@@ -244,7 +250,35 @@ fn born_haber_lattice_energy(formation_enthalpy_kj: f64, sublimation_enthalpy_kj
     var half: f64 = dissociation_enthalpy_kj / 2.0;
     u = u - half;
     u = u - electron_affinity_kj;
-    return u;
+    var du: f64 = u - u;
+    var h2: f64 = half * 2.0;
+    if (du == 0.0 && h2 == dissociation_enthalpy_kj) { return u; }
+    var nf = _km_is_finite(formation_enthalpy_kj) + _km_is_finite(sublimation_enthalpy_kj);
+    nf = nf + _km_is_finite(ionization_energy_kj) + _km_is_finite(dissociation_enthalpy_kj);
+    if (nf + _km_is_finite(electron_affinity_kj) != 5) { return u; }
+    var r: f64 = _km_born_haber_ux(formation_enthalpy_kj, sublimation_enthalpy_kj, ionization_energy_kj,
+        dissociation_enthalpy_kj, electron_affinity_kj);
+    return r;
+}
+
+# born_haber_lattice_energy with an unbounded exponent (ADR 0002 #33), for finite inputs: Rust's differences left to
+# right and the halving rounded to 53 bits (_km_ux_*), the last difference rounded once into binary64.
+#must_use
+fn _km_born_haber_ux(formation_enthalpy_kj: f64, sublimation_enthalpy_kj: f64, ionization_energy_kj: f64,
+    dissociation_enthalpy_kj: f64, electron_affinity_kj: f64): f64 {
+    var fs, fe = _km_ux_from(formation_enthalpy_kj);
+    var ss, se = _km_ux_from(sublimation_enthalpy_kj);
+    var is1, ie = _km_ux_from(ionization_energy_kj);
+    var ds, de = _km_ux_from(dissociation_enthalpy_kj);
+    var es, ee = _km_ux_from(electron_affinity_kj);
+    var two: f64 = 2.0;
+    var ts, te = _km_ux_from(two);
+    var a1, b1 = _km_ux_sub(fs, fe, ss, se);
+    var a2, b2 = _km_ux_sub(a1, b1, is1, ie);
+    var hs, he = _km_ux_div(ds, de, ts, te);
+    var a3, b3 = _km_ux_sub(a2, b2, hs, he);
+    var r: f64 = _km_ux_sub_f64(a3, b3, es, ee);
+    return r;
 }
 
 # ── ionic radii ─────────────────────────────────────────────────────────────────────

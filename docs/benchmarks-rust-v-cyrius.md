@@ -1,7 +1,8 @@
 # Benchmarks — Rust 1.2.0 vs the Cyrius port
 
 Each row times one benchmark body: the same work in Rust (`rust-old/`, release build) and in
-Cyrius (`tests/kimiya.bcyr`, `cyrius bench`). Port milestones append rows as they land. Numbers
+Cyrius (`tests/kimiya.bcyr`, and since the overflow audit's B4 `tests/audit.bcyr` for the audit's Cyrius-only benches;
+`cyrius bench` runs both). Port milestones append rows as they land. Numbers
 are host-specific, so compare within a column set, never across hosts.
 
 ## Method
@@ -510,4 +511,65 @@ rows), not 1,000,000 × 20: the file took about 255 s before B3, and B3's rows a
 host, and in that full run the rows read 5–10 % above the back-to-back figures above (`ideal_gas_volume` 123 ns,
 `peng_robinson_pressure` 103, `redlich_kwong_pressure` 193, `morse_width_parameter` 140, the edges 122–644 ns, the exact
 root 1.29–1.32 µs). The next batch's benches need the deadline raised (`[test] timeout` in `cyrius.cyml`) or a second
-bench file.
+bench file. (B4 split the file: below.)
+
+## The overflow audit's B4 (2026-11-11)
+
+ADR 0002 #33 and #34: the sums with cancellation and the Shomate polynomials with an unbounded exponent behind fast
+tests (Rust's chain in range), and #29's corrected fast-path bound. **The bench split** (the user's decision): the
+audit's Cyrius-only benches, B1's to B4's (`bench_audit_b1` … `bench_audit_b4`), live in `tests/audit.bcyr`;
+`tests/kimiya.bcyr` keeps the benches that mirror `rust-old/benches/benchmarks.rs` and the Cyrius-only ones from before
+the audit. The names are unchanged, and B3's seventeen are back at the standard 1,000,000 × 20 calls (its two exact
+roots at 100,000 × 20, as the other microsecond rows). On this host `cyrius bench tests/kimiya.bcyr` takes 177 s (261 s
+before the split; 279 s in B3's own run) and `cyrius bench tests/audit.bcyr` 189 s, each well inside `cyrius bench`'s
+300 s per-file deadline; moving only the edge, slow-path and tie benches would have left kimiya.bcyr at about 214 s, or
+232 s with B3's typical benches restored, so the audit's typical-input benches moved too. B3's benches at the restored
+counts read as before (`ideal_gas_volume` 115 ns, `peng_robinson_pressure` 95, `redlich_kwong_pressure` 190,
+`morse_width_parameter` 128, the edges 114–601 ns, the exact roots 1.22–1.26 µs).
+
+Before: `tests/kimiya.bcyr` on the code before B4 (the committed tree), and B4's new benches, as a trimmed copy of
+`tests/audit.bcyr` (only these benches), run on an export of the committed tree; after: both files on the code after,
+the same host.
+
+| Bench | Body | Rust | Before | After |
+|---|---|---|---|---|
+| `reaction/gibbs_free_energy` | (−100000, 298, −200): three guards, ΔH − T·ΔS and its range test (T·ΔS normal, inline) | 1.75 ns | 17 ns | 18 ns |
+| `thermochem/reaction_enthalpy_ch4` | CH₄ + 2O₂ → CO₂ + 2H₂O(l): four table scans, two sums with the per-product test inline, × 1000 | 38.58 ns | 259 ns | 293 ns |
+| `thermochem/enthalpy_change_cp` | the Rust bench's CO₂(g) call: the table-row path, T inside the box (one inline test) | 24.00 ns | 171 ns | 171 ns |
+| `thermochem/shomate_cp` | `s.cp(500)`, CO₂'s first segment: Rust's chain and the box test (`_km_shomate_box`) | 2.34 ns | 15 ns | 32 ns |
+| `thermochem/adiabatic_flame_ch4_air` | the flame at φ = 1 in air: about 90 table-row evaluations, each T inside the box | 301.48 ns | 3.40 µs | 3.29 µs |
+| `electrochemistry/nernst_potential` | (0.342, 2, 298.15 K, 0.1): #29's tests at 2⁻¹⁰²¹ (inline) | 6.42 ns | 90 ns | 89 ns |
+| `thermo/hess_law` | (−100, 50, −30): Rust's sum, "finite" | — | 13 ns | 15 ns |
+| `thermo/enthalpy_from_formation` | ([−400], [−200, −100]): the two sums, both finite | — | 20 ns | 24 ns |
+| `thermochem/reaction_gibbs_energy` | as `reaction_enthalpy_ch4`, ΔG_f° | — | 259 ns | 299 ns |
+| `thermochem/reaction_entropy` | as `reaction_enthalpy_ch4`, S° | — | 259 ns | 286 ns |
+| `nuclear/q_value` | D + T → ⁴He + n: the sums, the difference finite, × 931.494… | — | 24 ns | 26 ns |
+| `solution/ionic_strength` | 0.1 M of a 1:1 salt: Rust's ½·Σ, the sum finite | — | 24 ns | 31 ns |
+| `inorganic/born_haber_lattice_energy` | NaCl's cycle: the result finite, ΔH_diss/2 exact | — | 10 ns | 14 ns |
+| `solution/kohlrausch_molar_conductivity` | (126.4, 89.9, 0.01 M): `_km_kohlrausch_fast` | — | 22 ns | 28 ns |
+| `solution/limiting_molar_conductivity` | NaCl: `_km_limiting_fast` (two products normal) | — | 10 ns | 24 ns |
+| `kinetics/zero_order_concentration` | (1, 0.01, 50): k·t normal, the clamp | — | 12 ns | 17 ns |
+| `thermochem/shomate_enthalpy_antiderivative` | CO₂(g)'s segment at 500 K: Rust's chain and the box test | — | 37 ns | 54 ns |
+| `thermo/hess_law_edge` | [DBL_MAX, DBL_MAX, −DBL_MAX]: Rust's +∞, the unbounded sum | — | 22 ns | 162 ns |
+| `thermo/enthalpy_from_formation_edge` | [DBL_MAX, DBL_MAX] twice: Rust's NaN, the slow path | — | 31 ns | 212 ns |
+| `thermochem/reaction_enthalpy_edge` | [Al₂O₃ ×10³⁰⁸] → [Al₂O₃ ×10³⁰⁸]: Rust's NaN, the slow path (the lookups twice) | — | 225 ns | 587 ns |
+| `nuclear/q_value_edge` | [M, M] − [M, 0.999M]: Rust's NaN, the slow path | — | 33 ns | 250 ns |
+| `solution/ionic_strength_edge` | [(0.4·DBL_MAX, 2)]: Rust's +∞, the slow path | — | 26 ns | 144 ns |
+| `inorganic/born_haber_lattice_energy_edge` | (M, −M, M, 0, 0): Rust's +∞, the slow path | — | 10 ns | 175 ns |
+| `reaction/gibbs_free_energy_edge` | (M, 2, 0.75M): Rust's −∞, the slow path | — | 27 ns | 117 ns |
+| `solution/kohlrausch_molar_conductivity_edge` | (M, M, 1.21): Rust's −∞, the slow path | — | 23 ns | 129 ns |
+| `solution/limiting_molar_conductivity_edge` | (M, 1.5, −M, 1): Rust's +∞, the slow path | — | 11 ns | 132 ns |
+| `kinetics/zero_order_concentration_edge` | (−M, −M, 1.5): Rust's +∞, the slow path | — | 13 ns | 138 ns |
+| `thermochem/shomate_cp_edge` | H₂O(g)'s segment at 10³⁰⁰ K: Rust's ∞ − ∞ = NaN, the per-operation tests, the slow path | — | 29 ns | 311 ns |
+| `thermochem/shomate_enthalpy_antiderivative_edge` | A = 20.786 alone at 5·10⁻³²⁴ K: Rust's NaN, the slow path | — | 47 ns | 474 ns |
+
+On physical inputs the fast tests cost 1–7 ns for the scalar functions (`limiting_molar_conductivity` 14 ns: its fast
+path is a function, shared with the tests and `cr_verify.py`, testing two products), 2–7 ns a slice for the pure sums
+("finite"), and about 9 ns per record for the reaction sums (the per-product test and the coefficient's finiteness,
+inline; the table scans dominate). The Shomate box costs 17 ns per `KmShomate.cp` call (the test of T and five
+coefficients, a function call); inlining it was measured (34 and 39 ns, with bit and float compares) and not kept. The
+table-row path, whose coefficients are all inside the box, tests T alone, inline: `enthalpy_change_cp` is unchanged and
+the flame 3% faster than before (the general evaluation was a call, the row path now inline). The slow paths are the
+unbounded-exponent chains, 117–587 ns (the Shomate polynomials' per-operation tests before them: 311 and 474 ns).
+`nernst_potential`'s bound moved from 2⁻¹⁰²² to 2⁻¹⁰²¹ with the same inline compares (89 ns; `_km_ux_normal` calls
+measured 99 ns).

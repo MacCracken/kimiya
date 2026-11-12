@@ -789,6 +789,40 @@ fn _t_cyrius_adr32_bea() {
     assert(is_ok(t4) == 1 && v4 == 0xFFF0000000000000, "A = 930: the value itself is past −DBL_MAX: −∞, as Rust's");
 }
 
+# The f64 whose bit pattern is `bits`.
+#must_use
+fn _b4_fbits(bits): f64 {
+    var x: f64 = 0.0;
+    store64(&x, bits);
+    return x;
+}
+
+# ADR 0002 #33 (the overflow audit's B4): q_value's two sums past DBL_MAX that cancel (Rust's ∞ − ∞ = NaN), the value
+# itself past DBL_MAX (+∞ in both), and a non-finite mass (Rust's).
+fn _t_cyrius_adr33_q_value() {
+    test_group("cyrius_adr33_q_value");
+    var dmax: f64 = _b4_fbits(0x7FEFFFFFFFFFFFFF);
+    var r: f64[2];
+    r[0] = dmax;
+    r[1] = dmax;
+    var p: f64[2];
+    p[0] = dmax;
+    p[1] = 0.999 * dmax;
+    var q1: f64 = q_value(&r, 2, &p, 2);
+    assert_eq(_km_bits(q1), 0x7FEDCECCB849F588, "(2·DBL_MAX − 1.999·DBL_MAX)·931.494… = 1.67·10³⁰⁸ (Rust's NaN)");
+    var q2: f64 = q_value(&r, 2, &r, 2);
+    assert_eq(_km_bits(q2), 0, "equal sums past DBL_MAX: +0 (Rust's NaN)");
+    var q3: f64 = q_value(&r, 2, &p, 1);
+    assert_eq(_km_bits(q3), 0x7FF0000000000000, "(2·DBL_MAX − DBL_MAX)·931.494…: +∞ in both");
+    var inf: f64 = 1.0 / 0.0;
+    p[0] = inf;
+    var q4: f64 = q_value(&p, 1, &p, 1);
+    assert_eq(ulp_is_nan(_km_bits(q4)), 1, "∞ − ∞ of non-finite masses: Rust's NaN");
+    var q5: f64 = q_value(&r, 1, &p, 0);
+    var want: f64 = dmax * KM_AMU_MEV;
+    assert_eq(_km_bits(q5), _km_bits(want), "DBL_MAX·931.494…: Rust's chain (+∞)");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_decay_constant_c14();
@@ -836,6 +870,7 @@ fn main() {
     _t_cyrius_exact_half_lives();
     _t_cyrius_exact_secular();
     _t_cyrius_adr32_bea();
+    _t_cyrius_adr33_q_value();
     return assert_summary();
 }
 

@@ -110,7 +110,12 @@ type for average oxidation states, no separate extrapolating Antoine function. I
   - [x] B5 — F2, gas laws (`ideal_gas_pressure`, `ideal_gas_volume`, `gas_density` rounded once; van der Waals,
     Peng–Robinson and Redlich–Kwong pressure with an unbounded exponent, the co-volume tests on the unbounded co-volume,
     Tc^2.5 exactly rescaled) — done in the Cyrius API (ADR 0002 #31), in the audit's B3
-  - [ ] B6 — F7 and F8, sums with cancellation and the Shomate polynomial
+  - [x] B6 — F7 and F8, sums with cancellation and the Shomate polynomial (`hess_law`, `enthalpy_from_formation`, the
+    three thermochem reaction sums, `q_value`, `ionic_strength`, `born_haber_lattice_energy`, `gibbs_free_energy`,
+    `kohlrausch_molar_conductivity`, `limiting_molar_conductivity`, `zero_order_concentration`, `Shomate::cp`,
+    `enthalpy_antiderivative` with an unbounded exponent in Rust's summation order; the data-backed Shomate callers
+    unchanged) — done in the Cyrius API (ADR 0002 #33, #34), the audit's B4, with #29's fast-path correction and the
+    bench split (`tests/audit.bcyr`)
   - [ ] B7 — F9, exp and exp10 arguments
   - [ ] B8 — the FFT magnitudes, the flame's sign test, `find_peaks` if wanted
   - [ ] B9 — F15, an exact `balance_equation`

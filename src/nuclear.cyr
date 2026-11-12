@@ -28,6 +28,9 @@
 #   semantics: Rust's chain where Δm·931.494… is finite (Rust's bits), Rust's sequence with an unbounded exponent and
 #   the final division rounded once past it (masses above about 1.93·10³⁰⁵ u, physically meaningless and fixed too),
 #   mapped the same way.
+# - ADR 0002 #33 (the overflow audit's B4): q_value's (Σ m_r − Σ m_p)·931.494… has sums inside, so it gets #20's
+#   semantics too: Rust's chain where Σ m_r − Σ m_p is finite (Rust's bits), the unbounded-exponent sequence with the
+#   final product rounded once past it (two sums past DBL_MAX that cancel: Rust's ∞ − ∞ = NaN), mapped the same way.
 # - Rust's std::f64::consts::LN_2, its private EQUAL_RATE_REL_TOL (10⁻¹²) and SEMF_* coefficients and the asymmetry
 #   term's 4 are typed formula constants inline (port plan §6.4): LN_2 by its bits, as src/kinetics.cyr writes it. Each
 #   is pinned by golden rows (validate.py perturbs it one ulp, the tolerance also by halving and doubling, and requires
@@ -267,14 +270,35 @@ fn semi_empirical_binding_energy(z, a): Result {
 # The Q-value of a nuclear reaction, Q = (Σ m_reactants − Σ m_products)·c², in MeV (positive: exothermic), from the
 # nr reactant and np product atomic masses in u at `reactant_masses_u` and `product_masses_u`. Each sum is Rust's
 # `.sum()`, from −0.0 in order (src/thermo.cyr's _km_sum); NaN if either is no slice (a negative count, or a null
-# pointer with values). Mirrors `nuclear::q_value`.
+# pointer with values). ADR 0002 #33: Rust's chain where the difference of the sums is finite (the sums and the
+# difference are then the unbounded-exponent ones: src/thermo.cyr's comment on #33's sums), otherwise for finite masses
+# the same sequence with an unbounded exponent and the final product rounded once (two sums past DBL_MAX that cancel
+# give their difference's value, not ∞ − ∞ = NaN); a non-finite mass keeps Rust's. Mirrors `nuclear::q_value`, with
+# ADR 0002 #33.
 #must_use
 fn q_value(reactant_masses_u, nr, product_masses_u, np): f64 {
     var sum_r: f64 = _km_sum(reactant_masses_u, nr);
     var sum_p: f64 = _km_sum(product_masses_u, np);
     var d: f64 = sum_r - sum_p;
     var q: f64 = d * KM_AMU_MEV;
-    return q;
+    var dd: f64 = d - d;
+    if (dd == 0.0) { return q; }
+    if (_km_finite_slice(reactant_masses_u, nr) != 1 || _km_finite_slice(product_masses_u, np) != 1) { return q; }
+    var u: f64 = _km_q_value_ux(reactant_masses_u, nr, product_masses_u, np);
+    return u;
+}
+
+# q_value with an unbounded exponent (ADR 0002 #33), for two slices of finite masses: the sums from −0.0 in order and
+# their difference rounded to 53 bits, the product with 931.494… rounded once into binary64.
+#must_use
+fn _km_q_value_ux(reactant_masses_u, nr, product_masses_u, np): f64 {
+    var rs, re = _km_sum_ux(reactant_masses_u, nr);
+    var ps, pe = _km_sum_ux(product_masses_u, np);
+    var ds, de = _km_ux_sub(rs, re, ps, pe);
+    var amu: f64 = KM_AMU_MEV;
+    var as1, ae = _km_ux_from(amu);
+    var u: f64 = _km_ux_mul_f64(ds, de, as1, ae);
+    return u;
 }
 
 # ── decay chains ────────────────────────────────────────────────────────────────────

@@ -1904,8 +1904,10 @@ for mod in ("reaction", "thermo", "phase", "gas", "thermochem", "solution", "ele
             kind = "err" if path is None else path.split(" ", 1)[0].rstrip(",")
             flame_paths[kind] = flame_paths.get(kind, 0) + 1
         if fn in ("thermochem::reaction_enthalpy", "thermochem::reaction_gibbs_energy"):
-            check(NOTES.get(where, "").endswith("[J/mol: the oracle's kJ/mol result × 1000.0 (ADR 0002 #1)]"),
-                  f"{where}: {fn} row note does not say ADR 0002 #1's × 1000")
+            adr1 = "[J/mol: the oracle's kJ/mol result × 1000.0 (ADR 0002 #1)]"
+            nt_ = NOTES.get(where, "")
+            check(nt_.endswith(adr1) or (adr1 + " [ADR 0002 #33: " in nt_ and nt_.endswith(")]")),
+                  f"{where}: {fn} row note does not say ADR 0002 #1's × 1000 (then, at most, ADR 0002 #33's value)")
         if cls == "C" and not LIBM_EXACT:
             check(toks_shape(outs, want), f"{where}: {fn}{tuple(a)} -> {outs}, recomputed {base!r}")
             shape_only += 1
@@ -2809,13 +2811,22 @@ def _e20(r): return Err("InvalidInput") if r is None else r
 def e20_distance(v): return MPFR.potential_distance_3d(v)
 def e20_bond(v): return _e20(MPFR.potential_bond_angle(v, P_TOL))
 def e20_dihedral(v): return _e20(MPFR.potential_dihedral_angle(v, P_CTOL))
-# Rust's f64 chains, traced: OOR[0] is set when a product or sum leaves the normal range.
+# Rust's f64 chains, traced: OOR[0] is set when a product, quotient or sum leaves the normal range: a result that is not
+# finite, 0 from nonzero factors, nonzero and below 2⁻¹⁰²² in magnitude, or a product or quotient of exactly ±2⁻¹⁰²² that
+# is not the 53-bit rounding of its exact value (one just below 2⁻¹⁰²², which IEEE rounds up there at the subnormal grid
+# and 53-bit rounding to 2⁻¹⁰²² − 2⁻¹⁰⁷⁵: B4's correction of ADR 0002 #29, whose B2 tracer b2_nernst_in_range took every
+# 2⁻¹⁰²² as normal, as the port's fast path did; #20's and B1's tracers share these). A sum of two doubles is exact
+# wherever it is below 2⁻¹⁰²¹ in magnitude, so ±2⁻¹⁰²² is in range for a sum.
 OOR = [False]
-def _t_chk(r, *fs):
-    if not math.isfinite(r) or (r != 0.0 and abs(r) < 2.0 ** -1022) or (r == 0.0 and fs and all(x != 0.0 for x in fs)):
+N1022 = 2.0 ** -1022
+def _t_chk(r, *fs, rn53=None):
+    if not math.isfinite(r) or (r != 0.0 and abs(r) < N1022) or (r == 0.0 and fs and all(x != 0.0 for x in fs)):
+        OOR[0] = True
+    elif abs(r) == N1022 and rn53 is not None and not rn53().is_f64(r):
         OOR[0] = True
     return r
-def tm(x, y): return _t_chk(x * y, x, y)
+def tm(x, y): return _t_chk(x * y, x, y, rn53=lambda: MPFR.UX(x) * MPFR.UX(y))
+def tq(x, y): return _t_chk(dv(x, y), x, rn53=lambda: MPFR.UX(x) / MPFR.UX(y))
 def ta(x, y): return _t_chk(x + y)
 def ts(x, y): return _t_chk(x - y)
 def t_sub(a, b): return [ts(a[0], b[0]), ts(a[1], b[1]), ts(a[2], b[2])]
@@ -4059,7 +4070,7 @@ def b1_in_range(fn, a):
     OOR[0] = False
     if fn == "kinetics::second_order_concentration":
         c0, k, t = a
-        ta(_t_chk(dv(1.0, c0), 1.0, c0), tm(k, t))
+        ta(tq(1.0, c0), tm(k, t))
     else:
         v, km, s_ = a
         tm(v, s_)
@@ -4200,7 +4211,7 @@ def b2_nernst(e0, n, t, q):
 def b2_nernst_in_range(t, n, l):
     OOR[0] = False
     a = tm(R_GAS, t)
-    c = _t_chk(dv(a, float(n) * FARADAY), a, float(n) * FARADAY)
+    c = tq(a, float(n) * FARADAY)
     tm(c, l)
     return not OOR[0]
 def b2_factors(fn, a):
@@ -4703,6 +4714,299 @@ check(b3_fold["#17's (ε·d)·4 the port's, Rust's differs (#17's notes)"] >= 18
 check(sum(b3_fold[k] for k in b3_fold if k.startswith("#18 notes")) == 181, f"B3: M4d's #18 rows are not 181: {b3_fold}")
 check(b3_fold["RK rows whose glibc pow(Tc, 2.5) misrounds"] == 0, "B3: a redlich_kwong_pressure row whose glibc pow "
       "misrounds (its note, against glibc's oracle, would not be against the corrected one)")
+
+# ── 22. The overflow audit's B4 (ADR 0002 #33, #34): the sums and the Shomate polynomials ──────────────────────────────
+# Every row of the fourteen functions is recomputed from the port's semantics, independently of the generator and the port:
+# Rust's operation sequence on mpfr_ref.UX (53 bits at MPFR's widest exponent range; Rust's sums by mpfr_ref.ux_sum in
+# Rust's order, `.sum()` from −0.0, thermochem's `total += coeff * prop` from +0.0), the final operation rounded once into
+# binary64 (ux_add_final, ux_sub_final, ux_mul_final, ux_sum_final); Rust's own expression where an input is not finite,
+# and for the Shomate polynomials at T = ±0 (every product is then an exact zero and E/0 IEEE's special in both
+# evaluations); zero_order_concentration's clamp decided on the unbounded difference. Rust's validation is replicated
+# (rows where it errs carry no note). Every row: noted exactly where the port's value differs from the oracle's (by its
+# bits, NaN one value), the note naming it bit for bit. No row whose f64 chain stays in the normal range is noted (B3's
+# strict tracers: a product or quotient leaves the range when it is not finite, 0 from nonzero factors, or nonzero and at
+# most 2⁻¹⁰²²; a sum only when it is not finite; the final operation's own range does not count).
+# The pure-sum lemma (src/thermo.cyr's comment on #33's sums: a sum of two doubles is exact below 2⁻¹⁰²¹ and the 53-bit
+# rounding above, unless it overflows) is checked on every row of the three pure sums (hess_law, enthalpy_from_formation,
+# q_value's two sums) with finite inputs: where Rust's result is finite, every partial sum is exactly MPFR's.
+# The data-backed Shomate callers: every SHOMATE_DATA coefficient is 0 or in [2⁻²⁰⁰, 2²⁰⁰] and every range end in
+# [2⁻³⁰, 2³⁰], the port's box (src/thermochem.cyr's _km_shomate_box), so enthalpy_change_cp, which evaluates the
+# polynomials only at temperatures within the ranges, always takes Rust's chain; adiabatic_flame_temperature's evaluations
+# (Newton's iterates may leave the ranges) are replayed on every golden flame row, each inside the box, traced normal, or
+# equal to MPFR's.
+B4_ADD = "Rust's sequence evaluated with an unbounded exponent (the final addition rounded once)"
+B4_HOW = {
+    "thermo::hess_law": (33, B4_ADD),
+    "thermo::enthalpy_from_formation": (33, B3_SUB),
+    "thermochem::reaction_enthalpy": (33, B3_MUL),
+    "thermochem::reaction_gibbs_energy": (33, B3_MUL),
+    "thermochem::reaction_entropy": (33, B3_SUB),
+    "nuclear::q_value": (33, B3_MUL),
+    "solution::ionic_strength": (33, B3_MUL),
+    "inorganic::born_haber_lattice_energy": (33, B3_SUB),
+    "reaction::gibbs_free_energy": (33, B3_SUB),
+    "solution::kohlrausch_molar_conductivity": (33, B3_SUB),
+    "solution::limiting_molar_conductivity": (33, B4_ADD),
+    "kinetics::zero_order_concentration": (33, B3_SUB),
+    "Shomate::cp": (34, B4_ADD),
+    "Shomate::enthalpy_antiderivative": (34, B3_MUL),
+}
+B4_COL = {"thermochem::reaction_enthalpy": 0, "thermochem::reaction_gibbs_energy": 1, "thermochem::reaction_entropy": 2}
+def b4_ions(ins):
+    n = ins[0][1]
+    return [(ins[1 + 2 * j][1], ins[2 + 2 * j][1]) for j in range(n)]
+def b4_species(ins):
+    prod, k = species_at(ins, 0)
+    reac, _ = species_at(ins, k)
+    return prod, reac
+def b4_port(fn, ins):
+    """The port's result of the row (a double, or Err)."""
+    if fn == "thermo::hess_law":
+        xs = slice_args(ins)[0]
+        return MPFR.ux_sum_final(xs) if all(map(math.isfinite, xs)) else r_sum(xs)
+    if fn == "thermo::enthalpy_from_formation":
+        p_, r_ = slice_args(ins)
+        if not all(map(math.isfinite, p_ + r_)): return r_sum(p_) - r_sum(r_)
+        with MPFR.unbounded(): return MPFR.ux_sub_final(MPFR.ux_sum(p_), MPFR.ux_sum(r_))
+    if fn == "nuclear::q_value":
+        r_, p_ = slice_args(ins)
+        if not all(map(math.isfinite, r_ + p_)): return r_q_value(ins)
+        with MPFR.unbounded(): return MPFR.ux_mul_final(MPFR.ux_sum(r_) - MPFR.ux_sum(p_), U(AMU_MEV))
+    if fn == "solution::ionic_strength":
+        ions = b4_ions(ins)
+        if not all(math.isfinite(c) for c, _ in ions): return r_ionic(ins)
+        with MPFR.unbounded():
+            return MPFR.ux_mul_final(U(0.5), MPFR.ux_sum([U(c) * U(float(z)) * U(float(z)) for c, z in ions]))
+    if fn in B4_COL:
+        prod, reac = b4_species(ins)
+        col = B4_COL[fn]
+        for f_, _ in prod + reac:
+            if tc_lookup(f_) is None: return Err("InvalidReaction")
+        if not all(math.isfinite(c) for _, c in prod + reac): return r_reaction(prod, reac, col, col != 2)
+        with MPFR.unbounded():
+            sp_ = MPFR.ux_sum([U(c) * U(tc_lookup(f_)[2][col]) for f_, c in prod], 0.0)
+            sr = MPFR.ux_sum([U(c) * U(tc_lookup(f_)[2][col]) for f_, c in reac], 0.0)
+            return MPFR.ux_sub_final(sp_, sr) if col == 2 else MPFR.ux_mul_final(sp_ - sr, U(1000.0))
+    a = fl(ins)
+    if fn == "inorganic::born_haber_lattice_energy":
+        if not all(map(math.isfinite, a)): return r_haber(*a)
+        with MPFR.unbounded(): return MPFR.ux_sub_final(U(a[0]) - U(a[1]) - U(a[2]) - U(a[3]) / U(2.0), U(a[4]))
+    if fn == "reaction::gibbs_free_energy":
+        h, t, s_ = a
+        if not is_positive(t): return INVT
+        if not (is_finite(h) and is_finite(s_)): return INVALID
+        with MPFR.unbounded(): return MPFR.ux_sub_final(U(h), U(t) * U(s_))
+    if fn == "solution::kohlrausch_molar_conductivity":
+        l0, k, c = a
+        if not is_non_negative(c): return Err("InvalidConcentration")
+        if not (is_finite(l0) and is_finite(k)): return INVALID
+        with MPFR.unbounded(): return MPFR.ux_sub_final(U(l0), U(k) * U(c).sqrt())
+    if fn == "solution::limiting_molar_conductivity":
+        cat, nc, an, na = a
+        if not all(map(math.isfinite, a)): return nc * cat + na * an
+        with MPFR.unbounded(): return MPFR.ux_add_final(U(nc) * U(cat), U(na) * U(an))
+    if fn == "kinetics::zero_order_concentration":
+        c0, k, t = a
+        if not all(map(math.isfinite, a)): return r_zero(c0, k, t)
+        with MPFR.unbounded():
+            p_ = U(k) * U(t)
+            if (U(c0) - p_).cmp(U(0.0)) < 0: return 0.0
+            return MPFR.ux_sub_final(U(c0), p_)
+    c, temp = a[:5], a[7]
+    if not all(map(math.isfinite, c + [temp])) or temp == 0.0:
+        return _sh_cp0(c, temp) if fn == "Shomate::cp" else _sh_h0(c, temp)
+    return b4_shomate_ux(fn == "Shomate::cp", c, temp)
+def b4_shomate_ux(is_cp, c, temp):
+    aa, bb_, cc, dd, ee = (U(x) for x in c)
+    with MPFR.unbounded():
+        t = U(temp) / U(1000.0)
+        if is_cp: return MPFR.ux_add_final(aa + bb_ * t + cc * t * t + dd * t * t * t, ee / (t * t))
+        inner = t * (aa + t * (bb_ / U(2.0) + t * (cc / U(3.0) + t * (dd / U(4.0)))))
+        return MPFR.ux_mul_final(U(1000.0), inner - ee / t)
+def b4_shomate_in_range(is_cp, c, temp):
+    """Rust's f64 Shomate chain traced (B3's strict range): True when it stays in the normal range."""
+    a_, b_, c_, d_, e_ = c
+    OOR[0] = False
+    if temp == 0.0: return True
+    t = t3m(dv(temp, 1000.0), temp)
+    if is_cp:
+        s1 = t3a(a_ + t3m(b_ * t, b_, t))
+        s2 = t3a(s1 + t3m(t3m(c_ * t, c_, t) * t, c_, t))
+        t3a(s2 + t3m(t3m(t3m(d_ * t, d_, t) * t, d_, t) * t, d_, t))
+        t3m(dv(e_, t3m(t * t, t)), e_)
+        return not OOR[0]
+    h4 = t3a(t3m(dv(c_, 3.0), c_) + t3m(t * t3m(dv(d_, 4.0), d_), t, d_))
+    h7 = t3a(t3m(dv(b_, 2.0), b_) + t3m(t * h4, t, h4))
+    inner = t3m(t * t3a(a_ + t3m(t * h7, t, h7)), t)
+    t3a(inner - t3m(dv(e_, t), e_))
+    return not OOR[0]
+def b4_in_range(fn, ins):
+    """True when Rust's f64 chain of the row (inputs finite, validated) stays in the normal range."""
+    OOR[0] = False
+    if fn == "thermo::hess_law":
+        xs = slice_args(ins)[0]
+        acc = -0.0
+        for x in xs[:-1]: acc = t3a(acc + x)
+        return not OOR[0]
+    if fn in ("thermo::enthalpy_from_formation", "nuclear::q_value"):
+        sums_ = []
+        for xs in slice_args(ins):
+            acc = -0.0
+            for x in xs: acc = t3a(acc + x)
+            sums_.append(acc)
+        if fn == "nuclear::q_value": t3a(sums_[0] - sums_[1])
+        return not OOR[0]
+    if fn == "solution::ionic_strength":
+        acc = -0.0
+        for c, z in b4_ions(ins):
+            zf = float(z)
+            acc = t3a(acc + t3m(t3m(c * zf, c, zf) * zf, c, zf))
+        return not OOR[0]
+    if fn in B4_COL:
+        prod, reac = b4_species(ins)
+        col = B4_COL[fn]
+        sums_ = []
+        for side in (prod, reac):
+            acc = 0.0
+            for f_, c in side:
+                v = tc_lookup(f_)[2][col]
+                acc = t3a(acc + t3m(c * v, c, v))
+            sums_.append(acc)
+        if col != 2: t3a(sums_[0] - sums_[1])
+        return not OOR[0]
+    a = fl(ins)
+    if fn == "inorganic::born_haber_lattice_energy":
+        t3a(t3a(t3a(a[0] - a[1]) - a[2]) - t3m(dv(a[3], 2.0), a[3]))
+        return not OOR[0]
+    if fn == "reaction::gibbs_free_energy":
+        t3m(a[1] * a[2], a[1], a[2])
+        return not OOR[0]
+    if fn == "solution::kohlrausch_molar_conductivity":
+        sq = math.sqrt(a[2])
+        t3m(a[1] * sq, a[1], sq)
+        return not OOR[0]
+    if fn == "solution::limiting_molar_conductivity":
+        t3m(a[1] * a[0], a[1], a[0])
+        t3m(a[3] * a[2], a[3], a[2])
+        return not OOR[0]
+    if fn == "kinetics::zero_order_concentration":
+        t3m(a[1] * a[2], a[1], a[2])
+        return not OOR[0]
+    return b4_shomate_in_range(fn == "Shomate::cp", a[:5], a[7])
+def b4_inputs_finite(fn, ins):
+    if fn in ("thermo::hess_law", "thermo::enthalpy_from_formation", "nuclear::q_value"):
+        return all(math.isfinite(x) for xs in slice_args(ins) for x in xs)
+    if fn == "solution::ionic_strength": return all(math.isfinite(c) for c, _ in b4_ions(ins))
+    if fn in B4_COL:
+        prod, reac = b4_species(ins)
+        return all(math.isfinite(c) for _, c in prod + reac)
+    a = fl(ins)
+    if fn.startswith("Shomate::"): return all(map(math.isfinite, a[:5] + [a[7]]))
+    return all(map(math.isfinite, a))
+def b4_lemma(fn, ins):
+    """The pure-sum lemma on the row: (True, checked) where Rust's sums are finite and every partial sum is MPFR's."""
+    groups = slice_args(ins)
+    for xs in groups:
+        acc, ux = -0.0, U(-0.0)
+        with MPFR.unbounded():
+            for x in xs:
+                acc = acc + x
+                ux = ux + U(x)
+                if not math.isfinite(acc): return True, False
+                if not ux.is_f64(acc): return False, True
+    return True, True
+B4_RE = re.compile(r"\[ADR 0002 #(33|34): the port returns (.+) = (\S+) \(f:([0-9a-f]{16})\)\]$")
+B4_ADR1 = "[J/mol: the oracle's kJ/mol result × 1000.0 (ADR 0002 #1)]"
+b4_n = {fn: [0, 0, 0] for fn in B4_HOW}             # rows with a value (either side), noted, Rust's chain in range
+b4_cov = {"Rust 0, ±∞ or NaN, the value representable": 0, "Rust's NaN, the value ±∞": 0,
+          "Rust's special differs, the value out of range": 0, "a signed zero differs": 0,
+          "degraded: the value normal, Rust's more than 2 ulp off": 0, "within 2 ulp, or the value subnormal": 0}
+b4_pure = [0, 0]                                      # rows the lemma checked, rows with a non-finite f64 sum
+_sh_cp0, _sh_h0 = sh_cp, sh_h
+for mod_ in ("thermo", "thermochem", "nuclear", "solution", "inorganic", "reaction", "kinetics"):
+    for fn, cls, ins, outs, where in R.get(mod_, []):
+        if fn not in B4_HOW: continue
+        adr, how = B4_HOW[fn]
+        port = b4_port(fn, ins)
+        note = NOTES.get(where, "")
+        noted = f"[ADR 0002 #{adr}:" in note
+        pt = out_toks(port)
+        differs = not toks_equal(pt, outs)
+        check(noted == differs, f"{where}: {fn}: the port's {pt} vs the oracle's {outs}: the #{adr} note is "
+              f"{'missing' if differs else 'stray'}")
+        if fn in ("thermochem::reaction_enthalpy", "thermochem::reaction_gibbs_energy") and noted:
+            check(B4_ADR1 + " [ADR 0002 #33: " in note, f"{where}: {fn}'s #33 note does not follow ADR 0002 #1's")
+        if isinstance(port, Err): continue
+        b4_n[fn][0] += 1
+        if noted:
+            b4_n[fn][1] += 1
+            mm_ = B4_RE.search(note)
+            check(mm_ is not None and int(mm_.group(1)) == adr and mm_.group(2) == how and int(mm_.group(4), 16) == f2b(port)
+                  and same_bits(float(mm_.group(3)), port), f"{where}: the #{adr} note does not name {how} = {port!r}")
+        fin = b4_inputs_finite(fn, ins)
+        if fin:
+            inr = b4_in_range(fn, ins)
+            b4_n[fn][2] += inr
+            check(not (inr and noted), f"{where}: {fn}: Rust's chain stays in the normal range, so its bits are the "
+                  f"port's, but the row is noted")
+        if fin and fn in ("thermo::hess_law", "thermo::enthalpy_from_formation", "nuclear::q_value"):
+            ok_, checked = b4_lemma(fn, ins)
+            check(ok_, f"{where}: {fn}: a finite partial sum of doubles is not the unbounded one (the lemma)")
+            b4_pure[0 if checked else 1] += 1
+        if not noted: continue
+        o = outs[0][1]
+        if o == 0.0 and port == 0.0:
+            b4_cov["a signed zero differs"] += 1
+        elif o == 0.0 or not math.isfinite(o):
+            if math.isnan(o) and math.isinf(port): b4_cov["Rust's NaN, the value ±∞"] += 1
+            elif math.isfinite(port): b4_cov["Rust 0, ±∞ or NaN, the value representable"] += 1
+            else: b4_cov["Rust's special differs, the value out of range"] += 1
+        elif math.isfinite(port) and abs(port) >= 2.0 ** -1022 and abs(ulp_dist(f2b(o), f2b(port))) > 2:
+            b4_cov["degraded: the value normal, Rust's more than 2 ulp off"] += 1
+        else:
+            b4_cov["within 2 ulp, or the value subnormal"] += 1
+# The data-backed Shomate callers: the static box over SHOMATE_DATA, then every flame row's evaluations replayed.
+B4_LO, B4_HI = 2.0 ** -200, 2.0 ** 200
+def b4_box(c, temp):
+    return 2.0 ** -30 <= abs(temp) <= 2.0 ** 30 and all(x == 0.0 or B4_LO <= abs(x) <= B4_HI for x in c[:5])
+check(all(all(x == 0.0 or B4_LO <= abs(x) <= B4_HI for x in c[:5]) and 2.0 ** -30 <= c[5] <= c[6] <= 2.0 ** 30
+          for _, c in SH), "B4: a SHOMATE_DATA segment outside the port's box (enthalpy_change_cp would not be provably "
+                           "Rust's chain)")
+B4_EVALS = []
+def sh_cp(c, temp):
+    B4_EVALS.append((True, c, temp))
+    return _sh_cp0(c, temp)
+def sh_h(c, temp):
+    B4_EVALS.append((False, c, temp))
+    return _sh_h0(c, temp)
+b4_flame = {"rows": 0, "evaluations": 0, "in the box": 0, "traced normal": 0, "checked against MPFR": 0}
+for fn, cls, ins, outs, where in R.get("thermochem", []):
+    if fn != "thermochem::adiabatic_flame_temperature": continue
+    B4_EVALS.clear()
+    RULES[fn][1](ins)
+    b4_flame["rows"] += 1
+    for is_cp, c, temp in B4_EVALS:
+        b4_flame["evaluations"] += 1
+        if b4_box(c, temp): b4_flame["in the box"] += 1
+        elif not all(map(math.isfinite, list(c[:5]) + [temp])) or b4_shomate_in_range(is_cp, list(c[:5]), temp):
+            b4_flame["traced normal"] += 1
+        else:
+            b4_flame["checked against MPFR"] += 1
+            v = _sh_cp0(c, temp) if is_cp else _sh_h0(c, temp)
+            check(same_bits(v, b4_shomate_ux(is_cp, list(c[:5]), temp)), f"{where}: a flame evaluation of Shomate "
+                  f"{'cp' if is_cp else 'H'} at {temp!r} would differ under ADR 0002 #34")
+sh_cp, sh_h = _sh_cp0, _sh_h0
+for fn, (ok_, nt, inr) in b4_n.items():
+    print(f"{fn.split('::')[0]}: ADR 0002 #{B4_HOW[fn][0]}: {fn.split('::')[1]}: {nt} of {ok_} rows with a value noted "
+          f"with the port's, {inr} with Rust's chain in the normal range (all unnoted, Rust's bits)")
+    check(nt > 0, f"{fn}: no noted row")
+print(f"ADR 0002 #33, #34 noted rows: {b4_cov}")
+print(f"ADR 0002 #33's lemma: {b4_pure[0]} pure-sum rows with finite inputs and finite sums checked partial sum by "
+      f"partial sum against MPFR, {b4_pure[1]} with a sum past DBL_MAX")
+print(f"ADR 0002 #34's data-backed callers: every SHOMATE_DATA segment in the port's box; the flame rows' evaluations: "
+      f"{b4_flame}")
+check(b4_cov["Rust 0, ±∞ or NaN, the value representable"] > 0 and b4_cov["Rust's NaN, the value ±∞"] > 0,
+      f"B4: a hard-row class has no golden row: {b4_cov}")
 
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
              "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy", "stoichiometry"}

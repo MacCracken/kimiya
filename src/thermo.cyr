@@ -14,6 +14,13 @@
 #   representable (specific_heat_from_calorimetry(4184, 1000, DBL_MAX) is 0 in Rust, 2.33·10⁻³⁰⁸ here; m·c = ∞ with
 #   ΔT = 0 is Rust's NaN, here the exact 0). Rust's checks and Err codes are kept, and heat_transfer's non-finite
 #   inputs keep Rust's expression (IEEE's ±∞ and NaN).
+# - ADR 0002 #33 (the overflow audit's B4; the same decisions): hess_law's Σ and enthalpy_from_formation's Σ − Σ are
+#   sums, so they get ADR 0002 #20's semantics: Rust's operation sequence (its summation order, from −0.0) with an
+#   unbounded exponent (src/mathx.cyr's _km_ux_*), the final operation rounded once into binary64. A partial sum past
+#   DBL_MAX that later terms bring back gave ±∞ or NaN (∞ − ∞) although the value is representable (hess_law of
+#   [DBL_MAX, DBL_MAX, −DBL_MAX] is +∞ in Rust, DBL_MAX here). The fast path is Rust's chain wherever its sums are
+#   finite (_km_sum_exact below: a sum of doubles is exact where it is subnormal, so only overflow can leave the range);
+#   non-finite inputs keep Rust's sums.
 # - A Rust slice `&[f64]` is a pointer to n f64 values and the count n. Rust's f64 `sum` folds from
 #   −0.0, so the sum of no values is −0.0, as here. A count below 0, or a null pointer with values,
 #   is no slice: the result is NaN (these functions have no error channel).
@@ -54,25 +61,104 @@ fn heat_transfer(mass_g: f64, specific_heat: f64, delta_t: f64): f64 {
     return r;
 }
 
-# Hess's law: the total enthalpy change, the sum of the n step enthalpies at `enthalpies_j` in
-# order, in their unit (e.g. J/mol); −0.0 for no steps, NaN if (enthalpies_j, n) is no slice.
-# Mirrors `thermo::hess_law`.
+# 1 if (xs, n) is a slice whose n values are all finite.
+#must_use
+fn _km_finite_slice(xs, n): i64 {
+    if (n < 0 || (n > 0 && xs == 0)) { return 0; }
+    var k = 0;
+    while (k < n) {
+        var x: f64 = load64(xs + k * 8);
+        if (_km_is_finite(x) != 1) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# ADR 0002 #33's sums (the overflow audit's B4). A sum of two doubles x + y is exact wherever |x + y| < 2⁻¹⁰²¹: x and y
+# are multiples of 2⁻¹⁰⁷⁴, so x + y is one, and below 2⁻¹⁰²¹ = 2⁵³·2⁻¹⁰⁷⁴ such a multiple is a double (Hauser).
+# Elsewhere IEEE's sum is the 53-bit rounding of the exact one, ±∞ exactly where that rounding passes DBL_MAX. So in a
+# chain of additions of finite doubles every partial sum is the unbounded-exponent one (#20's) until one is ±∞; past
+# that the chain stays ±∞ or NaN (∞ + finite = ∞, ∞ − ∞ = NaN). Hence: a finite result of finite inputs is exactly the
+# unbounded chain's, and the fast path's test for a pure sum is "result finite". (Products inside a sum take the usual
+# normal-range test, _km_ux_normal.)
+
+# Σ of the n finite values at xs from −0.0 in order (Rust's `iter().sum()`), every addition rounded to 53 bits with an
+# unbounded exponent (_km_ux_add): (s, e). (xs, n) is a slice of finite values.
+#must_use
+fn _km_sum_ux(xs, n): (f64, i64) {
+    var z: f64 = -0.0;
+    var ss, se = _km_ux_from(z);
+    var k = 0;
+    while (k < n) {
+        var x: f64 = load64(xs + k * 8);
+        var xs1, xe1 = _km_ux_from(x);
+        var ns, ne = _km_ux_add(ss, se, xs1, xe1);
+        ss = ns;
+        se = ne;
+        k = k + 1;
+    }
+    return (ss, se);
+}
+
+# Σ of the n finite values at xs from −0.0 in order, every addition but the last rounded to 53 bits with an unbounded
+# exponent and the last rounded once into binary64 (_km_ux_add_f64); −0.0 for no values. (xs, n) is a slice of finite
+# values.
+#must_use
+fn _km_sum_ux_f64(xs, n): f64 {
+    if (n == 0) {
+        var z: f64 = -0.0;
+        return z;
+    }
+    var ps, pe = _km_sum_ux(xs, n - 1);
+    var x: f64 = load64(xs + (n - 1) * 8);
+    var xs1, xe1 = _km_ux_from(x);
+    var r: f64 = _km_ux_add_f64(ps, pe, xs1, xe1);
+    return r;
+}
+
+# Hess's law: the total enthalpy change, the sum of the n step enthalpies at `enthalpies_j` in order, in their unit
+# (e.g. J/mol); −0.0 for no steps, NaN if (enthalpies_j, n) is no slice. ADR 0002 #33: Rust's sum where it is finite
+# (its bits: the comment above), otherwise for finite steps the same sum with an unbounded exponent and the last
+# addition rounded once (a partial sum past DBL_MAX that later steps bring back is the value, not ±∞ or NaN); a
+# non-finite step keeps Rust's sum. Mirrors `thermo::hess_law`, with ADR 0002 #33.
 #must_use
 fn hess_law(enthalpies_j, n): f64 {
     var s: f64 = _km_sum(enthalpies_j, n);
-    return s;
+    var ds: f64 = s - s;
+    if (ds == 0.0) { return s; }
+    if (_km_finite_slice(enthalpies_j, n) != 1) { return s; }
+    var u: f64 = _km_sum_ux_f64(enthalpies_j, n);
+    return u;
 }
 
 # Enthalpy of reaction from formation enthalpies, ΔH_rxn = Σ ΔH_f(products) − Σ ΔH_f(reactants):
 # `products_hf` holds np values and `reactants_hf` nr, each ΔH_f already multiplied by its
 # stoichiometric coefficient (e.g. J/mol of reaction); the result is in the same unit. NaN if
-# either is no slice. Mirrors `thermo::enthalpy_from_formation`.
+# either is no slice. ADR 0002 #33: Rust's chain where both sums are finite (they are then the unbounded ones, and the
+# difference is rounded once in both), otherwise for finite values the two sums with an unbounded exponent and the
+# difference rounded once; a non-finite value keeps Rust's. Mirrors `thermo::enthalpy_from_formation`, with ADR 0002
+# #33.
 #must_use
 fn enthalpy_from_formation(products_hf, np, reactants_hf, nr): f64 {
     var sum_products: f64 = _km_sum(products_hf, np);
     var sum_reactants: f64 = _km_sum(reactants_hf, nr);
     var d: f64 = sum_products - sum_reactants;
-    return d;
+    var dp: f64 = sum_products - sum_products;
+    var dr: f64 = sum_reactants - sum_reactants;
+    if (dp == 0.0 && dr == 0.0) { return d; }
+    if (_km_finite_slice(products_hf, np) != 1 || _km_finite_slice(reactants_hf, nr) != 1) { return d; }
+    var u: f64 = _km_formation_ux(products_hf, np, reactants_hf, nr);
+    return u;
+}
+
+# enthalpy_from_formation with an unbounded exponent (ADR 0002 #33), for two slices of finite values: the two sums from
+# −0.0 in order, every addition rounded to 53 bits, the difference rounded once into binary64.
+#must_use
+fn _km_formation_ux(products_hf, np, reactants_hf, nr): f64 {
+    var ps, pe = _km_sum_ux(products_hf, np);
+    var rs, re = _km_sum_ux(reactants_hf, nr);
+    var u: f64 = _km_ux_sub_f64(ps, pe, rs, re);
+    return u;
 }
 
 # Specific heat at constant pressure from calorimetry, c_p = q / (m × ΔT) in J/(g·°C), from q in J,

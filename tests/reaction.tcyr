@@ -144,6 +144,58 @@ fn _t_cyrius_error_codes() {
     assert_eq(is_spontaneous(mz), 0, "-0 is not spontaneous");
 }
 
+# The f64 whose bit pattern is `bits` (store64, so no hex literal is read as an integer).
+#must_use
+fn _b4_fbits(bits): f64 {
+    var x: f64 = 0.0;
+    store64(&x, bits);
+    return x;
+}
+
+# ADR 0002 #33 (the overflow audit's B4): gibbs_free_energy's T·ΔS past DBL_MAX with ΔH bringing it back (Rust's −∞), a
+# subnormal T·ΔS, Rust's checks, and the fast path against the unbounded slow path on 3,000 seeded inputs.
+fn _t_cyrius_adr33_gibbs() {
+    test_group("cyrius_adr33_gibbs");
+    var dmax: f64 = _b4_fbits(0x7FEFFFFFFFFFFFFF);
+    var s34: f64 = 0.75 * dmax;
+    var t1, v1 = gibbs_free_energy(dmax, 2.0, s34);
+    assert(is_ok(t1) == 1 && v1 == 0xFFDFFFFFFFFFFFFE, "DBL_MAX − 2·(0.75·DBL_MAX) = −8.99·10³⁰⁷ (Rust's −∞)");
+    var sub1: f64 = _b4_fbits(1);
+    var sub3: f64 = _b4_fbits(3);
+    var t2, v2 = gibbs_free_energy(sub3, 1.5, sub1);
+    assert(is_ok(t2) == 1 && v2 == 0x0000000000000002, "3·2⁻¹⁰⁷⁴ − 1.5·2⁻¹⁰⁷⁴ = 1.5·2⁻¹⁰⁷⁴: 2·2⁻¹⁰⁷⁴ (Rust's 1)");
+    var t3, v3 = gibbs_free_energy(1.0, 0.0, 1.0);
+    assert(is_ok(t3) != 1 && v3 == KM_ERR_INVALID_TEMPERATURE, "T = 0: Rust's Err");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var took = 0;
+    var w: f64[3];
+    var k = 0;
+    while (k < 3000) {
+        var j = 0;
+        while (j < 3) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            store64(&w + 8 * j, ((st >> 2) % 0x7FE0000000000000) | ((st & 1) << 63));
+            j = j + 1;
+        }
+        var h: f64 = load64(&w);
+        var t: f64 = f64_abs(load64(&w + 8));
+        var s: f64 = load64(&w + 16);
+        var p: f64 = t * s;
+        if (_km_ux_normal(p) == 1 && t > 0.0) {
+            took = took + 1;
+            var tg, vg = gibbs_free_energy(h, t, s);
+            var u: f64 = _km_gibbs_ux(h, t, s);
+            if (is_ok(tg) != 1 || vg != _km_bits(u)) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "Rust's chain = the unbounded-exponent evaluation wherever T·ΔS is normal");
+    assert(took > 1000, "the fast test passes on most seeded inputs");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_gibbs_basic();
@@ -157,6 +209,7 @@ fn main() {
     _t_equilibrium_constant_zero_temp_is_error();
     _t_spontaneous_check();
     _t_cyrius_error_codes();
+    _t_cyrius_adr33_gibbs();
     return assert_summary();
 }
 

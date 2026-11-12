@@ -761,6 +761,56 @@ fn _t_cyrius_adr28() {
     assert(took > 9000, "the fast tests pass on in-range inputs");
 }
 
+# ADR 0002 #33 (the overflow audit's B4): zero_order_concentration's k·t past −DBL_MAX with a negative [A]₀ bringing it
+# back (Rust's +∞), a subnormal k·t that Rust rounds before the subtraction, the clamp decided on the unbounded
+# difference (+0 where Rust's underflowed k·t leaves −0), and the fast path against the slow path on 3,000 seeded
+# inputs.
+fn _t_cyrius_adr33_zero_order() {
+    test_group("cyrius_adr33_zero_order");
+    var dmax: f64 = fbits(0x7FEFFFFFFFFFFFFF);
+    var nd: f64 = -dmax;
+    var c1: f64 = zero_order_concentration(nd, nd, 1.5);
+    assert_eq(_km_bits(c1), 0x7FDFFFFFFFFFFFFE, "−DBL_MAX + 1.5·DBL_MAX = 8.99·10³⁰⁷ (Rust's +∞)");
+    var c2: f64 = zero_order_concentration(dmax, dmax, 1.5);
+    assert_eq(_km_bits(c2), 0, "DBL_MAX − 1.5·DBL_MAX < 0: 0, as Rust");
+    var s1: f64 = fbits(1);
+    var s3: f64 = fbits(3);
+    var c3: f64 = zero_order_concentration(s3, 1.5, s1);
+    assert_eq(_km_bits(c3), 0x0000000000000002, "3·2⁻¹⁰⁷⁴ − 1.5·2⁻¹⁰⁷⁴: 2·2⁻¹⁰⁷⁴ (Rust's 2⁻¹⁰⁷⁴)");
+    var mz: f64 = -0.0;
+    var e200: f64 = fbits(0x16687E92154EF7AC);     # 1e-200
+    var c4: f64 = zero_order_concentration(mz, e200, e200);
+    assert_eq(_km_bits(c4), 0, "−0 − 10⁻⁴⁰⁰ < 0: +0 (Rust's −0 − 0 = −0)");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var took = 0;
+    var w: f64[3];
+    var k = 0;
+    while (k < 3000) {
+        var j = 0;
+        while (j < 3) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            store64(&w + 8 * j, ((st >> 2) % 0x7FE0000000000000) | ((st & 1) << 63));
+            j = j + 1;
+        }
+        var c0: f64 = load64(&w);
+        var kk: f64 = load64(&w + 8);
+        var t: f64 = load64(&w + 16);
+        var p: f64 = kk * t;
+        if (_km_ux_normal(p) == 1) {
+            took = took + 1;
+            var r: f64 = zero_order_concentration(c0, kk, t);
+            var u: f64 = _km_zero_order_ux(c0, kk, t);
+            if (_km_bits(r) != _km_bits(u)) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "Rust's chain = the unbounded-exponent evaluation wherever k·t is normal");
+    assert(took > 1000, "the fast test passes on most seeded inputs");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_arrhenius_basic();
@@ -815,6 +865,7 @@ fn main() {
     _t_cyrius_check_order();
     _t_cyrius_zeros_and_nan();
     _t_cyrius_adr28();
+    _t_cyrius_adr33_zero_order();
     return assert_summary();
 }
 

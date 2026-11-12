@@ -32,6 +32,8 @@
 #   unbounded exponent (src/mathx.cyr's _km_ux_*), the final division rounded once into binary64, behind a cheap test
 #   that proves Rust's chain stayed in the normal range, so every such input keeps Rust's bits. Rust's checks, Err codes
 #   and order are kept.
+# - ADR 0002 #33 (the overflow audit's B4; the same decisions): zero_order_concentration's [A]₀ − k·t has a sum inside,
+#   so it gets #20's semantics too (the comparison with 0 on the unbounded difference), mapped the same way.
 # - lineweaver_burk's (slope, intercept) tuple becomes the caller's buffer of two f64 (16 bytes,
 #   `var lb[16];`), as peng_robinson_z_roots's Vec: Ok(2), the count written, with the slope at out and the
 #   intercept at out + 8; on Err the buffer is untouched.
@@ -133,12 +135,40 @@ fn _km_second_order_ux(initial: f64, rate_constant: f64, time: f64): f64 {
 # The zero-order concentration [A] = [A]₀ − k·t in mol/L, from [A]₀ in mol/L, k in mol·L⁻¹·s⁻¹ and t in s, or
 # +0.0 if that would be negative (the reaction is complete). Inputs are not validated: NaN propagates (Rust's
 # `if remaining < 0.0 { 0.0 } else { remaining }`, not f64::max, which would turn NaN into 0.0), and −0.0
-# stays −0.0. Mirrors `kinetics::zero_order_concentration`.
+# stays −0.0. ADR 0002 #33 (the overflow audit's B4): [A]₀ − k·t has a sum inside, so it gets ADR 0002 #20's
+# semantics: Rust's chain where k·t is the 53-bit rounding of its exact value (normal, src/mathx.cyr's _km_ux_normal,
+# or an exact zero: a zero factor), where the difference is rounded once in both and its sign is the exact one (a
+# nonzero difference of doubles never rounds to 0); otherwise, for finite inputs, the same sequence with an unbounded
+# exponent, the comparison with 0 on the unbounded difference and the difference rounded once
+# (zero_order_concentration(−DBL_MAX, −DBL_MAX, 1.5) is 8.99·10³⁰⁷, Rust's +∞); a non-finite input keeps Rust's
+# expression. Mirrors `kinetics::zero_order_concentration`, with ADR 0002 #33.
 #must_use
 fn zero_order_concentration(initial: f64, rate_constant: f64, time: f64): f64 {
-    var remaining: f64 = initial - (rate_constant * time);
+    var p: f64 = rate_constant * time;
+    var remaining: f64 = initial - p;
+    var fast = 0;
+    if (_km_ux_normal(p) == 1 || rate_constant == 0.0 || time == 0.0) { fast = 1; }
+    if (fast != 1 && _km_is_finite(initial) + _km_is_finite(rate_constant) + _km_is_finite(time) == 3) {
+        var u: f64 = _km_zero_order_ux(initial, rate_constant, time);
+        return u;
+    }
     if (remaining < 0.0) { return 0.0; }
     return remaining;
+}
+
+# zero_order_concentration with an unbounded exponent (ADR 0002 #33), for finite inputs: Rust's [A]₀ − k·t with k·t and
+# the difference rounded to 53 bits (src/mathx.cyr's _km_ux_*): +0.0 where that difference is negative (Rust's clamp, on
+# the unbounded value), otherwise the difference rounded once into binary64.
+#must_use
+fn _km_zero_order_ux(initial: f64, rate_constant: f64, time: f64): f64 {
+    var cs, ce = _km_ux_from(initial);
+    var ks, ke = _km_ux_from(rate_constant);
+    var ts, te = _km_ux_from(time);
+    var ps, pe = _km_ux_mul(ks, ke, ts, te);
+    var rs, re = _km_ux_sub(cs, ce, ps, pe);
+    if (rs < 0.0) { return 0.0; }
+    var u: f64 = _km_ux_sub_f64(cs, ce, ps, pe);
+    return u;
 }
 
 # The zero-order half-life t½ = [A]₀/(2k) in s, from [A]₀ in mol/L and k in mol·L⁻¹·s⁻¹. Ok(t½);

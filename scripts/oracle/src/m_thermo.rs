@@ -15,14 +15,16 @@
 //!   the port's correctly rounded m·c·ΔT or q/(m·ΔT) differs from Rust's value (`audit.rs`), and `audit::emit_thermo`
 //!   appends their edge rows (partial products past DBL_MAX or below 2⁻¹⁰²², 0 against an overflow, midpoints and
 //!   subnormal ties) with their own seed.
-
-use std::hint::black_box as bb;
+//! - ADR 0002 #33 (the overflow audit's B4): `hess_law` and `enthalpy_from_formation` rows are noted where Rust's sums
+//!   with an unbounded exponent (the final addition or subtraction rounded once) differ from Rust's value (`audit.rs`),
+//!   and `audit::emit_thermo_b4` appends their edge rows (partial sums past ±DBL_MAX that later values bring back) with
+//!   their own seed.
 
 use crate::audit;
 use crate::grids::Rng;
 use crate::m_reaction::edges;
-use crate::tsv::{Class, Module, Tok, f};
-use kimiya::thermo::{WATER_SPECIFIC_HEAT, enthalpy_from_formation, hess_law};
+use crate::tsv::{Module, Tok, f};
+use kimiya::thermo::WATER_SPECIFIC_HEAT;
 
 fn seq(xs: &[f64]) -> Vec<Tok> {
     let mut v = vec![Tok::V(xs.len())];
@@ -81,8 +83,7 @@ pub fn emit() -> Module {
         slices.push(slice(&mut rng, 1, 12));
     }
     for xs in &slices {
-        let s = hess_law(bb(xs));
-        m.row("thermo::hess_law", Class::B, &seq(xs), &[f(s)]);
+        audit::hess(&mut m, &seq(xs), xs);
     }
 
     let mut pairs: Vec<(Vec<f64>, Vec<f64>)> = vec![
@@ -101,10 +102,9 @@ pub fn emit() -> Module {
         pairs.push((p, slice(&mut rng, 0, 6)));
     }
     for (p, r) in &pairs {
-        let dh = enthalpy_from_formation(bb(p), bb(r));
         let mut ins = seq(p);
         ins.extend(seq(r));
-        m.row("thermo::enthalpy_from_formation", Class::B, &ins, &[f(dh)]);
+        audit::formation(&mut m, &ins, p, r);
     }
 
     let cal = audit::calorimetry;
@@ -140,5 +140,6 @@ pub fn emit() -> Module {
         cal(&mut m, e, ma, dt);
     }
     audit::emit_thermo(&mut m);
+    audit::emit_thermo_b4(&mut m);
     m
 }

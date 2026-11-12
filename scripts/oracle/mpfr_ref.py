@@ -10,7 +10,8 @@ UX (M4e-2, ADR 0002 #20) is binary64 with an unbounded exponent range: 53-bit MP
 exponent range, the final operation rounded once into binary64 (ux_*_final), and potential.rs's geometry on them
 (potential_*), the reference for the port's unbounded-exponent helpers and geometry; since the overflow audit's B2 also
 the final subtraction (ux_sub_final) and the √ of a quotient (ux_sqrt_div_final), and since B3 the power x^y at 53 bits
-(UX.pow: Redlich–Kwong's Tc^2.5) and w·√(a/b) rounded once (ux_mul_sqrt_div_final: the Morse width).
+(UX.pow: Redlich–Kwong's Tc^2.5) and w·√(a/b) rounded once (ux_mul_sqrt_div_final: the Morse width), and since B4
+Rust's sums in their order (ux_sum, ux_sum_final: ADR 0002 #33).
 
 No Python package is needed: MPFR (libmpfr.so.6, MPFR 4.x) is called through ctypes. Run
 `python3 -I scripts/oracle/mpfr_ref.py` for the self-checks.
@@ -372,6 +373,26 @@ def ux_mul_sqrt_div_final(w, a, b, prec=320):
     return _final(_m.mpfr_sqrt, q)
 
 
+def ux_sum(xs, start=-0.0):
+    """Rust's `iter().sum()` on UX values (the overflow audit's B4, ADR 0002 #33): from `start` (−0.0, Rust's f64 Sum; +0.0
+    for thermochem's `total += …` fold), the terms (doubles or UX values) added in order, every addition rounded to 53
+    bits at MPFR's widest exponent range (IEEE's signed zeros: −0 + −0 = −0, an exact cancellation +0)."""
+    s = UX(start)
+    for x in xs:
+        s = s + (x if isinstance(x, UX) else UX(x))
+    return s
+
+
+def ux_sum_final(xs, start=-0.0):
+    """ux_sum with its last addition rounded once into binary64 (hess_law's Σ, ADR 0002 #33); `start` itself, as a
+    double, for no terms."""
+    if not xs:
+        return start
+    head = ux_sum(xs[:-1], start)
+    last = xs[-1] if isinstance(xs[-1], UX) else UX(xs[-1])
+    return ux_add_final(head, last)
+
+
 def ux_scaled(s, e):
     """s·2^e as a UX, exactly, for a double s and any integer e."""
     r = UX(s)
@@ -504,6 +525,12 @@ if __name__ == "__main__":
     assert bits(ux_mul_sqrt_div_final(UX(2.0 ** -975), UX(1.0), UX(2.0 ** 200))) == 0             # 2^-1075: a tie, to 0
     assert bits(ux_mul_sqrt_div_final(UX(3 * 2.0 ** -975), UX(1.0), UX(2.0 ** 200))) == 2         # 3·2^-1075: to even
     assert ux_mul_sqrt_div_final(UX(from_bits(0x7FEFFFFFFFFFFFFF)), UX(4.0), UX(1.0)) == math.inf
+    # The overflow audit's B4: Rust's sums past DBL_MAX that later terms bring back, signed zeros, the last addition once.
+    dm = from_bits(0x7FEFFFFFFFFFFFFF)
+    assert ux_sum_final([dm, dm, -dm]) == dm and ux_sum_final([dm, dm]) == math.inf and bits(ux_sum_final([])) == bits(-0.0)
+    assert bits(ux_sum_final([-0.0, -0.0])) == bits(-0.0) and bits(ux_sum_final([0.0, -0.0])) == 0
+    assert ux_sum([dm, dm, -dm, -dm]).is_zero() and not ux_sum([dm, dm, -dm, -dm]).neg_sign()
+    assert ux_sum([], 0.0).is_f64(0.0) and ux_sum([from_bits(1), from_bits(1)]).is_f64(from_bits(2))
     rng = __import__("random").Random(20)
     for _ in range(2000):
         a, b = rng.uniform(-1e3, 1e3), rng.uniform(-1e3, 1e3)
