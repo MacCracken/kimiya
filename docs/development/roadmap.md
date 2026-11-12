@@ -117,11 +117,14 @@ type for average oxidation states, no separate extrapolating Antoine function. I
     unchanged) — done in the Cyrius API (ADR 0002 #33, #34), the audit's B4, with #29's fast-path correction and the
     bench split (`tests/audit.bcyr`)
   - [ ] B7 — F9, exp and exp10 arguments
-  - [ ] B8 — the FFT magnitudes, the flame's sign test, `find_peaks` if wanted
+  - [ ] B8 — the FFT (both the magnitudes' re² + im² and the butterflies, hisab 1.4.0's transform without the range
+    limit, by the user's answer "Both"), the flame's exact bracket sign test, `find_peaks`' threshold evaluated exactly
   - [ ] B9 — F15, an exact `balance_equation`
   - [ ] B10 — F10's unbounded exponentials and the exponential × prefactor functions
   - [ ] B11 — F11 and F12 (`nth_order_half_life`'s pow, `henderson_hasselbalch`'s log10)
-  - [ ] B12 — the iterative functions, per the user's answers
+  - [ ] B12 — the iterative functions, by the user's answer "Fix all three": the weak acid/base pH Newton with an
+    unbounded exponent on a slow path only; Peng–Robinson's coefficient edges only (Rust's cubic unchanged); the flame's
+    exact sign test (if not already done in B8)
 - [ ] *additive* — `fitting::fit_beer_lambert` → also return the intercept
 - [ ] *additive* — `spectroscopy::rydberg_wavelength` → nuclear-mass parameter for the reduced-mass correction
 - [ ] `integration::soorat::MolecularStructure::from_molecule` → `Result`
