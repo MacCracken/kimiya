@@ -45,7 +45,7 @@
 
 use std::hint::black_box as bb;
 
-use crate::exact::{Ux, cr_monomial, cr_sqrt_monomial, cr_sqrt_ratio};
+use crate::exact::{Int, Ux, cr_monomial, cr_sqrt_monomial, cr_sqrt_ratio};
 use crate::grids::{Rng, pow2};
 use crate::m_reaction::res;
 use crate::tsv::{Class, Module, Tok, f, i, s};
@@ -2819,4 +2819,126 @@ pub fn port_fft(signal: &[f64]) -> Option<Vec<f64>> {
         }
     }
     Some((0..=n / 2).map(|k| re[k].mul(re[k]).add(im[k].mul(im[k])).sqrt_f64()).collect())
+}
+
+// ── The overflow audit's B7 (ADR 0002 #39): balance_equation on unbounded integers ──────────────────────────────────
+
+/// How the port obtains `balance_equation`'s result (the note's `<how>`).
+pub const BALANCE_HOW: &str = "Rust's fraction-free elimination on unbounded integers";
+
+/// ADR 0002 #39: the port's `balance_equation` on the integer matrix `a` (row-major, m × n): Rust 1.2.0's algorithm with
+/// its i64 replaced by [`Int`] — the checks (m ≥ 1, n ≥ 2, |entry| ≤ 2⁵³), the pivot search, the swap, reduce_row,
+/// the sign flip, row_r ← pivot·row_r − factor·row_pivot then reduce_row, the lcm of the pivots,
+/// x[c] = −(row[f]·(lcm/piv)), reduce_row(x), the zero, sign and u32 checks, and the verification. The second value
+/// is whether Rust's own run overflows: whether, before this run returns, any value Rust forms with checked arithmetic
+/// (a product, a difference, a negation, the lcm, a gcd it converts to i64) leaves i64. Up to Rust's first overflow its
+/// values are these, so where it is false Rust's result is this one, and where it is true Rust's is its overflow
+/// Err(ComputationError).
+pub fn port_balance(a: &[i64], m: usize, n: usize) -> (Result<Vec<u32>, &'static str>, bool) {
+    if m < 1 || n < 2 {
+        return (Err("InvalidInput"), false);
+    }
+    if a.iter().any(|v| v.unsigned_abs() > 1 << 53) {
+        return (Err("InvalidInput"), false);
+    }
+    let mut ovf = false;
+    let mut chk = |v: &Int| {
+        if !v.fits_i64() {
+            ovf = true;
+        }
+    };
+    // reduce_row: the row divided by the gcd of its magnitudes when that exceeds 1 (Rust converts it to i64)
+    fn reduce(row: &mut [Int], chk: &mut dyn FnMut(&Int)) {
+        let g = row.iter().fold(Int::from_i64(0), |g, v| g.gcd(v));
+        if !g.is_zero() && !g.is_one() {
+            chk(&g);
+            for v in row.iter_mut() {
+                *v = v.div_exact(&g);
+            }
+        }
+    }
+    let mut rows: Vec<Vec<Int>> = (0..m).map(|i| (0..n).map(|j| Int::from_i64(a[i * n + j])).collect()).collect();
+    let mut rank = 0;
+    let mut free = None;
+    for col in 0..n {
+        let Some(p) = (rank..m).find(|&r| !rows[r][col].is_zero()) else {
+            if free.is_some() {
+                return (Err("ComputationError"), ovf); // ambiguous
+            }
+            free = Some(col);
+            continue;
+        };
+        rows.swap(p, rank);
+        reduce(&mut rows[rank], &mut chk);
+        if rows[rank][col].is_negative() {
+            for v in &mut rows[rank] {
+                *v = v.neg();
+                chk(v);
+            }
+        }
+        let piv = rows[rank][col].clone();
+        let prow = rows[rank].clone();
+        for (r, row) in rows.iter_mut().enumerate() {
+            let fac = row[col].clone();
+            if r == rank || fac.is_zero() {
+                continue;
+            }
+            for (v, p) in row.iter_mut().zip(&prow) {
+                let lhs = piv.mul(v);
+                chk(&lhs);
+                let rhs = fac.mul(p);
+                chk(&rhs);
+                *v = lhs.sub(&rhs);
+                chk(v);
+            }
+            reduce(row, &mut chk);
+        }
+        rank += 1;
+    }
+    let Some(f) = free else {
+        return (Err("ComputationError"), ovf); // only the trivial solution
+    };
+    let mut lcm = Int::from_i64(1);
+    for row in rows.iter().take(rank) {
+        if let Some(pv) = row.iter().find(|v| !v.is_zero()) {
+            let g = lcm.gcd(pv);
+            chk(&g);
+            lcm = lcm.div_exact(&g).mul(pv);
+            chk(&lcm);
+        }
+    }
+    let mut x = vec![Int::from_i64(0); n];
+    x[f] = lcm.clone();
+    for row in rows.iter().take(rank) {
+        if let Some(c) = row.iter().position(|v| !v.is_zero()) {
+            let pr = row[f].mul(&lcm.div_exact(&row[c]));
+            chk(&pr);
+            x[c] = pr.neg();
+            chk(&x[c]);
+        }
+    }
+    reduce(&mut x, &mut chk);
+    if x.iter().any(Int::is_zero) {
+        return (Err("ComputationError"), ovf); // a zero coefficient
+    }
+    let positive = x.iter().filter(|v| v.is_positive()).count();
+    if positive == 0 {
+        for v in &mut x {
+            *v = v.neg();
+            chk(v);
+        }
+    } else if positive != n {
+        return (Err("ComputationError"), ovf); // mixed signs
+    }
+    let Some(coeffs) = x.iter().map(Int::to_u32).collect::<Option<Vec<u32>>>() else {
+        return (Err("ComputationError"), ovf); // past u32
+    };
+    // the verification, exact (Rust's i128 sums cannot overflow here: |Σ| ≤ n·2⁵³·(2³² − 1))
+    for i in 0..m {
+        let s = (0..n).fold(0_i128, |s, j| s + i128::from(a[i * n + j]) * i128::from(coeffs[j]));
+        if s != 0 {
+            return (Err("ComputationError"), ovf);
+        }
+    }
+    (Ok(coeffs), ovf)
 }

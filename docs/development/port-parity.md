@@ -1829,6 +1829,56 @@ pending, 45,993 accepted (809 under ADR 6; under ADR 2 as §25 plus 913 #36–#3
 809), 0 glibc-matching (failed) ===
 ```
 
+## 27. The overflow audit's B7: balancing on unbounded integers, ADR 0002 #39 (2026-11-12)
+
+B1's decisions unchanged, with "Balancing: multi-word integers, no size limit" (the survey's remedy (a), settled by the
+main session under the user's policy, not asked; ADR 0002's B7 addition). `balance_equation` (#39) returns Rust's
+algorithm with its i64 and i128 replaced by mathematical integers: Rust's i64 code runs first, unchanged, and at its
+first overflow the same steps start again from the original matrix on signed multi-word integers, their tables sized
+from a proven Hadamard bound. Every overflow Err disappears; every other Err, its code and Rust's order are kept, the
+buffer check after. The corpus keeps the oracle's values; `scripts/oracle/` appends B7's 521 edge rows with their own
+seed: stoichiometry 47,776 → 48,297 (`balance_equation` 3,329 → 3,850).
+
+| Function | Class | Rows | Oracle Ok | Oracle Err | Noted (port ≠ oracle) | changing, of the rows before B7 |
+|---|---|---|---|---|---|---|
+| `stoichiometry::balance_equation` | A | 3,850 | 1,991 | 1,859 | 413 (#39: Rust's ComputationError, the port's Ok) | 104 of 3,329 |
+
+- **The noted rows** carry the port's whole result, `(v:n i:… …)` (the harness's `_par_map_toks`), and are accepted under
+  ADR 2; every other row is the port's result and its reference at once (the 78 #7 rows keep their notes). Of the rows
+  before B7 exactly the survey's 104, by (m, n): 55 (2, 3), 10 (8, 9), 6 each (6, 7), (9, 9) and (10, 9), 5 (9, 8), 3
+  each (8, 8), (7, 8), (8, 7) and (7, 7), 2 each (6, 6) and (7, 6); Rust overflows on 20 more of them whose exact result
+  is still the ComputationError (12 ambiguous, 2 trivial, 1 zero coefficient, 5 past u32), unnoted.
+- **The proofs** (`validate.py` §25). Every one of the 3,772 rows with an integer counterpart recomputed with the port's
+  semantics on Python ints and checked against the exact null space (§18's Fraction RREF); each note proven; the strict
+  tracer (the site of Rust's first i64 overflow): Rust overflows on 620 rows, 413 of them noted, and every row where it
+  does not is unnoted; by site, pivot·a 587 (389 Ok exactly), factor·a 18 (16), the difference 8 (7), the pivot row's
+  negation 1 (1), a reduced row's gcd of 2⁶³ 3, the lcm 1, x's product 1, x's negation 1 (0 Ok each: proven Err); the
+  207 still Errs: 103 ambiguous or trivial, 38 mixed, 45 past u32, 21 zero. The size bound on every row (the largest
+  stored value 1,823 bits, the largest product 3,641) and x's gcd of 1 before reduce_row on all 2,588 rows with a
+  one-dimensional null space and no zero coefficient.
+- **`cr_verify.py`**: `bal23`, `bal34`, `bal56`, `bal89`, `bal1213`, `bal2425`, 54,306 matrices (2 × 3 … 24 × 25): the
+  public result and the multi-word path forced against Rust's algorithm on Python ints, the fast path's overflow report
+  against a tracer of Rust's checked operations (it overflows on 37,380 of them): 0 mismatches, the same words and flags
+  on x86_64 ELF, x86_64 PE and aarch64.
+
+Tests: `tests/stoichiometry.tcyr`'s `cyrius_adr39_unbounded_integers` (the survey's example, every reachable overflow
+site, each Err after an overflow, u32::MAX against 2³², the buffer checks after a multi-word Ok),
+`cyrius_adr39_size_and_forced` (32 × 33 dense, 600 seeded matrices against the forced path) and `cyrius_adr39_multiword`
+(the helpers at their edges); no Rust test changes.
+
+**Cost** (before → after, the same host, alternating runs; `docs/benchmarks-rust-v-cyrius.md`'s B7 section): the fast
+path `balance_ch4_combustion` 805 → 778 ns, `balance_kmno4_hcl` 2.24 → 2.18 µs; `bench_audit_b7` (Rust's overflow Err,
+then the exact result) `balance_survey_2x3` 0.12 → 3.6 µs, `balance_overflow_10x9` 6.6 → 57 µs, `balance_dense_30x31`
+5.4 µs → 158 ms.
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **18 modules, 0 failing; 338,991 ok, 0 failed, 0 measured, 0
+pending, 46,406 accepted (809 under ADR 6; under ADR 2 as §26 plus 413 #39 rows), 0 glibc-matching.**
+
+```text
+=== parity summary: 18 modules, 0 failing | rows: 338991 ok, 0 failed, 0 measured, 0 pending, 46406 accepted (ADR 6:
+809), 0 glibc-matching (failed) ===
+```
+
 ## How to reproduce
 
 ```sh

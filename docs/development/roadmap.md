@@ -123,7 +123,9 @@ type for average oxidation states, no separate extrapolating Antoine function. I
     limit, by the user's answer "Both"), the flame's exact bracket sign test, `find_peaks`' threshold evaluated exactly
     — done in the Cyrius API (ADR 0002 #36, #37 and #38's flame part; `src/mathx.cyr`'s new `_km_sign_scaled`), the
     audit's B6
-  - [ ] B9 — F15, an exact `balance_equation`
+  - [x] B9 — F15, an exact `balance_equation` (Rust's elimination on multi-word integers, no size limit) — done in the
+    Cyrius API (ADR 0002 #39; the signed multi-word `_km_sb_*` with Lehmer's gcd, the tables from a proven Hadamard
+    bound), the audit's B7
   - [ ] B10 — F10's unbounded exponentials and the exponential × prefactor functions
   - [ ] B11 — F11 and F12 (`nth_order_half_life`'s pow, `henderson_hasselbalch`'s log10)
   - [ ] B12 — the iterative functions, by the user's answer "Fix all three": the weak acid/base pH Newton with an

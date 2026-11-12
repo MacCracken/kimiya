@@ -822,6 +822,36 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     `_km_sign_scaled` across rounds, 3,000 and 20,000 seeded inputs against the forced slow and exact paths); no Rust
     test changes
   - benches: `bench_audit_b6`, five edge benches, in `tests/audit2.bcyr`
+- **The library-wide overflow audit, B7** (the roadmap's B9; [ADR 0002 #39](docs/adr/0002-port-api-divergences.md), B1's
+  decisions unchanged, "Balancing: multi-word integers, no size limit" (the survey's remedy (a), settled by the main
+  session under the user's policy, not asked); port plan §6.4 "Decided in the overflow audit's B7"; the behaviour change
+  is under *Breaking*):
+  - **stoichiometry** — `balance_equation` runs Rust's i64 elimination first (`_km_balance_i64`, the old body with each
+    overflow check returning a restart code), and at its first overflow the same steps from the original matrix on
+    signed multi-word integers (`_km_balance_big`): the pivot search, the swap, reduce_row, the sign flip, the
+    fraction-free row update, the lcm, x, reduce_row(x), the zero, sign and u32 checks, then Rust's i128 verification;
+    `_km_balance_equation(…, force)` takes the multi-word path from the start (the tests', `cr_verify.py`'s)
+  - **stoichiometry** — `_km_sb_*`: signed integers of any size in slots of 31-bit limbs (from a word, copy, compare,
+    the signed difference, the product, Knuth's Algorithm D, the exact quotient, Lehmer's gcd with its unimodular
+    combination); `_km_balance_bits`: the Hadamard bound B that sizes the tables (every stored entry, the lcm and x below
+    2^B, every product and difference below 2^(2B + 1), proven in the ADR)
+  - generator: `scripts/oracle/src/exact.rs`'s `Int` (a sign and a `Big`, with Knuth's division in base 2⁶⁴ and Euclid's
+    gcd), `audit::port_balance` (Rust's algorithm on `Int`, with a tracer of Rust's checked operations: the port differs
+    from Rust only where Rust overflows, asserted); 521 balancing edge rows appended with their own seed
+    (`emit_balance_b7`)
+  - golden module `stoichiometry` 48,297 rows (3,850 `balance_equation`); the oracle's values kept, 413 rows noted with
+    the port's whole result — 104 of the 3,329 earlier rows, exactly the survey's, and 309 edge rows; the harness maps and
+    counts them (`_par_map_toks`)
+  - `validate.py` §25: every row recomputed with the port's semantics on Python ints and checked against the exact null
+    space; each note proven, a strict tracer of Rust's first overflow site (no row where Rust does not overflow is noted;
+    207 where it does stay the ComputationError, counted); the size bound and x's gcd of 1 checked on every row
+  - `cr_verify.py`: the families `bal23`, `bal34`, `bal56`, `bal89`, `bal1213` and `bal2425` (54,306 matrices of
+    2 × 3 … 24 × 25; the public result, the fast path's overflow report against a Python tracer of Rust's checked
+    arithmetic, the multi-word path forced), on x86_64 ELF, x86_64 PE and aarch64
+  - tests: `tests/stoichiometry.tcyr` `cyrius_adr39_unbounded_integers`, `cyrius_adr39_size_and_forced`,
+    `cyrius_adr39_multiword`; no Rust test changes (two of them still get the ComputationError, now as past u32 rather
+    than by the overflow: their comments say so)
+  - benches: `bench_audit_b7`, three edge benches, in `tests/audit2.bcyr`
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -1154,6 +1184,19 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   is unchanged (proven: the tests agree wherever the product is not an underflowed zero).
   *Migration:* none; code that relied on the ComputationError for tiny systems checks the scale itself.
 
+### Breaking (relative to Rust 1.2.0, ADR 0002 #39)
+- **stoichiometry** — `balance_equation` balances on unbounded integers where 1.2's checked i64 elimination overflows:
+  a matrix whose null space is one-dimensional with a positive u32 vector is Ok with it, where 1.2 returns
+  Err(ComputationError) "integer overflow while balancing equation" (`[[3037000500, 1, −3037000501], [1, 3037000500,
+  −3037000501]]` [1, 1, 1]: 1.2's first product, 3037000500², passes i64::MAX). Every other result is 1.2's: where the
+  exact null space has another dimension, or its vector a zero, mixed signs or an entry past u32::MAX, the result is
+  still the ComputationError (now for that reason), and every row 1.2 computes without overflow is unchanged. Such an
+  input with too small a `cap`, or a null `out`, now reaches the buffer check: Err(InvalidInput). The multi-word path
+  allocates its tables (about 8·(m·n·B/31 + 4n·B/31) bytes, B the matrix's Hadamard bound in bits) past a 4,096-word
+  local table, from the bump allocator.
+  *Migration:* none for matrices 1.2 balances; code that relied on the overflow Err to reject huge coefficients checks
+  the matrix's entries itself.
+
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
@@ -1347,6 +1390,12 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   3.40 µs (Rust 301.48 ns); `bench_audit_b6`: `fft_spectrum_256_huge` 27.7 → 318.1 µs and `_subnormal` 35.4 → 349.8 µs
   (the unbounded transform), `_squares` 27.4 → 45.1 µs (the per-bin unbounded √), `find_peaks_1000_subnormal` 19.5 →
   39.0 µs, `adiabatic_flame_tiny` 0.96 → 1.48 µs (Rust's Err there); `tests/audit2.bcyr` 45 s (31 s before)
+- The overflow audit's B7, ADR 0002 #39 (Cyrius before → after, the same host, alternating runs): the i64 fast path
+  unchanged — `stoichiometry/balance_ch4_combustion` 805 → 778 ns (Rust 233.90 ns), `balance_kmno4_hcl` 2.24 →
+  2.18 µs; `bench_audit_b7` (Rust's
+  ComputationError at its first overflow, then the port's exact result): `balance_survey_2x3` 0.12 → 3.6 µs,
+  `balance_overflow_10x9` 6.6 → 57 µs, `balance_dense_30x31` 5.4 µs → 158 ms (products past 3,000 bits; Lehmer's gcd
+  took a 39 × 40 matrix from 1.8 to 0.7 s); `tests/audit2.bcyr` 49 s (45 s before)
 
 ## [1.2.0] - 2026-11-08
 

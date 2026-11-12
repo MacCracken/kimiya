@@ -14,9 +14,14 @@
 #   entry, |v| ≤ 2⁵³ (MAX_COMPOSITION_ENTRY), is kept: a larger one is Err(KM_ERR_INVALID_INPUT), as in Rust (the
 #   port's settled point: every integer Rust accepts is accepted, every one it refuses refused). Rust's
 #   integer-tolerance test (INTEGER_TOLERANCE, 10⁻⁹) and its ragged-row check have no counterpart: an integer matrix
-#   has neither. The elimination is Rust's fraction-free Gauss–Jordan on i64 with checked arithmetic (_km_i64_*_ck,
-#   each Rust overflow Err(KM_ERR_COMPUTATION_ERROR) at the same step), the verification Rust's i128 sums
-#   (_km_i128_*: a signed 128-bit accumulator in three words, Rust's checked_add semantics).
+#   has neither. The elimination is Rust's fraction-free Gauss–Jordan on i64 with checked arithmetic (_km_i64_*_ck),
+#   the verification Rust's i128 sums (_km_i128_*: a signed 128-bit accumulator in three words, Rust's checked_add
+#   semantics).
+# - ADR 0002 #39 (the overflow audit's B7), balancing on unbounded integers: where one of Rust's checked i64
+#   operations overflows (its Err "integer overflow while balancing equation"), the port runs the same steps again from
+#   the original matrix on signed multi-word integers (_km_sb_*: 31-bit limbs, Knuth's division, Lehmer's gcd), so the
+#   result is Rust's algorithm on mathematical integers; every other Err, its code and order are Rust's. The tables
+#   are sized from a proven Hadamard bound (_km_balance_bits), so only allocation limits the size.
 # - ADR 0002 #7, oxidation states: assign_oxidation_states returns each state as an exact rational, a numerator over a
 #   positive denominator, reduced: Rust's Ok(n) is n/1, and where Rust returns Err "non-integer average oxidation state"
 #   the port returns the average itself (C₃H₈'s C −8/3, Fe₃O₄'s Fe +8/3, KO₂'s O −1/2: the peroxide branch's
@@ -36,11 +41,11 @@
 #   exact 1/10 under ADR 0002 #26, pinned by the golden rows on both sides of the edge and by tests/stoichiometry.tcyr's
 #   exact edges (r = 11/10 and 19/10 within, one ulp past them not). `round` halves away from zero, as Rust's
 #   (src/mathx.cyr's _km_round_half_away on the fast path, q + [2R ≥ B] on the exact one).
-# - Work tables: balance_equation's matrix copy and null vector, and empirical_formula's ratios (a double-double each,
-#   then the counts), use function-local tables (512, 64 and 128 words) and move to the bump allocator (which never
-#   frees) only past them; an allocation failure is Err(KM_ERR_COMPUTATION_ERROR). assign_oxidation_states needs none:
-#   each state is a function of the atomic number once the solved element is known, so the result is written in one
-#   pass at the end.
+# - Work tables: balance_equation's matrix copy, null vector and multi-word tables (ADR 0002 #39), and
+#   empirical_formula's ratios (a double-double each, then the counts), use function-local tables (512, 64, 4,096 and
+#   128 words) and move to the bump allocator (which never frees) only past them; an allocation failure is
+#   Err(KM_ERR_COMPUTATION_ERROR). assign_oxidation_states needs none: each state is a function of the atomic number
+#   once the solved element is known, so the result is written in one pass at the end.
 
 include "lib/alloc.cyr"
 
@@ -218,6 +223,544 @@ fn _km_i128_add_ck(acc, h2, m2, l2): i64 {
     return 1;
 }
 
+# ── signed multi-word integers (ADR 0002 #39: balance_equation's exact slow path) ─────
+# An integer of any size in a slot of words: word 0 its signed length (len, −len for a negative value, 0 for zero),
+# then len limbs of 31 bits, little-endian, the top one nonzero. With 31-bit limbs every intermediate below stays under
+# 2⁶³ (a limb product is below 2⁶², a two-limb numerator too), so the signed words never wrap and `>>` (logical) only
+# ever shifts non-negative words. The caller sizes the slots from ADR 0002 #39's proven bound; no operation checks a
+# capacity. src/mathx.cyr's _km_bn_* integers are unsigned and fixed at 8 × 32-bit limbs, so balancing (their only
+# user) gets this form here, beside the i128 sums of its verification.
+
+const _KM_SB_MASK = 0x7FFFFFFF;
+const _KM_SB_BASE = 0x80000000;
+
+# The limb count of slot a: |word 0|.
+#must_use
+fn _km_sb_len(a): i64 {
+    var s = load64(a);
+    if (s < 0) { return 0 - s; }
+    return s;
+}
+
+# Slot r ← the word v (any i64: i64::MIN is −2⁶³).
+fn _km_sb_set(r, v) {
+    var u = v;
+    if (v < 0) { u = 0 - v; }               # |v| as an unsigned word (i64::MIN: the pattern of 2⁶³)
+    var l = 0;
+    while (u != 0) {
+        store64(r + 8 + 8 * l, u & _KM_SB_MASK);
+        u = u >> 31;
+        l = l + 1;
+    }
+    if (v < 0) { l = 0 - l; }
+    store64(r, l);
+    return 0;
+}
+
+# Slot r ← slot a (r may be a).
+fn _km_sb_copy(r, a) {
+    var l = _km_sb_len(a);
+    var k = 0;
+    while (k <= l) {
+        store64(r + 8 * k, load64(a + 8 * k));
+        k = k + 1;
+    }
+    return 0;
+}
+
+# Compares the magnitudes of the la limbs at pa and the lb limbs at pb (top limbs nonzero): −1, 0 or 1.
+#must_use
+fn _km_sb_cmpm(pa, la, pb, lb): i64 {
+    if (la != lb) {
+        if (la < lb) { return 0 - 1; }
+        return 1;
+    }
+    var k = la - 1;
+    while (k >= 0) {
+        var x = load64(pa + 8 * k);
+        var y = load64(pb + 8 * k);
+        if (x != y) {
+            if (x < y) { return 0 - 1; }
+            return 1;
+        }
+        k = k - 1;
+    }
+    return 0;
+}
+
+# The limbs at pr ← |a| + |b| (la, lb limbs; pr may be pa or pb): the result's length.
+#must_use
+fn _km_sb_addm(pr, pa, la, pb, lb): i64 {
+    var p = pa;
+    var q = pb;
+    var lp = la;
+    var lq = lb;
+    if (la < lb) {
+        p = pb;
+        q = pa;
+        lp = lb;
+        lq = la;
+    }
+    var c = 0;
+    var k = 0;
+    while (k < lp) {
+        var s = load64(p + 8 * k) + c;
+        if (k < lq) { s = s + load64(q + 8 * k); }
+        store64(pr + 8 * k, s & _KM_SB_MASK);
+        c = s >> 31;
+        k = k + 1;
+    }
+    if (c != 0) {
+        store64(pr + 8 * lp, c);
+        return lp + 1;
+    }
+    return lp;
+}
+
+# The limbs at pr ← |a| − |b| for |a| ≥ |b| (la, lb limbs; pr may be pa or pb): the result's length, trimmed.
+#must_use
+fn _km_sb_subm(pr, pa, la, pb, lb): i64 {
+    var br = 0;
+    var k = 0;
+    while (k < la) {
+        var d = load64(pa + 8 * k) - br;
+        if (k < lb) { d = d - load64(pb + 8 * k); }
+        br = 0;
+        if (d < 0) {
+            d = d + _KM_SB_BASE;
+            br = 1;
+        }
+        store64(pr + 8 * k, d);
+        k = k + 1;
+    }
+    var l = la;
+    while (l > 0 && load64(pr + 8 * (l - 1)) == 0) { l = l - 1; }
+    return l;
+}
+
+# Slot r ← a − b (r distinct from a and b).
+fn _km_sb_sub(r, a, b) {
+    var sa = load64(a);
+    var sb = load64(b);
+    var la = _km_sb_len(a);
+    var lb = _km_sb_len(b);
+    if (sb == 0) { return _km_sb_copy(r, a); }
+    if (sa == 0) {
+        _km_sb_copy(r, b);
+        store64(r, 0 - sb);
+        return 0;
+    }
+    var l = 0;
+    var neg = 0;
+    if ((sa < 0) != (sb < 0)) {
+        l = _km_sb_addm(r + 8, a + 8, la, b + 8, lb);           # a − b = sign(a)·(|a| + |b|)
+        if (sa < 0) { neg = 1; }
+    } else {
+        var c = _km_sb_cmpm(a + 8, la, b + 8, lb);              # a − b = sign(a)·(|a| − |b|)
+        if (c == 0) {
+            store64(r, 0);
+            return 0;
+        }
+        if (c > 0) {
+            l = _km_sb_subm(r + 8, a + 8, la, b + 8, lb);
+            if (sa < 0) { neg = 1; }
+        } else {
+            l = _km_sb_subm(r + 8, b + 8, lb, a + 8, la);
+            if (sa > 0) { neg = 1; }
+        }
+    }
+    if (neg == 1) { l = 0 - l; }
+    store64(r, l);
+    return 0;
+}
+
+# Slot r ← a·b (r distinct from a and b; it receives up to len(a) + len(b) limbs). Schoolbook: each step's
+# t = aᵢ·bⱼ + rᵢ₊ⱼ + c is at most (2³¹ − 1)² + 2·(2³¹ − 1) = 2⁶² − 1, so the carry stays below 2³¹.
+fn _km_sb_mul(r, a, b) {
+    var la = _km_sb_len(a);
+    var lb = _km_sb_len(b);
+    if (la == 0 || lb == 0) {
+        store64(r, 0);
+        return 0;
+    }
+    var pa = a + 8;
+    var pb = b + 8;
+    var pr = r + 8;
+    var k = 0;
+    while (k < la + lb) {
+        store64(pr + 8 * k, 0);
+        k = k + 1;
+    }
+    var mask = _KM_SB_MASK;
+    var i = 0;
+    while (i < la) {
+        var ai = load64(pa + 8 * i);
+        if (ai != 0) {
+            var c = 0;
+            var q = pb;
+            var o = pr + 8 * i;
+            var qe = pb + 8 * lb;
+            while (q < qe) {
+                var t = ai * load64(q) + load64(o) + c;
+                store64(o, t & mask);
+                c = t >> 31;
+                q = q + 8;
+                o = o + 8;
+            }
+            store64(o, c);
+        }
+        i = i + 1;
+    }
+    var l = la + lb;
+    while (l > 0 && load64(pr + 8 * (l - 1)) == 0) { l = l - 1; }
+    if ((load64(a) < 0) != (load64(b) < 0)) { l = 0 - l; }
+    store64(r, l);
+    return 0;
+}
+
+# Magnitude division (Knuth's Algorithm D, as Hacker's Delight's divmnu, base 2³¹): u (lu limbs at pu) by v (lv ≥ 1
+# limbs at pv, top limb nonzero), lu ≥ lv. Writes the lu − lv + 1 quotient limbs (untrimmed) at pq unless pq is 0 (pq
+# may be pu), and the remainder's limbs at pr unless pr is 0; returns the remainder's length, trimmed. un (lu + 1
+# words) and vn (lv words) are work space. With v normalised (its top limb at least 2³⁰), the numerator
+# un[j + lv]·2³¹ + un[j + lv − 1] is below 2⁶², q̂ ≤ 2³¹ + 1 before the test and below 2³¹ after it (the test's
+# product q̂·vn[lv − 2] is formed only then, below 2⁶²), and each multiply-subtract step's q̂·vnᵢ + carry is below 2⁶³.
+#must_use
+fn _km_sb_divmod(pq, pr, pu, lu, pv, lv, un, vn): i64 {
+    var mask = _KM_SB_MASK;
+    var base = _KM_SB_BASE;
+    var i = 0;
+    if (lv == 1) {
+        # one limb: short division, top down (so pq may be pu)
+        var d = load64(pv);
+        var rem = 0;
+        i = lu - 1;
+        while (i >= 0) {
+            var cur = rem * base + load64(pu + 8 * i);
+            var qd = cur / d;
+            rem = cur - qd * d;
+            if (pq != 0) { store64(pq + 8 * i, qd); }
+            i = i - 1;
+        }
+        if (pr != 0) { store64(pr, rem); }
+        if (rem == 0) { return 0; }
+        return 1;
+    }
+    var s = 0;
+    var top = load64(pv + 8 * (lv - 1));
+    while (top < 0x40000000) {
+        top = top << 1;
+        s = s + 1;
+    }
+    i = lv - 1;
+    while (i > 0) {
+        store64(vn + 8 * i, ((load64(pv + 8 * i) << s) | (load64(pv + 8 * (i - 1)) >> (31 - s))) & mask);
+        i = i - 1;
+    }
+    store64(vn, (load64(pv) << s) & mask);
+    store64(un + 8 * lu, load64(pu + 8 * (lu - 1)) >> (31 - s));
+    i = lu - 1;
+    while (i > 0) {
+        store64(un + 8 * i, ((load64(pu + 8 * i) << s) | (load64(pu + 8 * (i - 1)) >> (31 - s))) & mask);
+        i = i - 1;
+    }
+    store64(un, (load64(pu) << s) & mask);
+    var vt = load64(vn + 8 * (lv - 1));
+    var vt2 = load64(vn + 8 * (lv - 2));
+    var j = lu - lv;
+    while (j >= 0) {
+        var num = load64(un + 8 * (j + lv)) * base + load64(un + 8 * (j + lv - 1));
+        var qh = num / vt;
+        var rh = num - qh * vt;
+        var again = 1;
+        while (again == 1) {
+            again = 0;
+            var dec = 0;
+            if (qh >= base) {
+                dec = 1;
+            } elif (qh * vt2 > rh * base + load64(un + 8 * (j + lv - 2))) {
+                dec = 1;
+            }
+            if (dec == 1) {
+                qh = qh - 1;
+                rh = rh + vt;
+                if (rh < base) { again = 1; }
+            }
+        }
+        # un[j .. j + lv] −= q̂·vn
+        var carry = 0;
+        var pv2 = vn;
+        var pe = vn + 8 * lv;
+        var pw = un + 8 * j;
+        while (pv2 < pe) {
+            var p = qh * load64(pv2) + carry;
+            carry = p >> 31;
+            var t = load64(pw) - (p & mask);
+            if (t < 0) {
+                t = t + base;
+                carry = carry + 1;
+            }
+            store64(pw, t);
+            pv2 = pv2 + 8;
+            pw = pw + 8;
+        }
+        var tt = load64(un + 8 * (j + lv)) - carry;
+        if (tt < 0) {
+            # q̂ was one too large: add v back
+            qh = qh - 1;
+            var c = 0;
+            i = 0;
+            while (i < lv) {
+                var sm = load64(un + 8 * (i + j)) + load64(vn + 8 * i) + c;
+                store64(un + 8 * (i + j), sm & mask);
+                c = sm >> 31;
+                i = i + 1;
+            }
+            tt = tt + c;
+        }
+        store64(un + 8 * (j + lv), tt);
+        if (pq != 0) { store64(pq + 8 * j, qh); }
+        j = j - 1;
+    }
+    var l = lv;
+    while (l > 0 && load64(un + 8 * (l - 1)) == 0) { l = l - 1; }
+    if (pr != 0) {
+        i = 0;
+        while (i < l) {
+            store64(pr + 8 * i, ((load64(un + 8 * i) >> s) | (load64(un + 8 * (i + 1)) << (31 - s))) & mask);
+            i = i + 1;
+        }
+        # the denormalised remainder can be one limb shorter than un's
+        while (l > 0 && load64(pr + 8 * (l - 1)) == 0) { l = l - 1; }
+    }
+    return l;
+}
+
+# Slot r ← a / d for d ≠ 0 dividing a exactly (r may be a; it receives up to len(a) − len(d) + 1 limbs).
+fn _km_sb_divexact(r, a, d, un, vn) {
+    var la = _km_sb_len(a);
+    var ld = _km_sb_len(d);
+    if (la == 0 || la < ld) {
+        store64(r, 0);
+        return 0;
+    }
+    var neg = 0;
+    if ((load64(a) < 0) != (load64(d) < 0)) { neg = 1; }
+    var w = _km_sb_divmod(r + 8, 0, a + 8, la, d + 8, ld, un, vn);
+    var l = la - ld + 1;
+    while (l > 0 && load64(r + 8 * l) == 0) { l = l - 1; }
+    if (neg == 1) { l = 0 - l; }
+    store64(r, l);
+    return w;
+}
+
+# The value of a slot of at most two limbs (below 2⁶²), as a word.
+#must_use
+fn _km_sb_small(a): i64 {
+    var l = _km_sb_len(a);
+    if (l == 0) { return 0; }
+    var v = load64(a + 8);
+    if (l == 2) { v = v + (load64(a + 16) << 31); }
+    return v;
+}
+
+# The bit length of a non-negative word v (0 for 0).
+#must_use
+fn _km_bitlen(v): i64 {
+    var b = 0;
+    var u = v;
+    while (u != 0) {
+        u = u >> 1;
+        b = b + 1;
+    }
+    return b;
+}
+
+# floor(|a| / 2^h) for an h ≥ 0 at which it is below 2⁶²: the bits come from three limbs at most.
+#must_use
+fn _km_sb_shr_word(a, h): i64 {
+    var l = _km_sb_len(a);
+    var k = h / 31;
+    var s = h - 31 * k;
+    var v = 0;
+    if (k < l) { v = load64(a + 8 + 8 * k) >> s; }
+    if (k + 1 < l) { v = v | (load64(a + 16 + 8 * k) << (31 - s)); }
+    if (k + 2 < l) { v = v | (load64(a + 24 + 8 * k) << (62 - s)); }
+    return v;
+}
+
+# Slot r ← |A·a + B·b| for words |A|, |B| < 2³⁰ and non-negative slots a, b (r distinct from both): limb by limb the
+# signed t = A·aᵢ + B·bᵢ + c (|t| < 2⁶²), its limb t mod 2³¹ (the low bits of the two's complement word) and the
+# carry (t − limb)/2³¹ (an exact division, so the truncating `/` floors); a negative total is negated. (Lehmer's
+# combinations are Euclid's remainders, non-negative, wherever its test admits the quotients.)
+fn _km_sb_lincomb(r, ca, a, cb, b) {
+    var la = _km_sb_len(a);
+    var lb = _km_sb_len(b);
+    var l = la;
+    if (lb > l) { l = lb; }
+    var pr = r + 8;
+    var c = 0;
+    var k = 0;
+    while (k < l) {
+        var t = c;
+        if (k < la) { t = t + ca * load64(a + 8 + 8 * k); }
+        if (k < lb) { t = t + cb * load64(b + 8 + 8 * k); }
+        var lim = t & _KM_SB_MASK;
+        c = (t - lim) / _KM_SB_BASE;
+        store64(pr + 8 * k, lim);
+        k = k + 1;
+    }
+    if (c > 0) {
+        store64(pr + 8 * l, c);
+        l = l + 1;
+    } elif (c < 0) {
+        # the total Σ limbs·2^(31k) + c·2^(31l) is negative: its magnitude |c|·2^(31l) − Σ
+        var br = 0;
+        k = 0;
+        while (k < l) {
+            var d = 0 - load64(pr + 8 * k) - br;
+            br = 0;
+            if (d < 0) {
+                d = d + _KM_SB_BASE;
+                br = 1;
+            }
+            store64(pr + 8 * k, d);
+            k = k + 1;
+        }
+        var top = 0 - c - br;
+        if (top != 0) {
+            store64(pr + 8 * l, top);
+            l = l + 1;
+        }
+    }
+    while (l > 0 && load64(pr + 8 * (l - 1)) == 0) { l = l - 1; }
+    store64(r, l);
+    return 0;
+}
+
+# Slot g ← gcd(|g|, |b|) (gcd(x, 0) = |x|), Rust's gcd_u64 on mathematical integers, by Lehmer's algorithm (Cohen,
+# A Course in Computational Algebraic Number Theory, Algorithm 1.3.7): with the larger operand p of three limbs or more
+# and the other, q, within a limb of it, Euclid runs on their top 62 bits â, b̂ (one shift) for both extreme ratios,
+# (â + A)/(b̂ + C) and (â + B)/(b̂ + D), while their quotients agree (so each is the full operands' quotient), below
+# 2³⁰, with the cofactors A, B, C, D below 2³⁰; then (p, q) ← (A·p + B·q, C·p + D·q), a unimodular step that keeps the
+# gcd. Where no quotient was admitted, or the operands differ by two limbs or more, one full division step p mod q
+# (_km_sb_divmod); below two limbs (2⁶²), Euclid on words. x, y, z, u are work slots, un and vn _km_sb_divmod's.
+fn _km_sb_gcd(g, b, x, y, z, u, un, vn) {
+    var lg = _km_sb_len(g);
+    var lb = _km_sb_len(b);
+    var p = x;
+    var q = y;
+    _km_sb_copy(p, g);
+    _km_sb_copy(q, b);
+    store64(p, lg);
+    store64(q, lb);
+    if (_km_sb_cmpm(p + 8, lg, q + 8, lb) < 0) {
+        p = y;
+        q = x;
+    }
+    var w = z;
+    var w2 = u;
+    var cap = 0x40000000;
+    while (_km_sb_len(q) != 0) {
+        var lp = _km_sb_len(p);
+        var lq = _km_sb_len(q);
+        if (lp <= 2) {
+            var uu = _km_sb_small(p);
+            var vv = _km_sb_small(q);
+            while (vv != 0) {
+                var t = uu % vv;
+                uu = vv;
+                vv = t;
+            }
+            return _km_sb_set(g, uu);
+        }
+        var ca = 1;
+        var cb = 0;
+        var cc = 0;
+        var cd = 1;
+        if (lp - lq < 2) {
+            var h = 31 * (lp - 1) + _km_bitlen(load64(p + 8 * lp)) - 62;
+            var ah = _km_sb_shr_word(p, h);
+            var bh = _km_sb_shr_word(q, h);
+            var go = 1;
+            while (go == 1) {
+                go = 0;
+                if (bh + cc != 0 && bh + cd != 0) {
+                    var q1 = (ah + ca) / (bh + cc);
+                    var q2 = (ah + cb) / (bh + cd);
+                    if (q1 == q2 && q1 < cap) {
+                        var nc = ca - q1 * cc;
+                        var nd = cb - q1 * cd;
+                        if (nc < cap && nc > 0 - cap && nd < cap && nd > 0 - cap) {
+                            ca = cc;
+                            cc = nc;
+                            cb = cd;
+                            cd = nd;
+                            var tb = ah - q1 * bh;
+                            ah = bh;
+                            bh = tb;
+                            go = 1;
+                        }
+                    }
+                }
+            }
+        }
+        if (cb == 0) {
+            # one full division step: (p, q) ← (q, p mod q)
+            var lr = _km_sb_divmod(0, w + 8, p + 8, lp, q + 8, lq, un, vn);
+            store64(w, lr);
+            var o = p;
+            p = q;
+            q = w;
+            w = o;
+        } else {
+            _km_sb_lincomb(w, ca, p, cb, q);
+            _km_sb_lincomb(w2, cc, p, cd, q);
+            var op = p;
+            var oq = q;
+            p = w;
+            q = w2;
+            w = op;
+            w2 = oq;
+            if (_km_sb_cmpm(p + 8, _km_sb_len(p), q + 8, _km_sb_len(q)) < 0) {
+                var sp = p;
+                p = q;
+                q = sp;
+            }
+        }
+    }
+    return _km_sb_copy(g, p);
+}
+
+# Rust's reduce_row on slots, its gcd part: the gcd of the magnitudes of the n slots at p (sw words apart) into slot g;
+# 1 when it exceeds 1 (the row is then divided by it), 0 otherwise (an all-zero row, or a gcd of 1). The fold starts at
+# the entry with the fewest limbs and stops at a gcd of 1 (gcd is associative and commutative, so the value is Rust's
+# left fold's); x, y, z, u, un, vn as _km_sb_gcd's.
+#must_use
+fn _km_sb_row_gcd(p, n, sw, g, x, y, z, u, un, vn): i64 {
+    var best = 0 - 1;
+    var bl = 0;
+    var k = 0;
+    while (k < n) {
+        var l = _km_sb_len(p + 8 * sw * k);
+        if (l != 0 && (best < 0 || l < bl)) {
+            best = k;
+            bl = l;
+        }
+        k = k + 1;
+    }
+    if (best < 0) { return 0; }
+    _km_sb_copy(g, p + 8 * sw * best);
+    store64(g, bl);
+    k = 0;
+    while (k < n) {
+        if (_km_sb_len(g) == 1 && load64(g + 8) == 1) { return 0; }
+        if (k != best && _km_sb_len(p + 8 * sw * k) != 0) { _km_sb_gcd(g, p + 8 * sw * k, x, y, z, u, un, vn); }
+        k = k + 1;
+    }
+    if (_km_sb_len(g) == 1 && load64(g + 8) == 1) { return 0; }
+    return 1;
+}
+
 # ── equation balancing ──────────────────────────────────────────────────────────────
 
 # The coefficient bound of Rust's private MAX_COMPOSITION_ENTRY: 2⁵³.
@@ -226,44 +769,95 @@ const _KM_MAX_COMPOSITION_ENTRY = 9007199254740992;
 # The largest m·n balance_equation takes: 2⁵⁶ words is beyond any address space, so a larger product names no matrix.
 const _KM_BAL_MAX_CELLS = 0x0100000000000000;
 
-# Balances a chemical equation from its composition matrix: m element rows by n species columns, entry (i, j) = the
-# count of element i in species j, at word i·n + j of `matrix` (flat row-major; reactant columns positive, product
-# columns negative, by convention). The smallest positive integer coefficients x with M·x = 0, one per species, go to
-# the caller's buffer `out` of `cap` words: Ok(n). The algorithm is Rust's: exact fraction-free Gauss–Jordan
-# elimination over the integers on the whole matrix (i64, checked, each touched row divided by the gcd of its
-# entries), so the result does not depend on row order; the null space must be one-dimensional, its basis vector
-# (built from the reduced row echelon form with the lcm of the pivots) is reduced, sign-normalised, converted to u32
-# and verified on every original row in i128.
-# Err(KM_ERR_INVALID_INPUT) if m < 1 (an empty matrix), n < 2 (fewer than two species), (matrix, m·n) is no buffer, or
-# an entry exceeds 2⁵³ in magnitude (ADR 0002 #7: Rust's bound, kept); Err(KM_ERR_COMPUTATION_ERROR) if the equation
-# cannot be balanced (only the trivial solution), is ambiguous (a null space of dimension above 1), needs a zero
-# coefficient or coefficients of mixed sign, a coefficient exceeds u32::MAX, the integer arithmetic overflows i64 (or
-# i128 in the verification), or a work table can't be allocated; Err(KM_ERR_INVALID_INPUT) if the n coefficients do not
-# fit in cap (`out` untouched). Mirrors `stoichiometry::balance_equation`, with ADR 0002 #7's integer matrix.
+# ADR 0002 #39's size bound B: every minor of the m × n matrix of order at most q = min(m, n) is below 2^B in
+# magnitude. By Hadamard's inequality a minor is at most the product of its rows' Euclidean lengths, each at most its
+# whole row's; a row with z nonzero entries of largest magnitude μ has ‖row‖ ≤ √z·μ < 2^b, b = bitlen(μ) +
+# ⌈bitlen(z)/2⌉ (b = 0 for a zero row, whose minors are 0), so a minor of order r ≤ q is below 2^(the sum of the q
+# largest row b's), each b ≥ 0; the same over the columns, and B is the smaller sum. b ≤ 54 + 29 (|entry| ≤ 2⁵³,
+# z < 2⁵⁷), so a histogram of the b's selects the q largest.
 #must_use
-fn balance_equation(matrix, m, n, out, cap): Result {
-    if (m < 1) { return Err(KM_ERR_INVALID_INPUT); }                   # Rust: empty composition matrix
-    if (n < 2) { return Err(KM_ERR_INVALID_INPUT); }                   # Rust: need at least 2 species
-    if (matrix == 0 || m > _KM_BAL_MAX_CELLS / n) { return Err(KM_ERR_INVALID_INPUT); }
-    var cells = m * n;
+fn _km_balance_bits(matrix, m, n): i64 {
+    var hr: i64[96];
+    var hc: i64[96];
     var k = 0;
-    while (k < cells) {
-        var v = load64(matrix + 8 * k);
-        if (v > _KM_MAX_COMPOSITION_ENTRY || v < 0 - _KM_MAX_COMPOSITION_ENTRY) { return Err(KM_ERR_INVALID_INPUT); }
+    while (k < 96) {
+        store64(&hr + 8 * k, 0);
+        store64(&hc + 8 * k, 0);
         k = k + 1;
     }
-    # The exact integer copy, row-major, and the null vector: local tables, the heap past them.
+    var i = 0;
+    while (i < m) {
+        var mu = 0;
+        var z = 0;
+        var j = 0;
+        while (j < n) {
+            var v = load64(matrix + 8 * (i * n + j));
+            if (v < 0) { v = 0 - v; }
+            if (v != 0) { z = z + 1; }
+            if (v > mu) { mu = v; }
+            j = j + 1;
+        }
+        var b = 0;
+        if (z > 0) { b = _km_bitlen(mu) + (_km_bitlen(z) + 1) / 2; }
+        store64(&hr + 8 * b, load64(&hr + 8 * b) + 1);
+        i = i + 1;
+    }
+    var jc = 0;
+    while (jc < n) {
+        var muc = 0;
+        var zc = 0;
+        var ic = 0;
+        while (ic < m) {
+            var vc = load64(matrix + 8 * (ic * n + jc));
+            if (vc < 0) { vc = 0 - vc; }
+            if (vc != 0) { zc = zc + 1; }
+            if (vc > muc) { muc = vc; }
+            ic = ic + 1;
+        }
+        var bc = 0;
+        if (zc > 0) { bc = _km_bitlen(muc) + (_km_bitlen(zc) + 1) / 2; }
+        store64(&hc + 8 * bc, load64(&hc + 8 * bc) + 1);
+        jc = jc + 1;
+    }
+    var q = m;
+    if (n < q) { q = n; }
+    var sr = 0;
+    var sc = 0;
+    var rr = q;
+    var rc = q;
+    k = 95;
+    while (k >= 0) {
+        var tr = load64(&hr + 8 * k);
+        if (tr > rr) { tr = rr; }
+        sr = sr + tr * k;
+        rr = rr - tr;
+        var tc = load64(&hc + 8 * k);
+        if (tc > rc) { tc = rc; }
+        sc = sc + tc * k;
+        rc = rc - tc;
+        k = k - 1;
+    }
+    if (sc < sr) { return sc; }
+    return sr;
+}
+
+# The fast path (ADR 0002 #39): Rust 1.2.0's fraction-free Gauss–Jordan elimination and null vector on i64 with its
+# checked arithmetic (_km_i64_*_ck, _km_reduce_row), the matrix copied to a local table (the heap past 512 words), the
+# n coefficients to the words at x. 0: x holds them, past Rust's zero, sign and u32 checks; 1: one of Rust's other
+# ComputationErrors (ambiguous, only the trivial solution, a zero coefficient, mixed signs, past u32), or the copy
+# can't be allocated; 2: one of Rust's checked operations overflowed (its overflow Err), where _km_balance_big
+# restarts from the original matrix. While no check fails every value is the exact integer, so 0 and 1 are the
+# exact algorithm's outcome too.
+#must_use
+fn _km_balance_i64(matrix, m, n, x): i64 {
+    var cells = m * n;
+    var k = 0;
+    # The exact integer copy, row-major: a local table, the heap past it.
     var ast: i64[512];
-    var xst: i64[64];
     var a = &ast;
-    var x = &xst;
     if (cells > 512) {
         a = alloc(8 * cells);
-        if (a == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
-    }
-    if (n > 64) {
-        x = alloc(8 * n);
-        if (x == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        if (a == 0) { return 1; }
     }
     k = 0;
     while (k < cells) {
@@ -280,7 +874,7 @@ fn balance_equation(matrix, m, n, out, cap): Result {
         while (p < m && load64(a + 8 * (p * n + col)) == 0) { p = p + 1; }
         if (p >= m) {
             # Rust: "equation balancing is ambiguous: more than one independent reaction"
-            if (free_col >= 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            if (free_col >= 0) { return 1; }
             free_col = col;
         } else {
             var pr = a + 8 * (rank * n);
@@ -294,12 +888,12 @@ fn balance_equation(matrix, m, n, out, cap): Result {
                     j = j + 1;
                 }
             }
-            if (_km_reduce_row(pr, n) != 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            if (_km_reduce_row(pr, n) != 0) { return 2; }
             if (load64(pr + 8 * col) < 0) {
                 var jn = 0;
                 while (jn < n) {
                     var vn = load64(pr + 8 * jn);
-                    if (vn == 0 - _KM_I64_MAX - 1) { return Err(KM_ERR_COMPUTATION_ERROR); }   # checked_neg
+                    if (vn == 0 - _KM_I64_MAX - 1) { return 2; }       # checked_neg
                     store64(pr + 8 * jn, 0 - vn);
                     jn = jn + 1;
                 }
@@ -324,16 +918,16 @@ fn balance_equation(matrix, m, n, out, cap): Result {
                             store64(rr + 8 * je, pivot * aj - factor * pj);
                         } else {
                             var ok1, lhs = _km_i64_mul_ck(pivot, aj);
-                            if (ok1 != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                            if (ok1 != 1) { return 2; }
                             var ok2, rhs = _km_i64_mul_ck(factor, pj);
-                            if (ok2 != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                            if (ok2 != 1) { return 2; }
                             var ok3, d = _km_i64_sub_ck(lhs, rhs);
-                            if (ok3 != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                            if (ok3 != 1) { return 2; }
                             store64(rr + 8 * je, d);
                         }
                         je = je + 1;
                     }
-                    if (_km_reduce_row(rr, n) != 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                    if (_km_reduce_row(rr, n) != 0) { return 2; }
                 }
                 r = r + 1;
             }
@@ -342,7 +936,7 @@ fn balance_equation(matrix, m, n, out, cap): Result {
         col = col + 1;
     }
     # Rust: "equation cannot be balanced: only the trivial solution exists"
-    if (free_col < 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (free_col < 0) { return 1; }
     var f = free_col;
 
     # The null vector from the RREF: each pivot row k reads a[k][c_k]·x[c_k] + a[k][f]·x[f] = 0, so x[f] is the lcm of
@@ -356,9 +950,9 @@ fn balance_equation(matrix, m, n, out, cap): Result {
         if (c < n) {
             var piv = load64(row + 8 * c);
             var g = _km_gcd_u64(_km_unsigned_abs(lcm), _km_unsigned_abs(piv));
-            if (g < 0) { return Err(KM_ERR_COMPUTATION_ERROR); }        # i64::try_from(2⁶³) fails
+            if (g < 0) { return 2; }                                    # i64::try_from(2⁶³) fails
             var okl, nl = _km_i64_mul_ck(lcm / g, piv);
-            if (okl != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            if (okl != 1) { return 2; }
             lcm = nl;
         }
         k = k + 1;
@@ -377,24 +971,24 @@ fn balance_equation(matrix, m, n, out, cap): Result {
         if (c2 < n) {
             var piv2 = load64(row2 + 8 * c2);
             # Rust's `lcm / piv` is plain i64 division; its one trapping case (i64::MIN / −1) can't arise with positive
-            # pivots, and is refused here rather than trapped.
-            if (piv2 == 0 - 1 && lcm == 0 - _KM_I64_MAX - 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            # pivots, and is sent to the exact path rather than trapped.
+            if (piv2 == 0 - 1 && lcm == 0 - _KM_I64_MAX - 1) { return 2; }
             var okx, px = _km_i64_mul_ck(load64(row2 + 8 * f), lcm / piv2);
-            if (okx != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            if (okx != 1) { return 2; }
             var okg, nx = _km_i64_neg_ck(px);
-            if (okg != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            if (okg != 1) { return 2; }
             store64(x + 8 * c2, nx);
         }
         k = k + 1;
     }
-    if (_km_reduce_row(x, n) != 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (_km_reduce_row(x, n) != 0) { return 2; }
 
     # Sign convention: all coefficients must share one sign.
     var positive = 0;
     k = 0;
     while (k < n) {
         var xk = load64(x + 8 * k);
-        if (xk == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }        # Rust: "balancing produced zero coefficient"
+        if (xk == 0) { return 1; }                                      # Rust: "balancing produced zero coefficient"
         k = k + 1;
     }
     k = 0;
@@ -406,19 +1000,270 @@ fn balance_equation(matrix, m, n, out, cap): Result {
         k = 0;
         while (k < n) {
             var okz, nz = _km_i64_neg_ck(load64(x + 8 * k));
-            if (okz != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            if (okz != 1) { return 2; }
             store64(x + 8 * k, nz);
             k = k + 1;
         }
     } elif (positive != n) {
-        return Err(KM_ERR_COMPUTATION_ERROR);                           # Rust: "coefficients of mixed sign"
+        return 1;                                                       # Rust: "coefficients of mixed sign"
     }
     k = 0;
     while (k < n) {
         var xu = load64(x + 8 * k);
-        if (xu < 0 || xu > _KM_U32_MAX) { return Err(KM_ERR_COMPUTATION_ERROR); }   # Rust: exceeds u32
+        if (xu < 0 || xu > _KM_U32_MAX) { return 1; }                   # Rust: exceeds u32
         k = k + 1;
     }
+    return 0;
+}
+
+# The local work table of the exact path (words); the heap past it.
+const _KM_BAL_BIG_LOCAL = 4096;
+
+# The exact slow path (ADR 0002 #39): Rust 1.2.0's elimination exactly as written — the pivot search, the swap,
+# reduce_row, the sign flip, row_r ← pivot·row_r − factor·row_pivot then reduce_row, the lcm of the pivots,
+# x[c] = −(row[f]·(lcm/piv)), reduce_row(x), the zero, sign and u32 checks — on signed multi-word integers
+# (_km_sb_*), so none of its i64 overflow checks exists, from the original matrix, the n coefficients to the words at
+# x. 0: x holds them; 1: one of Rust's other ComputationErrors, or the work table can't be allocated.
+# Its tables are sized from _km_balance_bits' B (ADR 0002 #39's proof): every entry of a row after reduce_row (and every
+# entry of the original matrix) is below 2^B, the lcm and x too, and a product or difference before reduce_row below
+# 2^(2B + 1). So a matrix slot holds B/31 + 2 limbs (one past the bound: _km_sb_divexact's untrimmed top limb) and a
+# work slot twice that plus two; the words are m row pointers, m·n matrix slots, and n scratch, n null-vector and eleven
+# work slots: a local table of 4,096 words, the bump allocator (which never frees) past it — a 40 × 41 matrix of
+# 2⁵³ entries (B = 2,280) takes about 1.1 MB a call. The rows are swapped through their pointers.
+#must_use
+fn _km_balance_big(matrix, m, n, x): i64 {
+    var bb = _km_balance_bits(matrix, m, n);
+    var cs = bb / 31 + 2;
+    var ss = cs + 1;                        # a matrix slot, in words
+    var ws = 2 * cs + 4;                    # a work slot: 2·cs + 2 limbs, its length, and the division's extra word
+    var lim = 0x0000010000000000;           # 2⁴⁰ words: past the allocator's 2 GiB limit many times over
+    if (ss > lim / (m * n) || ws > lim / (2 * n + 11)) { return 1; }
+    var words = m + m * n * ss + (2 * n + 11) * ws;
+    var wst: i64[4096];
+    var w = &wst;
+    if (words > _KM_BAL_BIG_LOCAL) {
+        w = alloc(8 * words);
+        if (w == 0) { return 1; }
+    }
+    var rows = w;
+    var mat = w + 8 * m;
+    var scr = mat + 8 * (m * n * ss);
+    var xs = scr + 8 * (n * ws);
+    var p1 = xs + 8 * (n * ws);
+    var p2 = p1 + 8 * ws;
+    var g = p2 + 8 * ws;
+    var ex = g + 8 * ws;
+    var ey = ex + 8 * ws;
+    var ez = ey + 8 * ws;
+    var eu = ez + 8 * ws;
+    var lc = eu + 8 * ws;
+    var qq = lc + 8 * ws;
+    var un = qq + 8 * ws;
+    var vn = un + 8 * ws;
+    var i = 0;
+    var j = 0;
+    while (i < m) {
+        var ri = mat + 8 * (i * n * ss);
+        store64(rows + 8 * i, ri);
+        j = 0;
+        while (j < n) {
+            _km_sb_set(ri + 8 * ss * j, load64(matrix + 8 * (i * n + j)));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    # Fraction-free Gauss–Jordan elimination to reduced row echelon form, Rust's steps.
+    var rank = 0;
+    var free_col = 0 - 1;
+    var col = 0;
+    while (col < n) {
+        var p = rank;
+        while (p < m && load64(load64(rows + 8 * p) + 8 * ss * col) == 0) { p = p + 1; }
+        if (p >= m) {
+            if (free_col >= 0) { return 1; }                            # Rust: ambiguous
+            free_col = col;
+        } else {
+            if (p != rank) {
+                var sw = load64(rows + 8 * p);
+                store64(rows + 8 * p, load64(rows + 8 * rank));
+                store64(rows + 8 * rank, sw);
+            }
+            var pr = load64(rows + 8 * rank);
+            if (_km_sb_row_gcd(pr, n, ss, g, ex, ey, ez, eu, un, vn) == 1) {
+                j = 0;
+                while (j < n) {
+                    _km_sb_divexact(pr + 8 * ss * j, pr + 8 * ss * j, g, un, vn);
+                    j = j + 1;
+                }
+            }
+            if (load64(pr + 8 * ss * col) < 0) {
+                j = 0;
+                while (j < n) {
+                    store64(pr + 8 * ss * j, 0 - load64(pr + 8 * ss * j));
+                    j = j + 1;
+                }
+            }
+            var pv = pr + 8 * ss * col;
+            var r = 0;
+            while (r < m) {
+                var rr = load64(rows + 8 * r);
+                var fc = rr + 8 * ss * col;
+                if (r != rank && load64(fc) != 0) {
+                    # row_r ← pivot·row_r − factor·row_pivot into the scratch row, then reduce_row back into row r
+                    j = 0;
+                    while (j < n) {
+                        _km_sb_mul(p1, pv, rr + 8 * ss * j);
+                        _km_sb_mul(p2, fc, pr + 8 * ss * j);
+                        _km_sb_sub(scr + 8 * ws * j, p1, p2);
+                        j = j + 1;
+                    }
+                    var red = _km_sb_row_gcd(scr, n, ws, g, ex, ey, ez, eu, un, vn);
+                    j = 0;
+                    while (j < n) {
+                        if (red == 1) {
+                            _km_sb_divexact(rr + 8 * ss * j, scr + 8 * ws * j, g, un, vn);
+                        } else {
+                            _km_sb_copy(rr + 8 * ss * j, scr + 8 * ws * j);
+                        }
+                        j = j + 1;
+                    }
+                }
+                r = r + 1;
+            }
+            rank = rank + 1;
+        }
+        col = col + 1;
+    }
+    if (free_col < 0) { return 1; }                                     # Rust: only the trivial solution
+    var f = free_col;
+
+    # The lcm of the pivots: lcm ← (lcm / gcd(lcm, piv))·piv.
+    _km_sb_set(lc, 1);
+    var k = 0;
+    while (k < rank) {
+        var row = load64(rows + 8 * k);
+        var c = 0;
+        while (c < n && load64(row + 8 * ss * c) == 0) { c = c + 1; }
+        if (c < n) {
+            _km_sb_copy(g, lc);
+            _km_sb_gcd(g, row + 8 * ss * c, ex, ey, ez, eu, un, vn);
+            _km_sb_divexact(qq, lc, g, un, vn);
+            _km_sb_mul(p1, qq, row + 8 * ss * c);
+            _km_sb_copy(lc, p1);
+        }
+        k = k + 1;
+    }
+    # x[f] = lcm, x[c] = −(row[f]·(lcm / piv)), then reduce_row(x).
+    k = 0;
+    while (k < n) {
+        store64(xs + 8 * ws * k, 0);
+        k = k + 1;
+    }
+    _km_sb_copy(xs + 8 * ws * f, lc);
+    k = 0;
+    while (k < rank) {
+        var row2 = load64(rows + 8 * k);
+        var c2 = 0;
+        while (c2 < n && load64(row2 + 8 * ss * c2) == 0) { c2 = c2 + 1; }
+        if (c2 < n) {
+            _km_sb_divexact(qq, lc, row2 + 8 * ss * c2, un, vn);
+            _km_sb_mul(p1, row2 + 8 * ss * f, qq);
+            _km_sb_copy(xs + 8 * ws * c2, p1);
+            store64(xs + 8 * ws * c2, 0 - load64(p1));
+        }
+        k = k + 1;
+    }
+    if (_km_sb_row_gcd(xs, n, ws, g, ex, ey, ez, eu, un, vn) == 1) {
+        k = 0;
+        while (k < n) {
+            _km_sb_divexact(xs + 8 * ws * k, xs + 8 * ws * k, g, un, vn);
+            k = k + 1;
+        }
+    }
+
+    # Rust's zero, sign and u32 checks, in its order.
+    k = 0;
+    while (k < n) {
+        if (load64(xs + 8 * ws * k) == 0) { return 1; }                 # Rust: a zero coefficient
+        k = k + 1;
+    }
+    var positive = 0;
+    k = 0;
+    while (k < n) {
+        if (load64(xs + 8 * ws * k) > 0) { positive = positive + 1; }
+        k = k + 1;
+    }
+    if (positive == 0) {
+        k = 0;
+        while (k < n) {
+            store64(xs + 8 * ws * k, 0 - load64(xs + 8 * ws * k));
+            k = k + 1;
+        }
+    } elif (positive != n) {
+        return 1;                                                       # Rust: coefficients of mixed sign
+    }
+    k = 0;
+    while (k < n) {
+        var xk = xs + 8 * ws * k;
+        if (load64(xk) < 0 || load64(xk) > 2) { return 1; }             # Rust: exceeds u32 (2 limbs: below 2⁶²)
+        var xv = _km_sb_small(xk);
+        if (xv > _KM_U32_MAX) { return 1; }
+        store64(x + 8 * k, xv);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# Balances a chemical equation from its composition matrix: m element rows by n species columns, entry (i, j) = the
+# count of element i in species j, at word i·n + j of `matrix` (flat row-major; reactant columns positive, product
+# columns negative, by convention). The smallest positive integer coefficients x with M·x = 0, one per species, go to
+# the caller's buffer `out` of `cap` words: Ok(n). The algorithm is Rust's: exact fraction-free Gauss–Jordan
+# elimination over the integers on the whole matrix (each touched row divided by the gcd of its entries), so the
+# result does not depend on row order; the null space must be one-dimensional, its basis vector (built from the
+# reduced row echelon form with the lcm of the pivots) is reduced, sign-normalised, converted to u32 and verified on
+# every original row in i128. ADR 0002 #39 (the overflow audit's B7): the elimination's integers are unbounded, so
+# where Rust's i64 overflows the port goes on exactly (Rust's i64 algorithm first, the same steps on multi-word
+# integers from the original matrix at its first overflow: _km_balance_i64, _km_balance_big). Heap: the i64 copy past
+# 512 cells and the null vector past 64 words (8 bytes a word), and the multi-word tables past 4,096 words (about
+# 8·(m·n·B/31 + 4·n·B/31) bytes for _km_balance_bits' B); the bump allocator never frees them.
+# Err(KM_ERR_INVALID_INPUT) if m < 1 (an empty matrix), n < 2 (fewer than two species), (matrix, m·n) is no buffer, or
+# an entry exceeds 2⁵³ in magnitude (ADR 0002 #7: Rust's bound, kept); Err(KM_ERR_COMPUTATION_ERROR) if the equation
+# cannot be balanced (only the trivial solution), is ambiguous (a null space of dimension above 1), needs a zero
+# coefficient or coefficients of mixed sign, a coefficient exceeds u32::MAX, the verification's i128 sums overflow
+# (they can't: n·2⁵³·(2³² − 1) < 2¹²⁷ for every n below 2⁴²), or a work table can't be allocated;
+# Err(KM_ERR_INVALID_INPUT) if the n coefficients do not fit in cap (`out` untouched). Mirrors
+# `stoichiometry::balance_equation`, with ADR 0002 #7's integer matrix and #39's unbounded integers.
+#must_use
+fn balance_equation(matrix, m, n, out, cap): Result {
+    return _km_balance_equation(matrix, m, n, out, cap, 0);
+}
+
+# balance_equation, with the i64 fast path skipped when force is 1 (the multi-word path from the start: the tests' and
+# scripts/oracle/cr_verify.py's check of that path; the result is the same).
+#must_use
+fn _km_balance_equation(matrix, m, n, out, cap, force): Result {
+    if (m < 1) { return Err(KM_ERR_INVALID_INPUT); }                   # Rust: empty composition matrix
+    if (n < 2) { return Err(KM_ERR_INVALID_INPUT); }                   # Rust: need at least 2 species
+    if (matrix == 0 || m > _KM_BAL_MAX_CELLS / n) { return Err(KM_ERR_INVALID_INPUT); }
+    var cells = m * n;
+    var k = 0;
+    while (k < cells) {
+        var v = load64(matrix + 8 * k);
+        if (v > _KM_MAX_COMPOSITION_ENTRY || v < 0 - _KM_MAX_COMPOSITION_ENTRY) { return Err(KM_ERR_INVALID_INPUT); }
+        k = k + 1;
+    }
+    # The null vector: a local table, the heap past it.
+    var xst: i64[64];
+    var x = &xst;
+    if (n > 64) {
+        x = alloc(8 * n);
+        if (x == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    }
+    var st = 2;
+    if (force != 1) { st = _km_balance_i64(matrix, m, n, x); }
+    if (st == 2) { st = _km_balance_big(matrix, m, n, x); }
+    if (st != 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
 
     # Verify M·x = 0 exactly on every original row, in i128 as Rust does.
     # Each row first in i64: a term with |entry| < 2³¹ (k < 2³²) is below 2⁶³, and while no partial sum overflows the

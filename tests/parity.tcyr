@@ -2311,6 +2311,9 @@ var _par_adr7_int = 0;
 var _par_adr7_round = 0;
 var _par_adr7_none = 0;
 var _par_st_round = 0;                      # set by _par_in_matrix: an entry was a near-integer f64
+# The overflow audit's B7 (ADR 0002 #39): balance_equation rows where Rust's checked i64 elimination overflows (its
+# ComputationError) and the port's unbounded integers give the noted whole result (_par_map_toks), mapped and counted.
+var _par_adr39 = 0;
 
 # The matrix at input token 0 as integers, row-major, into buf (_PAR_MAX words): (1, m, n) when every entry has an
 # integer counterpart (ADR 0002 #7), (0, 0, 0) when one has none or the rows are ragged, (-1, 0, 0) when the tokens
@@ -2391,13 +2394,18 @@ fn _par_stoichiometry(fp, fl): i64 {
         _par_adr7_int = _par_adr7_int + 1;
         _par_adr7_round = _par_adr7_round + _par_st_round;
         var tb, vb = balance_equation(_par_spec_in, bm, bn, _par_spec_out, bn);
-        if (is_err_result(tb) == 1) { _par_got_err(vb); return 1; }
-        _par_got_seq(vb);
-        var kb = 0;
-        while (kb < vb) {
-            _par_got_i(load64(_par_spec_out + 8 * kb));
-            kb = kb + 1;
+        if (is_err_result(tb) == 1) {
+            _par_got_err(vb);
+        } else {
+            _par_got_seq(vb);
+            var kb = 0;
+            while (kb < vb) {
+                _par_got_i(load64(_par_spec_out + 8 * kb));
+                kb = kb + 1;
+            }
         }
+        _par_map_toks(39, "[ADR 0002 #39:");
+        if (_par_mapped == 39) { _par_adr39 = _par_adr39 + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "stoichiometry::assign_oxidation_states") == 1) {
@@ -2730,8 +2738,9 @@ fn _par_accepted(fp, fl, ip, il): i64 {
     # #24 … #26 (M4f-2) stoichiometry's exact value, index or whole result; #27, #28 (the overflow audit's B1) thermo's,
     # phase's and kinetics' rounded-once or unbounded-exponent value; #29, #30 (B2) solution's, electrochemistry's and
     # spectroscopy's; #31, #32 (B3) gas's, potential's, inorganic's and nuclear's; #33, #34 (B4) the sums' and the
-    # Shomate polynomials'; #35 (B5) the exp / exp10 arguments'; #36 … #38 (B6) the FFT's, find_peaks' and the flame's.
-    if (_par_mapped >= 13 && _par_mapped <= 38) { return 2; }
+    # Shomate polynomials'; #35 (B5) the exp / exp10 arguments'; #36 … #38 (B6) the FFT's, find_peaks' and the flame's;
+    # #39 (B7) balance_equation's whole result on unbounded integers.
+    if (_par_mapped >= 13 && _par_mapped <= 39) { return 2; }
     # ADR 0002 #7 (M4f): an oxidation-state row whose note names the port's exact rational states, or a balancing row
     # whose f64 matrix has no integer counterpart (the oracle's Err(InvalidInput)).
     if (_par_mapped == 7) { return 2; }
@@ -2741,13 +2750,13 @@ fn _par_accepted(fp, fl, ip, il): i64 {
 # 1 for an ADR whose accepted rows are counted but not printed row by row: ADR 0002 #4's Antoine mapping, #13 … #22's
 # exact-value rows (M4c … M4e-3; about 17,000 rows between them), #23's isotope rows (M4e-4), #7's oxidation-state
 # and balancing rows (M4f), #24 … #26's stoichiometry rows (M4f-2), #27 / #28's (the overflow audit's B1), #29 /
-# #30's (B2), #31 / #32's (B3), #33 / #34's (B4), #35's (B5) and #36 … #38's (B6), each
+# #30's (B2), #31 / #32's (B3), #33 / #34's (B4), #35's (B5), #36 … #38's (B6) and #39's (B7), each
 # summarised by _par_module_done with its count; the validate.py proofs check every one of them. ADR 0002 #12's CFSE
 # rows (13) and #3's SEMF rows (23) are printed by name.
 #must_use
 fn _par_accepted_quiet(adr): i64 {
     if (adr == 2 && _par_mapped == 2) { return 1; }
-    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 38) { return 1; }
+    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 39) { return 1; }
     if (adr == 2 && _par_mapped == 7) { return 1; }
     return 0;
 }
@@ -2768,7 +2777,8 @@ fn _par_accepted_bits(adr): i64 {
 # (per function), #22's, #23's (per function) and #30's (per function); after stoichiometry, #7's (the oxidation states,
 # the integer matrix) and #24's (per function), #25's and #26's. The overflow audit's B4: #33's after thermo, reaction,
 # thermochem, solution, kinetics, inorganic and nuclear (per function), #34's after thermochem (per function); B5: #35's
-# after reaction and solution (per function); B6: #36's and #37's after spectroscopy, #38's after thermochem.
+# after reaction and solution (per function); B6: #36's and #37's after spectroscopy, #38's after thermochem; B7: #39's
+# after stoichiometry.
 fn _par_module_done(mp, ml) {
     if (_par_eq(mp, ml, "reaction") == 1) {
         _par_b4_line(33, _par_adr33_gibbs, "gibbs_free_energy");
@@ -2919,6 +2929,10 @@ fn _par_module_done(mp, ml) {
         fmt_int(_par_adr26);
         print(" empirical_formula rows where the exact ratios and 1/10 tolerance change Rust's result", 86);
         println(" (accepted, ADR 2, counted, not listed)");
+        _par_puts("  ADR 0002 #39 unbounded integers: ");
+        fmt_int(_par_adr39);
+        _par_puts(" balance_equation rows where Rust's checked i64 elimination overflows and the port's result is the");
+        println(" noted one (accepted, ADR 2, counted, not listed)");
         return 0;
     }
     if (_par_eq(mp, ml, "spectroscopy") == 1) {

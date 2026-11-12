@@ -644,3 +644,34 @@ unbounded √ alone costs about 0.14 µs (the `_squares` row: 129 bins).
 
 `tests/audit2.bcyr` takes 45 s with B6's benches (31 s before); `tests/kimiya.bcyr` and `tests/audit.bcyr` are unchanged
 in content, the former's three FFT benches a few seconds longer in all.
+
+## The overflow audit's B7 (2026-11-12)
+
+ADR 0002 #39: `balance_equation` runs Rust's i64 elimination first, unchanged, and at its first overflow the same steps
+from the original matrix on signed multi-word integers (31-bit limbs, Knuth's division, Lehmer's gcd), so where Rust's
+checked arithmetic overflows the port returns the exact algorithm's result. The typical benches are
+`tests/kimiya.bcyr`'s (`balance_ch4_combustion` is Rust's); `bench_audit_b7` in `tests/audit2.bcyr` adds three edge
+benches, where Rust's own run stops at its overflow Err.
+
+Before: a copy of the benches' harness with only these benches on the committed tree (`git archive HEAD`); after: the
+same on the batch, alternating runs, the same host.
+
+| Bench | Body | Rust | Before | After |
+|---|---|---|---|---|
+| `stoichiometry/balance_ch4_combustion` | CH₄ + 2O₂ → CO₂ + 2H₂O (3 × 4): the i64 fast path, no overflow | 233.90 ns | 805 ns | 778 ns |
+| `stoichiometry/balance_kmno4_hcl` | 2KMnO₄ + 16HCl → … (5 × 6): the same | — | 2.24 µs | 2.18 µs |
+| `stoichiometry/balance_survey_2x3` | the survey's example: Rust's first product 3037000500² overflows, its Err; here the multi-word path, [1, 1, 1] | — | 0.12 µs | 3.6 µs |
+| `stoichiometry/balance_overflow_10x9` | a 10 × 9 golden row whose elimination overflows i64 (entries ≤ 2,136): Rust's Err; here the exact x | — | 6.6 µs | 57 µs |
+| `stoichiometry/balance_dense_30x31` | 30 × 31 seeded entries below 2⁴⁵, the last column solved for x[j] = 1 + j mod 3: Rust's Err at the first product; here products past 3,000 bits, 423 KB of tables | — | 5.4 µs | 158 ms |
+
+**The fast path** is the old code in its own function (each overflow check returns a restart code instead of the Err),
+so in-range matrices keep their speed: the 3 % gain is the call's layout, not new work. **The slow path's cost** is the
+elimination's own: on the 30 × 31 matrix, 11.0 million limb products in its 870 row updates (pivot·a and factor·a for
+31 entries each), 10.7 million limb steps in the 26,800 exact divisions of reduce_row, and Lehmer's gcd (22,000 of its
+unimodular steps, 13,000 full division steps, 1.8 million limb steps of its combinations). Plain Euclid in place of
+Lehmer's gcd took a 39 × 40 dense matrix 1.8 s (about 844,000 of its division steps; 0.7 s with Lehmer's), and
+stepping pointers in the multiply and divide loops instead of indexing gained a further 13 % (193 → 168 ms on the
+30 × 31, before the final runs above).
+
+`tests/audit2.bcyr` takes 49 s with B7's benches (45 s before); `tests/kimiya.bcyr` and `tests/audit.bcyr` are
+unchanged.

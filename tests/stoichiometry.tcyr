@@ -4,12 +4,17 @@
 # checked i64 and signed 128-bit helpers at their edges, Rust's integer types as words, the caller buffers and slices,
 # the work tables' heap path, and since M4f-2 ADR 0002 #24–#26 (the yields and percent composition rounded once, the
 # exact limiting reagent, the exact empirical formula: cyrius_adr24_rounded_once, cyrius_adr25_exact_comparison,
-# cyrius_adr26_exact_tolerance, which replaced M4f's cyrius_empirical_tolerance on Rust's 0.1). The golden corpus
-# separately checks every function over its grid (tests/parity.tcyr).
+# cyrius_adr26_exact_tolerance, which replaced M4f's cyrius_empirical_tolerance on Rust's 0.1), and since the overflow
+# audit's B7 ADR 0002 #39 (balancing on unbounded integers where Rust's i64 overflows). The golden corpus separately
+# checks every function over its grid (tests/parity.tcyr).
 #
 # ADR 0002 #24–#26 adapt no Rust test: every assertion holds for the exact values (empirical_formula_nan_inf_are_errors'
 # subnormal case is still the ComputationError, its exact ratio about 3.75·10³²⁰ being past 2³²; only its comment says
-# so).
+# so). ADR 0002 #39 (the overflow audit's B7: balancing on unbounded integers) adapts none either: the matrices of
+# balance_intermediate_overflow_is_error and balance_large_entries_do_not_panic overflow Rust's i64, and their exact
+# null vectors exceed u32 (x = [1, 1, 2⁵³] for the first), so both are still the ComputationError; only the comments say
+# why, as cyrius_integer_matrix's for its gcd-2⁶³ row (now a zero coefficient). Its own groups are
+# cyrius_adr39_unbounded_integers, cyrius_adr39_size_and_forced and cyrius_adr39_multiword.
 #
 # Adapted beyond the port's form (port plan §6.4: `Result::unwrap` is `is_ok` + the payload, a slice a pointer and a
 # count, a Vec result the caller's buffer), for ADR 0002 #7, seven tests:
@@ -590,8 +595,9 @@ fn _t_balance_coefficient_overflowing_u32_is_error() {
 
 fn _t_balance_intermediate_overflow_is_error() {
     test_group("balance_intermediate_overflow_is_error");
-    # Elimination needs (2⁵³ − 1)² > i64::MAX: must be Err, not an abort.
-    assert(bal_err(&_m_inter, 2, 3) == KM_ERR_COMPUTATION_ERROR, "overflow");
+    # Elimination needs (2⁵³ − 1)² > i64::MAX: must be Err, not an abort. (ADR 0002 #39: the port goes on exactly, and
+    # the Err is the u32 check's: x = [1, 1, 2⁵³].)
+    assert(bal_err(&_m_inter, 2, 3) == KM_ERR_COMPUTATION_ERROR, "Err: x[2] = 2⁵³ exceeds u32");
 }
 
 fn _t_balance_large_entries_do_not_panic() {
@@ -917,7 +923,8 @@ fn _t_cyrius_integer_matrix() {
         k = k + 1;
     }
     assert(good == 1, "70 species: x[k] = 1 + k mod 3");
-    # the gcd-2⁶³ row: [2³¹, 1, 0], [2³¹, −(2³² − 1), 0] → row 1 becomes [0, −2⁶³, 0]
+    # the gcd-2⁶³ row: [2³¹, 1, 0], [2³¹, −(2³² − 1), 0] → row 1 becomes [0, −2⁶³, 0], Rust's overflow; on unbounded
+    # integers (ADR 0002 #39) it reduces to [0, −1, 0] and the null vector [0, 0, 1] has a zero coefficient
     var g[48];
     store64(&g, 2147483648);
     store64(&g + 8, 1);
@@ -925,7 +932,7 @@ fn _t_cyrius_integer_matrix() {
     store64(&g + 24, 2147483648);
     store64(&g + 32, 0 - 4294967295);
     store64(&g + 40, 0);
-    assert(bal_err(&g, 2, 3) == KM_ERR_COMPUTATION_ERROR, "a reduced row of gcd 2⁶³: overflow");
+    assert(bal_err(&g, 2, 3) == KM_ERR_COMPUTATION_ERROR, "a reduced row of gcd 2⁶³: then a zero coefficient");
 }
 
 # The checked i64 helpers and the signed 128-bit sum at their edges.
@@ -1298,6 +1305,277 @@ fn _t_cyrius_adr26_exact_tolerance() {
     assert(u == 1 && v == 0xFFFFFFFF, "2³² − 1");
 }
 
+# ── ADR 0002 #39 (the overflow audit's B7): balancing on unbounded integers ─────────
+
+# The survey's example: Rust's first product 3037000500² passes i64::MAX; x = [1, 1, 1].
+var _m39_survey: i64[6] = { 3037000500, 1, -3037000501, 1, 3037000500, -3037000501 };
+# Rust's first overflow at factor·a (x = [1, 4, 1]), at the difference (x = [715827882, 715827883, 1431655765]) and at
+# the pivot row's negation (row 1 becomes [0, −2⁶³, 2⁶² + 1, 2⁶² − 1] with gcd 1; x = [1, 1, 1, 1]).
+var _m39_factor: i64[6] = { -8589934592, 35184372088832, -140728898420736, 606044021509411, 0, -606044021509411 };
+var _m39_diff: i64[6] = { 4294967295, -4294967295, 3, -4294967295, -4294967295, 4294967295 };
+var _m39_neg: i64[12] = { 2147483648, 0, -1, -2147483647, 1, -4294967296, 2147483648, 2147483647, 1, 1, -1, -1 };
+# Rust's first overflow at the lcm's product (exactly past u32), x's product (past u32) and x's negation (mixed).
+var _m39_lcm: i64[6] = { -2199023255552, 0, 1, 0, 4833496850838509, -1 };
+var _m39_xmul: i64[6] = { -1, 0, 5471770886190343, 1, -8998685947572068, -1 };
+var _m39_xneg: i64[6] = { 3, 1, -4294967295, -3, -2147483648, -2147483648 };
+# x = [1, X, 1] with entries near 2⁵¹ (Rust's pivot·a overflows): X = 2³² − 1 Ok, 2³² past u32; X = 0 a zero
+# coefficient, X = −1 mixed signs.
+var _m39_u32: i64[6] = { 2251799813697593, 524295, -4503629691629618, 2251799813684249, 524285, -4503586741943324 };
+var _m39_u32p: i64[6] = { 2251799813697593, 524295, -4503629692153913, 2251799813684249, 524285, -4503586742467609 };
+var _m39_zero: i64[6] = { 2251799813697593, 524295, -2251799813697593, 2251799813684249, 524285, -2251799813684249 };
+var _m39_mixed: i64[6] = { 2251799813697593, 524295, -2251799813173298, 2251799813684249, 524285, -2251799813159964 };
+# Two independent reactions (ambiguous) and only the trivial solution, after Rust's overflow.
+var _m39_amb: i64[8] = { 4503599627370497, 2251799813685251, -4503599627370497, -2251799813685251, 4503599627370491,
+    1125899906842625, 7, -5629499534213123 };
+var _m39_triv: i64[9] = { 4503599627370497, 2251799813685251, 5, 4503599627370491, 1125899906842625, 7, 3,
+    4503599627370507, 2251799813685247 };
+
+# 1 if balance_equation(mat, m, n) is Ok with the n coefficients at want, both with the i64 fast path and with the
+# multi-word path forced; and the fast path's own outcome in *fast when fast is not 0 (0, 1 or 2: 2 is Rust's
+# overflow).
+#must_use
+fn bal39(mat, m, n, want, fast): i64 {
+    var x: i64[64];
+    var out: i64[64];
+    if (fast != 0) { store64(fast, _km_balance_i64(mat, m, n, &x)); }
+    var t, v = balance_equation(mat, m, n, &out, 64);
+    if (is_ok(t) != 1 || v != n || same_words(&out, want, n) != 1) { return 0; }
+    var tf, vf = _km_balance_equation(mat, m, n, &out, 64, 1);
+    if (is_ok(tf) != 1 || vf != n || same_words(&out, want, n) != 1) { return 0; }
+    return 1;
+}
+
+# The Err code of balance_equation(mat, m, n) if the forced multi-word path gives the same Err, else −1; and the fast
+# path's outcome in *fast.
+#must_use
+fn bal39_err(mat, m, n, fast): i64 {
+    var x: i64[64];
+    var out: i64[64];
+    store64(fast, _km_balance_i64(mat, m, n, &x));
+    var t, v = balance_equation(mat, m, n, &out, 64);
+    var tf, vf = _km_balance_equation(mat, m, n, &out, 64, 1);
+    if (is_err_result(t) != 1 || is_err_result(tf) != 1 || v != vf) { return 0 - 1; }
+    return v;
+}
+
+var _x39_ones: i64[4] = { 1, 1, 1, 1 };
+var _x39_factor: i64[3] = { 1, 4, 1 };
+var _x39_diff: i64[3] = { 715827882, 715827883, 1431655765 };
+var _x39_u32: i64[3] = { 1, 4294967295, 1 };
+
+# ADR 0002 #39: where Rust's checked i64 elimination overflows, the port goes on on unbounded integers and returns the
+# exact algorithm's result — Ok where the null space has a positive u32 vector (the survey's example; the first
+# overflow at each site that can lead to Ok: pivot·a, factor·a, the difference, the pivot row's negation), Rust's other
+# ComputationErrors where it has none (the sites whose overflow implies one: a reduced row's gcd of 2⁶³, the lcm's
+# product, x's product and negation; and after an overflow each of the zero coefficient, mixed signs, u32::MAX against
+# 2³², two reactions, only the trivial solution); Rust's checks first, the cap and a null out after.
+fn _t_cyrius_adr39_unbounded_integers() {
+    test_group("cyrius_adr39_unbounded_integers");
+    var fast = 0;
+    assert(bal39(&_m39_survey, 2, 3, &_x39_ones, &fast) == 1 && fast == 2, "the survey's example: [1, 1, 1]");
+    assert(bal39(&_m39_factor, 2, 3, &_x39_factor, &fast) == 1 && fast == 2, "factor·a overflows: [1, 4, 1]");
+    assert(bal39(&_m39_diff, 2, 3, &_x39_diff, &fast) == 1 && fast == 2, "the difference overflows: Ok");
+    assert(bal39(&_m39_neg, 3, 4, &_x39_ones, &fast) == 1 && fast == 2, "the pivot row's negation: [1, 1, 1, 1]");
+    assert(bal39(&_m39_u32, 2, 3, &_x39_u32, &fast) == 1 && fast == 2, "u32::MAX after an overflow: Ok");
+    var c = KM_ERR_COMPUTATION_ERROR;
+    var g: i64[6];
+    store64(&g, 2147483648);
+    store64(&g + 8, 1);
+    store64(&g + 16, 0);
+    store64(&g + 24, 2147483648);
+    store64(&g + 32, 0 - 4294967295);
+    store64(&g + 40, 0);
+    assert(bal39_err(&g, 2, 3, &fast) == c && fast == 2, "a reduced row of gcd 2⁶³: then a zero coefficient");
+    assert(bal39_err(&_m39_lcm, 2, 3, &fast) == c && fast == 2, "the lcm overflows: then past u32");
+    assert(bal39_err(&_m39_xmul, 2, 3, &fast) == c && fast == 2, "x's product overflows: then past u32");
+    assert(bal39_err(&_m39_xneg, 2, 3, &fast) == c && fast == 2, "x's negation overflows: then mixed signs");
+    assert(bal39_err(&_m39_u32p, 2, 3, &fast) == c && fast == 2, "2³² after an overflow: past u32");
+    assert(bal39_err(&_m39_zero, 2, 3, &fast) == c && fast == 2, "a zero coefficient after an overflow");
+    assert(bal39_err(&_m39_mixed, 2, 3, &fast) == c && fast == 2, "mixed signs after an overflow");
+    assert(bal39_err(&_m39_amb, 2, 4, &fast) == c && fast == 2, "two reactions after an overflow");
+    assert(bal39_err(&_m39_triv, 3, 3, &fast) == c && fast == 2, "only the trivial solution after an overflow");
+    assert(bal39_err(&_m_inter, 2, 3, &fast) == c && fast == 2, "Rust's (2⁵³ − 1)² test: x = [1, 1, 2⁵³], past u32");
+    assert(bal39_err(&_m_large, 3, 4, &fast) == c && fast == 2, "Rust's large-entries test: past u32");
+    # the cap and a null out, checked after the multi-word Ok, with out untouched; Rust's error before the cap
+    var out: i64[4];
+    store64(&out, 77);
+    var t1, v1 = balance_equation(&_m39_survey, 2, 3, &out, 2);
+    assert(is_err_result(t1) == 1 && v1 == KM_ERR_INVALID_INPUT && load64(&out) == 77, "cap 2 < 3: InvalidInput");
+    var t2, v2 = balance_equation(&_m39_survey, 2, 3, 0, 3);
+    assert(is_err_result(t2) == 1 && v2 == KM_ERR_INVALID_INPUT, "null out: InvalidInput");
+    var t3, v3 = balance_equation(&_m39_survey, 2, 3, &out, 3);
+    assert(is_ok(t3) == 1 && v3 == 3 && load64(&out) == 1 && load64(&out + 16) == 1, "cap 3: Ok");
+    var t4, v4 = balance_equation(&_m39_zero, 2, 3, 0, 0);
+    assert(is_err_result(t4) == 1 && v4 == c, "Rust's ComputationError before the cap");
+}
+
+# A dense (n − 1) × n matrix of seeded entries in [−2⁴⁵, 2⁴⁵) (xorshift64, the bench's seed), its last column solved
+# so that x = [1, 2, 3, 1, 2, 3, …, 1] (x[j] = 1 + j mod 3, the last 1): Rust overflows at once, and the exact
+# elimination's intermediates reach thousands of bits.
+fn _t39_dense(buf, n) {
+    var seed = 0x2545F4914F6CDD1D;
+    var i = 0;
+    while (i < n - 1) {
+        var s = 0;
+        var j = 0;
+        while (j < n - 1) {
+            seed = seed ^ (seed << 13);
+            seed = seed ^ (seed >> 7);
+            seed = seed ^ (seed << 17);
+            var e = ((seed >> 11) & 0x3FFFFFFFFFFF) - 0x200000000000;
+            store64(buf + 8 * (i * n + j), e);
+            s = s + e * (1 + j % 3);
+            j = j + 1;
+        }
+        store64(buf + 8 * (i * n + n - 1), 0 - s);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ADR 0002 #39 at size: a 32 × 33 dense matrix with entries near 2⁴⁵ (the exact path's heap tables, about 500 KB),
+# and seeded small matrices on which the i64 fast path never overflows, where the multi-word path forced gives the
+# fast path's result to the coefficient (both Ok and every Err class).
+fn _t_cyrius_adr39_size_and_forced() {
+    test_group("cyrius_adr39_size_and_forced");
+    var n = 33;
+    var mat = alloc(8 * (n - 1) * n);
+    _t39_dense(mat, n);
+    var want: i64[33];
+    var k = 0;
+    while (k < n) {
+        store64(&want + 8 * k, 1 + k % 3);
+        k = k + 1;
+    }
+    store64(&want + 8 * (n - 1), 1);
+    var fast = 0;
+    assert(bal39(mat, n - 1, n, &want, &fast) == 1 && fast == 2, "32 × 33 dense, entries near 2⁴⁵: x[j] = 1 + j mod 3");
+    # seeded: m in 1 … 6, n in 2 … 7, entries in −r … r (r = 1 … 4 or 1000), every other matrix with its last column
+    # solved for x[j] = 1 + j mod 3: the fast path's outcome and the forced path's agree
+    var seed = 0x9E3779B97F4A7C15;
+    var a: i64[64];
+    var o1: i64[8];
+    var o2: i64[8];
+    var same = 1;
+    var oks = 0;
+    var errs = 0;
+    var it = 0;
+    while (it < 600) {
+        seed = seed ^ (seed << 13);
+        seed = seed ^ (seed >> 7);
+        seed = seed ^ (seed << 17);
+        var m = 1 + (seed >> 3) % 6;
+        var nn = 2 + (seed >> 9) % 6;
+        var r = 1 + (seed >> 15) % 4;
+        if ((seed >> 20) % 5 == 0) { r = 1000; }
+        k = 0;
+        while (k < m * nn) {
+            seed = seed ^ (seed << 13);
+            seed = seed ^ (seed >> 7);
+            seed = seed ^ (seed << 17);
+            store64(&a + 8 * k, (seed >> 11) % (2 * r + 1) - r);
+            k = k + 1;
+        }
+        if (it % 2 == 0) {
+            # every other one consistent: each row's last entry solved so that x[j] = 1 + j mod 3 (the last 1) is in
+            # its null space
+            var i2 = 0;
+            while (i2 < m) {
+                var sm = 0;
+                var j2 = 0;
+                while (j2 < nn - 1) {
+                    sm = sm + load64(&a + 8 * (i2 * nn + j2)) * (1 + j2 % 3);
+                    j2 = j2 + 1;
+                }
+                store64(&a + 8 * (i2 * nn + nn - 1), 0 - sm);
+                i2 = i2 + 1;
+            }
+        }
+        var t1, v1 = balance_equation(&a, m, nn, &o1, 8);
+        var t2, v2 = _km_balance_equation(&a, m, nn, &o2, 8, 1);
+        if (is_ok(t1) != is_ok(t2) || v1 != v2) { same = 0; }
+        if (is_ok(t1) == 1) {
+            oks = oks + 1;
+            if (same_words(&o1, &o2, nn) != 1) { same = 0; }
+        } else {
+            errs = errs + 1;
+        }
+        it = it + 1;
+    }
+    assert(same == 1, "600 seeded matrices: the forced multi-word path is the fast path's result");
+    assert(oks > 20 && errs > 20, "both Ok and Err among them");
+}
+
+# ADR 0002 #39's multi-word helpers at their edges: i64::MIN and ±2⁵³ as slots, a difference that cancels, a product's
+# carries, Knuth's division through its add-back step (u = 3 + 2³⁰·2⁶², v = 1 + 2²⁸·2⁶², base 2³¹: q̂ one too large),
+# the gcd of consecutive Fibonacci numbers (Euclid's worst case, every Lehmer step a run of quotients 1) and of
+# multiples of a common factor, and Lehmer's combination of a negative total.
+fn _t_cyrius_adr39_multiword() {
+    test_group("cyrius_adr39_multiword");
+    var s: i64[32];
+    var t: i64[32];
+    var r: i64[32];
+    var u: i64[32];
+    var w: i64[32];
+    var un: i64[32];
+    var vn: i64[32];
+    var x: i64[32];
+    var y: i64[32];
+    var z: i64[32];
+    var mn = 0 - 0x7FFFFFFFFFFFFFFF - 1;
+    _km_sb_set(&s, mn);
+    assert(load64(&s) == 0 - 3 && load64(&s + 8) == 0 && load64(&s + 16) == 0 && load64(&s + 24) == 2, "−2⁶³");
+    _km_sb_set(&t, 9007199254740992);
+    assert(load64(&t) == 2 && load64(&t + 8) == 0 && load64(&t + 16) == 0x400000, "2⁵³: two limbs");
+    _km_sb_sub(&r, &t, &t);
+    assert(load64(&r) == 0, "2⁵³ − 2⁵³ = 0");
+    _km_sb_set(&u, 0 - 9007199254740992);
+    _km_sb_sub(&r, &t, &u);
+    assert(load64(&r) == 2 && load64(&r + 16) == 0x800000, "2⁵³ − (−2⁵³) = 2⁵⁴");
+    _km_sb_mul(&r, &s, &s);
+    assert(load64(&r) == 5 && load64(&r + 40) == 4, "(−2⁶³)² = 2¹²⁶: 4·2¹²⁴");
+    _km_sb_mul(&w, &r, &s);
+    assert(load64(&w) == 0 - 7 && load64(&w + 56) == 8, "(−2⁶³)³ = −2¹⁸⁹: −8·2¹⁸⁶");
+    # Knuth's add-back: u = 3 + 2³⁰·2⁶², v = 1 + 2²⁸·2⁶² → q = 3, r = 2²⁸·2⁶² − 0 … (u − 3v = 2²⁸·2⁶²)
+    store64(&u, 3);
+    store64(&u + 8, 3);
+    store64(&u + 16, 0);
+    store64(&u + 24, 0x40000000);
+    store64(&w, 3);
+    store64(&w + 8, 1);
+    store64(&w + 16, 0);
+    store64(&w + 24, 0x10000000);
+    var lr = _km_sb_divmod(&r + 8, &x + 8, &u + 8, 3, &w + 8, 3, &un, &vn);
+    assert(load64(&r + 8) == 3 && lr == 3 && load64(&x + 8) == 0 && load64(&x + 16) == 0
+        && load64(&x + 24) == 0x10000000, "(3 + 2³⁰·2⁶²) divmod (1 + 2²⁸·2⁶²) = (3, 2²⁸·2⁶²): the add-back step");
+    # gcd(F(301), F(300)) = 1 and gcd(7·F(301), 7·F(300)) = 7, built by the recurrence on slots
+    _km_sb_set(&x, 0);
+    _km_sb_set(&y, 1);
+    var k = 0;
+    while (k < 300) {
+        _km_sb_sub(&z, &y, &x);                 # z = y − x; then (x, y) ← (y, y + x) as y − (−x)
+        store64(&x, 0 - load64(&x));
+        _km_sb_sub(&z, &y, &x);
+        store64(&x, 0 - load64(&x));
+        _km_sb_copy(&x, &y);
+        _km_sb_copy(&y, &z);
+        k = k + 1;
+    }
+    _km_sb_copy(&r, &y);
+    _km_sb_gcd(&r, &x, &s, &t, &u, &w, &un, &vn);
+    assert(load64(&r) == 1 && load64(&r + 8) == 1, "gcd(F(301), F(300)) = 1");
+    _km_sb_set(&z, 7);
+    _km_sb_mul(&r, &y, &z);
+    _km_sb_mul(&t, &x, &z);
+    _km_sb_copy(&y, &t);
+    _km_sb_gcd(&r, &y, &s, &t, &u, &w, &un, &vn);
+    assert(load64(&r) == 1 && load64(&r + 8) == 7, "gcd(7·F(301), 7·F(300)) = 7");
+    # Lehmer's combination of a negative total: |1·1 + (−2)·1| = 1
+    _km_sb_set(&s, 1);
+    _km_sb_lincomb(&r, 1, &s, 0 - 2, &s);
+    assert(load64(&r) == 1 && load64(&r + 8) == 1, "|1 − 2| = 1");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_limiting_reagent_basic();
@@ -1371,6 +1649,9 @@ fn main() {
     _t_cyrius_adr24_rounded_once();
     _t_cyrius_adr25_exact_comparison();
     _t_cyrius_adr26_exact_tolerance();
+    _t_cyrius_adr39_unbounded_integers();
+    _t_cyrius_adr39_size_and_forced();
+    _t_cyrius_adr39_multiword();
     return assert_summary();
 }
 

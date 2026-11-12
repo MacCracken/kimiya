@@ -974,3 +974,187 @@ pub fn peak_above(w: f64, lo: f64, hi: f64, t: f64) -> bool {
     }
     pos.cmp(&neg) == std::cmp::Ordering::Greater
 }
+
+// ── The overflow audit's B7 (ADR 0002 #39): signed integers of any size, for balance_equation's exact replica ──────────
+
+impl Big {
+    /// (⌊self / d⌋, self mod d) for d > 0 by Knuth's Algorithm D in base 2⁶⁴ (u128 intermediates): [`Big::divrem`]'s
+    /// binary long division is too slow for the thousand-bit operands of ADR 0002 #39's replica.
+    fn divrem_d(&self, d: &Self) -> (Self, Self) {
+        assert!(!d.is_zero(), "Big::divrem_d by zero");
+        if self.cmp(d) == std::cmp::Ordering::Less {
+            return (Self(Vec::new()), self.clone());
+        }
+        let n = d.0.len();
+        if n == 1 {
+            let dv = u128::from(d.0[0]);
+            let mut q = vec![0_u64; self.0.len()];
+            let mut r = 0_u128;
+            for k in (0..self.0.len()).rev() {
+                let cur = (r << 64) | u128::from(self.0[k]);
+                #[allow(clippy::cast_possible_truncation)] // cur / dv < 2⁶⁴: r < dv
+                let qd = (cur / dv) as u64;
+                q[k] = qd;
+                r = cur % dv;
+            }
+            return (Self(q).norm(), Self::new(r));
+        }
+        let s = d.0[n - 1].leading_zeros();
+        let vn = d.shl(u64::from(s)).0;
+        let mut un = self.shl(u64::from(s)).0;
+        un.resize(self.0.len() + 1, 0);
+        let m = self.0.len() - n;
+        let mut q = vec![0_u64; m + 1];
+        let b = 1_u128 << 64;
+        for j in (0..=m).rev() {
+            let num = (u128::from(un[j + n]) << 64) | u128::from(un[j + n - 1]);
+            let mut qh = num / u128::from(vn[n - 1]);
+            let mut rh = num % u128::from(vn[n - 1]);
+            while qh >= b || qh * u128::from(vn[n - 2]) > ((rh << 64) | u128::from(un[j + n - 2])) {
+                qh -= 1;
+                rh += u128::from(vn[n - 1]);
+                if rh >= b {
+                    break;
+                }
+            }
+            // un[j ..= j + n] −= q̂·vn, with the borrow as a signed accumulator
+            let mut borrow = 0_i128;
+            let mut carry = 0_u128;
+            for i in 0..n {
+                let p = qh * u128::from(vn[i]) + carry;
+                carry = p >> 64;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                let t = i128::from(un[i + j]) - i128::from(p as u64) + borrow;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let lo = t as u64;
+                un[i + j] = lo;
+                borrow = t >> 64;
+            }
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            let t = i128::from(un[j + n]) - (carry as i128) + borrow;
+            if t < 0 {
+                // q̂ one too large: add vn back
+                qh -= 1;
+                let mut c = 0_u128;
+                for i in 0..n {
+                    let sm = u128::from(un[i + j]) + u128::from(vn[i]) + c;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let lo = sm as u64;
+                    un[i + j] = lo;
+                    c = sm >> 64;
+                }
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let top = (t + i128::from(c != 0)) as u64;
+                un[j + n] = top;
+            } else {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let top = t as u64;
+                un[j + n] = top;
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let qd = qh as u64;
+            q[j] = qd;
+        }
+        un.truncate(n);
+        (Self(q).norm(), Self(un).norm().shr(u64::from(s)))
+    }
+
+    /// gcd(self, o) by Euclid's algorithm on [`Big::divrem_d`]; gcd(x, 0) = x.
+    fn gcd(&self, o: &Self) -> Self {
+        let (mut a, mut b) = (self.clone(), o.clone());
+        while !b.is_zero() {
+            let (_, r) = a.divrem_d(&b);
+            a = b;
+            b = r;
+        }
+        a
+    }
+}
+
+/// A signed integer of any size: a sign and a magnitude (zero is non-negative). ADR 0002 #39's replica of the port's
+/// multi-word balance_equation (`audit::port_balance`): only what Rust's elimination needs. Integer arithmetic only,
+/// independent of the port's 31-bit limbs and Lehmer gcd (`validate.py` checks every result again with Python ints).
+#[derive(Clone)]
+pub struct Int {
+    neg: bool,
+    mag: Big,
+}
+
+impl Int {
+    pub fn from_i64(v: i64) -> Self {
+        Self { neg: v < 0, mag: Big::new(u128::from(v.unsigned_abs())) }
+    }
+
+    fn of(neg: bool, mag: Big) -> Self {
+        let neg = neg && !mag.is_zero();
+        Self { neg, mag }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.mag.is_zero()
+    }
+
+    pub fn is_negative(&self) -> bool {
+        self.neg
+    }
+
+    pub fn is_positive(&self) -> bool {
+        !self.neg && !self.mag.is_zero()
+    }
+
+    #[must_use]
+    pub fn neg(&self) -> Self {
+        Self::of(!self.neg, self.mag.clone())
+    }
+
+    #[must_use]
+    pub fn mul(&self, o: &Self) -> Self {
+        Self::of(self.neg != o.neg, self.mag.mul(&o.mag))
+    }
+
+    #[must_use]
+    pub fn sub(&self, o: &Self) -> Self {
+        use std::cmp::Ordering::Less;
+        if self.neg != o.neg {
+            return Self::of(self.neg, self.mag.add(&o.mag)); // a − b = sign(a)·(|a| + |b|)
+        }
+        if self.mag.cmp(&o.mag) == Less {
+            Self::of(!self.neg, o.mag.sub(&self.mag))
+        } else {
+            Self::of(self.neg, self.mag.sub(&o.mag))
+        }
+    }
+
+    /// gcd(|self|, |o|), non-negative.
+    #[must_use]
+    pub fn gcd(&self, o: &Self) -> Self {
+        Self::of(false, self.mag.gcd(&o.mag))
+    }
+
+    /// self / d for a d ≠ 0 that divides self (asserted): Rust's truncating `/`, exact here.
+    #[must_use]
+    pub fn div_exact(&self, d: &Self) -> Self {
+        let (q, r) = self.mag.divrem_d(&d.mag);
+        assert!(r.is_zero(), "Int::div_exact: not a divisor");
+        Self::of(self.neg != d.neg, q)
+    }
+
+    /// Whether this is 1 exactly.
+    pub fn is_one(&self) -> bool {
+        !self.neg && self.mag.bits() == 1
+    }
+
+    /// Whether this lies in i64's range.
+    pub fn fits_i64(&self) -> bool {
+        let b = self.mag.bits();
+        b <= 63 || (self.neg && b == 64 && self.mag.0.len() == 1 && self.mag.0[0] == 1 << 63)
+    }
+
+    /// The value as a u32, if it is one (0 ..= u32::MAX).
+    pub fn to_u32(&self) -> Option<u32> {
+        if self.neg || self.mag.bits() > 32 {
+            return None;
+        }
+        u32::try_from(self.mag.0.first().copied().unwrap_or(0)).ok()
+    }
+}

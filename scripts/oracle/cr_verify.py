@@ -126,6 +126,11 @@ candidate through the exact predicate; reference Fraction; 380,000 arrays with n
 ends), flame (adiabatic_flame_temperature and its transcribed bisection with the exact sign tests, 14,010 arguments
 at tiny scales, endothermic and subnormal ΔH; reference Rust's solver in Python on the generated SHOMATE table) and
 signsc (src/mathx.cyr's _km_sign_scaled, 140,110 sums against Fraction).
+The overflow audit's B7 (ADR 0002 #39) adds bal23, bal34, bal56, bal89, bal1213 and bal2425 (balance_equation of 2 × 3,
+3 × 4, 5 × 6, 8 × 9, 12 × 13 and 24 × 25 integer matrices, n + 1 words a result: the public result, the i64 fast path's
+own outcome and the multi-word path forced; reference Rust's algorithm on Python ints with a tracer of its checked i64
+operations, which the fast path's overflow report must match; 54,306 matrices over known x with large and small
+entries, x with a zero, negative or u32-edge entry, random small and large entries, ±2^53 entries and dependent rows).
 Through each function's _km_cr_<f>_fast entry it reports the fast path's fallback rate per region, and
 checks the fast path's result equals the function's wherever its test passes. It checks that the three
 targets give identical bits and flags.
@@ -143,7 +148,9 @@ Usage, from the repo root:
                                                            # conc vib rotor rot moment wsqrt igp igv dens
                                                            # vdw prp rkp lj width coul force lande bea
                                                            # hess eff rsum qv ionic haber gibbs kohl lim zoc
-                                                           # shcp shh keq dhl dhe dav)
+                                                           # shcp shh keq dhl dhe dav flame pk3 pk5 pk8
+                                                           # pk16 signsc fft1 … fft256 bal23 bal34 bal56
+                                                           # bal89 bal1213 bal2425)
     python3 -I scripts/oracle/cr_verify.py --work DIR      # probe sources and binaries in DIR
                                                            # (default build/cr-verify, gitignored)
 Exit status 1 on any mismatch or cross-target difference, 2 on a build or run failure.
@@ -3738,10 +3745,11 @@ def args_fft6(rng, n, count):
 
 
 def run_probe_vec(work, target, fid, mode, args, vw):
-    """(slot 0 word lists, slot 1 word lists, flags) for the FFT families' arguments."""
+    """(slot 0 word lists, slot 1 word lists, flags) for the FFT families' arguments (floats) and the balancing
+    families' (integer words)."""
     _, out, runner = TARGETS[target]
     n = len(args)
-    flat = [bits(v) for a in args for v in a]
+    flat = [v & 0xFFFFFFFFFFFFFFFF if isinstance(v, int) else bits(v) for a in args for v in a]
     (work / "job.bin").write_bytes(struct.pack(f"<3Q{len(flat)}Q", fid, mode, n, *flat))
     res = work / "res.bin"
     for attempt in range(2):
@@ -3809,6 +3817,211 @@ def fft6_checks(work, targets, which):
                     rates.append(f"{tag} {sum(1 for f in fl[i:i + len(sec)] if f != 1)}/{len(sec)}")
                     i += len(sec)
                 print("         fallbacks by region: " + "; ".join(rates))
+        print(f"       [{time.time() - t0:.0f} s]")
+    return failed
+
+
+# ── The overflow audit's B7 (ADR 0002 #39): balance_equation on unbounded integers ─────────────────────────────────
+# Ids 101 … 106: balance_equation of m × n integer matrices (the m·n entries as words), n + 1 words a slot: the status
+# (n for Ok, 2⁶³ | the Err code) and the n coefficients (0 where Err). Mode 0: the public result (slot 0), the i64 fast
+# path's own outcome (_km_balance_i64: slot 1 its code 0, 1 or 2, then its coefficients where 0) and the flag 1 when it
+# did not overflow (code 0 or 1); mode 1 the multi-word path forced (_km_balance_equation with force) in both slots.
+# Reference: Rust's algorithm on Python ints (ref_bal7, exact) with a tracer of Rust's checked i64 operations, so the
+# fast path must report an overflow exactly where Rust's arithmetic overflows, and every result must be the exact one.
+BAL7 = [(101, "bal23", 2, 3, 3000), (102, "bal34", 3, 4, 2500), (103, "bal56", 5, 6, 1500), (104, "bal89", 8, 9, 600),
+        (105, "bal1213", 12, 13, 150), (106, "bal2425", 24, 25, 8)]
+for _fid, _nm, _m7, _n7, _c7 in BAL7:
+    ARITY[_fid] = _m7 * _n7
+BAL7_ERR = {"InvalidInput": 5, "ComputationError": 6}
+
+
+def ref_bal7(a, m, n):
+    """(the expected n + 1 words of balance_equation, whether Rust's checked i64 arithmetic overflows): Rust 1.2.0's
+    algorithm on Python ints, every value Rust forms with a checked operation tested against i64 until it returns."""
+    lo, hi = -2 ** 63, 2 ** 63 - 1
+    ovf = [False]
+
+    def c(v):
+        if not lo <= v <= hi:
+            ovf[0] = True
+        return v
+
+    def tdiv(p, q):
+        r = abs(p) // abs(q)
+        return r if (p >= 0) == (q > 0) else -r
+
+    def red(row):
+        g = 0
+        for v in row:
+            g = math.gcd(g, abs(v))
+        if g > 1:
+            c(g)
+            return [tdiv(v, g) for v in row]
+        return row
+
+    def err(name):
+        return [(1 << 63) | BAL7_ERR[name]] + [0] * n, ovf[0]
+    if m < 1 or n < 2 or any(abs(v) > 2 ** 53 for v in a):
+        return err("InvalidInput")
+    A = [list(a[i * n:(i + 1) * n]) for i in range(m)]
+    rank, free = 0, None
+    for col in range(n):
+        p = next((r for r in range(rank, m) if A[r][col] != 0), None)
+        if p is None:
+            if free is not None:
+                return err("ComputationError")
+            free = col
+            continue
+        A[p], A[rank] = A[rank], A[p]
+        A[rank] = red(A[rank])
+        if A[rank][col] < 0:
+            A[rank] = [c(-v) for v in A[rank]]
+        piv = A[rank][col]
+        for r in range(m):
+            fac = A[r][col]
+            if r == rank or fac == 0:
+                continue
+            A[r] = red([c(c(piv * A[r][j]) - c(fac * A[rank][j])) for j in range(n)])
+        rank += 1
+    if free is None:
+        return err("ComputationError")
+    lcm = 1
+    for k in range(rank):
+        pv = next(v for v in A[k] if v != 0)
+        g = c(math.gcd(abs(lcm), abs(pv)))
+        lcm = c(tdiv(lcm, g) * pv)
+    x = [0] * n
+    x[free] = lcm
+    for k in range(rank):
+        cc = next(j for j, v in enumerate(A[k]) if v != 0)
+        x[cc] = c(-c(A[k][free] * tdiv(lcm, A[k][cc])))
+    x = red(x)
+    if 0 in x:
+        return err("ComputationError")
+    pos = sum(1 for v in x if v > 0)
+    if pos == 0:
+        x = [c(-v) for v in x]
+    elif pos != n:
+        return err("ComputationError")
+    if any(v < 0 or v > 2 ** 32 - 1 for v in x):
+        return err("ComputationError")
+    for i in range(m):
+        if sum(a[i * n + j] * x[j] for j in range(n)) != 0:
+            return err("ComputationError")
+    return [n] + x, ovf[0]
+
+
+def _bal7_solved(rng, x, rows, shrink=0, zp=0):
+    """rows rows orthogonal to x (x's last entry 1): each entry but the last uniform in ±⌊2⁵³/((n − 1)·|xⱼ|)⌋ >> shrink,
+    zero with probability zp, the last solved (|last| ≤ 2⁵³)."""
+    n = len(x)
+    out = []
+    for _ in range(rows):
+        row, s_ = [], 0
+        for xj in x[:-1]:
+            mag = max(((2 ** 53) // ((n - 1) * abs(xj)) if xj else (2 ** 53) // n) >> shrink, 1)
+            e = 0 if rng.random() < zp else rng.randint(-mag, mag)
+            row.append(e)
+            s_ += e * xj
+        row.append(-s_)
+        out += row
+    return out
+
+
+def args_bal7(rng, m, n, count):
+    """Regions of m × n matrices: orthogonal to a known x with large entries (Rust overflows; Ok exactly) and with small
+    ones (the fast path); x with an entry 0, negative, 2³² − 1 or 2³² (after the overflow); random small and random
+    large entries (mostly ambiguous or trivial); ±2⁵³ entries; dependent rows (a duplicate, a sum, a zero row)."""
+    c = count
+
+    def xs_(hi):
+        return [rng.randint(1, hi) for _ in range(n - 1)] + [1]
+
+    def fit(rows_flat):
+        rows_ = [rows_flat[i * n:(i + 1) * n] for i in range(len(rows_flat) // n)]
+        rows_ = (rows_ + [[0] * n] * m)[:m]
+        return tuple(v for r in rows_ for v in r)
+    big = [fit(_bal7_solved(rng, xs_(rng.choice((3, 1000, 2 ** 20, 2 ** 31 - 1))), n - 1 if m >= n - 1 else m,
+                            rng.randint(0, 12), rng.choice((0.0, 0.0, 0.2, 0.4)))) for _ in range(c)]
+    small = [fit(_bal7_solved(rng, xs_(rng.choice((3, 50))), min(m, n - 1), 40)) for _ in range(c)]
+    special = []
+    for _ in range(c):
+        x = xs_(50)
+        x[rng.randint(0, n - 2)] = rng.choice((0, -1, -1000, 2 ** 32 - 1, 2 ** 32, 2 ** 32 + 1))
+        special.append(fit(_bal7_solved(rng, x, min(m, n - 1))))
+    rsmall = [tuple(rng.randint(-r, r) for _ in range(m * n)) for r in (rng.choice((1, 3, 1000)) for _ in range(c))]
+    rbig = [tuple(rng.randint(-2 ** b, 2 ** b) for _ in range(m * n)) for b in (rng.randint(30, 53) for _ in range(c))]
+    e53 = []
+    for _ in range(c):
+        t = []
+        for _ in range(min(m, n - 1)):
+            while True:
+                row = [rng.choice((2 ** 53, -2 ** 53, 2 ** 53 - rng.randint(1, 9), rng.randint(1, 9) - 2 ** 53,
+                                   rng.randint(-9, 9))) for _ in range(n - 1)]
+                if abs(sum(row)) <= 2 ** 53:
+                    t += row + [-sum(row)]
+                    break
+        e53.append(fit(t))
+    dep = []
+    for _ in range(c):
+        base = _bal7_solved(rng, xs_(100), max(min(m, n - 1) - 1, 1), 1)
+        rows_ = [base[i * n:(i + 1) * n] for i in range(len(base) // n)]
+        extra = rng.choice((rows_[0], [-v for v in rows_[-1]], [0] * n,
+                            [a + b for a, b in zip(rows_[0], rows_[-1])]))
+        if any(abs(v) > 2 ** 53 for v in extra):
+            extra = rows_[0]
+        rows_.insert(rng.randint(0, len(rows_)), extra)
+        dep.append(fit([v for r in rows_ for v in r]))
+    return [("known x, large entries", big), ("known x, small entries", small), ("x with 0, < 0, 2^32 - 1, 2^32", special),
+            ("random small", rsmall), ("random large", rbig), ("+-2^53 entries", e53), ("dependent rows", dep)]
+
+
+def bal7_checks(work, targets, which):
+    """Ids 101 … 106 against the exact algorithm on every target, the multi-word path forced; True if anything
+    failed."""
+    failed = False
+    for fid, name, m, n, count in BAL7:
+        if name not in which:
+            continue
+        t0 = time.time()
+        rng = random.Random(1039 + fid)
+        sections = args_bal7(rng, m, n, count)
+        xs = [x for _, sec in sections for x in sec]
+        ref = [ref_bal7(list(a), m, n) for a in xs]
+        want = [w for w, _ in ref]
+        vw = n + 1
+        first = None
+        for t in targets:
+            g0, g1, fl = run_probe_vec(work, t, fid, 0, xs, vw)
+            a0, _, _ = run_probe_vec(work, t, fid, 1, xs, vw)
+            bad = [i for i in range(len(xs)) if g0[i] != want[i]]
+            bad_acc = [i for i in range(len(xs)) if a0[i] != want[i]]
+            # the fast path: an overflow exactly where Rust's arithmetic overflows; elsewhere the exact outcome
+            bad_fast = [i for i in range(len(xs)) if fl[i] != (0 if ref[i][1] else 1)
+                        or (fl[i] == 1 and (g1[i][0] == 0) != (want[i][0] == n))
+                        or (fl[i] == 1 and g1[i][0] == 0 and g1[i][1:] != want[i][1:])]
+            for i in bad[:3]:
+                print(f"  MISMATCH {name}{xs[i]!r} on {t}: got {g0[i]}, want {want[i]}")
+            for i in bad_acc[:3]:
+                print(f"  MISMATCH {name} (multi-word path forced){xs[i]!r} on {t}: got {a0[i]}, want {want[i]}")
+            for i in bad_fast[:3]:
+                print(f"  FAST PATH {name}{xs[i]!r} on {t}: code {g1[i][0]}, flag {fl[i]}, Rust overflows {ref[i][1]}")
+            cur = (g0, g1, list(fl), a0)
+            xdiff = 0 if first is None else sum(1 for u, v in zip(cur, first) for p, q in zip(u, v) if p != q)
+            if first is None:
+                first = cur
+            slow = len(xs) - sum(1 for f in fl if f == 1)
+            oks = sum(1 for w in want if w[0] == n)
+            print(f"{name:7} {t:8} {len(xs):9,} matrices ({oks:,} Ok): {len(bad)} mismatches; multi-word path forced: "
+                  f"{len(bad_acc)} mismatches; fast path: {len(bad_fast)} differ, Rust overflows on {slow:,}; words or "
+                  f"flags differing from {targets[0]}: {xdiff}")
+            failed |= bool(bad or bad_acc or bad_fast or xdiff)
+            if t == targets[0]:
+                rates, i = [], 0
+                for tag, sec in sections:
+                    rates.append(f"{tag} {sum(1 for f in fl[i:i + len(sec)] if f != 1)}/{len(sec)}")
+                    i += len(sec)
+                print("         Rust overflows by region: " + "; ".join(rates))
         print(f"       [{time.time() - t0:.0f} s]")
     return failed
 
@@ -3983,6 +4196,17 @@ include "src/nuclear.cyr"
 include "src/spectroscopy_data.cyr"
 include "src/spectroscopy.cyr"
 
+# The overflow audit's B7 (ADR 0002 #39): the (m, n) of ids 101 … 106 (cr_verify.py's BAL7).
+#must_use
+fn bal7_dims(fid): (i64, i64) {
+    if (fid == 101) { return (2, 3); }
+    if (fid == 102) { return (3, 4); }
+    if (fid == 103) { return (5, 6); }
+    if (fid == 104) { return (8, 9); }
+    if (fid == 105) { return (12, 13); }
+    return (24, 25);
+}
+
 # The argument words of function fid.
 #must_use
 fn arity(fid): i64 {
@@ -4030,6 +4254,10 @@ fn arity(fid): i64 {
     if (fid >= 92 && fid <= 98) { return 1 << (fid - 92); }
     if (fid == 99) { return 256; }
     if (fid == 100) { return 17; }
+    if (fid >= 101 && fid <= 106) {
+        var m7, n7 = bal7_dims(fid);
+        return m7 * n7;
+    }
     return 1;
 }
 
@@ -5165,6 +5393,48 @@ fn run_fft6(fid, mode, a, o0, o1): i64 {
     return f;
 }
 
+# The overflow audit's B7 (ADR 0002 #39): ids 101 … 106, balance_equation of an m × n integer matrix (bal7_dims), n + 1
+# words a slot: the status (n for Ok, 2⁶³ | the Err code) and the n coefficients (0 where Err). Mode 0: the public
+# result (o0), the i64 fast path's outcome (_km_balance_i64: its code 0, 1 or 2, then its coefficients where 0; o1) and
+# the flag 1 when it did not overflow; mode 1 the multi-word path forced (_km_balance_equation with force) in both.
+#must_use
+fn run_bal7(fid, mode, a, o0, o1): i64 {
+    var m, n = bal7_dims(fid);
+    var k = 0;
+    while (k <= n) {
+        store64(o0 + 8 * k, 0);
+        store64(o1 + 8 * k, 0);
+        k = k + 1;
+    }
+    var force = 0;
+    if (mode == 1) { force = 1; }
+    var t, v = _km_balance_equation(a, m, n, o0 + 8, n, force);
+    if (is_ok(t) == 1) {
+        store64(o0, v);
+    } else {
+        store64(o0, (1 << 63) | v);
+    }
+    if (mode == 1) {
+        k = 0;
+        while (k <= n) {
+            store64(o1 + 8 * k, load64(o0 + 8 * k));
+            k = k + 1;
+        }
+        return 0;
+    }
+    var f = _km_balance_i64(a, m, n, o1 + 8);
+    store64(o1, f);
+    if (f != 0) {
+        k = 1;
+        while (k <= n) {
+            store64(o1 + 8 * k, 0);
+            k = k + 1;
+        }
+    }
+    if (f == 2) { return 0; }
+    return 1;
+}
+
 # The overflow audit's B1 (ADR 0002 #27, #28): ids 33 … 44 as result words (cr_verify.py's AUDIT): mode 0 the public
 # function (an Err as the NaN word 0x7FF8000000000001), the fast path's result at the function's factors and its flag
 # (the monomial's _km_cr_mono_fast; for second_order_concentration and michaelis_menten their Rust-chain fast path);
@@ -5446,14 +5716,23 @@ fn main(): i64 {
     var n = load64(buf + 16);
     var ar = arity(fid);
     if (got != 8 * (3 + ar * n)) { return 3; }
-    if (fid >= 92 && fid <= 99) {
-        # the FFT families: n/2 + 1 words per slot and argument, then the flag bytes
+    if ((fid >= 92 && fid <= 99) || (fid >= 101 && fid <= 106)) {
+        # the FFT families: n/2 + 1 words per slot and argument, then the flag bytes; the balancing families n7 + 1
         var vw = ar / 2 + 1;
+        if (fid >= 101) {
+            var m7, n7 = bal7_dims(fid);
+            vw = n7 + 1;
+        }
         var outv = alloc(16 * vw * n + n + 8);
         var iv = 0;
         while (iv < n) {
             var av = buf + 24 + 8 * ar * iv;
-            var fv = run_fft6(fid, mode, av, outv + 8 * vw * iv, outv + 8 * vw * n + 8 * vw * iv);
+            var fv = 0;
+            if (fid >= 101) {
+                fv = run_bal7(fid, mode, av, outv + 8 * vw * iv, outv + 8 * vw * n + 8 * vw * iv);
+            } else {
+                fv = run_fft6(fid, mode, av, outv + 8 * vw * iv, outv + 8 * vw * n + 8 * vw * iv);
+            }
             store8(outv + 16 * vw * n + iv, fv);
             iv = iv + 1;
         }
@@ -5656,9 +5935,10 @@ def main():
     stoich = [name for _, name in STOICH if only is None or name in only]
     audit = [name for _, name in AUDIT if only is None or name in only]
     fft6 = [name for _, name, _, _ in FFT6 if only is None or name in only]
+    bal7 = [name for _, name, _, _, _ in BAL7 if only is None or name in only]
     plan = {}
     wmax = 7 * 600_000 if stoich else 0
-    if audit or fft6:
+    if audit or fft6 or bal7:
         wmax = max(wmax, 12 * 450_000)
     for fid, name, _, _, ref in funcs:
         xs, acc, spans = gen_args(name, lim)
@@ -5789,6 +6069,7 @@ def main():
     failed |= audit_checks(work, targets, audit)
     failed |= flame6_bisection_check(work, targets, audit)
     failed |= fft6_checks(work, targets, fft6)
+    failed |= bal7_checks(work, targets, bal7)
     print("cr_verify: " + ("FAILED" if failed else "all results correctly rounded, identical on every target"))
     sys.exit(1 if failed else 0)
 

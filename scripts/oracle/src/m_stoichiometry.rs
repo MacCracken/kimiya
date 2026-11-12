@@ -35,6 +35,7 @@
 
 use std::hint::black_box as bb;
 
+use crate::audit;
 use crate::exact::{cr_mul_div, empirical_exact, ratio_lt};
 use crate::grids::{Rng, pow2, specials};
 use crate::m_reaction::{edges, res};
@@ -82,13 +83,15 @@ pub fn no_counterpart(mat: &[Vec<f64>]) -> Option<&'static str> {
     None
 }
 
+fn coeff_toks(x: &[u32]) -> Vec<Tok> {
+    let mut v = vec![Tok::V(x.len())];
+    v.extend(x.iter().map(|&k| i(k)));
+    v
+}
+
 fn balance(m: &mut Module, mat: &[Vec<f64>]) {
     let outs = match balance_equation(bb(mat)) {
-        Ok(x) => {
-            let mut v = vec![Tok::V(x.len())];
-            v.extend(x.iter().map(|&k| i(k)));
-            v
-        }
+        Ok(x) => coeff_toks(&x),
         Err(e_) => vec![err(&e_)],
     };
     let ins = matrix_toks(mat);
@@ -102,9 +105,27 @@ fn balance(m: &mut Module, mat: &[Vec<f64>]) {
              Rust's Err(InvalidInput) is this input's result"
         );
         m.row_noted("stoichiometry::balance_equation", Class::A, &ins, &outs, &note);
-    } else {
-        m.row("stoichiometry::balance_equation", Class::A, &ins, &outs);
+        return;
     }
+    // ADR 0002 #39 (the overflow audit's B7): the port's result, Rust's algorithm on unbounded integers, noted where it
+    // differs from Rust's — only where Rust's checked i64 arithmetic overflowed (its ComputationError), asserted
+    #[allow(clippy::cast_possible_truncation)] // every entry is an integer below 2⁶³ in magnitude (no_counterpart)
+    let ints: Vec<i64> = mat.iter().flatten().map(|v| v.round() as i64).collect();
+    let (port, ovf) = audit::port_balance(&ints, mat.len(), mat.first().map_or(0, Vec::len));
+    let pt = match &port {
+        Ok(x) => coeff_toks(x),
+        Err(e_) => vec![Tok::Err((*e_).to_string())],
+    };
+    if same_toks(&pt, &outs) {
+        m.row("stoichiometry::balance_equation", Class::A, &ins, &outs);
+        return;
+    }
+    assert!(
+        ovf && matches!(&outs[..], [Tok::Err(v)] if v == "ComputationError"),
+        "ADR 0002 #39: the port's balance differs from Rust's where Rust did not overflow: {mat:?}"
+    );
+    let note = format!("ADR 0002 #39: the port returns {} = {}", audit::BALANCE_HOW, tokens_note(&pt));
+    m.row_noted("stoichiometry::balance_equation", Class::A, &ins, &outs, &note);
 }
 
 fn mat(rows: &[&[f64]]) -> Vec<Vec<f64>> {
@@ -1538,6 +1559,225 @@ fn emit_exact(m: &mut Module) {
     }
 }
 
+/// A matrix of `rows` rows orthogonal to x (ADR 0002 #39's edge rows): in each row every entry but the last uniform in
+/// ±⌊2⁵³/((n − 1)·|xⱼ|)⌋ / 2^shrink (±2⁵³/n where xⱼ = 0), zero with probability `zp` percent, and the last solved,
+/// −Σ eⱼ·xⱼ (x's last entry is 1), so |last| ≤ 2⁵³: the columns of small xⱼ get large entries, and Rust's products
+/// overflow.
+fn solved(rng: &mut Rng, x: &[i64], rows: usize, shrink: u32, zp: i64) -> Vec<Vec<f64>> {
+    let n = x.len();
+    assert!(n >= 2 && x[n - 1] == 1, "solved: x must end in 1");
+    let lim = 1_i64 << 53;
+    let k = i64::try_from(n - 1).unwrap_or(1);
+    (0..rows)
+        .map(|_| {
+            let mut row = Vec::with_capacity(n);
+            let mut s = 0_i128;
+            for &xj in &x[..n - 1] {
+                let mag = (if xj == 0 { lim / (k + 1) } else { lim / (k * xj.abs()) }) >> shrink;
+                let e = if rng.int(0, 99) < zp { 0 } else { rng.int(-mag.max(1), mag.max(1)) };
+                s += i128::from(e) * i128::from(xj);
+                #[allow(clippy::cast_precision_loss)] // |e| ≤ 2⁵³: exact
+                row.push(e as f64);
+            }
+            let last = i64::try_from(-s).unwrap_or(0);
+            assert!(last.abs() <= lim, "solved: the last entry passes 2⁵³");
+            #[allow(clippy::cast_precision_loss)] // |last| ≤ 2⁵³: exact
+            row.push(last as f64);
+            row
+        })
+        .collect()
+}
+
+/// A random m × n matrix with entries uniform in ±2^bits (ADR 0002 #39's ambiguous and trivial edge rows).
+fn random_big(rng: &mut Rng, m: usize, n: usize, bits: u32) -> Vec<Vec<f64>> {
+    let mag = 1_i64 << bits;
+    #[allow(clippy::cast_precision_loss)] // |entry| ≤ 2⁵³: exact
+    (0..m).map(|_| (0..n).map(|_| rng.int(-mag, mag) as f64).collect()).collect()
+}
+
+/// The overflow audit's B7 (ADR 0002 #39), appended with their own seed so the rows before keep theirs: balancing rows
+/// where Rust's checked i64 elimination overflows — the survey's example; Rust's first overflow at each site it can
+/// happen (pivot·a, factor·a, the difference, the pivot row's negation, a reduced row's gcd of 2⁶³, the lcm's product,
+/// x's product and its negation); matrices orthogonal to a known x (its last entry 1, the last column solved, large
+/// entries in the other columns) of 3 … 12 species, Ok on unbounded integers; the same with an entry of x 0, negative,
+/// 2³² − 1 (Ok), 2³² and 2³² + 1 (past u32), two reactions (ambiguous) and only the trivial solution, after the
+/// overflow; dependent, duplicate, negated and zero rows; ±2⁵³ entries; and large sizes, dense and sparse, 16 … 40
+/// species (the exact elimination's intermediates thousands of bits).
+#[allow(clippy::too_many_lines)] // one family after another
+fn emit_balance_b7(m: &mut Module) {
+    let mut rng = Rng::new(0x3907);
+    let e53 = pow2(53);
+    let fixed: Vec<Vec<Vec<f64>>> = vec![
+        // the survey's example, x = [1, 1, 1]
+        mat(&[&[3_037_000_500.0, 1.0, -3_037_000_501.0], &[1.0, 3_037_000_500.0, -3_037_000_501.0]]),
+        // Rust's first overflow at factor·a, the difference, the pivot row's negation (all Ok exactly)
+        mat(&[&[-8_589_934_592.0, 35_184_372_088_832.0, -140_728_898_420_736.0], &[
+            606_044_021_509_411.0,
+            0.0,
+            -606_044_021_509_411.0,
+        ]]),
+        mat(&[&[4_294_967_295.0, -4_294_967_295.0, 3.0], &[-4_294_967_295.0, -4_294_967_295.0, 4_294_967_295.0]]),
+        mat(&[
+            &[2_147_483_648.0, 0.0, -1.0, -2_147_483_647.0],
+            &[1.0, -4_294_967_296.0, 2_147_483_648.0, 2_147_483_647.0],
+            &[1.0, 1.0, -1.0, -1.0],
+        ]),
+        // a reduced row's gcd of 2⁶³ (then a zero coefficient), the lcm's product and x's product (then past u32),
+        // x's negation (then mixed signs)
+        mat(&[&[2_147_483_648.0, 1.0, 3.0], &[2_147_483_648.0, -4_294_967_295.0, 3.0]]),
+        mat(&[&[-2_199_023_255_552.0, 0.0, 1.0], &[0.0, 4_833_496_850_838_509.0, -1.0]]),
+        mat(&[&[-1.0, 0.0, 5_471_770_886_190_343.0], &[1.0, -8_998_685_947_572_068.0, -1.0]]),
+        mat(&[&[3.0, 1.0, -4_294_967_295.0], &[-3.0, -2_147_483_648.0, -2_147_483_648.0]]),
+        // x = [1, X, 1] with entries near 2⁵¹: X = 2³² − 1, 2³², 0, −1
+        mat(&[&[2_251_799_813_697_593.0, 524_295.0, -4_503_629_691_629_618.0], &[
+            2_251_799_813_684_249.0,
+            524_285.0,
+            -4_503_586_741_943_324.0,
+        ]]),
+        mat(&[&[2_251_799_813_697_593.0, 524_295.0, -4_503_629_692_153_913.0], &[
+            2_251_799_813_684_249.0,
+            524_285.0,
+            -4_503_586_742_467_609.0,
+        ]]),
+        mat(&[&[2_251_799_813_697_593.0, 524_295.0, -2_251_799_813_697_593.0], &[
+            2_251_799_813_684_249.0,
+            524_285.0,
+            -2_251_799_813_684_249.0,
+        ]]),
+        mat(&[&[2_251_799_813_697_593.0, 524_295.0, -2_251_799_813_173_298.0], &[
+            2_251_799_813_684_249.0,
+            524_285.0,
+            -2_251_799_813_159_964.0,
+        ]]),
+        // ±2⁵³ itself: x = [1, 1, 1, 1] and [1, 1, 1]
+        mat(&[&[e53, -e53, 3.0, -3.0], &[e53 - 1.0, 1.0, -e53, 0.0], &[5.0, e53 - 7.0, 2.0, -e53]]),
+        mat(&[&[e53, -e53 + 1.0, -1.0], &[-e53, e53 - 3.0, 3.0]]),
+        mat(&[&[e53, -1.0, -(e53 - 1.0)], &[1.0, e53, -(e53 + 1.0) + 2.0]]),
+    ];
+    for t in &fixed {
+        balance(m, t);
+    }
+    // known x, last column solved, 3 … 12 species: Ok on unbounded integers (Rust's i64 overflows)
+    for n in 3..=12_usize {
+        for rep in 0..15 {
+            let hi = [3_i64, 1000, 1 << 20, (1 << 31) - 1][rep % 4];
+            let mut x: Vec<i64> = (0..n - 1).map(|_| rng.int(1, hi)).collect();
+            x.push(1);
+            let shrink = u32::try_from(rng.int(0, 12)).unwrap_or(0);
+            let zp = [0, 0, 20, 40][usize::try_from(rng.int(0, 3)).unwrap_or(0)];
+            let t = solved(&mut rng, &x, n - 1, shrink, zp);
+            balance(m, &t);
+        }
+    }
+    // the same with one entry of x special: 0 (a zero coefficient), −1 and −1000 (mixed signs), 2³² − 1 (Ok), 2³² and
+    // 2³² + 1 (past u32)
+    for n in 3..=8_usize {
+        for special in [0_i64, -1, -1000, (1 << 32) - 1, 1 << 32, (1 << 32) + 1] {
+            for _ in 0..3 {
+                let mut x: Vec<i64> = (0..n - 1).map(|_| rng.int(1, 50)).collect();
+                x.push(1);
+                let at = usize::try_from(rng.int(0, i64::try_from(n - 2).unwrap_or(0))).unwrap_or(0);
+                x[at] = special;
+                let t = solved(&mut rng, &x, n - 1, 0, 0);
+                balance(m, &t);
+            }
+        }
+    }
+    // two reactions (n − 2 rows orthogonal to x, or a random rank-deficient set) and only the trivial solution (n random
+    // rows), entries near 2⁴⁰ … 2⁵³
+    for n in 3..=8_usize {
+        for _ in 0..4 {
+            let mut x: Vec<i64> = (0..n - 1).map(|_| rng.int(1, 9)).collect();
+            x.push(1);
+            balance(m, &solved(&mut rng, &x, n - 2, 0, 0));
+            let bits = u32::try_from(rng.int(40, 53)).unwrap_or(53);
+            balance(m, &random_big(&mut rng, n - 2, n, bits));
+            balance(m, &random_big(&mut rng, n, n, bits));
+            balance(m, &random_big(&mut rng, n + 1, n, bits));
+        }
+    }
+    // dependent rows: a duplicate, a negated duplicate, the sum of two rows (when within 2⁵³), a zero row, a row moved
+    // first; each still one reaction
+    for n in 3..=9_usize {
+        for _ in 0..3 {
+            let mut x: Vec<i64> = (0..n - 1).map(|_| rng.int(1, 100)).collect();
+            x.push(1);
+            let base = solved(&mut rng, &x, n - 1, 1, 0);
+            let mut dup = base.clone();
+            dup.push(base[0].clone());
+            balance(m, &dup);
+            let mut neg = base.clone();
+            neg.insert(1, base[n - 2].iter().map(|v| -v).collect());
+            balance(m, &neg);
+            let sum: Vec<f64> = base[0].iter().zip(&base[n - 2]).map(|(a, b)| a + b).collect();
+            if sum.iter().all(|v| v.abs() <= e53) {
+                let mut s2 = base.clone();
+                s2.push(sum);
+                balance(m, &s2);
+            }
+            let mut z = base.clone();
+            z.insert(0, vec![0.0; n]);
+            balance(m, &z);
+            let mut rot = base.clone();
+            rot.rotate_right(1);
+            balance(m, &rot);
+        }
+    }
+    // ±2⁵³ entries: rows over {±2⁵³, ±(2⁵³ − k), small} orthogonal to x = [1, …, 1] where they can be
+    for n in 3..=6_usize {
+        for _ in 0..8 {
+            let p53 = 1_i64 << 53;
+            #[allow(clippy::cast_precision_loss)] // |entry| ≤ 2⁵³: exact
+            let rows: Vec<Vec<f64>> = (0..n - 1)
+                .map(|_| loop {
+                    let mut row: Vec<i64> = (0..n - 1)
+                        .map(|_| match rng.int(0, 4) {
+                            0 => p53,
+                            1 => -p53,
+                            2 => p53 - rng.int(1, 9),
+                            3 => rng.int(1, 9) - p53,
+                            _ => rng.int(-9, 9),
+                        })
+                        .collect();
+                    let last = -row.iter().sum::<i64>();
+                    if last.abs() <= p53 {
+                        row.push(last);
+                        break row.iter().map(|&v| v as f64).collect();
+                    }
+                })
+                .collect();
+            balance(m, &rows);
+        }
+    }
+    // large sizes: dense (n − 1) × n orthogonal to x = [1, 2, 3, 1, …, 1] and to seeded x, and sparse (four nonzero
+    // entries a row, chained so the null space is one-dimensional), 16 … 40 species
+    for n in [16_usize, 20, 24, 32, 40] {
+        let mut x: Vec<i64> = (0..n - 1).map(|j| 1 + i64::try_from(j % 3).unwrap_or(0)).collect();
+        x.push(1);
+        balance(m, &solved(&mut rng, &x, n - 1, 0, 0));
+        let mut y: Vec<i64> = (0..n - 1).map(|_| rng.int(1, 1000)).collect();
+        y.push(1);
+        balance(m, &solved(&mut rng, &y, n - 1, 0, 30));
+        // sparse: row k couples species k, k + 1, k + 2 and the last (the last solved)
+        let lim = (1_i64 << 53) / 3_000;
+        #[allow(clippy::cast_precision_loss)] // |entry| ≤ 2⁵³: exact
+        let sparse: Vec<Vec<f64>> = (0..n - 1)
+            .map(|k| {
+                let mut row = vec![0.0; n];
+                let mut s = 0_i64;
+                for j in [k, (k + 1) % (n - 1), (k + 2) % (n - 1)] {
+                    let e = rng.int(-lim, lim);
+                    row[j] += e as f64;
+                    s += e * y[j];
+                }
+                row[n - 1] = -s as f64;
+                row
+            })
+            .collect();
+        balance(m, &sparse);
+    }
+}
+
 pub fn emit() -> Module {
     let mut m = Module::new("stoichiometry");
     emit_balance(&mut m);
@@ -1545,5 +1785,6 @@ pub fn emit() -> Module {
     emit_yields(&mut m);
     emit_composition(&mut m);
     emit_exact(&mut m);
+    emit_balance_b7(&mut m);
     m
 }

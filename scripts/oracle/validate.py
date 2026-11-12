@@ -3404,7 +3404,8 @@ print(f"spectroscopy: reduced_mass has {len(mass_ties)} tie rows (normal and sub
 # - balance_equation: every row is checked again by exact linear algebra (Fraction RREF): an Ok result is the
 #   primitive positive basis vector of a one-dimensional null space; an Err is a null space of another dimension, a
 #   basis vector with a zero or mixed signs or past u32, or (counted) Rust's i64 overflow where a valid u32 solution
-#   exists. The `[ADR 0002 #7: no integer-matrix counterpart` notes sit exactly on the rows whose f64 matrix has no
+#   exists (the port's Ok there since the overflow audit's B7, ADR 0002 #39: §25). The `[ADR 0002 #7: no
+#   integer-matrix counterpart` notes sit exactly on the rows whose f64 matrix has no
 #   integer one (an entry Rust's test refuses, an integer beyond i64, ragged rows), all Err(InvalidInput);
 # - assign_oxidation_states: the port's exact rational states (ADR 0002 #7: Rust's algorithm on Fractions, the i32
 #   range applied to the value) are computed; a row is noted exactly where Rust's Err is its "non-integer average" and
@@ -3481,8 +3482,9 @@ def st_balance(mat, tol=None, bound=None):
             a.append(int(r))
     return st_balance_int(a, len(mat), n, bound)
 def st_balance_int(a, m, n, bound=None):
-    """The port's balance_equation (ADR 0002 #7) on the integer matrix a, row-major: Rust's checks with its 2⁵³ bound
-    on the integers, then Rust's elimination; the u32 coefficients, or Err."""
+    """Rust's balance_equation on ADR 0002 #7's integer matrix a, row-major: Rust's checks with its 2⁵³ bound on the
+    integers, then Rust's elimination with its i64 checks; the u32 coefficients, or Err. (The port's own result, on
+    unbounded integers where these checks overflow, is §25's b7_port: ADR 0002 #39.)"""
     bound = ST_MAX_ENTRY if bound is None else bound
     if m < 1 or n < 2: return Err("InvalidInput")
     if any(abs(v) > bound for v in a): return Err("InvalidInput")
@@ -3827,8 +3829,8 @@ for fn, cls, ins, outs, where in R.get("stoichiometry", []):
             continue
         st_round += any(math.isfinite(v) and v != r_round(v) for row in mat for v in row)
         m_, n_ = len(mat), len(mat[0]) if mat else 0
-        # the port's integer function on the counterpart gives the oracle's result: the f64 entry test is the one step
-        # the integer API lacks, and every entry Rust accepts is its rounded integer
+        # Rust's algorithm on the integer counterpart gives the oracle's result: the f64 entry test is the one step the
+        # integer API lacks, and every entry Rust accepts is its rounded integer (the port's result is §25's)
         check(toks_equal(outs, st_toks(fn, st_balance_int(cp, m_, n_))), f"{where}: the integer counterpart's result")
         if m_ == 0 or n_ < 2 or any(abs(v) > ST_MAX_ENTRY for v in cp):
             continue
@@ -5499,6 +5501,233 @@ print(f"spectroscopy: ADR 0002 #36: fft_spectrum: {b6_ff}")
 print(f"ADR 0002 #36 noted rows by their worst bin: {b6_ffc}")
 check(b6_ff["noted"] > 0 and b6_ffc["qual: Rust 0, ±∞ or NaN where the value is representable"] > 0,
       f"ADR 0002 #36: a class has no golden row: {b6_ff} {b6_ffc}")
+
+# ── 25. The overflow audit's B7 (ADR 0002 #39): balance_equation on unbounded integers ─────────────────────────────────
+# Every balance_equation row with an integer counterpart (ADR 0002 #7) is recomputed with the port's semantics,
+# independently of the generator: Rust's algorithm (st_balance_int's steps: the pivot search, the swap, reduce_row, the
+# sign flip, row_r ← pivot·row_r − factor·row_pivot then reduce_row, the lcm of the pivots, x[c] = −(row[f]·(lcm/piv)),
+# reduce_row(x), the zero, sign and u32 checks, the verification) on Python ints with no i64 check, b7_port; and that
+# result checked against the exact null space (st_nullspace, Fraction): an Ok result is the primitive positive basis
+# vector of a one-dimensional null space, an Err a null space of another dimension or a basis vector with a zero, mixed
+# signs or an entry past u32. A row is noted exactly where the port's result differs from the oracle's, the note's
+# tokens being the port's whole result. Strict tracer: a noted row is one where Rust's checked arithmetic overflows
+# (b7_rust_site: the site of its first overflow, Rust's ComputationError), and every row where Rust does not overflow is
+# unnoted; the rows where Rust overflows and the exact result is still an Err are counted by class. The proofs behind
+# the port's tables (ADR 0002 #39) are checked on every row: every entry after reduce_row, every original entry, the lcm
+# and x are below 2^B, every product and difference before reduce_row below 2^(2B + 1), B the port's
+# _km_balance_bits; before reduce_row(x) the gcd of x is 1 wherever no coefficient is zero (so |x| ≥ lcm, and an
+# overflow of the lcm or of x is always an Err past u32); a reduced row of gcd 2⁶³ has every nonzero entry −2⁶³.
+B7_HOW = "Rust's fraction-free elimination on unbounded integers"
+B7_RE = re.compile(r"\[ADR 0002 #39: the port returns (.+) = (\[\d+\])(?:, [^()]*)? \(([^()]*)\)\]$")
+def b7_bits(a, m, n):
+    """The port's size bound B (src/stoichiometry.cyr's _km_balance_bits): the smaller of the sums of the q = min(m, n)
+    largest row and column b's, b = bitlen(max |entry|) + ⌈bitlen(nonzero count)/2⌉ (0 for a zero line)."""
+    def bs(lines):
+        out = []
+        for ln in lines:
+            nz = [abs(v) for v in ln if v]
+            out.append(max(nz).bit_length() + (len(nz).bit_length() + 1) // 2 if nz else 0)
+        return sum(sorted(out, reverse=True)[:min(m, n)])
+    rows_ = [a[i * n:(i + 1) * n] for i in range(m)]
+    return min(bs(rows_), bs([[a[i * n + j] for i in range(m)] for j in range(n)]))
+def b7_port(a, m, n, B=None, tr=None):
+    """The port's balance_equation (ADR 0002 #39) on the integer matrix a: Rust's steps on Python ints. With B, every
+    value is checked against the bound; tr (a dict) receives the largest value's bit length, and the gcd of x before its
+    reduce_row."""
+    if m < 1 or n < 2 or any(abs(v) > ST_MAX_ENTRY for v in a): return Err("InvalidInput")
+    A = [list(a[i * n:(i + 1) * n]) for i in range(m)]
+    big = [0, 0]
+    def stored(v):
+        big[0] = max(big[0], abs(v).bit_length())
+        if B is not None: check(abs(v) < 2 ** B, f"balance_equation: a stored value of {abs(v).bit_length()} bits past 2^{B}")
+        return v
+    def red(row):
+        g = 0
+        for v in row: g = math.gcd(g, abs(v))
+        return [stored(v // g) for v in row] if g > 1 else [stored(v) for v in row]
+    for row in A: [stored(v) for v in row]
+    rank, free = 0, None
+    for col in range(n):
+        p = next((r for r in range(rank, m) if A[r][col] != 0), None)
+        if p is None:
+            if free is not None: return Err("ComputationError")
+            free = col
+            continue
+        A[p], A[rank] = A[rank], A[p]
+        A[rank] = red(A[rank])
+        if A[rank][col] < 0: A[rank] = [-v for v in A[rank]]
+        piv = A[rank][col]
+        for r in range(m):
+            fac = A[r][col]
+            if r == rank or fac == 0: continue
+            new = []
+            for j in range(n):
+                d = piv * A[r][j] - fac * A[rank][j]
+                big[1] = max(big[1], abs(piv * A[r][j]).bit_length(), abs(fac * A[rank][j]).bit_length(),
+                             abs(d).bit_length())
+                if B is not None:
+                    check(max(abs(piv * A[r][j]), abs(fac * A[rank][j]), abs(d)) < 2 ** (2 * B + 1),
+                          f"balance_equation: a product or difference past 2^(2·{B} + 1)")
+                new.append(d)
+            A[r] = red(new)
+        rank += 1
+    if free is None: return Err("ComputationError")
+    lcm = 1
+    for k in range(rank):
+        pv = next(v for v in A[k] if v != 0)
+        lcm = stored(lcm // math.gcd(lcm, abs(pv)) * pv)
+    x = [0] * n
+    x[free] = lcm
+    for k in range(rank):
+        c = next(j for j, v in enumerate(A[k]) if v != 0)
+        x[c] = stored(-(A[k][free] * (lcm // A[k][c])))
+    g = 0
+    for v in x: g = math.gcd(g, abs(v))
+    if tr is not None: tr["x gcd"] = g; tr["bits"] = big[0]; tr["pbits"] = big[1]
+    x = red(x)
+    if 0 in x: return Err("ComputationError")
+    pos = sum(1 for v in x if v > 0)
+    if pos == 0: x = [-v for v in x]
+    elif pos != n: return Err("ComputationError")
+    if any(v < 0 or v > U32_MAX for v in x): return Err("ComputationError")
+    for i in range(m):
+        if sum(a[i * n + j] * x[j] for j in range(n)) != 0: return Err("ComputationError")
+    return x
+def b7_rust_site(a, m, n):
+    """The site of Rust's first i64 overflow (its checked operations in its order), or None."""
+    def ok(v): return I64_MIN <= v <= I64_MAX
+    A = [list(a[i * n:(i + 1) * n]) for i in range(m)]
+    def red(row, site):
+        g = 0
+        for v in row: g = math.gcd(g, abs(v))
+        if g > I64_MAX: return None, site
+        return ([tdiv(v, g) for v in row] if g > 1 else row), None
+    rank, free = 0, None
+    for col in range(n):
+        p = next((r for r in range(rank, m) if A[r][col] != 0), None)
+        if p is None:
+            if free is not None: return None
+            free = col
+            continue
+        A[p], A[rank] = A[rank], A[p]
+        A[rank], s_ = red(A[rank], "a reduced row's gcd of 2⁶³")
+        if s_: return s_
+        if A[rank][col] < 0:
+            if I64_MIN in A[rank]: return "the pivot row's negation"
+            A[rank] = [-v for v in A[rank]]
+        piv = A[rank][col]
+        for r in range(m):
+            fac = A[r][col]
+            if r == rank or fac == 0: continue
+            new = []
+            for j in range(n):
+                if not ok(piv * A[r][j]): return "pivot·a"
+                if not ok(fac * A[rank][j]): return "factor·a"
+                if not ok(piv * A[r][j] - fac * A[rank][j]): return "the difference"
+                new.append(piv * A[r][j] - fac * A[rank][j])
+            A[r], s_ = red(new, "a reduced row's gcd of 2⁶³")
+            if s_: return s_
+        rank += 1
+    if free is None: return None
+    lcm = 1
+    for k in range(rank):
+        pv = next(v for v in A[k] if v != 0)
+        if math.gcd(lcm, abs(pv)) > I64_MAX: return "the lcm's gcd"
+        lcm = tdiv(lcm, math.gcd(lcm, abs(pv))) * pv
+        if not ok(lcm): return "the lcm's product"
+    x = [0] * n
+    x[free] = lcm
+    for k in range(rank):
+        c = next(j for j, v in enumerate(A[k]) if v != 0)
+        px = A[k][free] * tdiv(lcm, A[k][c])
+        if not ok(px): return "x's product"
+        if not ok(-px): return "x's negation"
+        x[c] = -px
+    g = 0
+    for v in x: g = math.gcd(g, abs(v))
+    if g > I64_MAX: return "reduce_row(x)'s gcd"
+    if 0 in x: return None
+    if sum(1 for v in x if v > 0) == 0 and I64_MIN in x: return "the final sign flip"
+    return None
+b7 = {"rows": 0, "noted": 0, "Rust overflows": 0}
+b7_still_err, b7_sites, b7_shapes, b7_shapes_before, b7_bits_max, b7_pbits_max, b7_gcd1 = {}, {}, {}, {}, 0, 0, 0
+b7_still_before, b7_ovf_before = 0, 0
+for idx, (ins, outs, where) in enumerate(st_rows.get("stoichiometry::balance_equation", [])):
+    mat = st_matrix(ins)
+    cp = st_counterpart(mat)
+    note = NOTES.get(where, "")
+    noted = "[ADR 0002 #39:" in note
+    if cp is None:
+        check(not noted, f"{where}: a #39 note on a matrix without an integer counterpart")
+        continue
+    m_, n_ = len(mat), len(mat[0]) if mat else 0
+    b7["rows"] += 1
+    rust = st_balance_int(cp, m_, n_)
+    check(toks_equal(outs, st_toks("stoichiometry::balance_equation", rust)), f"{where}: Rust's balance recomputed")
+    if m_ < 1 or n_ < 2 or any(abs(v) > ST_MAX_ENTRY for v in cp):
+        check(not noted, f"{where}: a #39 note on a row Rust's checks refuse")
+        continue
+    tr = {}
+    port = b7_port(cp, m_, n_, B=b7_bits(cp, m_, n_), tr=tr)
+    b7_bits_max = max(b7_bits_max, tr.get("bits", 0))
+    b7_pbits_max = max(b7_pbits_max, tr.get("pbits", 0))
+    dim, w = st_nullspace(cp, m_, n_)
+    valid = dim == 1 and all(q > 0 for q in w) and max(w) <= U32_MAX
+    check(port == w if valid else isinstance(port, Err) and port.name == "ComputationError",
+          f"{where}: the port's {port} is not the exact null space's (dimension {dim}, {w})")
+    if dim == 1 and w is not None and 0 not in w:
+        check(tr.get("x gcd") == 1, f"{where}: x's gcd before reduce_row is {tr.get('x gcd')}, not 1")
+        b7_gcd1 += 1
+    pt = st_toks("stoichiometry::balance_equation", port)
+    differs = not toks_equal(pt, outs)
+    check(noted == differs, f"{where}: the port's {port} vs the oracle's {outs}: the #39 note is "
+          f"{'missing' if differs else 'stray'}")
+    site = b7_rust_site(cp, m_, n_)
+    if site is not None:
+        b7["Rust overflows"] += 1
+        b7_ovf_before += idx < 3329
+        b7_still_before += idx < 3329 and isinstance(port, Err)
+        b7_sites.setdefault(site, {"rows": 0, "Ok exactly": 0})
+        b7_sites[site]["rows"] += 1
+        b7_sites[site]["Ok exactly"] += not isinstance(port, Err)
+        check(rust == Err("ComputationError"), f"{where}: Rust overflows but its result is {rust}")
+        if isinstance(port, Err):
+            cls = "ambiguous or trivial" if dim != 1 else ("zero" if 0 in w else ("mixed" if not (all(q > 0 for q in w)) else "past u32"))
+            b7_still_err[cls] = b7_still_err.get(cls, 0) + 1
+    else:
+        check(not noted and toks_equal(pt, outs), f"{where}: Rust does not overflow, yet the port's result differs")
+    if site == "a reduced row's gcd of 2⁶³" or site in ("the lcm's product", "x's product", "x's negation"):
+        check(isinstance(port, Err), f"{where}: an overflow at {site} with an exact Ok")
+    if not noted: continue
+    b7["noted"] += 1
+    check(site is not None, f"{where}: a noted row where Rust does not overflow")
+    mm_ = B7_RE.search(note)
+    check(mm_ is not None and mm_.group(1) == B7_HOW and mm_.group(2) == f"[{len(port)}]"
+          and toks_equal([parse_tok(t_, where) for t_ in mm_.group(3).split(" ")], pt),
+          f"{where}: the #39 note does not name the port's result {port}")
+    b7_shapes[(m_, n_)] = b7_shapes.get((m_, n_), 0) + 1
+    if idx < 3329: b7_shapes_before[(m_, n_)] = b7_shapes_before.get((m_, n_), 0) + 1
+print(f"stoichiometry: ADR 0002 #39: balance_equation: {b7}; the noted rows Rust's ComputationError, the port's Ok "
+      f"(every one checked against the Fraction null space); the exact elimination's largest stored value {b7_bits_max} "
+      f"bits, its largest product or difference before reduce_row {b7_pbits_max} bits")
+print(f"  the rows before B7: {sum(b7_shapes_before.values())} noted, by (m, n): "
+      f"{dict(sorted(b7_shapes_before.items(), key=lambda kv: (-kv[1], kv[0])))}")
+print(f"  every noted row by (m, n): {dict(sorted(b7_shapes.items()))}")
+print(f"  Rust's first overflow by site (rows, of them Ok exactly): "
+      + "; ".join(f"{k} {v['rows']} ({v['Ok exactly']})" for k, v in sorted(b7_sites.items())))
+print(f"  where Rust overflows and the exact result is still the ComputationError: {dict(sorted(b7_still_err.items()))}; "
+      f"x's gcd 1 before reduce_row on all {b7_gcd1} rows with a one-dimensional null space and no zero coefficient")
+print(f"  of the rows before B7: Rust overflows on {b7_ovf_before}, the exact result Ok on "
+      f"{b7_ovf_before - b7_still_before} (noted) and still the ComputationError on {b7_still_before} (unnoted)")
+check(sum(b7_shapes_before.values()) == 104 and b7_shapes_before.get((2, 3)) == 55,
+      f"ADR 0002 #39: {sum(b7_shapes_before.values())} rows before B7 noted, not the survey's 104 (55 of them 2 × 3)")
+check(all(b7_sites.get(k, {}).get("Ok exactly", 0) > 0 for k in ("pivot·a", "factor·a", "the difference",
+      "the pivot row's negation")), f"ADR 0002 #39: a site that can lead to Ok has no golden row: {b7_sites}")
+check(all(b7_sites.get(k, {}).get("rows", 0) > 0 for k in ("a reduced row's gcd of 2⁶³", "the lcm's product",
+      "x's product", "x's negation")), f"ADR 0002 #39: an overflow site has no golden row: {b7_sites}")
+check(all(b7_still_err.get(k, 0) > 0 for k in ("ambiguous or trivial", "zero", "mixed", "past u32")),
+      f"ADR 0002 #39: an Err class after Rust's overflow has no golden row: {b7_still_err}")
+check(b7_pbits_max >= 3000, f"ADR 0002 #39: the largest product before reduce_row is only {b7_pbits_max} bits")
 
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
              "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy", "stoichiometry"}

@@ -44,6 +44,15 @@ var _bench_b5 = 0;          # the audit's B5 (ADR 0002 #35): 10 × 6 input words
 var _bench_b6_sig = 0;      # the audit's B6 (ADR 0002 #36, #37): 4 × 1024 signal words (bench_audit_b6)
 var _bench_b6_out = 0;      # fft_spectrum's out buffer (2 × 256 f64: the in-place transform), find_peaks' indices
 var _bench_b6_flame = 0;    # [("CO2(g)", 10⁻²⁰⁰), ("H2O(g)", 2·10⁻²⁰⁰), ("N2(g)", 7.52·10⁻²⁰⁰)]
+var _bench_b7_dense = 0;    # the audit's B7 (ADR 0002 #39): a 30 × 31 dense matrix (bench_audit_b7)
+var _bench_b7_out = 0;      # balance_equation's coefficients (31 words)
+# The survey's 2 × 3 (Rust's first product 3037000500² overflows; x = [1, 1, 1]) and a 10 × 9 golden row whose Rust
+# elimination overflows (x = [561, 420, 549, 115, 621, 712, 173, 710, 41]).
+var _bench_b7_survey: i64[6] = { 3037000500, 1, -3037000501, 1, 3037000500, -3037000501 };
+var _bench_b7_m109: i64[90] = { -634, 0, 0, 561, 0, 0, 1683, 0, 0, 0, 0, 0, 123, 0, -82, 0, 0, 1079, 1424, 519, 0, 0, 0,
+    -1122, -1260, 0, 0, 0, 0, 0, 346, 0, 0, -230, 0, 0, -41, 0, -1424, 0, 0, 1098, 0, 0, 561, 0, 0, 0, 0, 1424, -1242,
+    0, 0, 0, -1420, 621, 0, 0, -420, 0, 0, 1122, 0, 345, 115, 0, -2103, 0, 0, 0, 0, 0, 0, -1098, 840, 2136, 0, -345, 0,
+    0, 0, -82, 0, 0, 0, 0, 0, 0, 0, 1122 };
 
 # Cyrius-only, the overflow audit's B5 (ADR 0002 #35): the exp / exp10 arguments, on typical inputs, then on the edges
 # that take each one's unbounded-exponent slow path. which: 0 equilibrium_constant (−5000 J/mol, 298 K),
@@ -218,6 +227,65 @@ fn _bench_b6_setup() {
     store64(_bench_b6_flame + 40, 0x169706561E451C03); # 7.52·10⁻²⁰⁰
 }
 
+# Cyrius-only, the overflow audit's B7 (ADR 0002 #39): balance_equation where Rust's checked i64 elimination overflows
+# (Rust's ComputationError), here the multi-word path from the original matrix after the i64 attempt. which:
+# 0 balance_survey_2x3 (the survey's example), 1 balance_overflow_10x9 (the golden row above), 2 balance_dense_30x31
+# (30 × 31, seeded entries in [−2⁴⁵, 2⁴⁵), the last column solved for x[j] = 1 + j mod 3: intermediates past 3,000
+# bits).
+fn bench_audit_b7(name, which, per_batch, batches) {
+    var mat = &_bench_b7_survey;
+    var m = 2;
+    var n = 3;
+    if (which == 1) {
+        mat = &_bench_b7_m109;
+        m = 10;
+        n = 9;
+    }
+    if (which == 2) {
+        mat = _bench_b7_dense;
+        m = 30;
+        n = 31;
+    }
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var t, v = balance_equation(mat, m, n, _bench_b7_out, 31);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# The B7 inputs (bench_audit_b7): the 30 × 31 matrix, tests/stoichiometry.tcyr's seeded construction (xorshift64).
+fn _bench_b7_setup() {
+    var n = 31;
+    _bench_b7_dense = alloc(8 * (n - 1) * n);
+    _bench_b7_out = alloc(8 * n);
+    var seed = 0x2545F4914F6CDD1D;
+    var i = 0;
+    while (i < n - 1) {
+        var s = 0;
+        var j = 0;
+        while (j < n - 1) {
+            seed = seed ^ (seed << 13);
+            seed = seed ^ (seed >> 7);
+            seed = seed ^ (seed << 17);
+            var e = ((seed >> 11) & 0x3FFFFFFFFFFF) - 0x200000000000;
+            store64(_bench_b7_dense + 8 * (i * n + j), e);
+            s = s + e * (1 + j % 3);
+            j = j + 1;
+        }
+        store64(_bench_b7_dense + 8 * (i * n + n - 1), 0 - s);
+        i = i + 1;
+    }
+}
+
 # Runs every bench.
 fn main(): i64 {
     alloc_init();
@@ -238,6 +306,10 @@ fn main(): i64 {
     bench_audit_b6("spectroscopy/fft_spectrum_256_squares", 2, 1000, 20);
     bench_audit_b6("spectroscopy/find_peaks_1000_subnormal", 3, 10000, 20);
     bench_audit_b6("thermochem/adiabatic_flame_tiny", 4, 100000, 20);
+    _bench_b7_setup();
+    bench_audit_b7("stoichiometry/balance_survey_2x3", 0, 10000, 20);
+    bench_audit_b7("stoichiometry/balance_overflow_10x9", 1, 1000, 20);
+    bench_audit_b7("stoichiometry/balance_dense_30x31", 2, 1, 10);
     return 0;
 }
 

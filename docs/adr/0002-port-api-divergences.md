@@ -54,6 +54,7 @@ are compared through the stated mapping:
 | 36 *(2026-11-11, the overflow audit's B6)* | `spectroscopy::fft_spectrum` runs hisab 1.4.0's `num::fft` (bit reversal; per stage wn = (cos θ, sin θ), w *= wn; t = w·d, u ± t) and `Complex::abs` = √(re·re + im·im) of bins 0 … n/2 in binary64: a butterfly sum or a product w·d past DBL_MAX, a product or a difference below the normal range, or a square re² or im² that over- or underflows gives ±∞, 0, NaN or a degraded magnitude where the spectrum is representable (`fft_spectrum([1.75·10³⁰⁴])` [∞], not [1.75·10³⁰⁴]; `([−6.96·10⁻³¹⁶])` [0], not [6.96·10⁻³¹⁶]; `([3.3·10³⁰², 3.0·10³⁰⁴])` [∞, ∞], not [3.03·10³⁰⁴, 2.96·10³⁰⁴]) | **#20's semantics over the whole transform** (the user's decision "FFT: both" — the magnitudes and the butterflies): every butterfly and twiddle operation in hisab's order with an unbounded exponent (`_km_ux_*`), each magnitude's √ the final operation, rounded once into binary64; behind a per-operation fast test on Rust's own transform (`_km_fft`: every twiddle component 0 or at least 2⁻¹⁰⁰, every butterfly's d 0 or at least 2⁻⁹²¹, so each product is an exact zero or at least 2⁻¹⁰²¹; every retained output finite, so no sum overflowed; each bin's square sum in [2⁻⁹⁰⁰, DBL_MAX] or from re = im = 0, else that bin's unbounded magnitude), so in-range rows keep Rust's bits; the slow path `_km_fft_ux` on 32·n heap bytes. A NaN or ±∞ sample keeps Rust's IEEE spectrum (B1's rule); Rust's length check and Err kept; ADR 0003's M4e transcription gains the unbounded slow path (its amendment) | class C (bound 0, the corrected oracle: no fft row has a correction); equal rows plain; the others noted with the port's whole spectrum `(v:n f:… …)`, mapped and counted (418 rows: 41 of the 213 rows before B6, 377 of B6's 515 edge rows) |
 | 37 *(2026-11-11, the overflow audit's B6)* | `spectroscopy::find_peaks` tests w > RN(RN(min·RN(1 − t)) + RN(max·t)): the rounded threshold decides otherwise for a candidate within a few ulps of the exact min + t·(max − min), at the subnormal grid (`find_peaks([−0, 5·10⁻³²⁴, 0], 0.75)` [], the exact threshold 3.7·10⁻³²⁴), and as far as 2⁵² ulps off where min = −DBL_MAX and max = DBL_MAX (1 − t rounded by 2⁻⁵⁴, times DBL_MAX); `([10, 10.2, 10, 11, 10], 1 − 2⁻⁵³)` [], the exact threshold 11 − 2⁻⁵³ | the **exact predicate** (settled by the main session under the user's policy: "find_peaks' threshold is evaluated exactly"): w > min·(1 − t) + max·t in rational arithmetic, t the given double (1 − t exact), min and max Rust's fold over the finite values, the neighbour tests IEEE, a +∞ candidate above every (finite) threshold; Rust's threshold decides wherever a proven bound separates w from it (\|RN(w − T)\| > B, B = RN(RN(\|min\|·2⁻⁵¹) + RN(\|max\|·2⁻⁵¹)) + 2⁻¹⁰⁷², against the proven error 2.5u(1 + u)(\|min\| + \|max\|) + (1 + u)·2⁻¹⁰⁷⁴), else `_km_peak_above_exact` (the sign of w − min + t·min − t·max, six terms at any exponent, by `src/mathx.cyr`'s new `_km_sign_scaled`). Rust's checks and empty results kept | class A; equal rows plain; the others noted with the port's indices `(v:n i:… …)`, mapped and counted (222 rows: 3 of the 994 rows before B6, 219 of B6's 2,393 edge rows) |
 | 38 *(2026-11-11, the overflow audit's B6; the survey's F16, its flame part — B12 extends this row with the weak acid / base Newton and Peng–Robinson's coefficients)* | `thermochem::adiabatic_flame_temperature` tests the bracket as f(T₀)·f(T_max) < 0, a product that underflows to −0 when \|ΔH\| and the moles are tiny, so a reaction whose balance changes sign is "not bracketed", Err(ComputationError) (`(−10⁻³²⁰, [CO₂ ×10⁻³⁰⁰], 298.15)`; CH₄/air scaled by 10⁻²⁰⁰), and hisab 1.4.0's transcribed bisection tests f(a)·f(b) > 0 likewise | the **exact sign test** (the user's decision "Fix all three iterative edges", the flame's being "the flame bracket's exact sign test"): f(T₀) < 0 < f(T_max) or f(T_max) < 0 < f(T₀), Rust's answer wherever the product does not underflow to a zero (NaN, ±∞ and ±0 operands included, proven), and the bisection's same-sign test likewise (it cannot change a result: the flame calls it only after the bracket proved opposite signs at the same points). Newton, its absolute 10⁻³ J/mol tolerance, every Err and Rust's order kept, so such a system gets Newton's initial guess, Rust's own answer at a scale where the product does not underflow (a known, kept Rust behaviour: at any scale below about 10⁻³ the guess is accepted unconverged) | class B; equal rows plain; the others noted `(f:…)` with the solver path, mapped and counted (273 rows: 16 of the 1,937 rows before B6, Rust's Err there; 257 of B6's 443 edge rows) |
+| 39 *(2026-11-12, the overflow audit's B7; the survey's F15)* | `stoichiometry::balance_equation` runs its fraction-free Gauss–Jordan elimination on i64 with checked arithmetic: where a product pivot·a or factor·a, their difference, the pivot row's negation, a reduced row's gcd (`i64::try_from` of 2⁶³), the lcm of the pivots or x[c] = −(row[f]·(lcm/piv)) leaves i64, it returns Err(ComputationError), "integer overflow while balancing equation", although the null space can be one-dimensional with a positive u32 vector (`[[3037000500, 1, −3037000501], [1, 3037000500, −3037000501]]` Err, its first product 3037000500² past i64::MAX; the answer [1, 1, 1]) | **Rust's algorithm on unbounded integers** (settled by the main session under the user's policy, not asked: "Balancing: multi-word integers, no size limit", the survey's remedy (a)): every step as written — the pivot search, the swap, reduce_row, the sign flip, row_r ← pivot·row_r − factor·row_pivot then reduce_row, the lcm of the pivots, x[c] = −(row[f]·(lcm/piv)), reduce_row(x), the zero, sign and u32 checks, the i128 verification — with mathematical integers, so every overflow Err disappears and every other Err (ambiguous, only the trivial solution, a zero coefficient, mixed signs, past u32, the verification, each InvalidInput, the cap check after) stays at its place in Rust's order. Rust's i64 code runs first, unchanged (`_km_balance_i64`), and at its first overflow the same steps start again from the original matrix on signed multi-word integers (`_km_balance_big`, `_km_sb_*`: 31-bit limbs, Knuth's division, Lehmer's gcd), their tables sized from a proven Hadamard bound (`_km_balance_bits`), so only allocation limits the size | class A; equal rows plain; the others (Rust's overflow Err, the port's Ok) noted with the port's whole result `(v:n i:… …)`, mapped and counted (413 rows: 104 of the 3,329 rows before B7, 309 of B7's 521 edge rows) |
 
 Deferred with their modules (port plan §2.2), and decided when they port: #5 `bridge::*` →
 `Result` and removal of `ionization_to_bond_energy_estimate`; #10 soorat `from_molecule` →
@@ -1536,6 +1537,151 @@ Rust's chain, then the port's): `fft_spectrum_256_huge` 27.7 → 318.1 µs and `
 (the unbounded transform: about 11× Rust's chain), `fft_spectrum_256_squares` 27.4 → 45.1 µs (the per-bin unbounded √ on
 all 129 bins), `find_peaks_1000_subnormal` 19.5 → 39.0 µs (about half the candidates through the exact predicate),
 `adiabatic_flame_tiny` 0.96 → 1.48 µs (Rust's ComputationError there; here Newton's guess); `tests/audit2.bcyr` 45 s.
+
+## Addition, 2026-11-12 (audit B7): #39
+
+**The decisions.** B1's section above quotes the user's decisions verbatim; they apply to B7 unchanged. The survey's
+question 7 was not asked: the main session settled it under the user's policy, with its remedy (a): **"Balancing:
+multi-word integers, no size limit"** — Rust's own fraction-free elimination with the integers unbounded, not a modular
+null space (its (b)), and no width past which the port gives up (the project's record of the accuracy policy: "balancing
+uses Rust's elimination on multi-word integers with no size limit"). One row for the family: #39 (F15). Every Rust
+check, Err code and order stays. B7 is the roadmap's B9.
+
+**The treatment** (checked against `rust-old/src/stoichiometry.rs`: `balance_equation`, `reduce_row`, `gcd_u64`,
+`balance_overflow`). The result is what Rust's algorithm returns with its i64 and i128 replaced by mathematical integers:
+the steps exactly as written — the pivot search over rows rank … m − 1, the swap, reduce_row of the pivot row, its sign
+flip, row_r ← pivot·row_r − factor·row_pivot then reduce_row for every other row with a nonzero factor, the lcm of the
+pivots by lcm ← (lcm / gcd(lcm, piv))·piv, x[f] = lcm and x[c] = −(row[f]·(lcm/piv)), reduce_row(x), the zero check, the
+positive count and its flip, the u32 conversion, and the verification on the original rows. So the overflow Errs
+disappear — the elimination's checked_mul, checked_mul and checked_sub, the pivot row's checked_neg, reduce_row's
+`i64::try_from(g)`, the lcm's gcd conversion and checked_mul, x's checked_mul and checked_neg, the final flip's
+checked_neg — and every other Err stays at its place: ambiguous (a second free column) and only the trivial solution (no
+free column), the zero coefficient, mixed signs, a coefficient above u32::MAX, the verification, every
+Err(InvalidInput), and the `cap` / `out` check after the computation. All the Errs involved are ComputationError, so the
+visible change is Err → Ok; an overflowing input with too small a cap, or a null `out`, now reaches the buffer check and
+is Err(InvalidInput). The verification keeps Rust's i128 sums: with u32 coefficients and |entry| ≤ 2⁵³ each partial
+sum is below n·2⁵³·(2³² − 1) < 2¹²⁷ for every n below 2⁴² (a row of 32 TiB), so its checked_add cannot fail, as in Rust.
+
+**The structure** (`src/stoichiometry.cyr`). `balance_equation` validates as before, then runs `_km_balance_i64`, the
+former body unchanged except that each overflow check returns "overflow" (2) instead of the Err: 0 (x holds the u32
+coefficients, past the zero, sign and u32 checks), 1 (one of Rust's other ComputationErrors), 2. While no check fails,
+every i64 value is the exact integer, so 0 and 1 are the exact algorithm's outcome. At 2 the multi-word path
+`_km_balance_big` runs the same steps from the original matrix; then the shared i128 verification and the buffer check.
+`_km_balance_equation(…, force)` skips the fast path (the tests' and `cr_verify.py`'s check of the slow path). In-range
+inputs take exactly the old code: `balance_ch4_combustion` 805 → 778 ns, `balance_kmno4_hcl` 2.24 → 2.18 µs
+(alternating runs; the fast path moved into its own function).
+
+**The integers** (`_km_sb_*`, beside the i128 helpers in `src/stoichiometry.cyr` rather than in `src/mathx.cyr`:
+balancing is their only user, and `src/mathx.cyr`'s `_km_bn_*` are unsigned, fixed at 8 × 32-bit limbs, with no
+division by a multi-word divisor). A slot is its signed length (−len for a negative value, 0 for zero) and len limbs of
+31 bits, little-endian, the top one nonzero. 31-bit limbs keep every intermediate below 2⁶³ — a limb product
+(2³¹ − 1)² plus a limb and a carry is at most 2⁶² − 1, a two-limb numerator below 2⁶² — so the signed words never wrap
+and Cyrius's logical `>>` only shifts non-negative words. The operations: from a word (i64::MIN as −2⁶³), copy,
+magnitude compare, add and subtract magnitudes, the signed difference, the schoolbook product, Knuth's Algorithm D for
+the quotient and remainder (as Hacker's Delight's divmnu: the divisor normalised to a top limb of at least 2³⁰, q̂ from
+the top two limbs, below 2³¹ after the two-limb test, whose product q̂·v[n − 2] is formed only then, below 2⁶², the
+multiply-subtract with a non-negative carry, the add-back when q̂ was one too large), the exact quotient, and the gcd of
+magnitudes by **Lehmer's algorithm** (Cohen's Algorithm 1.3.7): with the larger operand of three limbs or more and the
+other within a limb of it, Euclid runs on their top 62 bits (one shift) for both extreme ratios (â + A)/(b̂ + C) and
+(â + B)/(b̂ + D) while the quotients agree — so each is the full operands' quotient — below 2³⁰, with the cofactors
+below 2³⁰; then (p, q) ← (A·p + B·q, C·p + D·q) in one pass of signed limbs (|t| < 2⁶², the carry an exact division by
+2³¹), a unimodular step that keeps the gcd whatever happens (a negative total is negated); where no quotient is admitted,
+or the operands differ by two limbs, one full division step; below two limbs, Euclid on words. reduce_row's gcd starts at
+the row's entry with the fewest limbs and stops at 1 (gcd is associative and commutative: Rust's left fold's value).
+Lehmer took a 39 × 40 dense matrix from 1.8 s (about 844,000 of Euclid's division steps) to 0.7 s.
+
+**Which overflows can become Ok, proven.** At the end of the elimination, with exactly one free column f, every pivot row
+k is primitive (reduce_row follows its every change) and has at most two nonzero entries: its pivot p_k > 0 at c_k and
+r_k at f (the other pivot columns are eliminated; a free column left of c_k is zero in every row at or below the rank
+then, and the later pivot rows are combinations of those rows only). So x = (x[c_k] = −r_k·L/p_k, x[f] = L) with L the
+lcm of the p_k, and its gcd is gcd_k((L/p_k)·gcd(p_k, r_k)) = gcd_k(L/p_k) = 1 when no r_k is 0 (for each prime some p_k
+carries L's full power): reduce_row(x) changes nothing that passes the zero check, and x[f] stays L. Hence an overflow of the
+lcm (L ≥ 2⁶³), of x's product (|x[c]| ≥ 2⁶³) or of its negation (x[c] = 2⁶³) leaves an entry past u32 (or a zero) on
+unbounded integers too: Err either way, unnoted. A reduced row whose gcd is 2⁶³ has every nonzero entry −2⁶³ (the only
+i64 of that magnitude), so on unbounded integers it reduces to a row of 0s and −1s, orthogonal to no positive x: Err
+again. So only the elimination's products, its differences and the pivot row's negation can turn into Ok; all four do in
+the corpus (pivot·a 389 rows, factor·a 16, the difference 7, the negation 1: `[[2³¹, 0, −1, 1 − 2³¹], [1, −2³², 2³¹,
+2³¹ − 1], [1, 1, −1, −1]]`, whose eliminated row 1 is [0, −2⁶³, 2⁶² + 1, 2⁶² − 1] with gcd 1, gives [1, 1, 1, 1]).
+**Unreachable sites**: the lcm's gcd conversion (gcd(lcm, piv) ≤ lcm < 2⁶³), reduce_row(x)'s gcd (≤ x[f] = lcm) and the
+final flip (x[f] = lcm > 0 survives reduce_row, so at least one coefficient is positive and the flip never runs); they
+are kept as Rust wrote them. `validate.py` checks the gcd claim on every row with a one-dimensional null space and no zero
+coefficient (2,588).
+
+**The size bound, proven** (the tables need no growth). Every step multiplies a row by a nonzero integer and adds a
+multiple of another, divides it by a positive gcd, negates it, or swaps two rows, so at every point each row is a
+nonzero rational multiple of the row of rational Gauss–Jordan elimination it stands for (or both are zero). After k
+pivots, with R the pivot rows and S their columns (P the matrix with the rows in their order then), a non-pivot row i
+is a multiple of the Schur complement row P_i − P_{i,S}·P_{R,S}⁻¹·P_R, whose entry j times det P_{R,S} is the (k + 1)-minor
+det P_{R ∪ {i}, S ∪ {j}} (Schur's determinant formula); a pivot row j is a multiple of row j of P_{R,S}⁻¹·P_R, whose entry
+l times det P_{R,S} is, by Cramer's rule, the k-minor of P_{R,S} with column c_j replaced by column l. So a row just
+reduced (divided by the gcd of its entries; the sign flip changes no magnitude) is ± the primitive vector of the line
+spanned by an integer vector of minors of order at most q = min(m, n), each of its entries at most such a minor; an
+original row is its own 1-minors. By Hadamard's inequality a minor is at most the product of its rows' Euclidean
+lengths, each at most its whole row's: a row with z nonzero entries of largest magnitude μ has ‖row‖ ≤ √z·μ < 2^b,
+b = bitlen(μ) + ⌈bitlen(z)/2⌉ (0 for a zero row), so every minor of order ≤ q is below 2^B, B the sum of the q largest
+row b's — or of the column b's, the same argument on the transpose; `_km_balance_bits` takes the smaller. Therefore
+every stored entry is below 2^B, and each product pivot·a or factor·a (two stored entries) below 2^(2B), their difference
+below 2^(2B + 1). The lcm: pivot row k is (the minor vector w_k)/g_k with w_k's pivot entry D = det P_{R,S}, so
+p_k = |D|/g_k divides |D|, L and every partial lcm divide |D| < 2^B; and |x[c_k]| = |r_k|·L/p_k = |w_k[f]|·L/|D| ≤
+|w_k[f]| < 2^B, the product row[f]·(lcm/piv) being x[c_k]'s magnitude itself. So a matrix slot holds B/31 + 2 limbs (one
+past ⌈B/31⌉: `_km_sb_divexact` writes len(a) − len(d) + 1 quotient limbs before trimming, at most ⌈B/31⌉ + 1), a work
+slot (the scratch row, x, the products, the gcd's and the division's operands) 2·(B/31 + 2) + 2 limbs, at least
+⌈(2B + 1)/31⌉ + 1, and the division's normalised dividend one word more. `validate.py` checks every stored value, product
+and difference of the exact elimination against these bounds on every golden row (the largest stored value 1,823 bits,
+the largest product 3,641 bits).
+
+**Heap.** `_km_balance_big` takes m row pointers, m·n matrix slots of B/31 + 3 words and 2n + 11 work slots of
+2·(B/31) + 8 words, in one table: a local one of 4,096 words (the survey's 2 × 3, B = 66: 236 words), the bump allocator
+past it (which never frees), Err(ComputationError) when the allocation fails (the allocator refuses one past 2 GiB; a
+table past 2⁴⁰ words is refused before it is sized). The bench's 30 × 31 matrix of entries below 2⁴⁵ (B = 1,444) takes
+423 KB a call, a 40 × 41 of 2⁵³ entries (B = 2,280) 1.1 MB. Rows are swapped through their pointers.
+
+**Golden comparison** (as #36 and #37's whole-result notes). The corpus keeps the oracle's values; where the port's
+result differs the note names it: `[ADR 0002 #39: the port returns Rust's fraction-free elimination on unbounded
+integers = [n], … (v:n i:… …)]`. The generator computes it independently of the port: `audit::port_balance`, Rust's
+algorithm on `exact::Int` (a sign and a `Big` magnitude, with Knuth's division in base 2⁶⁴ and Euclid's gcd), with a
+tracer of every value Rust forms with checked arithmetic; it asserts that the port's result differs from Rust's only
+where Rust's run overflows, and then Rust's result is the ComputationError. The edge rows are appended with their own
+seed (`emit_balance_b7`, 521 rows): the survey's example; Rust's first overflow at each site it can reach (pivot·a,
+factor·a, the difference, the pivot row's negation, a reduced row's gcd of 2⁶³, the lcm, x's product and its negation);
+matrices orthogonal to a known x (its last entry 1, the last column solved, large entries in the other columns) of 3 …
+12 species; x with an entry 0, −1 or −1000, 2³² − 1 (Ok), 2³² or 2³² + 1 (past u32); n − 2 rows (ambiguous) and n or
+n + 1 random rows (only the trivial solution), after the overflow; a duplicate, a negated duplicate, the sum of two rows,
+a zero row and a rotation; ±2⁵³ entries; and large sizes, dense and sparse, of 16, 20, 24, 32 and 40 species. Of the rows
+before B7 exactly the expected change: **104 of the 3,329** `balance_equation` rows, all Rust's ComputationError and the
+port's Ok, by (m, n) 55 (2, 3), 10 (8, 9), 6 each (6, 7), (9, 9) and (10, 9), 5 (9, 8), 3 each (8, 8), (7, 8), (8, 7) and
+(7, 7), 2 each (6, 6) and (7, 6); Rust overflows on 20 more whose exact result is still the ComputationError (12
+ambiguous, 2 trivial, 1 zero coefficient, 5 past u32); the 78 #7 rows keep their notes. Of B7's rows 309 noted. The
+harness maps a noted row (`_par_map_toks`) and counts it: **413 #39 rows**.
+
+`validate.py` §25 proves every note independently: each row with an integer counterpart recomputed with the port's
+semantics on Python ints (Rust's steps, no i64 check), the result checked against the exact null space (§18's Fraction
+RREF: an Ok is the primitive positive basis vector of a one-dimensional null space, an Err a null space of another
+dimension or a vector with a zero, mixed signs or an entry past u32), noted exactly where it differs from the oracle's,
+the note's tokens the port's result; the strict tracer (`b7_rust_site`, the site of Rust's first i64 overflow): every
+noted row is one where Rust overflows, and every row where it does not is unnoted. 3,772 rows; Rust overflows on 620,
+413 noted, 207 still the ComputationError (103 ambiguous or trivial, 38 mixed, 45 past u32, 21 zero); by Rust's first
+overflow: pivot·a 587 (389 Ok exactly), factor·a 18 (16), the difference 8 (7), the pivot row's negation 1 (1), a reduced
+row's gcd of 2⁶³ 3 (0), the lcm 1 (0), x's product 1 (0), x's negation 1 (0); the size bound and the gcd claim on every
+row, as above.
+
+`cr_verify.py` adds `bal23`, `bal34`, `bal56`, `bal89`, `bal1213` and `bal2425` (balance_equation of 2 × 3 … 24 × 25
+matrices: the public result, the i64 fast path's own outcome and the multi-word path forced, against Rust's algorithm on
+Python ints with a tracer of its checked operations — the fast path must report an overflow exactly where Rust's
+arithmetic overflows; 54,306 matrices over seven regions: known x with large and small entries, x with a zero, negative
+or u32-edge entry, random small and random large entries, ±2⁵³ entries, dependent rows), on x86_64 ELF, x86_64 PE and
+aarch64. `tests/stoichiometry.tcyr` adds `cyrius_adr39_unbounded_integers` (the survey's example; each reachable site;
+each Err after an overflow; u32::MAX against 2³²; the cap and a null `out` after a multi-word Ok; Rust's error before
+the cap), `cyrius_adr39_size_and_forced` (a 32 × 33 dense matrix; 600 seeded matrices, the forced path against the fast)
+and `cyrius_adr39_multiword` (the helpers at their edges: −2⁶³, ±2⁵³, the add-back step, Fibonacci gcds, a negative
+Lehmer total). No Rust test changes: `balance_intermediate_overflow_is_error`'s and
+`balance_large_entries_do_not_panic`'s matrices overflow Rust's i64, and their exact vectors exceed u32 ([1, 1, 2⁵³] for
+the first), so both stay the ComputationError.
+
+**Cost** (`tests/kimiya.bcyr`'s balance benches unchanged, as above; the new `bench_audit_b7`, `tests/audit2.bcyr`,
+before → after: Rust's ComputationError at its first overflow, then the port's exact result):
+`balance_survey_2x3` 0.12 → 3.6 µs, `balance_overflow_10x9` (a golden row) 6.6 → 57 µs, `balance_dense_30x31` (entries
+below 2⁴⁵, products past 3,000 bits) 5.4 µs → 158 ms; `tests/audit2.bcyr` 45 → 49 s.
 
 ## Consequences
 
