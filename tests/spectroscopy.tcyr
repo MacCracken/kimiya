@@ -1572,6 +1572,289 @@ fn _t_cyrius_adr30() {
     assert_eq(bad, 0, "absorbance, concentration_from_absorbance and vibrational_frequency = the exact paths (5,000)");
 }
 
+# find_peaks' scan with min / max folded as find_peaks folds them: the count (−1 when more than n), and the number of
+# candidates the exact predicate decided.
+fn _t_peaks_run(data, n, t: f64, out, force): (i64, i64) {
+    var lo: f64 = 1.0 / 0.0;
+    var hi: f64 = -lo;
+    var k = 0;
+    while (k < n) {
+        var v: f64 = load64(data + 8 * k);
+        if (_km_is_finite(v) == 1) {
+            lo = _km_min(lo, v);
+            hi = _km_max(hi, v);
+        }
+        k = k + 1;
+    }
+    var c, s = _km_find_peaks_run(data, n, t, lo, hi, out, n, force);
+    return (c, s);
+}
+
+# The spectrum of a signal by fft_spectrum (cap 2n, in place) and by the slow path forced: 1 when the two agree bit
+# for bit.
+fn _t_fft_same(sig, n, o1, o2): i64 {
+    var t, m = fft_spectrum(sig, n, o1, 2 * n);
+    if (is_ok(t) != 1) { return 0; }
+    if (_km_fft_spectrum_ux(sig, n, o2) != 1) { return 0; }
+    var k = 0;
+    while (k < m) {
+        if (load64(o1 + 8 * k) != load64(o2 + 8 * k)) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# ADR 0002 #36 (the overflow audit's B6): the FFT with an unbounded exponent. The survey's examples (golden rows: Rust's
+# ∞, 0 and [∞, ∞]); the fast test's data bound 2⁻⁹²¹ (passing exactly at it, refused one ulp below, the same spectrum
+# both ways); a product the fast test must refuse — n = 4's w = (cos(−π/2), −1) times d = 3.63·10⁻²⁹², exactly below
+# 2⁻¹⁰²², which IEEE rounds up to 2⁻¹⁰²² and 53 bits do not (so no test on a product's IEEE value at 2⁻¹⁰²² would do);
+# an aliased signal on the slow path; a non-finite sample (Rust's IEEE spectrum); 3,000 seeded signals of every
+# length to 64 over every binade, the public function against the slow path forced (equal wherever the fast test
+# passes, and the slow path everywhere else); and a bin whose square sum alone passes DBL_MAX.
+fn _t_cyrius_adr36_fft() {
+    test_group("cyrius: ADR 0002 #36 (the FFT, unbounded)");
+    var sig = buf(128);
+    var o1 = buf(256);
+    var o2 = buf(256);
+    put(sig, 0, from_bits(0x7F198DAE8FF94A54));        # 1.75·10³⁰⁴
+    var t1, m1 = fft_spectrum(sig, 1, o1, 2);
+    assert(is_ok(t1) == 1 && m1 == 1 && load64(o1) == 0x7F198DAE8FF94A54, "[1.75·10³⁰⁴]: itself (Rust's ∞)");
+    put(sig, 0, from_bits(0x8000000008641C75));        # −6.96·10⁻³¹⁶
+    var t2, m2 = fft_spectrum(sig, 1, o1, 2);
+    assert(is_ok(t2) == 1 && load64(o1) == 0x0000000008641C75, "[−6.96·10⁻³¹⁶]: 6.96·10⁻³¹⁶ (Rust's 0)");
+    put(sig, 0, from_bits(0x7EBF03C39DA5BE54));        # 3.3·10³⁰²
+    put(sig, 1, from_bits(0x7F25D7F8859AC5C4));        # 3.0·10³⁰⁴
+    var t3, m3 = fft_spectrum(sig, 2, o1, 4);
+    assert(is_ok(t3) == 1 && m3 == 2 && load64(o1) == 0x7F2616000CD61141 && load64(o1 + 8) == 0x7F2599F0FE5F7A47,
+      "[3.3·10³⁰², 3·10³⁰⁴]: [3.03·10³⁰⁴, 2.96·10³⁰⁴] (Rust's [∞, ∞])");
+    var dmax: f64 = from_bits(0x7FEFFFFFFFFFFFFF);
+    put(sig, 0, dmax);
+    var t4, m4 = fft_spectrum(sig, 1, o1, 2);
+    assert(is_ok(t4) == 1 && load64(o1) == 0x7FEFFFFFFFFFFFFF, "[DBL_MAX]: DBL_MAX (√ of DBL_MAX² rounded once)");
+    # the data bound
+    var dat = buf(16);
+    var bnd: f64 = from_bits(0x0660000000000000);      # 2⁻⁹²¹
+    var k = 0;
+    while (k < 8) { put(dat, k, 0.0); k = k + 1; }
+    put(dat, 2, 1.0);
+    put(dat, 6, bnd);                                   # z₃ = (2⁻⁹²¹, 0): d of n = 4's second butterfly
+    assert_eq(_km_fft(dat, 4), 1, "d = 2⁻⁹²¹: the fast test passes");
+    k = 0;
+    while (k < 8) { put(dat, k, 0.0); k = k + 1; }
+    put(dat, 2, 1.0);
+    put(dat, 6, from_bits(0x065FFFFFFFFFFFFF));
+    assert_eq(_km_fft(dat, 4), 0, "d one ulp below 2⁻⁹²¹: refused");
+    put(sig, 0, 0.0);
+    put(sig, 1, 1.0);
+    put(sig, 2, 0.0);
+    put(sig, 3, bnd);
+    assert_eq(_t_fft_same(sig, 4, o1, o2), 1, "… the spectrum at the bound is the slow path's");
+    put(sig, 3, from_bits(0x065FFFFFFFFFFFFF));
+    assert_eq(_t_fft_same(sig, 4, o1, o2), 1, "… and one ulp below");
+    # a product just below 2⁻¹⁰²²
+    k = 0;
+    while (k < 8) { put(dat, k, 0.0); k = k + 1; }
+    var c: f64 = from_bits(0x036D02967C31CDB4);        # 3.63·10⁻²⁹²: cos(−π/2)·c in [2⁻¹⁰²² − 2⁻¹⁰⁷⁵, 2⁻¹⁰²²)
+    put(dat, 2, c);                                     # z₁ = (c, 0): d of the second butterfly of n = 4
+    assert_eq(_km_fft(dat, 4), 0, "d = 3.63·10⁻²⁹²: refused (below 2⁻⁹²¹)");
+    assert_eq(load64(dat + 16), 0x0010000000000000, "… where IEEE's w·d is 2⁻¹⁰²² exactly (rounded up)");
+    var ws, we = _km_ux_from(from_bits(0x3C91A62633145C07));
+    var cs, ce = _km_ux_from(c);
+    var ps, pe = _km_ux_mul(ws, we, cs, ce);
+    assert(bits(ps) == 0x3FFFFFFFFFFFFFFF && pe == 0 - 1023, "… and the 53-bit product 2⁻¹⁰²² − 2⁻¹⁰⁷⁵");
+    put(sig, 0, 0.0);
+    put(sig, 1, c);
+    put(sig, 2, 0.0);
+    put(sig, 3, 0.0);
+    var t5, m5 = fft_spectrum(sig, 4, o1, 8);
+    assert(is_ok(t5) == 1 && load64(o1 + 8) == 0x036D02967C31CDB4, "[0, c, 0, 0]: |X₁| = c (Rust's 0: c² underflows)");
+    # aliased: the signal is out itself, on the slow path
+    var al = buf(8);
+    put(al, 0, from_bits(0x7EBF03C39DA5BE54));
+    put(al, 1, from_bits(0x7F25D7F8859AC5C4));
+    var t6, m6 = fft_spectrum(al, 2, al, 4);
+    assert(is_ok(t6) == 1 && load64(al) == 0x7F2616000CD61141 && load64(al + 8) == 0x7F2599F0FE5F7A47,
+      "an aliased signal on the slow path: the same spectrum");
+    # a non-finite sample: Rust's IEEE spectrum
+    var inf: f64 = 1.0 / 0.0;
+    put(sig, 0, inf);
+    put(sig, 1, from_bits(0x7E37E43C8800759C));        # 1e300
+    var t7, m7 = fft_spectrum(sig, 2, o1, 4);
+    var x0: f64 = at(o1, 0);
+    var x1: f64 = at(o1, 1);
+    assert(is_ok(t7) == 1 && x0 == inf && x1 == inf, "[∞, 10³⁰⁰]: Rust's [∞, ∞]");
+    # seeded signals: the public function = the slow path forced
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var slowc = 0;
+    var binc = 0;
+    var dd = buf(256);
+    var r = 0;
+    while (r < 3000) {
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var n = 1 << (((st >> 3) & 0xFF) % 7);
+        var e0 = ((st >> 16) & 0xFFFF) % 2040;
+        var spread = 1 + ((st >> 40) & 0xFF) % 140;
+        var j = 0;
+        while (j < n) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            var e = e0 + ((st >> 1) & 0xFFFF) % spread;
+            if (e > 2046) { e = 2046; }
+            var b = (e << 52) | (st & 0x000FFFFFFFFFFFFF);
+            if (((st >> 62) & 1) == 1) { b = b | 0x8000000000000000; }
+            if (((st >> 58) & 15) == 0) { b = 0; }
+            store64(sig + 8 * j, b);
+            j = j + 1;
+        }
+        if (_t_fft_same(sig, n, o1, o2) != 1) { bad = bad + 1; }
+        var fr = _km_fft_spectrum_fast(sig, n, dd);
+        if (fr == 0) { slowc = slowc + 1; }
+        if (fr == 1) { binc = binc + 1; }
+        r = r + 1;
+    }
+    assert_eq(bad, 0, "3,000 seeded signals: fft_spectrum = the unbounded-exponent spectrum forced, bit for bit");
+    var msg = "… with every path taken (the unbounded transform 165 times, a bin's unbounded magnitude 1,451)";
+    assert(slowc > 100 && binc > 100 && slowc + binc < 2700, msg);
+    # Rust's transform in range, the squares past DBL_MAX: the unbounded magnitude per bin, the transform kept
+    put(sig, 0, from_bits(0x6974E718D7D7625A));        # 10²⁰⁰
+    put(sig, 1, 1.0);
+    var f9 = _km_fft_spectrum_fast(sig, 2, dd);
+    assert(f9 == 1 && load64(dd) == 0x6974E718D7D7625A && load64(dd + 8) == 0x6974E718D7D7625A,
+      "[10²⁰⁰, 1]: Rust's transform, each bin's √ of a square sum past DBL_MAX rounded once (Rust's ∞)");
+}
+
+# ADR 0002 #37 (the overflow audit's B6): find_peaks' threshold test is exact. The survey's subnormal cases and the
+# golden 1 − 2⁻⁵³ row (Rust's rounded threshold 11 against the exact 11 − 2⁻⁵³), a 53-bit tie (θ = 2 + 2⁻⁵², Rust's
+# 2 + 2⁻⁵¹), ±DBL_MAX ends where Rust's threshold is 2⁵² ulps off (its 1 − t rounded by 2⁻⁵⁴, times DBL_MAX), a +∞
+# candidate, _km_sign_scaled across rounds, and 20,000 seeded arrays with near-ties: the fast test against the exact
+# predicate forced on every candidate.
+fn _t_cyrius_adr37_find_peaks() {
+    test_group("cyrius: ADR 0002 #37 (find_peaks' exact threshold)");
+    var out = buf(64);
+    var d = buf(64);
+    var one_m: f64 = from_bits(0x3FEFFFFFFFFFFFFF);    # 1 − 2⁻⁵³
+    put(d, 0, -0.0);
+    put(d, 1, from_bits(1));
+    put(d, 2, 0.0);
+    assert(peaks_of(d, 3, 0.75, out) == 1 && load64(out) == 1, "[−0, 5·10⁻³²⁴, 0] at 0.75: [1] (Rust's [])");
+    assert(peaks_of(d, 3, one_m, out) == 1 && load64(out) == 1, "… at 1 − 2⁻⁵³: [1] (Rust's [])");
+    assert(peaks_of(d, 3, 1.0, out) == 0, "… at 1: θ = 5·10⁻³²⁴ itself, no peak");
+    put(d, 0, 10.0);
+    put(d, 1, 10.2);
+    put(d, 2, 10.0);
+    put(d, 3, 11.0);
+    put(d, 4, 10.0);
+    assert(peaks_of(d, 5, one_m, out) == 1 && load64(out) == 3, "[10, 10.2, 10, 11, 10] at 1 − 2⁻⁵³: [3] (Rust's [])");
+    assert(peaks_of(d, 5, 1.0, out) == 0, "… at 1: none");
+    var half_up: f64 = from_bits(0x3FE0000000000001);  # ½ + 2⁻⁵³
+    put(d, 0, 1.0);
+    put(d, 1, from_bits(0x4000000000000001));          # 2 + 2⁻⁵¹
+    put(d, 2, 1.0);
+    put(d, 3, 3.0);
+    put(d, 4, 1.0);
+    assert(peaks_of(d, 5, half_up, out) == 2 && load64(out) == 1, "θ = 2 + 2⁻⁵²: 2 + 2⁻⁵¹ is a peak (Rust's T is it)");
+    put(d, 1, 2.0);
+    assert(peaks_of(d, 5, half_up, out) == 1 && load64(out) == 3, "… 2 is not");
+    var dmax: f64 = from_bits(0x7FEFFFFFFFFFFFFF);
+    var ndmax: f64 = -dmax;
+    var half_dn: f64 = from_bits(0x3FDFFFFFFFFFFFFF);  # ½ − 2⁻⁵⁴
+    put(d, 0, ndmax);
+    put(d, 1, from_bits(0xFC980CCE21B6FF77));          # −1.5·10²⁹²: between θ and Rust's T
+    put(d, 2, ndmax);
+    put(d, 3, dmax);
+    put(d, 4, 0.0);
+    var c1 = peaks_of(d, 5, half_dn, out);
+    assert(c1 == 2 && load64(out) == 1 && load64(out + 8) == 3, "±DBL_MAX at ½ − 2⁻⁵⁴: θ = −DBL_MAX·2⁻⁵³, [1, 3]");
+    var inf: f64 = 1.0 / 0.0;
+    put(d, 0, dmax);
+    put(d, 1, inf);
+    put(d, 2, dmax);
+    assert(peaks_of(d, 3, 1.0, out) == 1 && load64(out) == 1, "a +∞ candidate is above every finite threshold");
+    var cs: f64[4];
+    var ks: i64[4];
+    store64(&cs, 1.0);
+    store64(&ks, 1000);
+    var m1: f64 = -1.0;
+    store64(&cs + 8, m1);
+    store64(&ks + 8, 1000);
+    store64(&cs + 16, m1);
+    store64(&ks + 16, 0 - 2100);
+    assert(_km_sign_scaled(&cs, &ks, 3) == 0 - 1, "2¹⁰⁰⁰ − 2¹⁰⁰⁰ − 2⁻²¹⁰⁰: the tiny term decides, rounds later");
+    store64(&cs + 16, 0.0);
+    assert(_km_sign_scaled(&cs, &ks, 3) == 0, "… without it, 0");
+    store64(&cs + 16, from_bits(0x39B0000000000000));  # 2⁻¹⁰⁰·2¹⁰⁰ = 1: in the first round, 2⁻¹⁰⁰⁰ of its scale
+    store64(&ks + 16, 100);
+    store64(&cs + 24, m1);
+    store64(&ks + 24, 99);
+    var msg_d = "2¹⁰⁰⁰ − 2¹⁰⁰⁰ + 1 − 2⁹⁹: the round's sum, 2⁻¹⁰⁰⁰ of its scale, defers to the larger deferred term";
+    assert(_km_sign_scaled(&cs, &ks, 4) == 0 - 1, msg_d);
+    store64(&ks + 24, 0 - 100);
+    assert(_km_sign_scaled(&cs, &ks, 4) == 1, "… and 1 − 2⁻¹⁰⁰ is positive");
+    var st = 0x2545F4914F6CDD1D;
+    var bad = 0;
+    var slow = 0;
+    var o2 = buf(64);
+    var k = 0;
+    while (k < 20000) {
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var n = 3 + ((st >> 1) & 0xFFFFFF) % 30;
+        var ex = ((st >> 8) & 0xFFFFFF) % 2046;                      # one binade for the array, its sign mixed
+        var j = 0;
+        while (j < n) {
+            st = st ^ (st << 13);
+            st = st ^ (st >> 7);
+            st = st ^ (st << 17);
+            var e2 = ex + ((st >> 58) & 3);
+            if (e2 > 2046) { e2 = 2046; }
+            var b = (e2 << 52) | (st & 0x000FFFFFFFFFFFFF);
+            if (((st >> 55) & 1) == 1) { b = b | 0x8000000000000000; }
+            if (((st >> 56) & 7) == 0) { b = load64(d + 8 * (j / 2)); }   # repeats: ties and plateaus
+            store64(d + 8 * j, b);
+            j = j + 1;
+        }
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var t: f64 = f64_from((st >> 11) & 0x1FFFFFFFFFFFFF);
+        t = t / 9007199254740992.0;
+        # a candidate at Rust's threshold ± a few ulps
+        var i = 1 + ((st >> 3) & 0xFFFF) % (n - 2);
+        var lo: f64 = inf;
+        var hi: f64 = -inf;
+        j = 0;
+        while (j < n) {
+            var v: f64 = at(d, j);
+            lo = _km_min(lo, v);
+            hi = _km_max(hi, v);
+            j = j + 1;
+        }
+        var omt: f64 = 1.0 - t;
+        var thr: f64 = (lo * omt) + (hi * t);
+        var tb = bits(thr) + ((st >> 40) & 0xFF) % 5 - 2;
+        if (thr == 0.0) { tb = ((st >> 40) & 0xFF) % 3; }
+        var w: f64 = from_bits(tb);
+        if (w >= lo && w <= hi) { put(d, i, w); }
+        var ca, sa = _t_peaks_run(d, n, t, out, 0);
+        var cb, sb = _t_peaks_run(d, n, t, o2, 1);
+        if (ca != cb) { bad = bad + 1; }
+        j = 0;
+        while (j < ca && j < cb) {
+            if (load64(out + 8 * j) != load64(o2 + 8 * j)) { bad = bad + 1; }
+            j = j + 1;
+        }
+        slow = slow + sa;
+        k = k + 1;
+    }
+    assert_eq(bad, 0, "20,000 seeded arrays: the fast test's indices = the exact predicate's on every candidate");
+    assert(slow > 100, "… and the near-ties reach the exact predicate");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main(): i64 {
     _t_beer_lambert_basic();
@@ -1649,6 +1932,8 @@ fn main(): i64 {
     _t_cyrius_adr23_s8();
     _t_cyrius_constants();
     _t_cyrius_adr30();
+    _t_cyrius_adr36_fft();
+    _t_cyrius_adr37_find_peaks();
     return assert_summary();
 }
 

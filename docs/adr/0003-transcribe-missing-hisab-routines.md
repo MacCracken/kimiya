@@ -127,3 +127,17 @@ glibc's (then MPFR's) twiddles, and perturbing the −2.0 by an ulp changes 41 r
 plan §6.2's row is updated. **Follow-up for hisab** (`docs/development/state.md`): hisab's FFT twiddles are not correctly
 rounded (`f64_cos` / `f64_sin`), so its transforms differ in the last bits by platform and from a correctly rounded
 reference; a hisab FFT on correctly rounded twiddles, or with 1.4.0's recurrence as an option, would let kimiya call it.
+
+## Amendment (the overflow audit's B6, 2026-11-11)
+
+**The FFT gains an unbounded-exponent slow path (ADR 0002 #36), and the flame's bisection an exact sign test (ADR 0002
+#38).** `_km_fft` is still hisab 1.4.0's `num::fft` operation for operation, now also returning whether its products
+provably stayed in binary64's normal range (every twiddle component 0 or at least 2⁻¹⁰⁰, every butterfly's d 0 or at
+least 2⁻⁹²¹); where that test, or the retained outputs' finiteness, fails for a finite signal, `fft_spectrum` re-runs the
+same transcription with an unbounded exponent (`_km_fft_ux`, on `src/mathx.cyr`'s `_km_ux_*`), each magnitude's √ rounded
+once — the user's decision "FFT: both", hisab 1.4.0's transform without the range limit. In-range transforms keep their
+bits (the fast path is the transcription itself); the golden rows that change are ADR 0002 #36's (41 of the 213 M4e
+rows). `_km_flame_bisection`'s opposite-signs check, hisab 1.4.0's `f(a)·f(b) > 0`, is the exact same-sign comparison,
+which differs only where that product underflows to +0 and cannot change a flame result (the flame reaches it only after
+its bracket proved opposite signs at the same two points); the bracket test itself is ADR 0002 #38. The status stays
+**Accepted**.

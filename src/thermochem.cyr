@@ -16,6 +16,13 @@
 #   there: every physical input, every tabulated segment over its range). A product past DBL_MAX whose sums cancel, or a
 #   Shomate term that over- or underflows, gave ±∞ or NaN although the value is finite or ±∞; here it is that value.
 #   Rust's checks, Err codes and order are kept; a non-finite input keeps Rust's result.
+# - ADR 0002 #38 (the overflow audit's B6; the user's decision "fix all three iterative edges", the flame's being its
+#   bracket's exact sign test): adiabatic_flame_temperature's bracket test f(T₀)·f(T_max) < 0 is an exact sign
+#   comparison, since the product underflows to −0 when |ΔH| and the moles are tiny (a real system scaled by 10⁻²⁰⁰:
+#   Rust's Err, here Newton's answer, Rust's own at a scale where the product does not underflow), and the transcribed
+#   bisection's f(a)·f(b) > 0 likewise (no result changes there).
+#   Newton, its absolute 10⁻³ J/mol tolerance (which accepts the initial guess at once at such scales) and every Err
+#   are Rust's.
 #
 # Units: reaction_enthalpy and reaction_gibbs_energy return **J/mol** (ADR 0002 #1: Rust 1.2 returns
 # kJ/mol; here Rust's kJ difference is multiplied by 1000.0 once, so the value is the oracle's × 1000
@@ -842,10 +849,14 @@ fn _km_flame_newton(dh: f64, products, n, cache, t0: f64, x0: f64): (i64, f64) {
 }
 
 # hisab 1.4.0 `num::bisection(f, a, b, tol, max_iter)` on the flame balance, operation for operation,
-# with Rust's FLAME_BISECTION_TOL = 1e-6 and max_iter = 200: fail if f(a)·f(b) > 0; orient so f(lo) < 0
-# (swap when f(a) > 0); per iteration mid = (lo + hi)·0.5, stop with mid if |f(mid)| < tol or
+# with Rust's FLAME_BISECTION_TOL = 1e-6 and max_iter = 200: fail if f(a) and f(b) have the same sign; orient so
+# f(lo) < 0 (swap when f(a) > 0); per iteration mid = (lo + hi)·0.5, stop with mid if |f(mid)| < tol or
 # |hi − lo| < tol, else move the end whose sign f(mid) shares; after max_iter, (lo + hi)·0.5.
-# (KM_ERR_NONE, T) or (KM_ERR_INVALID_INPUT, 0.0) for hisab's opposite-signs error.
+# (KM_ERR_NONE, T) or (KM_ERR_INVALID_INPUT, 0.0) for hisab's opposite-signs error. ADR 0002 #38 (the overflow audit's
+# B6): hisab's test is the product f(a)·f(b) > 0, which a product underflowing to +0 passes although the signs agree;
+# here it is the exact sign comparison (f(a) > 0 and f(b) > 0, or both < 0), the same answer wherever the product does
+# not underflow to a zero (a NaN, ±∞ or ±0 operand included). The flame calls it only after its bracket test proved
+# f(a) and f(b) of strictly opposite signs, and f is deterministic, so neither test refuses there: no result changes.
 #must_use
 fn _km_flame_bisection(dh: f64, products, n, cache, t0: f64, a: f64, b: f64): (i64, f64) {
     var tol: f64 = 0.000001;
@@ -853,8 +864,7 @@ fn _km_flame_bisection(dh: f64, products, n, cache, t0: f64, a: f64, b: f64): (i
     var hi: f64 = b;
     var f_lo: f64 = _km_flame_f(dh, products, n, cache, t0, lo);
     var f_hi: f64 = _km_flame_f(dh, products, n, cache, t0, hi);
-    var pr: f64 = f_lo * f_hi;
-    if (pr > 0.0) { return (KM_ERR_INVALID_INPUT, 0.0); }
+    if ((f_lo > 0.0 && f_hi > 0.0) || (f_lo < 0.0 && f_hi < 0.0)) { return (KM_ERR_INVALID_INPUT, 0.0); }
     if (f_lo > 0.0) {
         var sw: f64 = lo;
         lo = hi;
@@ -887,9 +897,14 @@ fn _km_flame_bisection(dh: f64, products, n, cache, t0: f64, a: f64, b: f64): (i
 # range [T_min, T_max); Err(KM_ERR_INVALID_INPUT) if ΔH is not finite, the list is empty (or no list),
 # or a product's moles are not positive and finite; Err(KM_ERR_INVALID_REACTION) for a product with no
 # Shomate data (the first bad product in list order decides); Err(KM_ERR_COMPUTATION_ERROR) if the root
-# can't be bracketed (ΔH ≥ 0, or the flame temperature is past T_max; the test is the product
-# f(T₀)·f(T_max) < 0, so NaN fails it) or the bisection fails. Mirrors
-# `thermochem::adiabatic_flame_temperature`, in Rust's order of checks.
+# can't be bracketed (ΔH ≥ 0, or the flame temperature is past T_max: f(T₀) and f(T_max) not of strictly
+# opposite signs, so NaN and ±0 fail it) or the bisection fails. Mirrors
+# `thermochem::adiabatic_flame_temperature`, in Rust's order of checks. ADR 0002 #38 (the overflow audit's B6,
+# the user's decision to fix the iterative edges, here the bracket's exact sign test): Rust tests
+# f(T₀)·f(T_max) < 0, a product that underflows to −0 for a tiny |ΔH| and moles (|f(T₀)·f(T_max)| at most
+# 2⁻¹⁰⁷⁵), so a reaction whose balance does change sign is "not bracketed" (Err); here the signs are compared
+# exactly, the same answer wherever the product does not underflow to a zero (a NaN, ±∞ or ±0 operand included).
+# Newton, its tolerances and every Err are Rust's.
 #must_use
 fn adiabatic_flame_temperature(reaction_enthalpy_j: f64, products, n, t_initial_k: f64): Result {
     if (_km_is_positive(t_initial_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
@@ -921,14 +936,17 @@ fn adiabatic_flame_temperature(reaction_enthalpy_j: f64, products, n, t_initial_
     if (t_initial_k < range_min || t_initial_k >= range_max) { return Err(KM_ERR_INVALID_TEMPERATURE); }
 
     # f(T₀) = −ΔH_rxn and f decreases, so a sign change on [T₀, T_max] means an exothermic reaction
-    # whose root lies in the data range. A product test, so NaN fails it.
+    # whose root lies in the data range. ADR 0002 #38: the exact sign test (f_lo < 0 < f_hi or f_hi < 0 < f_lo),
+    # where Rust's f_lo·f_hi < 0 fails when the product underflows to −0. It is Rust's answer wherever the
+    # product does not underflow to a zero: a NaN operand fails both (NaN·x is NaN; NaN compares false), a ±0
+    # operand fails both (the product ±0 or 0·∞ = NaN), and for two nonzero non-NaN values the product's sign is
+    # the xor of theirs, its value negative, −∞ or −0, the last only by underflow.
     var t_lo: f64 = t_initial_k;
     var t_hi: f64 = range_max;
     var f_lo: f64 = _km_flame_f(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_lo);
     var f_hi: f64 = _km_flame_f(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_hi);
-    var pr: f64 = f_lo * f_hi;
     var bracketed = 0;
-    if (pr < 0.0) { bracketed = 1; }
+    if ((f_lo < 0.0 && f_hi > 0.0) || (f_lo > 0.0 && f_hi < 0.0)) { bracketed = 1; }
     if (bracketed != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
 
     # The initial guess: an average Cp of 40 J/(mol·K) per mole of product (Rust's typed constant).

@@ -1351,6 +1351,45 @@ fn _t_cyrius_adr34_shomate() {
     assert_eq(bad, 0, "… where Rust's chain, the row path's included, is the unbounded-exponent evaluation");
 }
 
+# ADR 0002 #38 (the overflow audit's B6): the flame's bracket compares the signs of f(T₀) and f(T_max) exactly. Rust's
+# product f(T₀)·f(T_max) underflows to −0 for the survey's (−10⁻³²⁰, [CO₂ ×10⁻³⁰⁰], 298.15) and for CH₄/air scaled by
+# 10⁻²⁰⁰ (golden rows), its ComputationError; here they are bracketed and Newton accepts its guess at once (|f| below
+# Rust's absolute 10⁻³ J/mol), the answer Rust itself gives at 10⁻¹⁵⁰, where the product does not underflow. An
+# endothermic ΔH stays the Err. The transcribed bisection's same-sign test is exact too: two negative ends whose product
+# underflows to +0 refuse (hisab's f(a)·f(b) > 0 would bisect on).
+fn _t_cyrius_adr38_flame_sign() {
+    test_group("cyrius_adr38_flame_sign");
+    var t0: f64 = 298.15;
+    var e320: f64 = _b4_fbits(0x00000000000007E8);  # 1e-320
+    var ne320: f64 = -e320;
+    var e300: f64 = _b4_fbits(0x01A56E1FC2F8F359);  # 1e-300
+    var c = sp1("CO2(g)", e300);
+    var t1, v1 = adiabatic_flame_temperature(ne320, c, 1, t0);
+    assert(is_ok(t1) == 1 && v1 == 0x4072A26666666666, "(−10⁻³²⁰, [CO₂ ×10⁻³⁰⁰], 298.15): 298.15 K (Rust's Err)");
+    var cache: i64[64];
+    fill_cache(c, 1, &cache);
+    var fa: f64 = _km_flame_f(ne320, c, 1, &cache, t0, t0);
+    var fb: f64 = _km_flame_f(ne320, c, 1, &cache, t0, 6000.0);
+    var pr: f64 = fa * fb;
+    assert(fa > 0.0 && fb < 0.0 && _km_bits(pr) == 0x8000000000000000, "… its ends' product is −0");
+    var t2, v2 = adiabatic_flame_temperature(e320, c, 1, t0);
+    assert(is_err_code(t2, v2, KM_ERR_COMPUTATION_ERROR), "an endothermic ΔH of 10⁻³²⁰: Err in both");
+    var e2, x2 = _km_flame_bisection(e320, c, 1, &cache, t0, t0, 6000.0);
+    assert_eq(e2, KM_ERR_INVALID_INPUT, "the bisection's ends both negative, product +0: its opposite-signs error");
+    var m200 = sp3("CO2(g)", _b4_fbits(0x16687E92154EF7AC), "H2O(g)", _b4_fbits(0x16787E92154EF7AC), "N2(g)",
+        _b4_fbits(0x169706561E451C03));
+    var dh200: f64 = _b4_fbits(0x97A2BDD1E669466D); # −802,300 × 10⁻²⁰⁰
+    var t3, v3 = adiabatic_flame_temperature(dh200, m200, 3, t0);
+    assert(is_ok(t3) == 1 && v3 == 0x40A139834F3BC40A, "CH₄/air × 10⁻²⁰⁰: 2204.756463878327 K (Rust's Err)");
+    var m150 = sp3("CO2(g)", _b4_fbits(0x20CA2FE76A3F9475), "H2O(g)", _b4_fbits(0x20DA2FE76A3F9475), "N2(g)",
+        _b4_fbits(0x20F89DAB733BC3DF));
+    var dh150: f64 = _b4_fbits(0xA2040960A4718B27); # −802,300 × 10⁻¹⁵⁰
+    var t4, v4 = adiabatic_flame_temperature(dh150, m150, 3, t0);
+    var r3: f64 = v3;
+    var r4: f64 = v4;
+    assert(is_ok(t4) == 1 && near(r4, r3, 0.000000001), "… Rust's own answer at 10⁻¹⁵⁰ (bracketed in both)");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_lookup_water_liquid();
@@ -1423,6 +1462,7 @@ fn main() {
     _t_cyrius_shomate_struct();
     _t_cyrius_adr33_reaction_sums();
     _t_cyrius_adr34_shomate();
+    _t_cyrius_adr38_flame_sign();
     return assert_summary();
 }
 

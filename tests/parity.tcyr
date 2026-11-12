@@ -423,6 +423,11 @@ var _par_adr35_kok = 0;                      # equilibrium_constant rows where o
 var _par_adr35_lim = 0;                      # debye_huckel_limiting
 var _par_adr35_ext = 0;                      # debye_huckel_extended
 var _par_adr35_dav = 0;                      # davies_activity
+# The overflow audit's B6 (ADR 0002 #36 … #38): fft_spectrum's and find_peaks' rows noted with the port's whole result
+# (_par_map_toks) and adiabatic_flame_temperature's with its value (_par_got_noted), mapped and counted.
+var _par_adr36_fft = 0;                      # #36: fft_spectrum
+var _par_adr37_peaks = 0;                    # #37: find_peaks
+var _par_adr38_flame = 0;                    # #38: adiabatic_flame_temperature
 
 # ADR 0002 #35 (the overflow audit's B5): the got list for an equilibrium_constant row whose note may name the port's K,
 # `= <x> (f:<bits>)]` (where Rust's is another value, or its ComputationError), or its Err, `= Err(ComputationError)
@@ -621,7 +626,8 @@ var _par_adr1_err = 0;
 
 # `thermochem` rows: src/thermochem.cyr and the generated src/thermochem_data.cyr. ADR 0002 #33 (the overflow audit's
 # B4): the reaction sums' rows noted with the port's unbounded-exponent value (reaction_enthalpy's and
-# reaction_gibbs_energy's after ADR 0002 #1's note), and #34: the Shomate rows, are mapped and counted.
+# reaction_gibbs_energy's after ADR 0002 #1's note), and #34: the Shomate rows, are mapped and counted; #38 (B6): the
+# flame rows where the port's exact bracket sign test is Ok and Rust's product test the Err.
 fn _par_thermochem(fp, fl): i64 {
     if (_par_eq(fp, fl, "thermochem::THERMOCHEM_DATA") == 1) { _par_got_seq(KM_THERMOCHEM_COUNT); return 1; }
     if (_par_eq(fp, fl, "thermochem::THERMOCHEM_DATA[]") == 1) { _par_got_thermochem(_par_in(0) + 1); return 1; }
@@ -674,7 +680,8 @@ fn _par_thermochem(fp, fl): i64 {
         if (prods < 0) { return 0 - 1; }
         var t0k: f64 = _par_in(2 + 2 * n);
         var tf, vf = adiabatic_flame_temperature(dh, prods, n, t0k);
-        _par_got_res(tf, vf);
+        _par_got_noted(38, "[ADR 0002 #38:", tf, vf);
+        if (_par_mapped == 38) { _par_adr38_flame = _par_adr38_flame + 1; }
         return 1;
     }
     var named = 0;
@@ -2080,7 +2087,8 @@ fn _par_got_f64s(t, v, buf) {
 # transform), so both paths replay the corpus. ADR 0002 #19 (the wavenumber conversions), #21 (the Bohr levels, the
 # transition energy, the Rydberg formula and the series) and #22 (the reduced mass): a noted row's port value must be
 # the note's; #23 (the isotope abundances and patterns, M4e-4): a noted row's whole result must be the note's tokens;
-# #30 (the overflow audit's B2: the Beer–Lambert, rotor and moment-of-inertia monomials, √(k/μ)): as #19's.
+# #30 (the overflow audit's B2: the Beer–Lambert, rotor and moment-of-inertia monomials, √(k/μ)): as #19's; #36 and
+# #37 (B6: the unbounded FFT, find_peaks' exact threshold): a noted row's whole result must be the note's tokens.
 fn _par_spectroscopy(fp, fl): i64 {
     if (_par_spec_alloc() != 1) { return 0 - 1; }
     if (_par_eq(fp, fl, "SpectralSeries::n_lower") == 1) {
@@ -2155,6 +2163,8 @@ fn _par_spectroscopy(fp, fl): i64 {
         if (n <= 64) { cap = n / 2 + 1; }
         var tf, vf = fft_spectrum(_par_spec_in, n, _par_spec_out, cap);
         _par_got_f64s(tf, vf, _par_spec_out);
+        _par_map_toks(36, "[ADR 0002 #36:");
+        if (_par_mapped == 36) { _par_adr36_fft = _par_adr36_fft + 1; }
         return 1;
     }
     if (_par_eq(fp, fl, "spectroscopy::find_peaks") == 1) {
@@ -2168,6 +2178,8 @@ fn _par_spectroscopy(fp, fl): i64 {
             _par_got_i(load64(_par_spec_out + 8 * q));
             q = q + 1;
         }
+        _par_map_toks(37, "[ADR 0002 #37:");
+        if (_par_mapped == 37) { _par_adr37_peaks = _par_adr37_peaks + 1; }
         return 1;
     }
     var x: f64 = _par_in(0);
@@ -2718,8 +2730,8 @@ fn _par_accepted(fp, fl, ip, il): i64 {
     # #24 … #26 (M4f-2) stoichiometry's exact value, index or whole result; #27, #28 (the overflow audit's B1) thermo's,
     # phase's and kinetics' rounded-once or unbounded-exponent value; #29, #30 (B2) solution's, electrochemistry's and
     # spectroscopy's; #31, #32 (B3) gas's, potential's, inorganic's and nuclear's; #33, #34 (B4) the sums' and the
-    # Shomate polynomials'; #35 (B5) the exp / exp10 arguments'.
-    if (_par_mapped >= 13 && _par_mapped <= 35) { return 2; }
+    # Shomate polynomials'; #35 (B5) the exp / exp10 arguments'; #36 … #38 (B6) the FFT's, find_peaks' and the flame's.
+    if (_par_mapped >= 13 && _par_mapped <= 38) { return 2; }
     # ADR 0002 #7 (M4f): an oxidation-state row whose note names the port's exact rational states, or a balancing row
     # whose f64 matrix has no integer counterpart (the oracle's Err(InvalidInput)).
     if (_par_mapped == 7) { return 2; }
@@ -2729,13 +2741,13 @@ fn _par_accepted(fp, fl, ip, il): i64 {
 # 1 for an ADR whose accepted rows are counted but not printed row by row: ADR 0002 #4's Antoine mapping, #13 … #22's
 # exact-value rows (M4c … M4e-3; about 17,000 rows between them), #23's isotope rows (M4e-4), #7's oxidation-state
 # and balancing rows (M4f), #24 … #26's stoichiometry rows (M4f-2), #27 / #28's (the overflow audit's B1), #29 /
-# #30's (B2), #31 / #32's (B3), #33 / #34's (B4) and #35's (B5), each
+# #30's (B2), #31 / #32's (B3), #33 / #34's (B4), #35's (B5) and #36 … #38's (B6), each
 # summarised by _par_module_done with its count; the validate.py proofs check every one of them. ADR 0002 #12's CFSE
 # rows (13) and #3's SEMF rows (23) are printed by name.
 #must_use
 fn _par_accepted_quiet(adr): i64 {
     if (adr == 2 && _par_mapped == 2) { return 1; }
-    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 35) { return 1; }
+    if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 38) { return 1; }
     if (adr == 2 && _par_mapped == 7) { return 1; }
     return 0;
 }
@@ -2756,7 +2768,7 @@ fn _par_accepted_bits(adr): i64 {
 # (per function), #22's, #23's (per function) and #30's (per function); after stoichiometry, #7's (the oxidation states,
 # the integer matrix) and #24's (per function), #25's and #26's. The overflow audit's B4: #33's after thermo, reaction,
 # thermochem, solution, kinetics, inorganic and nuclear (per function), #34's after thermochem (per function); B5: #35's
-# after reaction and solution (per function).
+# after reaction and solution (per function); B6: #36's and #37's after spectroscopy, #38's after thermochem.
 fn _par_module_done(mp, ml) {
     if (_par_eq(mp, ml, "reaction") == 1) {
         _par_b4_line(33, _par_adr33_gibbs, "gibbs_free_energy");
@@ -2955,6 +2967,14 @@ fn _par_module_done(mp, ml) {
         fmt_int(_par_adr30_moment);
         print(") where the port's correctly rounded value differs from Rust's", 62);
         println(" (accepted, ADR 2, counted, not listed)");
+        _par_puts("  ADR 0002 #36 the FFT unbounded: ");
+        fmt_int(_par_adr36_fft);
+        _par_puts(" fft_spectrum rows where an intermediate of Rust's transform or magnitudes leaves the normal range");
+        println(" and the port's spectrum is the noted one (accepted, ADR 2, counted, not listed)");
+        _par_puts("  ADR 0002 #37 the exact threshold: ");
+        fmt_int(_par_adr37_peaks);
+        _par_puts(" find_peaks rows where Rust's rounded threshold decides otherwise and the port's indices are the");
+        println(" noted ones (accepted, ADR 2, counted, not listed)");
         return 0;
     }
     if (_par_eq(mp, ml, "potential") == 1) {
@@ -3057,6 +3077,10 @@ fn _par_module_done(mp, ml) {
         fmt_int(_par_adr34_h);
         _par_puts(") where an intermediate of Rust's chain leaves the normal range and the port's result is the");
         println(" noted one (accepted, ADR 2, counted, not listed)");
+        _par_puts("  ADR 0002 #38 the exact bracket sign test: ");
+        fmt_int(_par_adr38_flame);
+        _par_puts(" adiabatic_flame_temperature rows where Rust's f(T0)·f(T_max) underflows to −0 and the port's");
+        println(" Ok is the noted one (accepted, ADR 2, counted, not listed)");
         return 0;
     }
     if (_par_eq(mp, ml, "phase") != 1) { return 0; }

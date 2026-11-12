@@ -486,14 +486,25 @@ fn pattern(m: &mut Module, isos: &[Iso], atoms: &[(u8, u32)]) {
 fn spectrum(m: &mut Module, signal: &[f64]) {
     let mut ins = vec![Tok::V(signal.len())];
     ins.extend(signal.iter().map(|&x| f(x)));
-    let outs = match fft_spectrum(bb(signal)) {
-        Ok(s) => {
-            let mut v = vec![Tok::V(s.len())];
-            v.extend(s.iter().map(|&x| f(x)));
-            v
-        }
-        Err(e_) => vec![err(&e_)],
+    let vals = |s: &[f64]| {
+        let mut v = vec![Tok::V(s.len())];
+        v.extend(s.iter().map(|&x| f(x)));
+        v
     };
+    let rust = fft_spectrum(bb(signal));
+    let outs = match &rust {
+        Ok(s) => vals(s),
+        Err(e_) => vec![err(e_)],
+    };
+    // ADR 0002 #36 (the overflow audit's B6): the port's spectrum of a finite signal, the unbounded-exponent transform,
+    // noted where it differs from Rust's (by its bits; NaN never occurs for a finite signal)
+    if let (Ok(r), Some(p)) = (&rust, audit::port_fft(signal))
+        && (r.len() != p.len() || r.iter().zip(&p).any(|(a, b)| a.to_bits() != b.to_bits()))
+    {
+        let note = format!("ADR 0002 #36: the port returns {} = {}", audit::FFT_HOW, tokens_note(&vals(&p)));
+        m.row_noted("spectroscopy::fft_spectrum", Class::C, &ins, &outs, &note);
+        return;
+    }
     m.row("spectroscopy::fft_spectrum", Class::C, &ins, &outs);
 }
 
@@ -501,12 +512,21 @@ fn peaks(m: &mut Module, data: &[f64], threshold: f64) {
     let mut ins = vec![Tok::V(data.len())];
     ins.extend(data.iter().map(|&x| f(x)));
     ins.push(f(threshold));
-    let p = find_peaks(bb(data), bb(threshold));
-    let mut outs = vec![Tok::V(p.len())];
-    for k in p {
-        outs.push(i(i64::try_from(k).unwrap_or(-1)));
+    let idx = |p: &[usize]| {
+        let mut v = vec![Tok::V(p.len())];
+        v.extend(p.iter().map(|&k| i(i64::try_from(k).unwrap_or(-1))));
+        v
+    };
+    let rust = find_peaks(bb(data), bb(threshold));
+    let outs = idx(&rust);
+    // ADR 0002 #37 (the overflow audit's B6): the port's indices with the exact threshold test, noted where they differ
+    let port = audit::port_peaks(data, threshold);
+    if port == rust {
+        m.row("spectroscopy::find_peaks", Class::A, &ins, &outs);
+    } else {
+        let note = format!("ADR 0002 #37: the port returns {} = {}", audit::PEAKS_HOW, tokens_note(&idx(&port)));
+        m.row_noted("spectroscopy::find_peaks", Class::A, &ins, &outs, &note);
     }
-    m.row("spectroscopy::find_peaks", Class::A, &ins, &outs);
 }
 
 /// sin(x) for |x| ≤ π + 1, a Taylor series in + − × ÷ only: a fixed double on every machine (a grid input, not std's
@@ -1252,5 +1272,205 @@ pub fn emit(isos: &[Iso]) -> Module {
         peaks(&mut m, &data, rng.unit());
     }
     audit::emit_spectroscopy(&mut m);
+    emit_peaks_b6(&mut m);
+    emit_fft_b6(&mut m);
     m
+}
+
+/// The overflow audit's B6 (ADR 0002 #36), appended with their own seed so the rows before keep theirs: fft_spectrum rows
+/// at every power of two to 256 whose transform or magnitudes leave the normal range — huge samples (the sums and the
+/// squares past DBL_MAX, the magnitude finite or not), DBL_MAX impulses, constants and alternations (the DC and Nyquist
+/// sums past DBL_MAX), samples near √DBL_MAX and 2⁻⁵¹¹ (a square over- or underflows alone), subnormal samples, huge
+/// and tiny samples mixed, near-cancelling samples (x and x·(1 + k·2⁻⁵²): the butterflies' differences tiny), the data
+/// bound 2⁻⁹²¹ of the port's fast test ulp by ulp, a product w·d below 2⁻¹⁰²² (n = 4, w = (6.1·10⁻¹⁷, −1)), ±0 among
+/// them, and NaN and ±∞ beside huge samples (Rust's IEEE spectrum kept); and seeded signals over every binade.
+#[allow(clippy::too_many_lines)] // one family after another
+fn emit_fft_b6(m: &mut Module) {
+    let mut rng = Rng::new(0x3606);
+    let (big, tiny) = (f64::MAX, f64::from_bits(1));
+    let sq = big.sqrt(); // 1.34·10¹⁵⁴: a square past DBL_MAX
+    let lo_sq = pow2(-511); // a square at 2⁻¹⁰²²
+    let bound = pow2(-921);
+    for k in 0..=8_u32 {
+        let n = 1_usize << k;
+        let mut imp = vec![0.0; n];
+        imp[0] = big;
+        spectrum(m, &imp);
+        spectrum(m, &vec![big; n]);
+        spectrum(m, &vec![-big * 0.75; n]);
+        spectrum(m, &(0..n).map(|j| if j % 2 == 0 { big } else { -big }).collect::<Vec<_>>());
+        spectrum(m, &vec![sq; n]);
+        spectrum(m, &vec![sq * 0.5; n]);
+        spectrum(m, &vec![lo_sq; n]);
+        spectrum(m, &vec![tiny; n]);
+        spectrum(m, &(0..n).map(|j| f64::from_bits(1 + j as u64)).collect::<Vec<_>>());
+        for &b in &[bound, bound.next_down(), bound.next_up(), -bound] {
+            let mut v = vec![0.0; n];
+            v[n - 1] = b;
+            spectrum(m, &v);
+            spectrum(m, &vec![b; n]);
+        }
+        // huge, subnormal, mixed, near-cancelling, with ±0
+        for _ in 0..4 {
+            spectrum(m, &(0..n).map(|_| rng.signed_log_uniform(300.0, 308.25)).collect::<Vec<_>>());
+            spectrum(m, &(0..n).map(|_| rng.signed_log_uniform(-323.3, -300.0)).collect::<Vec<_>>());
+            spectrum(m, &(0..n).map(|_| rng.signed_log_uniform(150.0, 160.0)).collect::<Vec<_>>());
+            spectrum(m, &(0..n).map(|_| rng.signed_log_uniform(-170.0, -150.0)).collect::<Vec<_>>());
+            spectrum(
+                m,
+                &(0..n)
+                    .map(|_| match rng.int(0, 3) {
+                        0 => rng.signed_log_uniform(290.0, 308.25),
+                        1 => rng.signed_log_uniform(-323.3, -290.0),
+                        2 => 0.0,
+                        _ => -0.0,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let x = rng.signed_log_uniform(-300.0, 300.0);
+            #[allow(clippy::cast_precision_loss)] // small integers
+            let near: Vec<f64> = (0..n).map(|j| x * (1.0 + (j % 3) as f64 * f64::EPSILON)).collect();
+            spectrum(m, &near);
+        }
+    }
+    // a product w·d of the n = 4 stage just below 2⁻¹⁰²² (w = (cos(−π/2), −1) correctly rounded, d = x₁ − x₃): IEEE's
+    // rounds it at the subnormal grid; and its magnitude below the squares' range
+    let w4 = (-std::f64::consts::PI / 2.0).cos();
+    let c = pow2(-1022) / w4;
+    for d in -3_i64..=3 {
+        let x1 = f64::from_bits(c.to_bits().wrapping_add_signed(d));
+        spectrum(m, &[0.0, x1, 0.0, 0.0]);
+        spectrum(m, &[x1, x1, -x1, 0.0]);
+    }
+    // NaN and ±∞ beside huge samples: Rust's IEEE spectrum, unchanged
+    for k in 1..=4_u32 {
+        let n = 1_usize << k;
+        let mut v: Vec<f64> = (0..n).map(|_| rng.signed_log_uniform(300.0, 308.25)).collect();
+        v[0] = f64::INFINITY;
+        spectrum(m, &v);
+        v[n - 1] = f64::NAN;
+        spectrum(m, &v);
+        v[0] = tiny;
+        spectrum(m, &v);
+    }
+    // seeded: every binade, lengths to 64
+    for _ in 0..120 {
+        let n = 1_usize << rng.int(0, 6);
+        let e0 = rng.uniform(-323.3, 308.0);
+        let spread = rng.uniform(0.0, 40.0);
+        spectrum(
+            m,
+            &(0..n).map(|_| rng.signed_log_uniform(e0, (e0 + spread).min(308.25))).collect::<Vec<_>>(),
+        );
+    }
+}
+
+/// The smallest double w > lo·(1 − t) + hi·t exactly (the exact threshold's successor on the double grid), +∞ when no
+/// finite double lies above it: a bisection on the doubles' order (±0 one point), the exact predicate monotone in w.
+/// (Rust's rounded threshold can be 2⁵² ulps off it: lo = −DBL_MAX, hi = DBL_MAX, t = ½ − 2⁻⁵⁴.)
+fn first_above(lo: f64, hi: f64, t: f64) -> f64 {
+    let key = |x: f64| -> i128 {
+        let m = i128::from(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF);
+        if x.is_sign_negative() { -m } else { m }
+    };
+    let val = |k: i128| -> f64 {
+        let b = u64::try_from(k.unsigned_abs()).unwrap_or(0);
+        if k < 0 { -f64::from_bits(b) } else { f64::from_bits(b) }
+    };
+    let (mut a, mut b) = (key(-f64::MAX), key(f64::MAX));
+    if !crate::exact::peak_above(f64::MAX, lo, hi, t) {
+        return f64::INFINITY;
+    }
+    if crate::exact::peak_above(-f64::MAX, lo, hi, t) {
+        return -f64::MAX;
+    }
+    // invariant: val(a) is not above, val(b) is
+    while b - a > 1 {
+        let mid = a + (b - a) / 2;
+        if crate::exact::peak_above(val(mid), lo, hi, t) { b = mid } else { a = mid }
+    }
+    val(b)
+}
+
+/// The overflow audit's B6 (ADR 0002 #37), appended with their own seed so the rows before keep theirs: find_peaks rows
+/// with a candidate at the exact threshold's successor and its neighbours, ulp by ulp (min and max normal, subnormal,
+/// huge, of mixed signs, ±DBL_MAX; t over 0, 1, 1 − 2⁻⁵³, 2⁻¹⁰⁷⁴, ½ ± an ulp and seeded), subnormal data on every t of a
+/// grid, ±0 mixes, a max of DBL_MAX with a +∞ candidate, and seeded near-ties. (With −DBL_MAX and DBL_MAX, Rust's
+/// threshold is 2⁵² ulps off the exact one at t = ½ ± an ulp: its 1 − t rounds by 2⁻⁵⁴, times DBL_MAX.)
+#[allow(clippy::too_many_lines)] // one family after another
+fn emit_peaks_b6(m: &mut Module) {
+    let mut rng = Rng::new(0x3707);
+    let (big, tiny) = (f64::MAX, f64::from_bits(1));
+    let ts = [0.0, 1.0, 1.0_f64.next_down(), tiny, 0.5, 0.5_f64.next_down(), 0.5_f64.next_up(), 0.1, 0.75, 0.3,
+        0.9, 0.25_f64.next_up(), 2.0_f64.powi(-60), 0.999];
+    let ends: [(f64, f64); 14] = [
+        (0.0, 1.0),
+        (1.0, 3.0),
+        (10.0, 11.0),
+        (-5.0, 7.0),
+        (-3.0, -1.0),
+        (0.1, 0.7),
+        (tiny, 5.0 * tiny),
+        (-0.0, tiny),
+        (-7.0 * tiny, 3.0 * tiny),
+        (pow2(-1022), 3.0 * pow2(-1022)),
+        (-big, big),
+        (big * 0.5, big),
+        (-big, -big * 0.25),
+        (1e-300, 1e300),
+    ];
+    for &(lo, hi) in &ends {
+        for &t in &ts {
+            let w0 = first_above(lo, hi, t);
+            for d in -2_i64..=2 {
+                let w = f64::from_bits(w0.to_bits().wrapping_add_signed(d));
+                if !(lo..=hi).contains(&w) {
+                    continue;
+                }
+                peaks(m, &[lo, w, lo, hi, lo], t);
+                peaks(m, &[hi, lo, w, lo], t);
+            }
+        }
+    }
+    // subnormal data at every t of a grid: k·2⁻¹⁰⁷⁴ around a few units
+    for k in 1_u64..=6 {
+        for j in 0..=16 {
+            let t = f64::from(j) / 16.0;
+            peaks(m, &[-0.0, f64::from_bits(k), 0.0], t);
+            peaks(m, &[0.0, f64::from_bits(k), f64::from_bits(1), f64::from_bits(k + 1), -0.0], t);
+            peaks(m, &[-f64::from_bits(k), -0.0, -f64::from_bits(k + 2), f64::from_bits(k), -f64::from_bits(1)], t);
+        }
+    }
+    // ±0 mixes
+    for t in [0.0, 0.5, 1.0, tiny, 1.0_f64.next_down()] {
+        let mixes: [&[f64]; 4] =
+            [&[-0.0, 0.0, -0.0], &[0.0, -0.0, 0.0], &[-0.0, tiny, -0.0], &[0.0, -0.0, tiny, -0.0, 0.0]];
+        for d in mixes {
+            peaks(m, d, t);
+        }
+        peaks(m, &[-0.0, 0.0, -0.0, tiny, 0.0, -0.0], t);
+    }
+    // a max of DBL_MAX with a +∞ candidate (above every finite threshold), ±DBL_MAX ends, a −∞ neighbour
+    for t in [0.0, 1.0, 0.5, 1.0_f64.next_down(), tiny, 0.3] {
+        peaks(m, &[big, f64::INFINITY, big], t);
+        peaks(m, &[-big, big, -big, 0.0, f64::from_bits(1), 0.0], t);
+        peaks(m, &[f64::NEG_INFINITY, -big, f64::NEG_INFINITY, big], t);
+    }
+    // seeded near-ties: a candidate at the exact threshold's successor or a neighbour, over every binade of the ends
+    for _ in 0..400 {
+        let a = rng.signed_log_uniform(-323.3, 308.2);
+        let b = rng.signed_log_uniform(-323.3, 308.2);
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let t = match rng.int(0, 3) {
+            0 => rng.unit(),
+            1 => ts[usize::try_from(rng.int(0, 13)).unwrap_or(0)],
+            2 => rng.log_uniform(-323.3, 0.0).min(1.0),
+            _ => 1.0 - rng.log_uniform(-16.0, -0.3),
+        };
+        let w0 = first_above(lo, hi, t);
+        let w = f64::from_bits(w0.to_bits().wrapping_add_signed(rng.int(-2, 1)));
+        if (lo..=hi).contains(&w) {
+            peaks(m, &[lo, w, lo, hi], t);
+        }
+    }
 }

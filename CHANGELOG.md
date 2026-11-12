@@ -789,6 +789,39 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     against the slow paths); no Rust test changes
   - benches: `bench_audit_b5`, four typical and six edge benches, in a new third bench file `tests/audit2.bcyr` (31 s;
     in `tests/audit.bcyr` they took it to 219 s of the 300 s per-file deadline, so it splits as B4's did)
+- **The library-wide overflow audit, B6** (the roadmap's B8; [ADR 0002 #36, #37, #38](docs/adr/0002-port-api-divergences.md),
+  B1's decisions unchanged, the user's "FFT: both" and "fix all three iterative edges", find_peaks' exact threshold
+  settled under the policy; port plan §6.4 "Decided in the overflow audit's B6"; the behaviour changes are under
+  *Breaking*):
+  - **spectroscopy** — `fft_spectrum` under #20's semantics over the whole transform (#36): hisab 1.4.0's transcription
+    (`_km_fft`) with per-operation operand checks (twiddle components 0 or ≥ 2⁻¹⁰⁰, each butterfly's d 0 or ≥ 2⁻⁹²¹) and
+    the retained outputs' finiteness as the fast test, a bin whose square sum leaves [2⁻⁹⁰⁰, DBL_MAX] its unbounded √
+    (`_km_fft_mag_ux`), and otherwise the transform with an unbounded exponent (`_km_fft_ux`, `_km_fft_spectrum_ux`; 32·n
+    heap bytes); a NaN or ±∞ sample keeps 1.2's IEEE spectrum. `find_peaks`' threshold test exact (#37): Rust's rounded
+    threshold behind a proven error bound, else `_km_peak_above_exact`
+  - **mathx** — `_km_sign_scaled`: the exact sign of a sum of up to eight terms cᵢ·2^kᵢ at any exponents (rounds of
+    Grow-Expansion, the deferred tiny terms carried down), for #37's predicate
+  - **thermochem** — `adiabatic_flame_temperature`'s bracket and its transcribed bisection compare the signs of f(T₀) and
+    f(T_max) exactly (#38)
+  - generator: `scripts/oracle/src/audit.rs`'s B6 (`port_fft` on `exact::Ux`, `port_peaks` on the new
+    `exact::peak_above` in `Big` integers), `m_thermochem.rs`'s flame replica with the exact tests (asserting the only
+    change is Rust's underflowing bracket); edge rows appended with their own seeds: spectroscopy +2,393 `find_peaks` and
+    +515 `fft_spectrum`, thermochem +443 flame rows
+  - golden modules `spectroscopy` 70,777 and `thermochem` 11,592 rows; the oracle's values kept, 913 rows noted with the
+    port's result — 418 `fft_spectrum` (41 of the 213 earlier rows), 222 `find_peaks` (3 of 994), 273
+    `adiabatic_flame_temperature` (16 of 1,937); the harness maps and counts them (`_par_map_toks`, `_par_got_noted`)
+  - `validate.py` §24: the flame recomputed with the exact tests (and the sign tests checked against Rust's products over
+    1,444 special pairs and 20,000 seeded ones), `find_peaks` with `Fraction`s (the fast test's bound and decisions
+    checked on every candidate), the FFT on `mpfr_ref.UX` (MPFR's twiddles, each √ rounded once); each note proven, no
+    in-range row noted (B3's strict tracers), the noted rows counted by class
+  - `cr_verify.py`: the families `flame` (14,010 arguments), `pk3` … `pk16` (380,000 arrays), `fft1` … `fft256` (110,718
+    signals; a vector result per argument) and `signsc` (`_km_sign_scaled`, 140,110 sums against `Fraction`), the slow and
+    exact paths forced, on x86_64 ELF, x86_64 PE and aarch64
+  - tests: `tests/thermochem.tcyr` `cyrius_adr38_flame_sign`, `tests/spectroscopy.tcyr` `cyrius: ADR 0002 #36` and
+    `#37` (the survey's examples, the fast tests' bounds ulp by ulp, n = 4's product below 2⁻¹⁰²², ±DBL_MAX thresholds,
+    `_km_sign_scaled` across rounds, 3,000 and 20,000 seeded inputs against the forced slow and exact paths); no Rust
+    test changes
+  - benches: `bench_audit_b6`, five edge benches, in `tests/audit2.bcyr`
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -1094,6 +1127,33 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   *Migration:* none for code that stays within the normal range (T above about 5·10⁻³⁰⁹ K and below 2·10³⁰⁷ K; |A|·z²,
   B·å and their products with √I below 10³⁰⁸).
 
+### Breaking (relative to Rust 1.2.0, ADR 0002 #36)
+- **spectroscopy** — `fft_spectrum` runs 1.2's transform (hisab 1.4.0's `num::fft`) and magnitudes with an unbounded
+  exponent, each magnitude's √ rounded once: every signal whose 1.2 transform stays in the normal range keeps its
+  spectrum, and a signal near DBL_MAX or subnormal has its spectrum where 1.2's sums, products or squares over- or
+  underflow (`fft_spectrum([1.75·10³⁰⁴])` [1.75·10³⁰⁴], 1.2's [∞]; `([−6.96·10⁻³¹⁶])` [6.96·10⁻³¹⁶], 1.2's [0];
+  `([3.3·10³⁰², 3.0·10³⁰⁴])` [3.03·10³⁰⁴, 2.96·10³⁰⁴], 1.2's [∞, ∞]). A signal with a NaN or ±∞ keeps 1.2's spectrum;
+  the length check and its error are 1.2's. An aliased `signal` (inside out's first 2n values) is no longer transformed
+  in `out`: it gets a 16·n-byte heap table, and the slow path 32·n bytes, from the bump allocator.
+  *Migration:* none for samples between about 10⁻²⁷⁷ and DBL_MAX/n in magnitude (or exact zeros); a caller that
+  relied on no allocation with `signal == out` passes separate buffers.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #37)
+- **spectroscopy** — `find_peaks` compares a candidate with the exact threshold min + t·(max − min) (1 − t not
+  rounded), where 1.2 rounds min·(1 − t) + max·t first: a candidate within a few ulps of the threshold, or at the
+  subnormal grid, can change (`find_peaks([−0, 5·10⁻³²⁴, 0], 0.75)` [1], 1.2's []; `([10, 10.2, 10, 11, 10],
+  1 − 2⁻⁵³)` [3], 1.2's []), as can one within 2⁻⁵³·max(|min|, |max|) of it where min and max nearly cancel (±DBL_MAX
+  at t = ½ ± an ulp). The checks, the empty results, min / max over the finite values and the neighbour tests are 1.2's.
+  *Migration:* none unless a threshold is meant to be 1.2's rounded value.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #38)
+- **thermochem** — `adiabatic_flame_temperature` tests its bracket by the signs of f(T₀) and f(T_max), not their
+  product, which underflows to −0 when |ΔH| and the moles are tiny: such a system (a real one scaled by 10⁻²⁰⁰, or
+  (−10⁻³²⁰, [CO₂ ×10⁻³⁰⁰], 298.15)) is Ok — Newton's first guess, accepted by the absolute 10⁻³ J/mol tolerance, 1.2's own
+  answer at any scale where the product does not underflow — where 1.2 gives Err(ComputationError). Every other input
+  is unchanged (proven: the tests agree wherever the product is not an underflowed zero).
+  *Migration:* none; code that relied on the ComputationError for tiny systems checks the scale itself.
+
 ### Changed
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
@@ -1280,6 +1340,13 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   100, `davies_activity` 98 → 96 ns; the slow paths `equilibrium_constant_edge` 26 → 151 ns (Rust's exp(−0) is trivial),
   `equilibrium_constant_subnormal` 80 → 166, `debye_huckel_limiting_edge` 30 → 93, `debye_huckel_extended_edge` 45 → 277,
   `debye_huckel_extended_overflow` 47 → 276, `davies_activity_edge` 39 → 162 ns; `tests/audit2.bcyr` 31 s, `tests/audit.bcyr` unchanged at 189 s (219 s with them)
+- The overflow audit's B6, ADR 0002 #36 … #38 (Cyrius before → after, the same host, alternating runs; no Rust bench):
+  `spectroscopy/fft_spectrum_256` 27.3 → 30.5 µs, `fft_spectrum_1024` 129.2 → 143.1, `fft_spectrum_4096` 605.6 → 669.4
+  (+11–12 %: the per-butterfly operand checks about 6 %, the restructured magnitude pass the rest; skipping the checks at
+  k = 0 gained under 1 % and was not kept), `find_peaks_1000` 19.0 → 20.3 µs, `thermochem/adiabatic_flame_ch4_air` 3.37 →
+  3.40 µs (Rust 301.48 ns); `bench_audit_b6`: `fft_spectrum_256_huge` 27.7 → 318.1 µs and `_subnormal` 35.4 → 349.8 µs
+  (the unbounded transform), `_squares` 27.4 → 45.1 µs (the per-bin unbounded √), `find_peaks_1000_subnormal` 19.5 →
+  39.0 µs, `adiabatic_flame_tiny` 0.96 → 1.48 µs (Rust's Err there); `tests/audit2.bcyr` 45 s (31 s before)
 
 ## [1.2.0] - 2026-11-08
 

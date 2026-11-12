@@ -608,3 +608,39 @@ eight unbounded operations the dearest), then the same exp or 10^x; Rust's own e
 stretches every bench; so B5's go into a new `tests/audit2.bcyr` (31 s), the audit's later batches with them, the same
 way B4 split `tests/kimiya.bcyr` (the user's decision then: split rather than raise the deadline). `tests/audit.bcyr` is
 unchanged (189 s); `cyrius bench` runs all three files.
+
+## The overflow audit's B6 (2026-11-11)
+
+ADR 0002 #36: `fft_spectrum` under #20's semantics over the whole transform, behind a per-operation operand test on Rust's
+own transform (and a bin's unbounded √ where only its square sum leaves the range); #37: `find_peaks`' threshold test
+exact, Rust's rounded threshold deciding behind a proven bound; #38: `adiabatic_flame_temperature`'s bracket and its
+bisection compare signs exactly. The typical benches are `tests/kimiya.bcyr`'s (Cyrius-only for the FFT and the peaks:
+`rust-old/benches` has neither); `bench_audit_b6` in `tests/audit2.bcyr` adds five edge benches.
+
+Before: a copy of `tests/kimiya.bcyr`'s harness with only these benches, and of `tests/audit2.bcyr`, on the committed
+tree (`git archive HEAD`); after: the same on the batch, alternating runs, the same host.
+
+| Bench | Body | Rust | Before | After |
+|---|---|---|---|---|
+| `spectroscopy/fft_spectrum_256` | a seeded signal in [0, 1), in place: the transform with its operand checks, the bins' range test | — | 27.3 µs | 30.5 µs |
+| `spectroscopy/fft_spectrum_1024` | the same, n = 1024 | — | 129.2 µs | 143.1 µs |
+| `spectroscopy/fft_spectrum_4096` | the same, n = 4096 | — | 605.6 µs | 669.4 µs |
+| `spectroscopy/find_peaks_1000` | 1,000 values, t = 0.1: Rust's threshold and the bound once, a subtraction and two compares a candidate | — | 19.0 µs | 20.3 µs |
+| `thermochem/adiabatic_flame_ch4_air` | CH₄ in air: two sign compares for the bracket's multiply | 301.48 ns | 3.37 µs | 3.40 µs |
+| `spectroscopy/fft_spectrum_256_huge` | the signal × 10³⁰⁷: sums past DBL_MAX, Rust's ∞; the unbounded transform | — | 27.7 µs | 318.1 µs |
+| `spectroscopy/fft_spectrum_256_subnormal` | the signal × 10⁻³¹⁰: data below 2⁻⁹²¹, Rust's degraded; the unbounded transform | — | 35.4 µs | 349.8 µs |
+| `spectroscopy/fft_spectrum_256_squares` | the signal × 10²⁰⁰: the transform in range, every square sum past DBL_MAX; the per-bin unbounded √ | — | 27.4 µs | 45.1 µs |
+| `spectroscopy/find_peaks_1000_subnormal` | k·2⁻¹⁰⁷⁴ with k < 16, t = ½: about half the candidates within the bound, the exact predicate | — | 19.5 µs | 39.0 µs |
+| `thermochem/adiabatic_flame_tiny` | CH₄/air × 10⁻²⁰⁰: Rust's bracket product −0, its Err; here bracketed, Newton's guess | — | 0.96 µs | 1.48 µs |
+
+**The FFT's fast-path cost**, +11–12 %, inside the ~15 % aimed at: measured without the per-butterfly operand checks the
+three sizes take 29.1, 139.6 and 638.5 µs, so the checks (two absolute values and compares a butterfly, two more a
+butterfly of a stage's first block for the twiddles) are about 6 %, and the rest is the restructured magnitude pass (the
+range test of each bin's square sum, which also proves the retained outputs finite) and the transform's extra state.
+Tried: skipping the checks at k = 0 (w = (1, 0), whose products are exact) gained under 1 % and was not kept; merging
+the retained outputs' finiteness pass into the magnitude pass gained 1 % and was kept. The slow path is about 11× Rust's
+chain: each of the n/2·log₂ n butterflies and twiddle steps is sixteen unbounded operations (`_km_ux_*`). A bin's
+unbounded √ alone costs about 0.14 µs (the `_squares` row: 129 bins).
+
+`tests/audit2.bcyr` takes 45 s with B6's benches (31 s before); `tests/kimiya.bcyr` and `tests/audit.bcyr` are unchanged
+in content, the former's three FFT benches a few seconds longer in all.

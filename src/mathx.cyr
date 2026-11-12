@@ -4252,6 +4252,108 @@ fn _km_exp_sign(p, n): i64 {
     return 0 - 1;
 }
 
+# The sign (−1, 0 or 1) of the exact sum Σ cᵢ·2^kᵢ of n ≤ 8 terms at any exponents: the doubles cᵢ at cs (finite, each 0
+# or of magnitude in [2⁻¹¹⁰, 4)) with the integers kᵢ at ks (|kᵢ| < 2⁴⁰). The overflow audit's B6 (ADR 0002 #37):
+# find_peaks' exact threshold, whose terms span 2⁻²¹⁵⁰ … 2¹⁰²⁵. Round by round: K is the largest kᵢ of a nonzero term;
+# the terms with kᵢ − K ≥ −900 scale exactly into doubles cᵢ·2^(kᵢ − K) in [2⁻¹⁰¹⁰, 4) (normal, so exact), and their
+# exact sum E (Grow-Expansion with zero elimination, as _km_exp_sign: no overflow, the sum is below 32) is a
+# nonoverlapping expansion whose largest component decides its sign; each deferred term is below 4·2⁻⁹⁰⁰ = 2⁻⁸⁹⁸ in that
+# scale, so at most 8 of them sum below 2⁻⁸⁹⁵. With no deferred term, or |top(E)| ≥ 2⁻⁸⁹⁰ (then |E| > 2⁻⁸⁹¹), E's sign
+# is the sum's. Otherwise E's components (exact doubles, possibly subnormal in that scale) and the deferred terms are
+# the new terms, as (significand, exponent) pairs: no more terms than before, and every one below 2^(K − 888), so K
+# falls by at least 888 each round and the rounds end within five on the kᵢ's range here (an empty list is the sum 0).
+#must_use
+fn _km_sign_scaled(cs, ks, n): i64 {
+    var c: f64[8];
+    var k: i64[8];
+    var ex: f64[8];                                 # a round's expansion, increasing magnitude
+    var dc: f64[8];                                 # a round's deferred terms
+    var dk: i64[8];
+    var m = 0;
+    var i = 0;
+    while (i < n) {
+        var ci: f64 = load64(cs + 8 * i);
+        if (ci != 0.0) {
+            store64(&c + 8 * m, ci);
+            store64(&k + 8 * m, load64(ks + 8 * i));
+            m = m + 1;
+        }
+        i = i + 1;
+    }
+    while (m > 0) {
+        var kmax = load64(&k);
+        i = 1;
+        while (i < m) {
+            var ki = load64(&k + 8 * i);
+            if (ki > kmax) { kmax = ki; }
+            i = i + 1;
+        }
+        var ne = 0;
+        var nd = 0;
+        i = 0;
+        while (i < m) {
+            var cj: f64 = load64(&c + 8 * i);
+            var kj = load64(&k + 8 * i);
+            if (kj - kmax >= 0 - 900) {
+                var sc: f64 = _km_cr_pow2(kj - kmax);
+                var q: f64 = cj * sc;               # exact: in [2⁻¹⁰¹⁰, 4)
+                var j = 0;
+                var w = 0;
+                while (j < ne) {
+                    var ej: f64 = load64(&ex + 8 * j);
+                    var s: f64 = q + ej;
+                    var bb: f64 = s - q;
+                    var er: f64 = (q - (s - bb)) + (ej - bb);
+                    if (er != 0.0) {
+                        store64(&ex + 8 * w, er);
+                        w = w + 1;
+                    }
+                    q = s;
+                    j = j + 1;
+                }
+                if (q != 0.0) {
+                    store64(&ex + 8 * w, q);
+                    w = w + 1;
+                }
+                ne = w;
+            } else {
+                store64(&dc + 8 * nd, cj);
+                store64(&dk + 8 * nd, kj);
+                nd = nd + 1;
+            }
+            i = i + 1;
+        }
+        if (ne > 0) {
+            var top: f64 = load64(&ex + 8 * (ne - 1));
+            var at: f64 = f64_abs(top);
+            var lim: f64 = 0x0850000000000000;      # 2⁻⁸⁹⁰
+            if (nd == 0 || at >= lim) {
+                if (top > 0.0) { return 1; }
+                return 0 - 1;
+            }
+        }
+        if (nd == 0) { return 0; }
+        m = 0;
+        i = 0;
+        while (i < ne) {
+            var e0: f64 = load64(&ex + 8 * i);
+            var es, ee = _km_ux_from(e0);
+            store64(&c + 8 * m, es);
+            store64(&k + 8 * m, kmax + ee);
+            m = m + 1;
+            i = i + 1;
+        }
+        i = 0;
+        while (i < nd) {
+            store64(&c + 8 * m, load64(&dc + 8 * i));
+            store64(&k + 8 * m, load64(&dk + 8 * i));
+            m = m + 1;
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
 # For the n doubles at p: (g + 2·f, c, e) with g the xor of their sign bits, f = 1 if one is ±0 or 2 if one is not
 # finite (else 0), c the count of significands other than 1, stored at out as f64 words in [1, 2), and e the sum of
 # their exponents. A subnormal is first scaled by 2⁵⁴ (exactly).

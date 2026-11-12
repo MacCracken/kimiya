@@ -51,6 +51,9 @@ are compared through the stated mapping:
 | 33 *(2026-11-11, the overflow audit's B4)* | `thermo::hess_law` sums its slice from −0.0, `enthalpy_from_formation` computes Σ products − Σ reactants, thermochem's `reaction_enthalpy`, `reaction_gibbs_energy` and `reaction_entropy` Σ coeff·prop (from +0.0) over the products minus the same over the reactants (#1: × 1000 for the two in J/mol), `nuclear::q_value` (Σ m_r − Σ m_p)·931.494…, `solution::ionic_strength` ½·Σ (c·z)·z, `inorganic::born_haber_lattice_energy` ΔH_f − ΔH_sub − IE − ΔH_diss/2 − EA left to right, `reaction::gibbs_free_energy` ΔH − T·ΔS, `solution::kohlrausch_molar_conductivity` Λ° − K·√c, `limiting_molar_conductivity` ν₊·λ₊ + ν₋·λ₋ and `kinetics::zero_order_concentration` [A]₀ − k·t (0 if negative): sums and differences in which a partial sum or a product term passes DBL_MAX and a later term brings it back, so the result is ±∞ or ∞ − ∞ = NaN although the value is finite (`hess_law([DBL_MAX, DBL_MAX, −DBL_MAX])` +∞, not DBL_MAX; `reaction_enthalpy([Al₂O₃ ×10³⁰⁸] → [Al₂O₃ ×10³⁰⁸])` NaN, not 0; `q_value([M, M], [M, 0.999M])` NaN, not 1.67·10³⁰⁸; `ionic_strength([(0.4·DBL_MAX, 2)])` +∞, not 1.44·10³⁰⁸; `gibbs_free_energy(DBL_MAX, 2, 0.75·DBL_MAX)` −∞, not −8.99·10³⁰⁷), or a subnormal product is rounded before the sum | **#20's semantics** for all twelve: Rust's operation sequence, its summation order included, evaluated with an unbounded exponent (`_km_ux_*`; Rust's `.sum()` from −0.0 and thermochem's `total += coeff * prop` from +0.0, `_km_sum_ux`, `_km_sum_property_ux`), the final operation rounded once into binary64 (the last addition, the difference, ½·Σ, × 931.494… or × 1000), comparisons on the unbounded values (`zero_order_concentration`'s clamp), behind a fast-path test that proves Rust's chain stayed normal, so those inputs keep Rust's bits. For a pure sum the test is "result finite": a sum of two doubles is exact below 2⁻¹⁰²¹ (both are multiples of 2⁻¹⁰⁷⁴) and the 53-bit rounding above, so only overflow can leave the range, and ±∞ or NaN persists to the result (proven in the addition below); a product inside takes `_km_ux_normal` or an exact zero. A non-finite input keeps Rust's expression; Rust's checks, Err codes and order are kept | class B; equal rows plain; the others noted `(f:…)` (after #1's note for the two J/mol sums), mapped and counted (28 `hess_law`, 27 `enthalpy_from_formation`, 115 `reaction_enthalpy`, 113 `reaction_gibbs_energy`, 66 `reaction_entropy`, 58 `q_value`, 13 `ionic_strength`, 74 `born_haber_lattice_energy`, 57 `gibbs_free_energy`, 54 `kohlrausch_molar_conductivity`, 31 `limiting_molar_conductivity`, 61 `zero_order_concentration`: 697) |
 | 34 *(2026-11-11, the overflow audit's B4)* | `thermochem::Shomate::cp` computes (((A + B·t) + (C·t)·t) + ((D·t)·t)·t) + E/(t·t) and `enthalpy_antiderivative` 1000·(t·(A + t·(B/2 + t·(C/3 + t·(D/4)))) − E/t), t = T/1000, for any coefficients and T: as T → 0, t·t underflows and E/(t·t) is ±∞, or 0/0 = NaN for E = 0, where Cp is finite (`Shomate{20.786, 0, 0, 0, 0}.cp(10⁻³⁰⁰)` NaN, not 20.786), and t itself underflows in the antiderivative (at 5·10⁻³²⁴ K NaN, not 1.04·10⁻³²²); for large T, C·t², D·t³ and t⁴ overflow and their difference is ∞ − ∞ = NaN where the value is ±∞ (H₂O(g)'s Cp at 10³⁰⁰ K NaN, not −∞) | **#20's semantics** on Rust's exact evaluation order, the final addition (Cp) or product by 1000 (H) rounded once, behind a fast test: a box (\|T\| in [2⁻³⁰, 2³⁰] and every nonzero coefficient in [2⁻²⁰⁰, 2²⁰⁰], where every intermediate is provably normal: every tabulated segment over its range, every physical use) or, outside it, each product and quotient normal or an exact zero and each sum finite; T = ±0 (every product an exact zero, E/0 IEEE's special in both) and non-finite inputs keep Rust's chain. The data-backed callers (`enthalpy_change_cp`, `adiabatic_flame_temperature`) share the evaluation and stay in the box (proven for every SHOMATE_DATA segment over its range, so the table-row path tests T alone; replayed for the flame's 324,925 golden evaluations) | class B; equal rows plain; the others noted `(f:…)`, mapped and counted (185 `cp`, 25 `enthalpy_antiderivative`: 210) |
 | 35 *(2026-11-11, the overflow audit's B5)* | `reaction::equilibrium_constant` computes exp(−ΔG/(R·T)), `solution::debye_huckel_limiting` 10^((((−A)·z)·z)·√I), `debye_huckel_extended` 10^(((((−A)·z)·z)·√I)/(1 + (B·å)·√I)) and `davies_activity` 10^((((−A)·z)·z)·(√I/(1 + √I) − 0.3·I)): an intermediate of the exp or 10^x argument that over- or underflows gives K or γ = 1, 0 or NaN, or a degraded K, although the value is representable (`equilibrium_constant(−DBL_MAX, DBL_MAX)` 1, not e^0.12 = 1.128: R·T overflows; `(−10⁻³²⁰, 10⁻³²²)` 197,357, not 193,216: a subnormal R·T; `debye_huckel_limiting(100000, 0, 10³⁰⁰)` and `davies_activity` there ∞·0 = NaN, not 1; `debye_huckel_extended(1, 1, 10³⁰⁸, 10¹⁵⁵, 10¹⁵⁵)` 1, not 0.977: B·å = ∞; `(100000, 1, 10³⁰⁰, 10¹⁵⁴, 10¹⁵⁴)` 0, not 10⁻¹⁰⁰: A·z² = ∞), and `equilibrium_constant`'s ComputationError decides on that degraded K (Ok where the value overflows, Err where it does not) | **#20's semantics on the argument**: Rust's sequence with an unbounded exponent (`_km_ux_*`), the argument's final quotient or product rounded once into binary64 (`_km_keq_arg_ux`, `_km_dh_limiting_arg_ux`, `_km_dh_extended_arg_ux`, `_km_davies_arg_ux`), then the unchanged correctly rounded `_km_cr_exp` / `_km_cr_exp10`, which of that binary64 argument is the correctly rounded exp / 10^x of the unbounded 53-bit argument (the lemma in the addition below; no new primitive); behind inline fast tests (R·T in [2⁻¹⁰²¹, DBL_MAX]; A·z² finite; the extended law's numerator and (B·å)·√I finite) that prove Rust's chain gives that result, so those inputs keep Rust's bits. `equilibrium_constant`'s ComputationError is Rust's, judged on the port's K; Rust's checks, Err codes and order are kept | class C (the corrected oracle, K = 0); equal rows plain; the others noted `(f:…)` or, where the port's K overflows and Rust's does not, `(E:ComputationError)`, mapped and counted (326 `equilibrium_constant`, 27 of them the port's Err and 33 its K where Rust's overflows; 55 `debye_huckel_limiting`, 385 `debye_huckel_extended`, 79 `davies_activity`: 845) |
+| 36 *(2026-11-11, the overflow audit's B6)* | `spectroscopy::fft_spectrum` runs hisab 1.4.0's `num::fft` (bit reversal; per stage wn = (cos θ, sin θ), w *= wn; t = w·d, u ± t) and `Complex::abs` = √(re·re + im·im) of bins 0 … n/2 in binary64: a butterfly sum or a product w·d past DBL_MAX, a product or a difference below the normal range, or a square re² or im² that over- or underflows gives ±∞, 0, NaN or a degraded magnitude where the spectrum is representable (`fft_spectrum([1.75·10³⁰⁴])` [∞], not [1.75·10³⁰⁴]; `([−6.96·10⁻³¹⁶])` [0], not [6.96·10⁻³¹⁶]; `([3.3·10³⁰², 3.0·10³⁰⁴])` [∞, ∞], not [3.03·10³⁰⁴, 2.96·10³⁰⁴]) | **#20's semantics over the whole transform** (the user's decision "FFT: both" — the magnitudes and the butterflies): every butterfly and twiddle operation in hisab's order with an unbounded exponent (`_km_ux_*`), each magnitude's √ the final operation, rounded once into binary64; behind a per-operation fast test on Rust's own transform (`_km_fft`: every twiddle component 0 or at least 2⁻¹⁰⁰, every butterfly's d 0 or at least 2⁻⁹²¹, so each product is an exact zero or at least 2⁻¹⁰²¹; every retained output finite, so no sum overflowed; each bin's square sum in [2⁻⁹⁰⁰, DBL_MAX] or from re = im = 0, else that bin's unbounded magnitude), so in-range rows keep Rust's bits; the slow path `_km_fft_ux` on 32·n heap bytes. A NaN or ±∞ sample keeps Rust's IEEE spectrum (B1's rule); Rust's length check and Err kept; ADR 0003's M4e transcription gains the unbounded slow path (its amendment) | class C (bound 0, the corrected oracle: no fft row has a correction); equal rows plain; the others noted with the port's whole spectrum `(v:n f:… …)`, mapped and counted (418 rows: 41 of the 213 rows before B6, 377 of B6's 515 edge rows) |
+| 37 *(2026-11-11, the overflow audit's B6)* | `spectroscopy::find_peaks` tests w > RN(RN(min·RN(1 − t)) + RN(max·t)): the rounded threshold decides otherwise for a candidate within a few ulps of the exact min + t·(max − min), at the subnormal grid (`find_peaks([−0, 5·10⁻³²⁴, 0], 0.75)` [], the exact threshold 3.7·10⁻³²⁴), and as far as 2⁵² ulps off where min = −DBL_MAX and max = DBL_MAX (1 − t rounded by 2⁻⁵⁴, times DBL_MAX); `([10, 10.2, 10, 11, 10], 1 − 2⁻⁵³)` [], the exact threshold 11 − 2⁻⁵³ | the **exact predicate** (settled by the main session under the user's policy: "find_peaks' threshold is evaluated exactly"): w > min·(1 − t) + max·t in rational arithmetic, t the given double (1 − t exact), min and max Rust's fold over the finite values, the neighbour tests IEEE, a +∞ candidate above every (finite) threshold; Rust's threshold decides wherever a proven bound separates w from it (\|RN(w − T)\| > B, B = RN(RN(\|min\|·2⁻⁵¹) + RN(\|max\|·2⁻⁵¹)) + 2⁻¹⁰⁷², against the proven error 2.5u(1 + u)(\|min\| + \|max\|) + (1 + u)·2⁻¹⁰⁷⁴), else `_km_peak_above_exact` (the sign of w − min + t·min − t·max, six terms at any exponent, by `src/mathx.cyr`'s new `_km_sign_scaled`). Rust's checks and empty results kept | class A; equal rows plain; the others noted with the port's indices `(v:n i:… …)`, mapped and counted (222 rows: 3 of the 994 rows before B6, 219 of B6's 2,393 edge rows) |
+| 38 *(2026-11-11, the overflow audit's B6; the survey's F16, its flame part — B12 extends this row with the weak acid / base Newton and Peng–Robinson's coefficients)* | `thermochem::adiabatic_flame_temperature` tests the bracket as f(T₀)·f(T_max) < 0, a product that underflows to −0 when \|ΔH\| and the moles are tiny, so a reaction whose balance changes sign is "not bracketed", Err(ComputationError) (`(−10⁻³²⁰, [CO₂ ×10⁻³⁰⁰], 298.15)`; CH₄/air scaled by 10⁻²⁰⁰), and hisab 1.4.0's transcribed bisection tests f(a)·f(b) > 0 likewise | the **exact sign test** (the user's decision "Fix all three iterative edges", the flame's being "the flame bracket's exact sign test"): f(T₀) < 0 < f(T_max) or f(T_max) < 0 < f(T₀), Rust's answer wherever the product does not underflow to a zero (NaN, ±∞ and ±0 operands included, proven), and the bisection's same-sign test likewise (it cannot change a result: the flame calls it only after the bracket proved opposite signs at the same points). Newton, its absolute 10⁻³ J/mol tolerance, every Err and Rust's order kept, so such a system gets Newton's initial guess, Rust's own answer at a scale where the product does not underflow (a known, kept Rust behaviour: at any scale below about 10⁻³ the guess is accepted unconverged) | class B; equal rows plain; the others noted `(f:…)` with the solver path, mapped and counted (273 rows: 16 of the 1,937 rows before B6, Rust's Err there; 257 of B6's 443 edge rows) |
 
 Deferred with their modules (port plan §2.2), and decided when they port: #5 `bridge::*` →
 `Result` and removal of `ionization_to_bond_energy_estimate`; #10 soorat `from_molecule` →
@@ -1356,6 +1359,183 @@ it), `davies_activity_edge` 39 → 162 ns. **The third bench file**: in `tests/a
 it to 219 s of `cyrius bench`'s 300 s per-file deadline (189 s before), with the audit's later batches still to come, so
 they open `tests/audit2.bcyr` (31 s), as B4 split `tests/kimiya.bcyr` under the user's decision there (split rather than
 raise the deadline); `tests/audit.bcyr` is unchanged.
+
+## Addition, 2026-11-11 (audit B6): #36, #37 and #38
+
+**The decisions.** B1's section above quotes the user's decisions verbatim; they apply to B6 unchanged. On the survey's
+questions 5 and 6 the user answered (2026-11-10, each the recommended option, as the project's record of the accuracy
+policy has them): **"Fix all three iterative edges:** weak acid/base Newton (unbounded slow path), Peng–Robinson
+coefficients only, and the flame bracket's exact sign test" and **"FFT: both** the magnitudes and the butterflies,
+without the range limit" (hisab 1.4.0's transform, every operation with an unbounded exponent). Question 9 was settled by
+the main session under the policy, not asked: "find_peaks' threshold is evaluated exactly". One row per family: #36
+(F13), #37 (F14) and #38 (F16, its flame part; B12 adds the weak acid / base Newton and Peng–Robinson's coefficients to
+the same row). Every Rust
+check, Err code and order stays. B6 is the roadmap's B8.
+
+**The treatment, per function** (each checked against `rust-old/src/spectroscopy.rs` and `thermochem.rs`, and hisab
+1.4.0's `src/num/fft.rs` and `roots.rs`):
+
+| Function | Rust's formula | Treatment | Fast test |
+|---|---|---|---|
+| `spectroscopy::fft_spectrum` | hisab 1.4.0's `num::fft` (bit reversal; per stage wn = (cos θ, sin θ) of θ = (−2·π)/len, w = (1, 0), t = w·d with re = w.re·d.re − w.im·d.im and im = w.re·d.im + w.im·d.re, u ± t, w *= wn), then √(re·re + im·im) of bins 0 … n/2 | #20's semantics over the whole transform: every butterfly and twiddle operation with an unbounded exponent, each √ rounded once (`_km_fft_ux`, `_km_fft_mag_ux`); a NaN or ±∞ sample keeps Rust's IEEE spectrum | `_km_fft`'s operand bounds (twiddle components 0 or ≥ 2⁻¹⁰⁰, each butterfly's d 0 or ≥ 2⁻⁹²¹), every retained output finite; per bin the square sum in [2⁻⁹⁰⁰, DBL_MAX] or re = im = 0, else that bin's unbounded √ |
+| `spectroscopy::find_peaks` | w[1] > w[0], w[1] > w[2], w[1] > RN(RN(min·RN(1 − t)) + RN(max·t)) | the exact predicate w > min·(1 − t) + max·t, t the given double; min and max Rust's fold; the neighbour tests IEEE; +∞ above every finite threshold | \|RN(w − T)\| > B, T Rust's threshold, B its proven error bound |
+| `thermochem::adiabatic_flame_temperature` | `f(t_lo) * f(t_hi) < 0.0`; hisab's bisection `f_lo * f_hi > 0.0` | the exact sign comparisons; Newton, its tolerances and every Err Rust's | (none: two comparisons) |
+
+**#38, the sign tests, proven equal to Rust's except where the product underflows.** Let a = f(T₀) and b = f(T_max) and
+p = RN(a·b). If either is NaN, p is NaN, and p < 0, p > 0 and every comparison of the NaN are false: both tests fail. If
+one is ±0 and the other is not NaN, p is ±0 (the other finite) or NaN (0·∞), so p < 0 and p > 0 fail, and ±0 is neither
+below nor above 0: both fail. Otherwise both are nonzero and not NaN, p's sign is the xor of theirs (IEEE's rule, also
+for ±∞ and for a product that over- or underflows), and |p| = RN(|a·b|) is 0 (underflow: |a·b| ≤ 2⁻¹⁰⁷⁵, the tie at
+2⁻¹⁰⁷⁵ to even), subnormal, normal or ∞. So p < 0 ⟺ the signs differ and |p| ≠ 0, the exact test ⟺ the signs differ;
+and p > 0 ⟺ the signs agree and |p| ≠ 0, the exact same-sign test ⟺ the signs agree. They differ exactly where the
+product underflows to a zero from nonzero operands. `validate.py` checks both pairs of tests on every pair of a set of
+38 special and boundary values (±0, ±2⁻¹⁰⁷⁴ … ±DBL_MAX, ±∞, NaN) and 20,000 seeded pairs: they differ on 1,439 (bracket)
+and 1,478 (bisection) pairs, each an underflowing product. **The bisection's test cannot change a flame result**: the
+flame calls `_km_flame_bisection` only after its bracket proved a and b of strictly opposite signs, and the bisection
+evaluates the same f at the same two points (deterministic), so neither form refuses there; it is exact so that the
+transcription is (a tiny endothermic ΔH's ends are both negative with a product of +0, which hisab's test would bisect on;
+`tests/thermochem.tcyr`). **The kept Rust behaviour**: Newton's tolerance is an absolute 10⁻³ J/mol, so at a scale where
+|f| is below it from the start (any system scaled below about 10⁻³), Newton accepts its initial guess T₀ − ΔH/(40·Σn)
+unconverged — CH₄/air at 10⁻²⁰⁰ gives 2204.756463878327 K where the scale-free root is 2327.18 K — and that is Rust's own
+answer wherever the product does not underflow (the same system at 10⁻¹⁵⁰, within an ulp); the sign fix only makes the
+scale range consistent, and the tolerance is not in scope.
+
+**#37, the fast test, proven.** Write a = min, b = max, θ = a·(1 − t) + b·t (exact) and u = 2⁻⁵³. Rust's T is
+RN(RN(a·h) + RN(b·t)) with h = RN(1 − t): h is 1 − t exactly for t ≥ ½ (Sterbenz) and within u/2 of it below (1 − t in
+(½, 1], its ulp 2⁻⁵³); |RN(x·y) − x·y| ≤ u·|x·y| + 2⁻¹⁰⁷⁵ (the subnormal grid's half step); a sum of doubles rounds by at
+most u relative and is exact below 2⁻¹⁰²¹. With |h|, t ≤ 1: |T − θ| ≤ u·(|a| + |b|)·(1 + u) + u·2⁻¹⁰⁷⁴ (the sum) + u·|a| +
+u·|b| + 2·2⁻¹⁰⁷⁵ (the products) + (u/2)·|a| (h) ≤ 2.5u·(1 + u)·(|a| + |b|) + (1 + u)·2⁻¹⁰⁷⁴ wherever T is finite. The port
+computes B = RN(RN(RN(|a|·2⁻⁵¹) + RN(|b|·2⁻⁵¹)) + 2⁻¹⁰⁷²) ≥ (1 − u)²·(4u·(|a| + |b|) + 3·2⁻¹⁰⁷⁴), above that bound; RN is
+monotone, so RN(w − T) > B proves w − T > B and w > θ, and RN(w − T) < −B proves w < θ (an overflowing w − T is ±∞ on
+the right side). Otherwise, and where T is ±∞, `_km_peak_above_exact` decides: w − a + t·a − t·b > 0, w and −a as
+(significand, exponent) pairs, t·a and −t·b as exact TwoProducts of their significands (in [1, 4), the low parts 0 or at
+least 2⁻¹⁰⁴), by `_km_sign_scaled`. A non-finite candidate can only be +∞ (NaN and −∞ fail w > w[0]), above every finite
+threshold, as IEEE would compare it; a finite candidate is never below min. `validate.py` checks the bound on every row
+past the checks and the fast test's decision against the exact one on every candidate it decides.
+
+**#37's machinery, `_km_sign_scaled`** (`src/mathx.cyr`: the exact sign of Σ cᵢ·2^kᵢ for up to eight doubles cᵢ, each 0 or
+of magnitude in [2⁻¹¹⁰, 4), at any integer exponents kᵢ). Round by round, with K the largest kᵢ of a nonzero term: the
+terms with kᵢ − K ≥ −900 scale exactly into normal doubles in [2⁻¹⁰¹⁰, 4) and their exact sum E is formed by
+Grow-Expansion with zero elimination (as `_km_exp_sign`; no overflow below 32), a nonoverlapping expansion whose largest
+component has the sum's sign; each other term is below 2⁻⁸⁹⁸ in that scale, so at most eight of them sum below 2⁻⁸⁹⁵. With
+no such term, or E's top component at least 2⁻⁸⁹⁰, E's sign is the sum's; otherwise E's components (exact doubles,
+possibly subnormal in that scale) and the deferred terms are the next round's terms, no more than before and all below
+2^(K − 888). find_peaks' terms span 2⁻²¹⁵⁰ … 2¹⁰²⁵, so the rounds end within five; the example that needs them is
+w − a + t·a − t·b with a = 2⁻¹⁰³, b = DBL_MAX, t = 2⁻¹⁰⁷⁴ and w = 2⁻⁵⁰: the first three terms cancel to 2⁻¹¹⁷⁷ — w is a peak
+by 2⁻¹¹⁷⁷ (`tests/spectroscopy.tcyr` checks a three-round case, 2¹⁰⁰⁰ − 2¹⁰⁰⁰ − 2⁻²¹⁰⁰).
+
+**#36, the fast test, proven.** `_km_fft` runs Rust's transform and returns 1 when every component of wn, of each
+twiddle w a butterfly uses (checked in the first block of a stage: the recurrence is input-independent, the same in every
+block) is 0 or at least 2⁻¹⁰⁰ and every component of each butterfly's d is 0 or at least 2⁻⁹²¹. Then, by induction over
+the operations: each product of the transform — w·d, and the recurrence's w·wn — has operands equal to the unbounded
+chain's and is either an exact ±0 from a zero factor (the same signed zero in both evaluations) or of exact magnitude at
+least 2⁻¹⁰²¹, where binary64's rounding is the 53-bit one unless it overflows; each sum or difference of two doubles is
+exact below 2⁻¹⁰²¹ and the 53-bit rounding above unless it overflows (the pure-sum lemma, #33). So every value is the
+unbounded chain's unless an operation overflowed. An overflow reaches a retained output as ±∞ or NaN: a non-finite
+component of d gives t a non-finite component (w's components are never both 0; a zero one gives 0·∞ = NaN, a nonzero
+one ±∞ or NaN), a non-finite u or t gives both u ± t a non-finite component, so a non-finite value at any stage makes
+both outputs of the butterfly it enters non-finite, and in the last stage (one block) every value of the previous stage
+enters a butterfly whose u + t is a retained bin k < n/2 (the bin n/2 is u − t of k = 0). So "every retained re and im
+finite" proves the whole transform the unbounded one; the twiddle that the last k of a block computes is never used.
+(The same argument shows a NaN or ±∞ sample makes every output non-finite after log₂ n stages, so such a signal never
+passes the test, and B1's rule gives it Rust's IEEE spectrum.) Per bin, the square sum s = RN(RN(re²) + RN(im²)) in
+[2⁻⁹⁰⁰, DBL_MAX] is the unbounded one (#20's distance_3d argument in two dimensions: no square overflowed, and a square
+below 2⁻¹⁰²¹ in either evaluation is added to one of at least 2⁻⁹⁰¹, under a quarter of its ulp; both below 2⁻¹⁰²¹ would
+put s below 2⁻¹⁰²⁰), a normal double whose IEEE √ is the correctly rounded one; re = im = 0 gives +0 in both; any other bin
+of a valid transform takes `_km_fft_mag_ux` of its (exact) re and im — the per-bin slow path, cheap — and an invalid
+transform of a finite signal the whole slow path. **The twiddles**: the bound never binds in practice (wn's smallest
+component is above 2⁻⁶⁰ for every n the port can hold, and the recurrence's smallest nonzero component measures 2⁻⁵⁶ for
+every n ≤ 2²²), so the test is the data's: a d below 2⁻⁹²¹ ≈ 5.6·10⁻²⁷⁸, or a sum past DBL_MAX, takes the slow path.
+**The 2⁻¹⁰²² pitfall** (B4's #29): the test is on the operands, never on a product's IEEE value; n = 4's second butterfly
+has w = (cos(−π/2), −1) = (6.12·10⁻¹⁷, −1), and d = 3.63·10⁻²⁹² puts w.re·d in [2⁻¹⁰²² − 2⁻¹⁰⁷⁵, 2⁻¹⁰²²), which IEEE
+rounds up to 2⁻¹⁰²² and 53 bits do not; that d is below 2⁻⁹²¹, so the test refuses (`tests/spectroscopy.tcyr`).
+
+**#36's machinery** (`src/spectroscopy.cyr`): `_km_fft` (hisab's transcription, now with the operand checks and its 1/0),
+`_km_fft_spectrum_fast` (Rust's transform and magnitudes in the work table, the per-bin unbounded √ where a bin's square
+sum leaves the range; 2, 1 or 0), `_km_fft_ux` (the same operations on `_km_ux_mul`, `_km_ux_add`, `_km_ux_sub`, from
+`_km_ux_from` of the samples, signed zeros as IEEE's), `_km_fft_mag_ux` (the squares and their sum at 53 bits,
+`_km_ux_sqrt_f64` once) and `_km_fft_spectrum_ux` (the slow path: 32·n heap bytes, then the magnitudes to `out`). The
+signal must survive the fast attempt, so the IEEE transform runs in `out` only when cap ≥ 2n and `signal` does not
+overlap out's first 2n values (as before, nothing is allocated then); an aliased signal now has a 16·n-byte heap work
+table, which the bump allocator never frees (the slow path's 32·n bytes too). So `fft_spectrum([1.75·10³⁰⁴])` is
+[1.75·10³⁰⁴] (Rust's [∞]), `([−6.96·10⁻³¹⁶])` [6.96·10⁻³¹⁶] (Rust's [0]), `([3.3·10³⁰², 3.0·10³⁰⁴])` [3.0292·10³⁰⁴,
+2.9627·10³⁰⁴] (Rust's [∞, ∞]), `([DBL_MAX])` [DBL_MAX] (Rust's [∞]), `([10²⁰⁰, 1])` [10²⁰⁰, 10²⁰⁰] (Rust's [∞, ∞]: the
+transform in range, the per-bin √) and `([∞, 10³⁰⁰])` Rust's [∞, ∞].
+
+**Golden comparison** (as #23 for the whole-result notes, #33 … #35 otherwise). The corpus keeps the oracle's values;
+where the port's result differs, the note names it: `[ADR 0002 #36: the port returns hisab 1.4.0's transform and the
+magnitudes evaluated with an unbounded exponent (each √ rounded once) = [n], … (v:n f:… …)]`, `[ADR 0002 #37: the port
+returns the threshold test evaluated exactly (w > min·(1 − t) + max·t in rational arithmetic) = [n], … (v:n i:… …)]` and
+`[ADR 0002 #38: the port returns Rust's solver with an exact bracket sign test (newton, 0 steps) = <x> (f:…)]` (the
+port's solver path inside; the oracle's Err rows have none). The generator computes them independently of the port: the
+FFT on `exact::Ux` with glibc's cos and sin (the oracle's sincos, correctly rounded at every FFT angle: no fft row has a
+correction, MPFR decides), `find_peaks` on `exact::peak_above` (W·2¹⁰⁷⁴ + T·L > L·2¹⁰⁷⁴ + T·H in `Big` integers),
+the flame on `m_thermochem.rs`'s solver replica from the public Shomate API with the exact tests (asserting that it
+differs from Rust's only where the bracket product underflows to a zero: Rust's ComputationError, the port's Ok). Rust's
+validation is replicated and asserted. The edge rows are appended with their own seeds: spectroscopy 2,393 `find_peaks`
+(a candidate at the exact threshold's successor and its neighbours ulp by ulp for fourteen (min, max) pairs — normal,
+subnormal, mixed signs, ±DBL_MAX — at fourteen t including 0, 1, 1 − 2⁻⁵³, 2⁻¹⁰⁷⁴ and ½ ± an ulp; subnormal data on a
+grid of t; ±0 mixes; a +∞ candidate; seeded near-ties over every binade) and 515 `fft_spectrum` (every power of two to
+256: DBL_MAX impulses, constants and alternations, √DBL_MAX and 2⁻⁵¹¹ samples, subnormal ones, the data bound 2⁻⁹²¹ ulp by
+ulp, huge, subnormal, mixed and near-cancelling seeded signals, n = 4's product below 2⁻¹⁰²², NaN and ±∞ beside huge
+samples; seeded signals over every binade); thermochem 443 flame rows (the survey's example and its endothermic mirror,
+six real systems scaled by 10⁻³²⁰ … 10⁻¹⁵⁰ at two T₀, the scale where |f(T₀)·f(T_max)| crosses 2⁻¹⁰⁷⁵ ulp by ulp, a
+subnormal ΔH against moles from 10⁻⁹ to 10², endothermic tiny systems, seeded fuel mixtures at tiny scales). Of the rows
+before B6 exactly the expected change: **41 of 213 `fft_spectrum`** (40 where a bin of Rust's is 0, ±∞ or NaN and the
+port's representable — 2,158 such bins — and 1 where Rust's NaN is the value ∞; a magnitude-only fix would have repaired
+28 of the 41, so the butterflies matter for 13), **3 of 994 `find_peaks`** (`[−0, 5·10⁻³²⁴, 0]` at t = 0.75 and
+1 − 2⁻⁵³, `[10, 10.2, 10, 11, 10]` at 1 − 2⁻⁵³), **16 of 1,937 `adiabatic_flame_temperature`** (four real systems at
+10⁻²⁰⁰ and 10⁻¹⁷⁰, each at T₀ = 298.15 and 500 K). The harness maps a noted row (`_par_map_toks` for the two vector
+results, `_par_got_noted` for the flame) and counts it: **418 #36 rows, 222 #37 rows, 273 #38 rows**.
+
+`validate.py` §24 proves every note independently. **#38**: every flame row recomputed with its replica `r_flame` in the
+port's form (`exact`), noted exactly where the result differs from the oracle's, the note naming the value bit for bit
+and the solver path; a noted row's ends have opposite signs and a product underflowing to a zero (Rust's
+ComputationError against the port's Ok), and every row whose product is no such zero is unnoted (strict); 2,345 rows past
+validation, 47 with an underflowed zero product of equal signs (Err in both), 111 with a subnormal nonzero product
+(bracketed in both); B4's replay of the flame's Shomate evaluations now includes the port's own (664,046, all in #34's
+box). **#37**: every row with `Fraction`s, noted exactly where the indices differ, the note's tokens bit for bit; on
+every row past the checks Rust's T within the proven bound of θ and the port's B above it, the fast test's decision the
+exact one on every candidate it decides, and no row noted whose every candidate the fast test decides; 6,546 candidates,
+3,993 decided by the fast test, 233 where Rust's threshold decides otherwise (109 at subnormal or zero thresholds, 16 with
+±DBL_MAX ends, 108 other normal near-ties). **#36**: every row with a finite signal recomputed on `mpfr_ref.UX` (the
+transform as transcribed with MPFR's correctly rounded cos and sin, every operation at 53 bits at MPFR's widest exponent
+range, each √ by `ux_sqrt_final`), noted exactly where it differs from the oracle's (no fft row has a correction), the
+note's tokens bit for bit; a signal with a NaN or ±∞ never noted; B3's strict tracers over every product, sum and square
+(the twiddle recurrence included): no row whose chain stays in the normal range is noted (226 such rows), nor one where
+the port's fast test passes with every bin's square sum in range (194); rows longer than 1,024 whose chain stays in range
+are covered by that lemma alone (the UX replica is slow). The noted rows by their worst bin: 408 where a bin of Rust's is
+0, ±∞ or NaN and the port's representable, 1 where Rust's NaN is the value ±∞, 8 degraded (normal, Rust's more than 2 ulp
+off), 1 within 2 ulp or subnormal; 9,177 noted bins.
+
+`cr_verify.py` adds `flame` (adiabatic_flame_temperature and the transcribed bisection's exact same-sign test, 14,010
+arguments: tiny scales, around the scale where the product stops underflowing, endothermic and subnormal ΔH, typical,
+every Err; reference Rust's solver in Python on the generated SHOMATE table with the exact tests), `pk3`, `pk5`, `pk8`,
+`pk16` (find_peaks of 3, 5, 8 and 16 values: the public function, the fast test's scan, every candidate through the exact
+predicate forced; reference `Fraction`; 95,000 arrays each with near-ties, subnormal data, ±DBL_MAX ends, ±0 and
+non-finite values) and `fft1` … `fft256` (fft_spectrum of n = 1, 2, 4, …, 64 and 256: the public spectrum, the fast path's
+where its transform test passes, the unbounded transform forced; reference the transform on `mpfr_ref.UX`; 110,718
+signals: per region 3,000 for n ≤ 8, 1,500 for 16, 800 for 32, 400 for 64 and 60 for 256 — the UX reference costs about
+16 operations a butterfly — over binade-uniform, typical, huge, subnormal, mixed, near-cancelling, the bounds 2⁻⁹²¹,
+2⁻⁵¹¹, 2⁵¹¹ and √DBL_MAX, non-finite samples and n = 4's product below 2⁻¹⁰²²) and `signsc` (`_km_sign_scaled` itself,
+140,110 sums of up to eight terms against `Fraction`: random terms over its whole exponent range, exact cancellations
+decided one to three rounds down, a round's remainder of 2⁻¹⁰¹⁰ … 2⁻⁹⁰¹ of its scale against a larger deferred term), on
+x86_64 ELF, x86_64 PE and aarch64. That last region found a slip in review: the round's bound 2⁻⁸⁹⁰ had been written as
+the double 2⁻¹⁰¹⁸, which let a round's tiny remainder decide against a larger deferred term (12,008 of its sums; no
+golden row or `find_peaks` argument reached it); corrected, with a three-round case in `tests/spectroscopy.tcyr`.
+
+**Cost** (`tests/kimiya.bcyr`, before → after on the same host, alternating runs of HEAD and the batch;
+`docs/benchmarks-rust-v-cyrius.md`'s B6 section): `spectroscopy/fft_spectrum_256` 27.3 → 30.5 µs (+12 %),
+`fft_spectrum_1024` 129.2 → 143.1 (+11 %), `fft_spectrum_4096` 605.6 → 669.4 (+11 %): the per-butterfly operand checks
+are about 6 % (measured without them: 29.1, 139.6, 638.5), the rest the restructured magnitude pass, its range test and the
+extra state; skipping the checks at k = 0 (w = (1, 0), exact products) gained under 1 % and was not kept, merging the
+retained-output and magnitude passes gained 1 % and was. `find_peaks_1000` 19.0 → 20.3 µs (+7 %: Rust's threshold and
+the bound once, a subtraction and two compares a candidate), `thermochem/adiabatic_flame_ch4_air` 3.37 → 3.40 µs (two
+compares for a multiply: unchanged within noise). The new `bench_audit_b6` (`tests/audit2.bcyr`, before → after:
+Rust's chain, then the port's): `fft_spectrum_256_huge` 27.7 → 318.1 µs and `fft_spectrum_256_subnormal` 35.4 → 349.8 µs
+(the unbounded transform: about 11× Rust's chain), `fft_spectrum_256_squares` 27.4 → 45.1 µs (the per-bin unbounded √ on
+all 129 bins), `find_peaks_1000_subnormal` 19.5 → 39.0 µs (about half the candidates through the exact predicate),
+`adiabatic_flame_tiny` 0.96 → 1.48 µs (Rust's ComputationError there; here Newton's guess); `tests/audit2.bcyr` 45 s.
 
 ## Consequences
 

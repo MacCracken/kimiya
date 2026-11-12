@@ -146,8 +146,16 @@ pub enum Path {
 }
 
 /// The flame solver rebuilt from the public API, with hisab 1.4.0's loops transcribed: the result
-/// (or the error variant) and, for an `Ok`, the solver path.
-fn flame_replica(dh: f64, products: &[(&str, f64)], t0: f64) -> (Result<f64, &'static str>, Option<Path>) {
+/// (or the error variant) and, for an `Ok`, the solver path. With `exact`, the port's (ADR 0002 #38, the overflow
+/// audit's B6): the bracket test and the bisection's same-sign test compare the signs of f(T₀) and f(T_max) exactly
+/// (f_lo < 0 < f_hi or f_hi < 0 < f_lo; both > 0 or both < 0), where Rust tests their product, which underflows to
+/// ±0 for a tiny |ΔH| and moles; everything else is Rust's.
+fn flame_replica(
+    dh: f64,
+    products: &[(&str, f64)],
+    t0: f64,
+    exact: bool,
+) -> (Result<f64, &'static str>, Option<Path>) {
     let pos = |x: f64| x > 0.0 && x.is_finite();
     if !pos(t0) {
         return (Err("InvalidTemperature"), None);
@@ -184,7 +192,8 @@ fn flame_replica(dh: f64, products: &[(&str, f64)], t0: f64) -> (Result<f64, &'s
         -cp
     };
     let (t_lo, t_hi) = (t0, range_max);
-    let bracketed = fun(t_lo) * fun(t_hi) < 0.0;
+    let (fa, fb) = (fun(t_lo), fun(t_hi));
+    let bracketed = if exact { (fa < 0.0 && fb > 0.0) || (fa > 0.0 && fb < 0.0) } else { fa * fb < 0.0 };
     if !bracketed {
         return (Err("ComputationError"), None);
     }
@@ -214,7 +223,8 @@ fn flame_replica(dh: f64, products: &[(&str, f64)], t0: f64) -> (Result<f64, &'s
     // hisab 1.4.0 bisection(f, t_lo, t_hi, 1e-6, 200)
     let (mut lo, mut hi) = (t_lo, t_hi);
     let (f_lo, f_hi) = (fun(lo), fun(hi));
-    if f_lo * f_hi > 0.0 {
+    let same_sign = if exact { (f_lo > 0.0 && f_hi > 0.0) || (f_lo < 0.0 && f_hi < 0.0) } else { f_lo * f_hi > 0.0 };
+    if same_sign {
         return (Err("ComputationError"), None);
     }
     if f_lo > 0.0 {
@@ -235,6 +245,18 @@ fn flame_replica(dh: f64, products: &[(&str, f64)], t0: f64) -> (Result<f64, &'s
     (Ok((lo + hi) * 0.5), Some(Path::Bisection(why, 200)))
 }
 
+/// f(T₀) and f(T_max), the flame balance at the bracket's ends (for inputs Rust's validation accepts): ADR 0002 #38's
+/// rows, where their product underflows to a zero.
+fn flame_ends(dh: f64, products: &[(&str, f64)], t0: f64) -> (f64, f64) {
+    let resolved: Vec<(Segs, f64)> = products.iter().filter_map(|&(fo, n)| segs(fo).map(|sg| (sg, n))).collect();
+    let t_max = resolved.iter().map(|(sg, _)| sg.t_max).fold(f64::INFINITY, f64::min);
+    let fun = |t: f64| -> f64 {
+        let heat: f64 = resolved.iter().map(|(sg, n)| n * sg.enthalpy_change(t0, t)).sum();
+        -dh - heat
+    };
+    (fun(t0), fun(t_max))
+}
+
 /// Solver-path tallies for the module comment and port-parity.md.
 #[derive(Default)]
 pub struct Paths {
@@ -247,10 +269,22 @@ fn variant(e: &KimiyaError) -> String {
     format!("{e:?}").split('(').next().unwrap_or_default().to_string()
 }
 
+/// How the port obtains a flame temperature under ADR 0002 #38 (the note's `<how>`).
+pub const FLAME_HOW: &str = "Rust's solver with an exact bracket sign test";
+
+/// A solver path as the row notes write it.
+fn path_text(path: Option<Path>) -> String {
+    match path {
+        Some(Path::Newton(k)) => format!("newton, {k} steps"),
+        Some(Path::Bisection(why, k)) => format!("bisection after newton: {why}, {k} halvings"),
+        None => String::new(),
+    }
+}
+
 fn flame(m: &mut Module, paths: &mut Paths, dh: f64, products: &Species, t0: f64) {
     let p = borrow(products);
     let got = adiabatic_flame_temperature(bb(dh), bb(&p), bb(t0));
-    let (rep, path) = flame_replica(dh, &p, t0);
+    let (rep, path) = flame_replica(dh, &p, t0, false);
     let same = match (&got, &rep) {
         (Ok(a), Ok(b)) => a.to_bits() == b.to_bits(),
         (Err(a), Err(b)) => variant(a) == *b,
@@ -263,20 +297,37 @@ fn flame(m: &mut Module, paths: &mut Paths, dh: f64, products: &Species, t0: f64
     let mut ins = vec![f(dh)];
     ins.extend(species_toks(products));
     ins.push(f(t0));
-    let extra = match path {
-        Some(Path::Newton(k)) => {
-            paths.newton += 1;
-            format!("newton, {k} steps")
-        }
-        Some(Path::Bisection(why, k)) => {
-            paths.bisection += 1;
-            format!("bisection after newton: {why}, {k} halvings")
-        }
-        None => {
-            paths.err += 1;
-            String::new()
-        }
+    match path {
+        Some(Path::Newton(_)) => paths.newton += 1,
+        Some(Path::Bisection(..)) => paths.bisection += 1,
+        None => paths.err += 1,
+    }
+    let extra = path_text(path);
+    // ADR 0002 #38: the port's result, Rust's solver with the exact sign tests. It can differ only where Rust's bracket
+    // product underflows to −0 although the signs differ: Rust's ComputationError, the port's Ok (the rest of the
+    // solver is the same, and the bisection's test cannot refuse after the bracket passed).
+    let (port, ppath) = flame_replica(dh, &p, t0, true);
+    let changed = match (&rep, &port) {
+        (Ok(a), Ok(b)) => a.to_bits() != b.to_bits(),
+        (Err(a), Err(b)) => a != b,
+        _ => true,
     };
+    if changed {
+        let (fa, fb) = flame_ends(dh, &p, t0);
+        assert!(
+            rep == Err("ComputationError") && port.is_ok() && fa * fb == 0.0 && fa != 0.0 && fb != 0.0,
+            "ADR 0002 #38: the port's flame differs from Rust's beyond an underflowing bracket: \
+             {dh:?} {products:?} {t0:?}"
+        );
+        let x = port.unwrap_or(f64::NAN);
+        let note = format!(
+            "ADR 0002 #38: the port returns {FLAME_HOW} ({}) = {x:?} (f:{:016x})",
+            path_text(ppath),
+            x.to_bits()
+        );
+        m.row_noted("thermochem::adiabatic_flame_temperature", Class::B, &ins, &[res(got)], &note);
+        return;
+    }
     let out = res(got);
     if extra.is_empty() {
         m.row("thermochem::adiabatic_flame_temperature", Class::B, &ins, &[out]);
@@ -826,5 +877,88 @@ pub fn emit() -> Module {
         paths.newton, paths.bisection, paths.err
     );
     audit::emit_thermochem(&mut m);
+    emit_flame_b6(&mut m, &mut paths);
     m
+}
+
+/// 10^k as a double (the decimal literal's correctly rounded value, by parsing).
+fn ten(k: i32) -> f64 {
+    format!("1e{k}").parse().unwrap_or(f64::NAN)
+}
+
+/// The overflow audit's B6 (ADR 0002 #38), appended with their own seed so the rows before keep theirs: flame rows whose
+/// bracket product f(T₀)·f(T_max) underflows to −0 while the signs differ (Rust's ComputationError, the port's Ok) and
+/// their neighbours — the survey's example and its endothermic mirror (Err in both); real systems scaled across every
+/// binade from 10⁻³²⁰ to 10⁻¹⁵⁰ (below about 10⁻¹⁶⁹ the product underflows), at two T₀; for each, the scale where
+/// |f(T₀)·f(T_max)| crosses 2⁻¹⁰⁷⁵ (found by bisection on the scale), ulp by ulp around it; a subnormal ΔH against moles
+/// from 10⁻⁹ to 10², both signs; an endothermic system at the same scales (both ends negative, their product +0: Err in
+/// both); seeded fuel mixtures at seeded tiny scales. (The bisection fallback can't be reached with an underflowing
+/// bracket: |f| at the guess is then far below Newton's 10⁻³ J/mol, which accepts it at once.)
+fn emit_flame_b6(m: &mut Module, paths: &mut Paths) {
+    let mut rng = Rng::new(0x3806);
+    let co2 = sp(&[("CO2(g)", 1.0)]);
+    flame(m, paths, -1e-320, &scaled(&co2, 1e-300), 298.15);
+    flame(m, paths, 1e-320, &scaled(&co2, 1e-300), 298.15);
+    let base: [(f64, Species); 6] = [
+        (-802_300.0, sp(&[("CO2(g)", 1.0), ("H2O(g)", 2.0), ("N2(g)", 7.52)])),
+        (-241_820.0, sp(&[("H2O(g)", 1.0), ("N2(g)", 1.88)])),
+        (-519_320.0, sp(&[("CO(g)", 1.0), ("H2O(g)", 2.0), ("N2(g)", 5.64)])),
+        (-282_980.0, sp(&[("CO2(g)", 1.0), ("N2(g)", 1.88)])),
+        (-393_510.0, co2.clone()),
+        (-2_043_900.0, sp(&[("CO2(g)", 3.0), ("H2O(g)", 4.0), ("N2(g)", 18.8)])),
+    ];
+    let exps = [-320, -310, -300, -290, -280, -260, -240, -220, -200, -190, -180, -175, -172, -170, -169, -168, -165,
+        -160, -155, -150];
+    for (dh, prods) in &base {
+        for &k in &exps {
+            let sc = ten(k);
+            for t0 in [298.15, 500.0] {
+                flame(m, paths, dh * sc, &scaled(prods, sc), t0);
+            }
+        }
+        // the scale where |f(T₀)·f(T_max)| crosses 2⁻¹⁰⁷⁵: below it the product is −0 (Rust's Err), above −2⁻¹⁰⁷⁴ or
+        // more (Rust's Ok); the rows at the two sides, ulp by ulp
+        let pv = |sc: f64| {
+            let sp_ = scaled(prods, sc);
+            let (fa, fb) = flame_ends(dh * sc, &borrow(&sp_), 298.15);
+            fa * fb
+        };
+        let (mut lo, mut hi) = (ten(-200), ten(-150));
+        for _ in 0..200 {
+            let mid = lo.sqrt() * hi.sqrt();
+            if mid <= lo || mid >= hi {
+                break;
+            }
+            if pv(mid) == 0.0 { lo = mid } else { hi = mid }
+        }
+        for sc in [lo, hi] {
+            for d in -2_i64..=2 {
+                let x = f64::from_bits(sc.to_bits().wrapping_add_signed(d));
+                flame(m, paths, dh * x, &scaled(prods, x), 298.15);
+            }
+        }
+    }
+    // a subnormal ΔH against moles from 10⁻⁹ to 10², both signs
+    for kk in [1_u64, 3, 1 << 20, (1 << 52) - 1] {
+        let dh = f64::from_bits(kk);
+        for e in [-9, -7, -6, -5, -3, 0, 2] {
+            flame(m, paths, -dh, &scaled(&co2, ten(e)), 298.15);
+            flame(m, paths, dh, &scaled(&co2, ten(e)), 298.15);
+        }
+    }
+    // an endothermic system at tiny scales: both ends negative, their product +0 (Err in both)
+    for k in [-300, -250, -200, -170, -160] {
+        let sc = ten(k);
+        flame(m, paths, 241_820.0 * sc, &scaled(&base[1].1, sc), 298.15);
+    }
+    // seeded: a fuel mixture at a seeded tiny scale and T₀
+    for _ in 0..80 {
+        let fu = &FUELS[usize::try_from(rng.int(0, 8)).unwrap_or(0)];
+        let phi = [0.7, 0.9, 1.0, 1.5][usize::try_from(rng.int(0, 3)).unwrap_or(0)];
+        let phi = if phi > 1.0 && fu.fuel != "H2(g)" { 1.0 } else { phi }; // rich only for H₂ (its excess has data)
+        let (dh, prods) = mixture(fu, phi, 3.76, 0.0);
+        let sc = rng.log_uniform(-320.0, -150.0);
+        let t0 = [298.15, 300.0, 500.0, 1000.0][usize::try_from(rng.int(0, 3)).unwrap_or(0)];
+        flame(m, paths, dh * sc, &scaled(&prods, sc), t0);
+    }
 }

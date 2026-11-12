@@ -983,11 +983,15 @@ def r_dh_cp(formula, t1, t2):
     if lo < run[0][5] or hi > run[-1][6]: return Err("InvalidTemperature")
     return seg_dh(run, t1, t2)
 FLAME_PATH = [None]
-def r_flame(dh, prods, t0, ntol=1e-3, btol=1e-6, gcp=40.0, eps=1e-12):
+FLAME_ENDS = [None]              # (f(T₀), f(T_max)) of the last flame evaluated past validation (ADR 0002 #38)
+def r_flame(dh, prods, t0, ntol=1e-3, btol=1e-6, gcp=40.0, eps=1e-12, exact=False):
     """adiabatic_flame_temperature with hisab 1.4.0's newton_raphson (tol ntol, 50 iterations,
     derivative threshold eps) and bisection (tol btol, 200 iterations) transcribed; FLAME_PATH[0] is
-    the solver that answered. The keyword arguments are Rust's typed constants (the pinning check)."""
+    the solver that answered. The keyword arguments are Rust's typed constants (the pinning check), and
+    with `exact` the port's ADR 0002 #38 (the overflow audit's B6): the bracket's and the bisection's sign
+    tests compare the signs of f(T₀) and f(T_max) exactly instead of testing their product."""
     FLAME_PATH[0] = None
+    FLAME_ENDS[0] = None
     if not is_positive(t0): return Err("InvalidTemperature")
     if not is_finite(dh): return Err("InvalidInput")
     if not prods: return Err("InvalidInput")
@@ -1008,7 +1012,11 @@ def r_flame(dh, prods, t0, ntol=1e-3, btol=1e-6, gcp=40.0, eps=1e-12):
         for run, n in res: cp += n * seg_cp(run, t)
         return -cp
     t_lo, t_hi = t0, rmax
-    if not fun(t_lo) * fun(t_hi) < 0.0: return Err("ComputationError")
+    fa, fb = fun(t_lo), fun(t_hi)
+    FLAME_ENDS[0] = (fa, fb)
+    if exact:
+        if not ((fa < 0.0 < fb) or (fb < 0.0 < fa)): return Err("ComputationError")
+    elif not fa * fb < 0.0: return Err("ComputationError")
     total = -0.0
     for _, n in res: total += n
     x = r_min(r_max(t0 - dv(dh, total * gcp), t_lo), t_hi)
@@ -1028,7 +1036,8 @@ def r_flame(dh, prods, t0, ntol=1e-3, btol=1e-6, gcp=40.0, eps=1e-12):
         x -= dv(fx, dfx)
     lo, hi = t_lo, t_hi
     f_lo, f_hi = fun(lo), fun(hi)
-    if f_lo * f_hi > 0.0: return Err("ComputationError")
+    if (((f_lo > 0.0 and f_hi > 0.0) or (f_lo < 0.0 and f_hi < 0.0)) if exact else f_lo * f_hi > 0.0):
+        return Err("ComputationError")
     if f_lo > 0.0: lo, hi = hi, lo
     for k in range(200):
         mid = (lo + hi) * 0.5
@@ -1900,6 +1909,7 @@ for mod in ("reaction", "thermo", "phase", "gas", "thermochem", "solution", "ele
             path = FLAME_PATH[0]
             note = NOTES.get(where, "")
             noted = note.rsplit(" [", 1)[1][:-1] if note.endswith("]") else None
+            if "[ADR 0002 #38:" in note: noted = None     # the oracle's Err; §24 checks the port's path in the note
             check(noted == path, f"{where}: solver path noted {noted!r}, recomputed {path!r}")
             kind = "err" if path is None else path.split(" ", 1)[0].rstrip(",")
             flame_paths[kind] = flame_paths.get(kind, 0) + 1
@@ -4984,6 +4994,8 @@ for fn, cls, ins, outs, where in R.get("thermochem", []):
     if fn != "thermochem::adiabatic_flame_temperature": continue
     B4_EVALS.clear()
     RULES[fn][1](ins)
+    fprods_, fk_ = species_at(ins, 1)
+    r_flame(ins[0][1], fprods_, ins[fk_][1], exact=True)   # the port's own evaluations (ADR 0002 #38's rows go on)
     b4_flame["rows"] += 1
     for is_cp, c, temp in B4_EVALS:
         b4_flame["evaluations"] += 1
@@ -5181,6 +5193,312 @@ print(f"ADR 0002 #35's lemma, checked on every row past validation: {b5_lemma}; 
 check(all(v > 0 for k, v in b5_cov.items() if "out of range" not in k), f"B5: a noted-row class has no golden row: "
       f"{b5_cov}")
 check(all(v > 0 for v in b5_lemma.values()), f"B5: a case of the lemma has no golden row: {b5_lemma}")
+
+# ── 24. The overflow audit's B6 (ADR 0002 #36, #37, #38): the FFT, find_peaks' threshold, the flame's bracket ─────────
+# #38, adiabatic_flame_temperature: every row is recomputed with the port's solver (r_flame with `exact`: the bracket's
+# and the bisection's sign tests compare the signs exactly, everything else Rust's) and must be noted exactly where its
+# result differs from the oracle's, the note naming the value bit for bit and its solver path. The sign tests are
+# checked against Rust's product tests over every pair of a set of special and boundary values (±0, the subnormal and
+# normal ends, ±∞, NaN) and seeded pairs: they differ only where the product underflows to a zero from nonzero operands.
+# On the rows: a noted row's ends have opposite signs and an underflowing product (Rust's ComputationError, the port's
+# Ok); every row whose product is not such a zero is unnoted (strict); the bisection's test never refuses after the
+# bracket passed.
+B6_FLAME = "thermochem::adiabatic_flame_temperature"
+B6_FLAME_HOW = "Rust's solver with an exact bracket sign test"
+B6_FLAME_RE = re.compile(r"\[ADR 0002 #38: the port returns (.+) \((newton, \d+ steps|bisection after newton: [^)]*)\) "
+                         r"= (\S+) \(f:([0-9a-f]{16})\)\]$")
+def b6_lt_rust(a, b): return a * b < 0.0
+def b6_lt_exact(a, b): return (a < 0.0 < b) or (b < 0.0 < a)
+def b6_gt_rust(a, b): return a * b > 0.0
+def b6_gt_exact(a, b): return (a > 0.0 and b > 0.0) or (a < 0.0 and b < 0.0)
+B6_SPECIALS = [0.0, 2.0 ** -1074, 3 * 2.0 ** -1074, 2.0 ** -1060, 2.0 ** -1022, 2.0 ** -1000, 2.0 ** -537, 2.0 ** -538,
+               1e-162, 1.5e-162, 1e-200, 1e-3, 1.0, 1e200, 2.0 ** 512, 2.0 ** 1000, DMAX_V, math.inf, math.nan]
+B6_SPECIALS = B6_SPECIALS + [-x for x in B6_SPECIALS]
+b6_pairs = [(a, b) for a in B6_SPECIALS for b in B6_SPECIALS]
+_rng6 = random.Random(0x3806)
+for _ in range(20000):
+    b6_pairs.append(tuple(_rng6.choice([-1.0, 1.0]) * 2.0 ** _rng6.uniform(-1074, 1023) for _ in range(2)))
+b6_diff = [0, 0]
+for a_, b_ in b6_pairs:
+    for k_, (rt, et) in enumerate(((b6_lt_rust, b6_lt_exact), (b6_gt_rust, b6_gt_exact))):
+        if rt(a_, b_) != et(a_, b_):
+            b6_diff[k_] += 1
+            check(a_ * b_ == 0.0 and a_ != 0.0 and b_ != 0.0 and not math.isnan(a_) and not math.isnan(b_),
+                  f"ADR 0002 #38: the sign test and Rust's product test differ at ({a_!r}, {b_!r}) beyond an underflow")
+print(f"ADR 0002 #38's sign tests against Rust's products: {len(b6_pairs)} pairs; they differ on {b6_diff[0]} "
+      f"(bracket) and {b6_diff[1]} (bisection) pairs, each an underflowing product")
+check(b6_diff[0] > 0 and b6_diff[1] > 0, "ADR 0002 #38: no pair shows the underflow")
+b6_fl = {"rows past validation": 0, "noted": 0, "the product an underflowed zero, signs equal (Err in both)": 0,
+         "the product subnormal, nonzero (bracketed in both)": 0}
+for fn, cls, ins, outs, where in R.get("thermochem", []):
+    if fn != B6_FLAME: continue
+    prods6, k6 = species_at(ins, 1)
+    rust = r_flame(ins[0][1], prods6, ins[k6][1])
+    ends = FLAME_ENDS[0]
+    port = r_flame(ins[0][1], prods6, ins[k6][1], exact=True)
+    ppath = FLAME_PATH[0]
+    note = NOTES.get(where, "")
+    noted = "[ADR 0002 #38:" in note
+    differs = not toks_equal(out_toks(port), outs)
+    check(noted == differs, f"{where}: the port's flame {port!r} vs the oracle's {outs}: the #38 note is "
+          f"{'missing' if differs else 'stray'}")
+    check(toks_equal(out_toks(rust), outs), f"{where}: Rust's flame recomputed differs from the oracle")
+    if ends is None:
+        check(not noted, f"{where}: a row Rust's validation refuses is noted")
+        continue
+    b6_fl["rows past validation"] += 1
+    fa, fb = ends
+    uz = fa * fb == 0.0 and fa != 0.0 and fb != 0.0
+    check(uz or not noted, f"{where}: a noted flame row whose bracket product does not underflow to a zero")
+    if uz and b6_gt_exact(fa, fb): b6_fl["the product an underflowed zero, signs equal (Err in both)"] += 1
+    if 0.0 < abs(fa * fb) < 2.0 ** -1022: b6_fl["the product subnormal, nonzero (bracketed in both)"] += 1
+    if not noted: continue
+    b6_fl["noted"] += 1
+    check(isinstance(rust, Err) and rust.name == "ComputationError" and not isinstance(port, Err) and b6_lt_exact(fa, fb),
+          f"{where}: a #38 row that is not Rust's ComputationError against the port's Ok")
+    mm_ = B6_FLAME_RE.search(note)
+    check(mm_ is not None and mm_.group(1) == B6_FLAME_HOW and mm_.group(2) == ppath and int(mm_.group(4), 16) == f2b(port)
+          and same_bits(float(mm_.group(3)), port), f"{where}: the #38 note does not name {B6_FLAME_HOW} ({ppath}) = "
+          f"{port!r}")
+print(f"thermochem: ADR 0002 #38: adiabatic_flame_temperature: {b6_fl}")
+check(b6_fl["noted"] > 0 and b6_fl["the product an underflowed zero, signs equal (Err in both)"] > 0,
+      f"ADR 0002 #38: a class has no golden row: {b6_fl}")
+
+# #37, find_peaks: every row is recomputed with the port's semantics — Rust's checks and empty results, Rust's fold for
+# min and max over the finite values, the neighbour tests as IEEE, the threshold test w > min·(1 − t) + max·t in
+# Fraction arithmetic with t the given double (1 − t exact), a non-finite candidate as IEEE against a finite threshold
+# (+∞ above) — and must be noted exactly where its indices differ from the oracle's, the note's tokens being them. On
+# every row past the checks, each candidate is checked against the port's fast test (src/spectroscopy.cyr's
+# _km_find_peaks_run): Rust's rounded threshold T within the proven bound 2.5u(1 + u)(|min| + |max|) + (1 + u)·2⁻¹⁰⁷⁴ of the
+# exact θ, the port's computed bound B at least that, and where RN(w − T) is beyond ±B Rust's decision is the exact one;
+# a row whose every candidate the fast test decides is unnoted (strict). The noted rows and the candidates are counted.
+B6_PEAKS = "spectroscopy::find_peaks"
+B6_PEAKS_HOW = "the threshold test evaluated exactly (w > min·(1 − t) + max·t in rational arithmetic)"
+B6_PEAKS_RE = re.compile(r"\[ADR 0002 #37: the port returns (.+) = (\[\d+\])(?:, [^()]*)? \(([^()]*)\)\]$")
+def b6_peaks_port(data, th):
+    """The port's find_peaks (Ints), and per candidate (w, T, θ) for the checks."""
+    if len(data) < 3 or not (0.0 <= th <= 1.0): return Ints([]), [], None
+    lo, hi = math.inf, -math.inf
+    for v in data:
+        if math.isfinite(v): lo, hi = r_min(lo, v), r_max(hi, v)
+    if lo > hi: return Ints([]), [], None
+    q = Fraction(lo) * (1 - Fraction(th)) + Fraction(hi) * Fraction(th)
+    rt = lo * (1.0 - th) + hi * th
+    out, cands = [], []
+    for k in range(len(data) - 2):
+        w0, w1, w2 = data[k], data[k + 1], data[k + 2]
+        if w1 > w0 and w1 > w2:
+            above = Fraction(w1) > q if math.isfinite(w1) else w1 > 0.0
+            cands.append((w1, rt, above))
+            if above: out.append(k + 1)
+    return Ints(out), cands, (lo, hi, q, rt)
+b6_pk = {"rows": 0, "rows past the checks": 0, "noted": 0, "candidates": 0, "candidates decided by the fast test": 0,
+         "candidates where Rust's threshold decides otherwise": 0, "of them subnormal or zero thresholds": 0,
+         "of them with min = −DBL_MAX and max = DBL_MAX": 0, "of them other normal near-ties": 0}
+U6 = Fraction(1, 2 ** 53)
+for ins, outs, where in srows.get(B6_PEAKS, []):
+    data, th = peaks_args(ins)
+    b6_pk["rows"] += 1
+    port, cands, ctx = b6_peaks_port(data, th)
+    note = NOTES.get(where, "")
+    noted = "[ADR 0002 #37:" in note
+    pt = out_toks(port)
+    differs = not toks_equal(pt, outs)
+    check(noted == differs, f"{where}: find_peaks{(data, th)}: the port's {port} vs the oracle's {outs}: the #37 note is "
+          f"{'missing' if differs else 'stray'}")
+    if noted:
+        b6_pk["noted"] += 1
+        mm_ = B6_PEAKS_RE.search(note)
+        check(mm_ is not None and mm_.group(1) == B6_PEAKS_HOW and mm_.group(2) == f"[{len(port)}]"
+              and toks_equal([parse_tok(t_, where) for t_ in mm_.group(3).split(" ")], pt),
+              f"{where}: the #37 note does not name {B6_PEAKS_HOW} = {port}")
+    if ctx is None: continue
+    b6_pk["rows past the checks"] += 1
+    lo, hi, q, rt = ctx
+    alo, ahi = abs(lo), abs(hi)
+    bound = Fraction(5, 2) * U6 * (1 + U6) * (Fraction(alo) + Fraction(ahi)) + (1 + U6) * Fraction(2) ** -1074
+    if math.isfinite(rt):
+        check(abs(Fraction(rt) - q) <= bound, f"{where}: Rust's threshold {rt!r} is beyond the proven bound of θ")
+    bnd = (alo * 2.0 ** -51 + ahi * 2.0 ** -51) + 2.0 ** -1072
+    check(Fraction(bnd) >= bound, f"{where}: the port's bound {bnd!r} is below the proven one")
+    all_fast = True
+    for w1, _, above in cands:
+        b6_pk["candidates"] += 1
+        if not math.isfinite(w1):
+            b6_pk["candidates decided by the fast test"] += 1
+            continue
+        fast = None
+        if math.isfinite(rt):
+            d = w1 - rt
+            if d > bnd: fast = True
+            elif d < -bnd: fast = False
+        if fast is None:
+            all_fast = False
+        else:
+            b6_pk["candidates decided by the fast test"] += 1
+            check(fast == above, f"{where}: the fast test decides {w1!r} against {rt!r} wrongly")
+        if (w1 > rt) != above:
+            b6_pk["candidates where Rust's threshold decides otherwise"] += 1
+            if abs(rt) < 2.0 ** -1022 or abs(q) < Fraction(2) ** -1022:
+                b6_pk["of them subnormal or zero thresholds"] += 1
+            elif lo == -DMAX_V and hi == DMAX_V:
+                b6_pk["of them with min = −DBL_MAX and max = DBL_MAX"] += 1
+            else:
+                b6_pk["of them other normal near-ties"] += 1
+    check(not (all_fast and noted), f"{where}: find_peaks{(data, th)}: every candidate is decided by Rust's threshold "
+          f"with the proven bound, but the row is noted")
+print(f"spectroscopy: ADR 0002 #37: find_peaks: {b6_pk}")
+check(all(v > 0 for v in b6_pk.values()), f"ADR 0002 #37: a class has no golden row: {b6_pk}")
+
+# #36, fft_spectrum: every row with a finite signal is recomputed with the port's semantics on mpfr_ref.UX — hisab
+# 1.4.0's transform as transcribed (the bit reversal, per stage wn = (cos θ, sin θ) of θ = (−2·π)/len with MPFR's
+# correctly rounded cos and sin, w = (1, 0), t = w·d, u ± t, w *= wn), every operation at 53 bits at MPFR's widest
+# exponent range, then each bin's √(re·re + im·im) with the squares and the sum at 53 bits and the √ rounded once into
+# binary64 (mpfr_ref.ux_sqrt_final) — and must be noted exactly where it differs from the oracle's (its reference: no
+# fft row has a correction), the note's tokens being it bit for bit; a signal with a NaN or ±∞ (Rust's IEEE spectrum, B1's
+# rule) is never noted. Rows whose f64 chain stays in the normal range are unnoted (B3's strict tracers over every
+# product, sum and square of the transform and the magnitudes, the twiddle recurrence included; the √ apart), and so are
+# rows where the port's fast test passes (its operand bounds, 2⁻¹⁰⁰ for the twiddles and 2⁻⁹²¹ for the data, the
+# retained outputs finite, each bin's square sum in [2⁻⁹⁰⁰, DBL_MAX] or from re = im = 0). The noted rows are counted
+# by class, as the survey's.
+B6_FFT = "spectroscopy::fft_spectrum"
+B6_FFT_HOW = "hisab 1.4.0's transform and the magnitudes evaluated with an unbounded exponent (each √ rounded once)"
+B6_FFT_RE = re.compile(r"\[ADR 0002 #36: the port returns (.+) = (\[\d+\])(?:, [^()]*)? \(([^()]*)\)\]$")
+def b6_bitrev(n):
+    perm, j = list(range(n)), 0
+    for i_ in range(1, n):
+        bit = n >> 1
+        while j & bit:
+            j ^= bit
+            bit >>= 1
+        j ^= bit
+        if i_ < j: perm[i_], perm[j] = perm[j], perm[i_]
+    return perm
+def b6_fft_ux(sig):
+    """The port's spectrum of a finite signal (power-of-two length): the transform on UX, the magnitudes rounded once."""
+    n = len(sig)
+    U_ = MPFR.UX
+    with MPFR.unbounded():
+        re_ = [U_(x) for x in sig]
+        im_ = [U_(0.0) for _ in sig]
+        perm = b6_bitrev(n)
+        re_, im_ = [re_[k] for k in perm], [im_[k] for k in perm]
+        length = 2
+        while length <= n:
+            half = length >> 1
+            angle = -2.0 * math.pi / float(length)
+            wr0, wi0 = U_(MPFR.cos(angle)), U_(MPFR.sin(angle))
+            for start in range(0, n, length):
+                wr, wi = U_(1.0), U_(0.0)
+                for k in range(half):
+                    a_, b_ = start + k, start + k + half
+                    tr = wr * re_[b_] - wi * im_[b_]
+                    ti = wr * im_[b_] + wi * re_[b_]
+                    ur, ui = re_[a_], im_[a_]
+                    re_[a_], im_[a_] = ur + tr, ui + ti
+                    re_[b_], im_[b_] = ur - tr, ui - ti
+                    wr, wi = wr * wr0 - wi * wi0, wr * wi0 + wi * wr0
+            length <<= 1
+        return [MPFR.ux_sqrt_final(re_[k] * re_[k] + im_[k] * im_[k]) for k in range(n // 2 + 1)]
+def b6_fft_trace(sig):
+    """(in range, fast): Rust's IEEE chain stays in the normal range (every product of nonzero factors normal and above
+    2⁻¹⁰²², every sum and product finite; the √ apart), and the port's fast test passes (_km_fft's operand bounds, the
+    retained outputs finite, each bin's square sum in [2⁻⁹⁰⁰, DBL_MAX] or from re = im = 0)."""
+    n = len(sig)
+    ok, fast = [True], [True]
+    LW, LD, LO, HI = 2.0 ** -100, 2.0 ** -921, 2.0 ** -900, DMAX_V
+    def mul(x, y):
+        p_ = x * y
+        if x != 0.0 and y != 0.0 and not (math.isfinite(p_) and abs(p_) > 2.0 ** -1022): ok[0] = False
+        if not math.isfinite(p_): ok[0] = False
+        return p_
+    def add(x, y):
+        z = x + y
+        if not math.isfinite(z): ok[0] = False
+        return z
+    def chk(v, lim):
+        if 0.0 < abs(v) < lim: fast[0] = False
+    perm = b6_bitrev(n)
+    re_, im_ = [sig[k] for k in perm], [0.0] * n
+    length = 2
+    while length <= n:
+        half = length >> 1
+        angle = -2.0 * math.pi / float(length)
+        wr0, wi0 = MPFR.cos(angle), MPFR.sin(angle)
+        chk(wr0, LW)
+        chk(wi0, LW)
+        for start in range(0, n, length):
+            wr, wi = 1.0, 0.0
+            for k in range(half):
+                a_, b_ = start + k, start + k + half
+                chk(re_[b_], LD)
+                chk(im_[b_], LD)
+                if start == 0:
+                    chk(wr, LW)
+                    chk(wi, LW)
+                tr = add(mul(wr, re_[b_]), -mul(wi, im_[b_]))
+                ti = add(mul(wr, im_[b_]), mul(wi, re_[b_]))
+                ur, ui = re_[a_], im_[a_]
+                re_[a_], im_[a_] = add(ur, tr), add(ui, ti)
+                re_[b_], im_[b_] = add(ur, -tr), add(ui, -ti)
+                wr, wi = add(mul(wr, wr0), -mul(wi, wi0)), add(mul(wr, wi0), mul(wi, wr0))
+        length <<= 1
+    for k in range(n // 2 + 1):
+        rr, ii = re_[k], im_[k]
+        if not (math.isfinite(rr) and math.isfinite(ii)): fast[0] = False
+        sq_ = add(mul(rr, rr), mul(ii, ii))
+        if not (LO <= sq_ <= HI or (rr == 0.0 and ii == 0.0)): fast[0] = False
+    return ok[0], fast[0]
+b6_ff = {"rows": 0, "finite signals": 0, "noted": 0, "noted bins": 0, "Rust's chain in range": 0,
+         "the port's fast test passing": 0}
+b6_ffc = {"qual: Rust 0, ±∞ or NaN where the value is representable": 0,
+          "NaN-for-∞: Rust's NaN where the value is ±∞": 0,
+          "degraded: the value normal, Rust's more than 2 ulp off": 0, "within 2 ulp, or the value subnormal": 0}
+for ins, outs, where in srows.get(B6_FFT, []):
+    sig = fl(ins)[1:]
+    b6_ff["rows"] += 1
+    note = NOTES.get(where, "")
+    noted = "[ADR 0002 #36:" in note
+    n = len(sig)
+    if n == 0 or n & (n - 1) or not all(map(math.isfinite, sig)):
+        check(not noted, f"{where}: an fft_spectrum row with a non-finite or invalid signal is noted")
+        continue
+    b6_ff["finite signals"] += 1
+    inr, fast = b6_fft_trace(sig)
+    b6_ff["Rust's chain in range"] += inr
+    b6_ff["the port's fast test passing"] += fast
+    check(not (inr and noted), f"{where}: fft_spectrum of {n}: Rust's chain stays in the normal range, but the row is noted")
+    check(not (fast and noted), f"{where}: fft_spectrum of {n}: the port's fast test passes, but the row is noted")
+    if (inr or fast) and n > 1024:
+        continue                                        # the lemma's rows (Rust's bits), too long for UX here
+    port = b6_fft_ux(sig)
+    pt = out_toks(port)
+    differs = not toks_equal(pt, outs)
+    check(noted == differs, f"{where}: fft_spectrum of {n}: the port's spectrum vs the oracle's: the #36 note is "
+          f"{'missing' if differs else 'stray'}")
+    if not noted: continue
+    b6_ff["noted"] += 1
+    mm_ = B6_FFT_RE.search(note)
+    check(mm_ is not None and mm_.group(1) == B6_FFT_HOW and mm_.group(2) == f"[{len(port)}]"
+          and toks_equal([parse_tok(t_, where) for t_ in mm_.group(3).split(" ")], pt),
+          f"{where}: the #36 note does not name the port's spectrum")
+    worst = 3
+    for (gk, gv, gb), x in zip(outs[1:], port):
+        if gb == f2b(x): continue
+        b6_ff["noted bins"] += 1
+        o = gv
+        if math.isnan(o) or o == 0.0 or math.isinf(o):
+            c_ = 0 if (math.isfinite(x) and (x != 0.0 or o != 0.0)) else (1 if math.isnan(o) and math.isinf(x) else 3)
+        elif x >= 2.0 ** -1022 and math.isfinite(x) and abs(ulp_dist(gb, f2b(x))) > 2:
+            c_ = 2
+        else:
+            c_ = 3
+        worst = min(worst, c_)
+    b6_ffc[list(b6_ffc)[worst]] += 1
+print(f"spectroscopy: ADR 0002 #36: fft_spectrum: {b6_ff}")
+print(f"ADR 0002 #36 noted rows by their worst bin: {b6_ffc}")
+check(b6_ff["noted"] > 0 and b6_ffc["qual: Rust 0, ±∞ or NaN where the value is representable"] > 0,
+      f"ADR 0002 #36: a class has no golden row: {b6_ff} {b6_ffc}")
 
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
              "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy", "stoichiometry"}

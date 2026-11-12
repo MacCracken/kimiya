@@ -939,3 +939,38 @@ pub fn empirical_exact(mp: &[(f64, f64)]) -> Option<Vec<u32>> {
         })
         .collect()
 }
+
+/// The overflow audit's B6 (ADR 0002 #37): whether w > lo·(1 − t) + hi·t exactly, for finite doubles w, lo, hi and t
+/// (`find_peaks`' threshold with 1 − t not rounded). Every double is an integer multiple of 2⁻¹⁰⁷⁴, so with X = x·2¹⁰⁷⁴
+/// the test w + t·lo > lo + t·hi is W·2¹⁰⁷⁴ + T·L > L·2¹⁰⁷⁴ + T·H in integers, each side a sum of signed products of
+/// non-negative `Big`s. Integer arithmetic only, independent of the port's scaled double expansions (`validate.py`
+/// checks every value again with `Fraction`).
+pub fn peak_above(w: f64, lo: f64, hi: f64, t: f64) -> bool {
+    let fin = w.is_finite() && lo.is_finite() && hi.is_finite() && t.is_finite();
+    assert!(fin, "peak_above({w:?}, {lo:?}, {hi:?}, {t:?})");
+    // |x|·2¹⁰⁷⁴ and x's sign (zero as non-negative)
+    let int = |x: f64| -> (bool, Big) {
+        if x == 0.0 {
+            return (false, Big::new(0));
+        }
+        let (m, e) = decompose(x);
+        (x < 0.0, Big::new(u128::from(m)).shl(u64::try_from(e + 1074).unwrap_or(0)))
+    };
+    let (wn, wm) = int(w);
+    let (ln, lm) = int(lo);
+    let (hn, hm) = int(hi);
+    let (tn, tm) = int(t);
+    let p1074 = Big::new(1).shl(1074);
+    // the signed terms of the left side W·2¹⁰⁷⁴ + T·L and the right side L·2¹⁰⁷⁴ + T·H
+    let left = [(wn, wm.mul(&p1074)), (tn != ln, tm.mul(&lm))];
+    let right = [(ln, lm.mul(&p1074)), (tn != hn, tm.mul(&hm))];
+    // Σ positive − Σ negative of (left − right), compared as two non-negative sums
+    let (mut pos, mut neg) = (Big::new(0), Big::new(0));
+    for (n, v) in left {
+        if n { neg = neg.add(&v) } else { pos = pos.add(&v) }
+    }
+    for (n, v) in right {
+        if n { pos = pos.add(&v) } else { neg = neg.add(&v) }
+    }
+    pos.cmp(&neg) == std::cmp::Ordering::Greater
+}

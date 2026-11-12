@@ -117,6 +117,15 @@ on mpfr_ref.UX with every operation at 53 bits and MPFR's exp / exp10 of it roun
 ux_exp10_final), so the lemma that the port's binary64 argument gives the same result is checked on every argument; each
 on binade-uniform, typical, R·T past DBL_MAX or subnormal, A·z², B·å or the numerator past DBL_MAX (at I = 0, or brought
 back), subnormal products, Davies' bracket at 0, the 2^-1022 boundaries, and Err arguments.
+The overflow audit's B6 (ADR 0002 #36 … #38) adds fft1 … fft256 (fft_spectrum of n = 1, 2, 4, …, 64 and 256 values: the
+public spectrum, Rust's IEEE one where the port's fast test passes, the unbounded-exponent transform forced; reference
+hisab 1.4.0's transform on mpfr_ref.UX with MPFR's twiddles, each √ rounded once; 110,718 signals: binade-uniform,
+typical, huge, subnormal, mixed, near-cancelling, at the fast test's bounds, non-finite samples, and n = 4's product just
+below 2^-1022), pk3 … pk16 (find_peaks of 3, 5, 8 and 16 values: the public function, the fast test's scan, every
+candidate through the exact predicate; reference Fraction; 380,000 arrays with near-ties, subnormal data and ±DBL_MAX
+ends), flame (adiabatic_flame_temperature and its transcribed bisection with the exact sign tests, 14,010 arguments
+at tiny scales, endothermic and subnormal ΔH; reference Rust's solver in Python on the generated SHOMATE table) and
+signsc (src/mathx.cyr's _km_sign_scaled, 140,110 sums against Fraction).
 Through each function's _km_cr_<f>_fast entry it reports the fast path's fallback rate per region, and
 checks the fast path's result equals the function's wherever its test passes. It checks that the three
 targets give identical bits and flags.
@@ -1554,7 +1563,8 @@ AUDIT = [(33, "mono"), (34, "heat"), (35, "shc"), (36, "boil"), (37, "frz"), (38
          (66, "width"), (67, "coul"), (68, "force"), (69, "lande"), (70, "bea"),
          (71, "hess"), (72, "eff"), (73, "rsum"), (74, "qv"), (75, "ionic"), (76, "haber"), (77, "gibbs"), (78, "kohl"),
          (79, "lim"), (80, "zoc"), (81, "shcp"), (82, "shh"),
-         (83, "keq"), (84, "dhl"), (85, "dhe"), (86, "dav")]
+         (83, "keq"), (84, "dhl"), (85, "dhe"), (86, "dav"),
+         (87, "flame"), (88, "pk3"), (89, "pk5"), (90, "pk8"), (91, "pk16"), (100, "signsc")]
 AUDIT_NAMES = tuple(name for _, name in AUDIT)
 AUDIT2_NAMES = ("sqrtdiv", "dil", "cond", "fmass", "fcharge", "fratio", "nernst", "abs", "conc", "vib", "rotor", "rot",
                 "moment")
@@ -1563,6 +1573,7 @@ ARITY.update({45: 2, 46: 3, 47: 2, 48: 3, 49: 3, 50: 5, 51: 4, 52: 3, 53: 3, 54:
 ARITY.update({58: 4, 59: 3, 60: 3, 61: 3, 62: 5, 63: 5, 64: 4, 65: 3, 66: 3, 67: 3, 68: 3, 69: 5, 70: 3})
 ARITY.update({71: 6, 72: 8, 73: 11, 74: 8, 75: 7, 76: 5, 77: 3, 78: 3, 79: 4, 80: 3, 81: 6, 82: 6})
 ARITY.update({83: 2, 84: 3, 85: 5, 86: 3})
+ARITY.update({87: 8, 88: 4, 89: 6, 90: 9, 91: 17, 100: 17})
 F_CONST = _const("src/constants.cyr", "KM_FARADAY")
 H_CONST = _const("src/constants.cyr", "KM_PLANCK")
 R_GAS = _const("src/constants.cyr", "KM_GAS_CONSTANT")
@@ -1686,6 +1697,8 @@ def ref_audit(name, a):
         return ref_audit4(name, a)
     if name in AUDIT5_NAMES:
         return ref_audit5(name, a)
+    if name in AUDIT6_NAMES:
+        return ref_audit6(name, a)
     fin = all(math.isfinite(v) for v in a if isinstance(v, float))
     if name == "mono":
         nn, nd = a[0], a[1]
@@ -3333,6 +3346,494 @@ def args_dh(rng, name):
             ("the function's own edges", extra), ("Err and specials", bad)]
 
 
+# ── The overflow audit's B6 (ADR 0002 #36, #37, #38): the FFT, find_peaks' threshold, the flame's bracket ────────────
+# id 87, flame (adiabatic_flame_temperature: ΔH, T₀, then three (species, moles) pairs, a species an index into
+# FLAME6_SPECIES, −1 unused): the public result word (an Err as 2^63 | its code), and where Rust's validation passes (Ok
+# or the ComputationError) the transcribed bisection over [T₀, T_max] (its exact same-sign test) in the second slot, else
+# the public word; both modes. Reference: Rust's solver from src/thermochem_data.cyr's SHOMATE table (generated), the
+# Shomate polynomials in Rust's order (every evaluation checked inside ADR 0002 #34's box, where they are the port's),
+# hisab 1.4.0's newton_raphson and bisection, with ADR 0002 #38's exact sign tests. Ids 88 … 91, pk3 … pk16 (find_peaks
+# of 3, 5, 8, 16 values, then t): the peaks as a bit mask; mode 0 the public function, the scan with the fast test and
+# the flag 1 when no candidate needed the exact predicate, mode 1 every candidate through the exact predicate. Reference:
+# Rust's checks, fold and neighbour tests with ADR 0002 #37's threshold test in Fraction arithmetic.
+AUDIT6_NAMES = ("flame", "pk3", "pk5", "pk8", "pk16", "signsc")
+FLAME6_SPECIES = ("CO2(g)", "H2O(g)", "N2(g)", "CO(g)", "O2(g)", "H2(g)", "Ar(g)")
+
+
+def _shomate_table():
+    """SHOMATE_DATA from src/thermochem_data.cyr (generated): (formula, A, B, C, D, E, t_min, t_max) per row."""
+    import re
+    text = (_ROOT / "src/thermochem_data.cyr").read_text()
+    off = text[text.index("var _KM_SHOMATE_FORMULA_OFF"):]
+    off = off[:off.index("};")]
+    names = re.findall(r"^\s+[0-9]+,\s+#\s+(\S+)$", off, re.M)
+
+    def col(name):
+        body = text[text.index(f"var {name}: f64[34] = {{"):]
+        body = body[:body.index("};")]
+        return [float(v) for v in re.findall(r"^\s+(-?[0-9.]+),", body, re.M)]
+    cols = [col("KM_SHOMATE_" + c) for c in ("A", "B", "C", "D", "E", "T_MIN", "T_MAX")]
+    assert len(names) == 34 and all(len(c) == 34 for c in cols)
+    return [(names[i], *(c[i] for c in cols)) for i in range(34)]
+
+
+SHOMATE6 = _shomate_table()
+
+
+def _segs6(formula):
+    rows = [r for r in SHOMATE6 if r[0] == formula]
+    return rows if rows else None
+
+
+def _sh6(is_cp, r, temp):
+    assert 2.0 ** -30 <= abs(temp) <= 2.0 ** 30, f"a flame evaluation at {temp!r}, outside ADR 0002 #34's box"
+    return _shomate_rust(is_cp, *r[1:6], temp)
+
+
+def _seg_dh6(run, t1, t2):
+    lo, hi, sign = (t1, t2, 1.0) if t1 <= t2 else (t2, t1, -1.0)
+    total, lower = 0.0, -INF
+    for k, r in enumerate(run):
+        upper = INF if k + 1 == len(run) else r[7]
+        a_, b_ = max(lo, lower), min(hi, upper)
+        if b_ > a_:
+            total += _sh6(False, r, b_) - _sh6(False, r, a_)
+        if upper >= hi:
+            break
+        lower = upper
+    return sign * total
+
+
+def _seg_cp6(run, t):
+    for r in run:
+        if t <= r[7]:
+            return _sh6(True, r, t)
+    return _sh6(True, run[-1], t)
+
+
+def ref_flame6(a):
+    """(the public word, the bisection's word) of id 87."""
+    dh, t0 = a[0], a[1]
+    prods = [(FLAME6_SPECIES[a[2 + 2 * j]], a[3 + 2 * j]) for j in range(3) if a[2 + 2 * j] >= 0]
+    if not _pos(t0):
+        w = ERR5["INVALID_TEMPERATURE"]
+        return w, w
+    if not math.isfinite(dh) or not prods:
+        return ERR5["INVALID_INPUT"], ERR5["INVALID_INPUT"]
+    res, tmax = [], INF
+    for f_, n_ in prods:
+        run = _segs6(f_)
+        if run is None:
+            w = (1 << 63) | _err_code("KM_ERR_INVALID_REACTION")
+            return w, w
+        if not _pos(n_):
+            return ERR5["INVALID_INPUT"], ERR5["INVALID_INPUT"]
+        tmax = min(tmax, run[-1][7])
+        res.append((run, n_, run[0][6]))
+    tmin = max(r_[2] for r_ in res)
+    if t0 < tmin or t0 >= tmax:
+        w = ERR5["INVALID_TEMPERATURE"]
+        return w, w
+
+    def fun(t):
+        heat = -0.0
+        for run, n_, _ in res:
+            heat += n_ * _seg_dh6(run, t0, t)
+        return -dh - heat
+
+    def dfun(t):
+        cp = -0.0
+        for run, n_, _ in res:
+            cp += n_ * _seg_cp6(run, t)
+        return -cp
+
+    def bisect(lo, hi):
+        f_lo, f_hi = fun(lo), fun(hi)
+        if (f_lo > 0.0 and f_hi > 0.0) or (f_lo < 0.0 and f_hi < 0.0):
+            return (1 << 63) | _err_code("KM_ERR_INVALID_INPUT")
+        if f_lo > 0.0:
+            lo, hi = hi, lo
+        for _ in range(200):
+            mid = (lo + hi) * 0.5
+            fm = fun(mid)
+            if abs(fm) < 1e-6 or abs(hi - lo) < 1e-6:
+                return bits(mid)
+            if fm < 0.0:
+                lo = mid
+            else:
+                hi = mid
+        return bits((lo + hi) * 0.5)
+    wb = bisect(t0, tmax)
+    fa, fb_ = fun(t0), fun(tmax)
+    if not ((fa < 0.0 < fb_) or (fb_ < 0.0 < fa)):
+        return ERR5["COMPUTATION_ERROR"], wb
+    total = -0.0
+    for _, n_, _ in res:
+        total += n_
+    x = min(max(t0 - dh / (total * 40.0), t0), tmax)
+    for _ in range(50):
+        fx = fun(x)
+        if abs(fx) < 1e-3:
+            if t0 <= x <= tmax:
+                return bits(x), wb
+            break
+        dfx = dfun(x)
+        if abs(dfx) < 1e-12:
+            break
+        x -= fx / dfx
+    return wb, wb
+
+
+def ref_peaks6(a):
+    """The bit mask of id 88 … 91's peaks (ADR 0002 #37's exact threshold test)."""
+    from fractions import Fraction
+    data, th = list(a[:-1]), a[-1]
+    if len(data) < 3 or not (0.0 <= th <= 1.0):
+        return 0
+    fin = [v for v in data if math.isfinite(v)]
+    if not fin:
+        return 0
+    lo, hi = INF, -INF
+    for v in fin:                                   # Rust's fold: f64::min / max (equal values: either, the same)
+        lo, hi = min(lo, v), max(hi, v)
+    q = Fraction(lo) * (1 - Fraction(th)) + Fraction(hi) * Fraction(th)
+    mask = 0
+    for k in range(1, len(data) - 1):
+        w = data[k]
+        if w > data[k - 1] and w > data[k + 1] and (Fraction(w) > q if math.isfinite(w) else w > 0.0):
+            mask |= 1 << k
+    return mask
+
+
+def ref_audit6(name, a):
+    if name == "flame":
+        return ref_flame6(a)[0]
+    if name == "signsc":
+        from fractions import Fraction
+        n = a[0]
+        tot = sum((Fraction(a[1 + i]) * Fraction(2) ** a[9 + i] for i in range(n)), Fraction(0))
+        return (tot > 0) - (tot < 0) + 1
+    return ref_peaks6(a)
+
+
+def args_signsc(rng):
+    """(n, eight significands, eight exponents) for _km_sign_scaled: random terms over its whole exponent range; exact
+    cancellations at the top (c·2^k against −c·2^k or −2c·2^(k − 1)) with small remainders 850 … 2,210 binades below and
+    deferred terms around them, so that the sign is decided one, two or three rounds down; a round's remainder of
+    2^-1010 … 2^-901 of its scale against a larger deferred term (the bound B6's review corrected); and exact zeros."""
+    def sig():
+        e = rng.randint(-110, 1)
+        return rng.choice((1.0, -1.0)) * rng.uniform(1.0, 2.0) * 2.0 ** e
+
+    def pack(cs, ks):
+        cs, ks = list(cs)[:8], list(ks)[:8]
+        n = len(cs)
+        return (n, *(cs + [0.0] * (8 - n)), *(ks + [0] * (8 - n)))
+    rand = [pack([sig() for _ in range(m)], [rng.randint(-2200, 1030) for _ in range(m)])
+            for m in (rng.randint(1, 8) for _ in range(40_000))]
+    canc = []
+    for _ in range(60_000):
+        k = rng.randint(-1000, 1000)
+        c = sig()
+        if rng.random() < 0.5:
+            cs, ks = [c, -c], [k, k]
+        else:
+            cs, ks = [c, -2.0 * c], [k, k - 1] if abs(2.0 * c) < 4.0 else [k, k]
+            if ks[1] == k:
+                cs[1] = -c
+        for _ in range(rng.randint(1, 6)):
+            cs.append(sig())
+            ks.append(k - rng.randint(850, 1110) - rng.choice((0, 0, rng.randint(0, 1100))))
+        canc.append(pack(cs, ks))
+    edge = []
+    for _ in range(40_000):
+        k = rng.randint(-900, 1000)
+        c = sig()
+        small = rng.choice((1.0, -1.0)) * 2.0 ** rng.randint(-110, -1)
+        cs = [c, -c, small, rng.choice((1.0, -1.0)) * rng.uniform(1.0, 3.99)]
+        ks = [k, k, k - 900, k - rng.randint(901, 1000)]
+        edge.append(pack(cs, ks))
+    zeros = [pack([1.0, -1.0], [k, k]) for k in range(-50, 50)] + [pack([0.0, 2.0, -1.0], [5, 3, 4]) for _ in range(10)]
+    return [("binade-uniform", rand), ("cancellations", canc), ("the round's bound", edge), ("zeros", zeros)]
+
+
+def args_flame6(rng):
+    """(ΔH, T₀, s₁, n₁, s₂, n₂, s₃, n₃) with real systems at tiny scales (the bracket product underflowing: Rust's Err),
+    across the scale where it stops underflowing, endothermic ones (both ends negative: Err), subnormal ΔH against
+    moles over many decades, ordinary ones, and every Err path."""
+    systems = [(-802_300.0, ((0, 1.0), (1, 2.0), (2, 7.52))), (-241_820.0, ((1, 1.0), (2, 1.88))),
+               (-519_320.0, ((3, 1.0), (1, 2.0), (2, 5.64))), (-282_980.0, ((0, 1.0), (2, 1.88))),
+               (-393_510.0, ((0, 1.0),)), (-241_820.0, ((1, 1.0), (5, 0.2), (6, 0.5)))]
+
+    def pack(dh, t0, prods, k):
+        pr = list(prods) + [(-1, 0.0)] * (3 - len(prods))
+        return (dh * k, t0, *(v for s_, n_ in pr for v in (s_, n_ * k)))
+    tiny = []
+    for _ in range(6000):
+        dh, prods = rng.choice(systems)
+        tiny.append(pack(dh, rng.choice((298.15, 300.0, 500.0, 1000.0)), prods, 10.0 ** rng.uniform(-320.0, -150.0)))
+    edge = []
+    for _ in range(3000):                           # around the scale 10^-169 where the product stops underflowing
+        dh, prods = rng.choice(systems)
+        edge.append(pack(dh, 298.15, prods, 10.0 ** rng.uniform(-172.0, -166.0)))
+    endo = []
+    for _ in range(2000):
+        dh, prods = rng.choice(systems)
+        endo.append(pack(-dh, rng.choice((298.15, 500.0)), prods, 10.0 ** rng.uniform(-320.0, 0.0)))
+    sub = []
+    for _ in range(2000):                           # a subnormal ΔH against moles from 10^-9 to 10^2
+        k = rng.randint(1, (1 << 52) - 1)
+        sub.append((-fb(k) * rng.choice((1.0, -1.0)), 298.15, 0, 10.0 ** rng.uniform(-9.0, 2.0), -1, 0.0, -1, 0.0))
+    typical = []
+    for _ in range(1000):
+        dh, prods = rng.choice(systems)
+        typical.append(pack(dh * rng.uniform(0.2, 2.0), rng.choice((298.15, 400.0, 700.0)), prods, 1.0))
+    bad = [(-1e5, 0.0, 0, 1.0, -1, 0.0, -1, 0.0), (NAN, 298.15, 0, 1.0, -1, 0.0, -1, 0.0),
+           (-1e5, 298.15, 0, -1.0, -1, 0.0, -1, 0.0), (-1e5, 298.15, -1, 0.0, -1, 0.0, -1, 0.0),
+           (-1e5, 7000.0, 0, 1.0, -1, 0.0, -1, 0.0), (0.0, 298.15, 0, 1.0, -1, 0.0, -1, 0.0),
+           (-0.0, 298.15, 0, 1.0, -1, 0.0, -1, 0.0), (-1e-320, 298.15, 0, 1e-300, -1, 0.0, -1, 0.0),
+           (1e-320, 298.15, 0, 1e-300, -1, 0.0, -1, 0.0), (-1e5, 298.15, 0, 5e-324, -1, 0.0, -1, 0.0)]
+    return [("tiny scales", tiny), ("around the underflow's scale", edge), ("endothermic", endo),
+            ("a subnormal ΔH", sub), ("typical", typical), ("Err and specials", bad)]
+
+
+def args_peaks6(rng, n):
+    """n values and a threshold: binade-uniform, typical, near-ties (a candidate at the exact threshold's neighbours),
+    subnormal, ±DBL_MAX ends, ±0 and non-finite values."""
+    from fractions import Fraction
+    ts = (0.0, 1.0, nextdown_(1.0), fb(1), 0.5, nextdown_(0.5), nextup_(0.5), 0.1, 0.75)
+
+    def t_of():
+        return rng.choice(ts) if rng.random() < 0.3 else rng.random()
+    rand = [tuple(_spp(rng) for _ in range(n)) + (t_of(),) for _ in range(20_000)]
+    typical = [tuple(rng.uniform(-10.0, 10.0) for _ in range(n)) + (t_of(),) for _ in range(20_000)]
+    ties = []
+    for _ in range(30_000):
+        e0 = rng.randint(-1074, 1000)
+        xs = [_spp(rng, e0, min(e0 + rng.randint(0, 60), 1023)) for _ in range(n)]
+        t = t_of()
+        lo, hi = min(xs), max(xs)
+        q = Fraction(lo) * (1 - Fraction(t)) + Fraction(hi) * Fraction(t)
+        w = float(q)                                # the double nearest θ, then a neighbour
+        w = ulps(w, rng.randint(-2, 2))
+        if lo <= w <= hi:
+            xs[rng.randint(1, n - 2)] = w
+        ties.append(tuple(xs) + (t,))
+    sub = [tuple(fb(rng.randint(0, 8)) * rng.choice((1.0, -1.0)) for _ in range(n)) + (t_of(),) for _ in range(10_000)]
+    wide = []
+    for _ in range(10_000):
+        xs = [rng.choice((DMAX, -DMAX, _spp(rng, 1000, 1023), _spp(rng))) for _ in range(n)]
+        wide.append(tuple(xs) + (rng.choice((nextdown_(0.5), nextup_(0.5), 0.5, t_of())),))
+    special = []
+    for _ in range(5_000):
+        xs = [rng.choice((0.0, -0.0, INF, -INF, NAN, fb(1), 1.0, DMAX)) for _ in range(n)]
+        special.append(tuple(xs) + (rng.choice((t_of(), -0.1, 1.5, NAN, INF)),))
+    return [("binade-uniform", rand), ("typical", typical), ("near-ties", ties), ("subnormal", sub),
+            ("±DBL_MAX ends", wide), ("±0 and non-finite", special)]
+
+
+def nextdown_(x):
+    return math.nextafter(x, -INF)
+
+
+def nextup_(x):
+    return math.nextafter(x, INF)
+
+
+# ids 92 … 99, fft1 … fft256 (fft_spectrum of n = 1, 2, 4, …, 64 and 256 values): n/2 + 1 words per slot; mode 0 the
+# public spectrum, the fast path's (_km_fft_spectrum_fast: Rust's IEEE transform, each bin's magnitude Rust's or the
+# unbounded one) and the flag 1 when its transform test passed, mode 1 the
+# unbounded-exponent spectrum forced (_km_fft_spectrum_ux; a non-finite signal's public one). Reference: hisab 1.4.0's
+# transform on mpfr_ref.UX (every operation at 53 bits, MPFR's correctly rounded cos and sin for the twiddles) and each
+# bin's √ rounded once (mpfr_ref.ux_sqrt_final); for a signal with a NaN or ±∞, Rust's IEEE transform and magnitudes
+# in binary64 (B1's rule). Sizes and counts (the reference costs about 16 UX operations a butterfly, so the counts fall
+# with n): per region 3,000 signals for n = 1 … 8, 1,500 for 16, 800 for 32, 400 for 64 and 60 for 256 (seven regions
+# and half one of non-finite samples: 22,500 … 450 signals a size, about 110,718 in all).
+FFT6 = [(92, "fft1", 1, 3000), (93, "fft2", 2, 3000), (94, "fft4", 4, 3000), (95, "fft8", 8, 3000),
+        (96, "fft16", 16, 1500), (97, "fft32", 32, 800), (98, "fft64", 64, 400), (99, "fft256", 256, 60)]
+for _fid, _nm, _n6, _c6 in FFT6:
+    ARITY[_fid] = _n6
+
+
+def _bitrev6(n):
+    perm, j = list(range(n)), 0
+    for i in range(1, n):
+        bit = n >> 1
+        while j & bit:
+            j ^= bit
+            bit >>= 1
+        j ^= bit
+        if i < j:
+            perm[i], perm[j] = perm[j], perm[i]
+    return perm
+
+
+def _fft6(sig, U):
+    """hisab 1.4.0's transform with the value type U (mpfr_ref.UX, or float for Rust's IEEE one)."""
+    n = len(sig)
+    perm = _bitrev6(n)
+    re_, im_ = [U(sig[k]) for k in perm], [U(0.0) for _ in sig]
+    length = 2
+    while length <= n:
+        half = length >> 1
+        ang = -2.0 * math.pi / float(length)
+        wr0, wi0 = U(mpfr_ref.cos(ang)), U(mpfr_ref.sin(ang))
+        for start in range(0, n, length):
+            wr, wi = U(1.0), U(0.0)
+            for k in range(half):
+                a_, b_ = start + k, start + k + half
+                tr = wr * re_[b_] - wi * im_[b_]
+                ti = wr * im_[b_] + wi * re_[b_]
+                ur, ui = re_[a_], im_[a_]
+                re_[a_], im_[a_] = ur + tr, ui + ti
+                re_[b_], im_[b_] = ur - tr, ui - ti
+                wr, wi = wr * wr0 - wi * wi0, wr * wi0 + wi * wr0
+        length <<= 1
+    return re_, im_
+
+
+def ref_fft6(sig):
+    """The reference words of an FFT family argument (n/2 + 1 of them)."""
+    m = len(sig) // 2 + 1
+    if not all(math.isfinite(x) for x in sig):
+        re_, im_ = _fft6(sig, float)
+        out = []
+        for k in range(m):
+            sq_ = re_[k] * re_[k] + im_[k] * im_[k]
+            out.append(bits(math.sqrt(sq_) if sq_ == sq_ else NAN))
+        return out
+    with mpfr_ref.unbounded():
+        re_, im_ = _fft6(sig, mpfr_ref.UX)
+        return [bits(mpfr_ref.ux_sqrt_final(re_[k] * re_[k] + im_[k] * im_[k])) for k in range(m)]
+
+
+def args_fft6(rng, n, count):
+    c = count
+    rand = [tuple(_spp(rng) for _ in range(n)) for _ in range(c)]
+    typical = [tuple(rng.uniform(-1.0, 1.0) for _ in range(n)) for _ in range(c)]
+    huge = [tuple(_spp(rng, 990, 1023) for _ in range(n)) for _ in range(c)]
+    subn = [tuple(_spp(rng, -1074, -1000) for _ in range(n)) for _ in range(c)]
+    mixed = [tuple(rng.choice((_spp(rng, 950, 1023), _spp(rng, -1074, -950), 0.0, -0.0, _spp(rng)))
+                   for _ in range(n)) for _ in range(c)]
+    near = []                                       # near-cancelling samples: tiny butterfly differences
+    for _ in range(c):
+        x = _spp(rng, -1000, 1000)
+        near.append(tuple(ulps(x, rng.randint(-3, 3)) for _ in range(n)))
+    bound = []                                      # around the data bound 2^-921 and the squares' 2^-511, 2^512
+    for _ in range(c):
+        b0 = rng.choice((2.0 ** -921, 2.0 ** -511, 2.0 ** 511, math.sqrt(DMAX)))
+        bound.append(tuple(rng.choice((0.0, ulps(b0, rng.randint(-2, 2)) * rng.choice((1.0, -1.0)), rng.uniform(-1, 1)))
+                           for _ in range(n)))
+    special = []
+    for _ in range(max(c // 2, 1)):
+        xs = [rng.choice((_spp(rng, 990, 1023), rng.uniform(-1.0, 1.0))) for _ in range(n)]
+        xs[rng.randint(0, n - 1)] = rng.choice((INF, -INF, NAN))
+        special.append(tuple(xs))
+    if n == 4:                                      # a product w·d just below 2^-1022 (w = (cos(−π/2), −1))
+        cc = 2.0 ** -1022 / math.cos(-math.pi / 2.0)
+        special += [(0.0, ulps(cc, d), 0.0, 0.0) for d in range(-4, 5)]
+        special += [(1.0, ulps(cc, d), -1.0, 0.0) for d in range(-4, 5)]
+    return [("binade-uniform", rand), ("typical", typical), ("huge", huge), ("subnormal", subn), ("mixed", mixed),
+            ("near-cancelling", near), ("the bounds", bound), ("non-finite and 2^-1022 products", special)]
+
+
+def run_probe_vec(work, target, fid, mode, args, vw):
+    """(slot 0 word lists, slot 1 word lists, flags) for the FFT families' arguments."""
+    _, out, runner = TARGETS[target]
+    n = len(args)
+    flat = [bits(v) for a in args for v in a]
+    (work / "job.bin").write_bytes(struct.pack(f"<3Q{len(flat)}Q", fid, mode, n, *flat))
+    res = work / "res.bin"
+    for attempt in range(2):
+        if res.exists():
+            res.unlink()
+        r = subprocess.run([*runner, str(work / out)], cwd=work, capture_output=True)
+        if r.returncode == 0 and res.exists():
+            break
+    if r.returncode != 0 or not res.exists():
+        print(r.stdout.decode(errors="replace")[-2000:], r.stderr.decode(errors="replace")[-2000:])
+        print(f"cr_verify: probe failed on {target} (exit {r.returncode})")
+        sys.exit(2)
+    data = res.read_bytes()
+    words = struct.unpack(f"<{2 * vw * n}Q", data[:16 * vw * n])
+    s0 = [list(words[vw * i:vw * i + vw]) for i in range(n)]
+    s1 = [list(words[vw * n + vw * i:vw * n + vw * i + vw]) for i in range(n)]
+    return s0, s1, data[16 * vw * n:16 * vw * n + n]
+
+
+def fft6_checks(work, targets, which):
+    """Ids 92 … 99 against the unbounded-exponent spectrum on every target, the slow path forced; True if anything
+    failed."""
+    failed = False
+
+    def eq(a, b):
+        return all(x == y or (math.isnan(fb(x)) and math.isnan(fb(y))) for x, y in zip(a, b))
+    for fid, name, n, count in FFT6:
+        if name not in which:
+            continue
+        t0 = time.time()
+        rng = random.Random(1033 + fid)
+        sections = args_fft6(rng, n, count)
+        xs = [x for _, sec in sections for x in sec]
+        want = [ref_fft6(a) for a in xs]
+        vw = n // 2 + 1
+        first = None
+        for t in targets:
+            g0, g1, fl = run_probe_vec(work, t, fid, 0, xs, vw)
+            a0, _, _ = run_probe_vec(work, t, fid, 1, xs, vw)
+            bad = [i for i in range(len(xs)) if not eq(g0[i], want[i])]
+            bad_acc = [i for i in range(len(xs)) if not eq(a0[i], want[i])]
+            bad_fast = [i for i in range(len(xs)) if fl[i] == 1 and not eq(g1[i], g0[i])]
+            for i in bad[:3]:
+                print(f"  MISMATCH {name}{xs[i]!r} on {t}: got {[hex(w) for w in g0[i]]}, "
+                      f"want {[hex(w) for w in want[i]]}")
+            for i in bad_acc[:3]:
+                print(f"  MISMATCH {name} (slow path){xs[i]!r} on {t}: got {[hex(w) for w in a0[i]]}")
+            for i in bad_fast[:3]:
+                print(f"  FAST/FULL DIFFER {name}{xs[i]!r} on {t}")
+
+            def canon(ws):
+                return [[NANW if math.isnan(fb(w)) else w for w in v] for v in ws]
+            cur = (canon(g0), canon(g1), list(fl), canon(a0))
+            xdiff = 0 if first is None else sum(1 for u, v in zip(cur, first) for p, q in zip(u, v) if p != q)
+            if first is None:
+                first = cur
+            slow = len(xs) - sum(1 for f in fl if f == 1)
+            print(f"{name:7} {t:8} {len(xs):9,} args: {len(bad)} mismatches; slow path forced: {len(bad_acc)} "
+                  f"mismatches; fast path: {len(bad_fast)} differ, fell back {slow:,}; bits or flags differing from "
+                  f"{targets[0]}: {xdiff}")
+            failed |= bool(bad or bad_acc or bad_fast or xdiff)
+            if t == targets[0]:
+                rates, i = [], 0
+                for tag, sec in sections:
+                    rates.append(f"{tag} {sum(1 for f in fl[i:i + len(sec)] if f != 1)}/{len(sec)}")
+                    i += len(sec)
+                print("         fallbacks by region: " + "; ".join(rates))
+        print(f"       [{time.time() - t0:.0f} s]")
+    return failed
+
+
+def flame6_bisection_check(work, targets, which):
+    """Id 87's second slot, the transcribed bisection over [T₀, T_max] with ADR 0002 #38's exact same-sign test, against
+    its reference on every target; True if anything failed."""
+    if "flame" not in which:
+        return False
+    failed = False
+    rng = random.Random(1033 + 87)
+    xs = [x for _, sec in args_flame6(rng) for x in sec]
+    want = [ref_flame6(a)[1] for a in xs]
+    for t in targets:
+        _, g1, _ = run_probe(work, t, 87, 0, xs)
+        bad = [i for i in range(len(xs)) if g1[i] != want[i]]
+        for i in bad[:5]:
+            print(f"  MISMATCH flame (bisection){xs[i]!r} on {t}: got {g1[i]:016x}, want {want[i]:016x}")
+        refused = sum(1 for w in want if w == (1 << 63) | _err_code("KM_ERR_INVALID_INPUT"))
+        print(f"flame   {t:8} {len(xs):9,} args: the bisection's exact same-sign test: {len(bad)} mismatches "
+              f"({refused:,} refused)")
+        failed |= bool(bad)
+    return failed
+
+
 def audit_checks(work, targets, which):
     """Ids 33 … 82 against their exact references on every target, the exact path forced; True if anything failed."""
     failed = False
@@ -3349,7 +3850,9 @@ def audit_checks(work, targets, which):
             "gibbs": args_gibbs, "kohl": args_kohl, "lim": args_lim, "zoc": args_zoc, "shcp": args_shomate,
             "shh": args_shomate,
             "keq": args_keq, "dhl": lambda r: args_dh(r, "dhl"), "dhe": lambda r: args_dh(r, "dhe"),
-            "dav": lambda r: args_dh(r, "dav")}
+            "dav": lambda r: args_dh(r, "dav"),
+            "flame": args_flame6, "pk3": lambda r: args_peaks6(r, 3), "pk5": lambda r: args_peaks6(r, 5),
+            "pk8": lambda r: args_peaks6(r, 8), "pk16": lambda r: args_peaks6(r, 16), "signsc": args_signsc}
 
     def eq(a, b):
         return a == b or (math.isnan(fb(a)) and math.isnan(fb(b)))
@@ -3519,6 +4022,14 @@ fn arity(fid): i64 {
     if (fid == 83) { return 2; }
     if (fid == 84 || fid == 86) { return 3; }
     if (fid == 85) { return 5; }
+    if (fid == 87) { return 8; }
+    if (fid == 88) { return 4; }
+    if (fid == 89) { return 6; }
+    if (fid == 90) { return 9; }
+    if (fid == 91) { return 17; }
+    if (fid >= 92 && fid <= 98) { return 1 << (fid - 92); }
+    if (fid == 99) { return 256; }
+    if (fid == 100) { return 17; }
     return 1;
 }
 
@@ -4494,6 +5005,166 @@ fn run_audit5(fid, mode, a): (i64, i64, i64) {
     return (w, _km_bits(gf), 1);
 }
 
+# The overflow audit's B6 (ADR 0002 #38): the flame family's product formulas by index (cr_verify.py's FLAME6_SPECIES).
+#must_use
+fn _km_species6(k): i64 {
+    if (k == 0) { return "CO2(g)"; }
+    if (k == 1) { return "H2O(g)"; }
+    if (k == 2) { return "N2(g)"; }
+    if (k == 3) { return "CO(g)"; }
+    if (k == 4) { return "O2(g)"; }
+    if (k == 5) { return "H2(g)"; }
+    return "Ar(g)";
+}
+
+# The overflow audit's B6 (ADR 0002 #37, #38): ids 87 … 91 as result words (cr_verify.py's AUDIT6_NAMES). Id 87, flame
+# (adiabatic_flame_temperature: ΔH, T₀, then three (species index, moles) pairs, an index below 0 unused): the public
+# result (an Err as 2⁶³ | its code) and, where Rust's validation passes (Ok or the ComputationError), the transcribed
+# bisection over [T₀, T_max] in the second slot (its exact same-sign test), else the public word; the flag 0 (no fast
+# path: cr_verify.py checks the second slot on its own); both modes.
+# Ids 88 … 91, find_peaks of 3, 5, 8 and 16 values (then the threshold): the peaks as a bit mask (bit i for index i);
+# mode 0 the public function, the scan with the fast test (_km_find_peaks_run) and the flag 1 when no candidate needed
+# the exact predicate; mode 1 every candidate through the exact predicate (force). Id 100, signsc: src/mathx.cyr's
+# _km_sign_scaled of n ≤ 8 terms (n, eight significand words, eight exponent words): the sign + 1 in both slots and
+# modes.
+#must_use
+fn run_audit6(fid, mode, a): (i64, i64, i64) {
+    if (fid == 100) {
+        var sg = _km_sign_scaled(a + 8, a + 72, load64(a));
+        return (sg + 1, sg + 1, 1);
+    }
+    if (fid == 87) {
+        var dh: f64 = load64(a);
+        var t0: f64 = load64(a + 8);
+        var pr: i64[6];
+        var n = 0;
+        var j = 0;
+        while (j < 3) {
+            var kk = load64(a + 16 + 16 * j);
+            if (kk >= 0) {
+                store64(&pr + 16 * n, _km_species6(kk));
+                store64(&pr + 16 * n + 8, load64(a + 24 + 16 * j));
+                n = n + 1;
+            }
+            j = j + 1;
+        }
+        var t, v = adiabatic_flame_temperature(dh, &pr, n, t0);
+        var w0 = _km_res5(t, v);
+        if (is_ok(t) != 1 && v != KM_ERR_COMPUTATION_ERROR) { return (w0, w0, 0); }
+        var cache: i64[6];
+        var inf: f64 = _KM_INF;
+        var tmax: f64 = inf;
+        j = 0;
+        while (j < n) {
+            var st, ct = _km_segments_lookup(load64(&pr + 16 * j));
+            store64(&cache + 16 * j, st);
+            store64(&cache + 16 * j + 8, ct);
+            var hi: f64 = KM_SHOMATE_T_MAX[st + ct - 1];
+            tmax = _km_min(tmax, hi);
+            j = j + 1;
+        }
+        var e, x = _km_flame_bisection(dh, &pr, n, &cache, t0, t0, tmax);
+        var xb: f64 = x;
+        var w1 = _km_bits(xb);
+        if (e != KM_ERR_NONE) { w1 = (1 << 63) | e; }
+        return (w0, w1, 0);
+    }
+    var len = 16;
+    if (fid == 88) { len = 3; }
+    if (fid == 89) { len = 5; }
+    if (fid == 90) { len = 8; }
+    var th: f64 = load64(a + 8 * len);
+    var ob: i64[16];
+    var tp, vp = find_peaks(a, len, th, &ob, 16);
+    var mask = 0;
+    var q = 0;
+    while (q < vp) {
+        mask = mask | (1 << load64(&ob + 8 * q));
+        q = q + 1;
+    }
+    var lo: f64 = _KM_INF;
+    var hi2: f64 = -lo;
+    q = 0;
+    while (q < len) {
+        var y: f64 = load64(a + 8 * q);
+        if (_km_is_finite(y) == 1) {
+            lo = _km_min(lo, y);
+            hi2 = _km_max(hi2, y);
+        }
+        q = q + 1;
+    }
+    var inr = 0;
+    if (th >= 0.0 && th <= 1.0) { inr = 1; }
+    if (inr != 1 || lo > hi2) { return (mask, mask, 1); }
+    var force = 0;
+    if (mode == 1) { force = 1; }
+    var c, sl = _km_find_peaks_run(a, len, th, lo, hi2, &ob, 16, force);
+    var m2 = 0;
+    q = 0;
+    while (q < c) {
+        m2 = m2 | (1 << load64(&ob + 8 * q));
+        q = q + 1;
+    }
+    if (mode == 1) { return (m2, m2, 0); }
+    var fl = 0;
+    if (sl == 0) { fl = 1; }
+    return (mask, m2, fl);
+}
+
+# The overflow audit's B6 (ADR 0002 #36): ids 92 … 99, fft_spectrum of n = 1, 2, 4, …, 64 and 256 values, n/2 + 1 words
+# per slot: mode 0 the public spectrum (o0), the fast path's (_km_fft_spectrum_fast, o1: Rust's IEEE transform, each
+# bin's magnitude Rust's or the unbounded one) and the flag 1 when its transform test passed; mode 1 the unbounded-exponent spectrum forced (_km_fft_spectrum_ux) in both slots for a finite signal,
+# the public one otherwise. The work tables are allocated once.
+var _fft6_out = 0;
+var _fft6_work = 0;
+#must_use
+fn run_fft6(fid, mode, a, o0, o1): i64 {
+    if (_fft6_out == 0) {
+        _fft6_out = alloc(8 * 512);
+        _fft6_work = alloc(16 * 256);
+    }
+    var n = arity(fid);
+    var m = n / 2 + 1;
+    var fin = 1;
+    var k = 0;
+    while (k < n) {
+        var x: f64 = load64(a + 8 * k);
+        if (_km_is_finite(x) != 1) { fin = 0; }
+        k = k + 1;
+    }
+    if (mode == 1 && fin == 1) {
+        if (_km_fft_spectrum_ux(a, n, o0) != 1) { return 2; }
+        k = 0;
+        while (k < m) {
+            store64(o1 + 8 * k, load64(o0 + 8 * k));
+            k = k + 1;
+        }
+        return 0;
+    }
+    var t, v = fft_spectrum(a, n, _fft6_out, 2 * n);
+    k = 0;
+    while (k < m) {
+        store64(o0 + 8 * k, load64(_fft6_out + 8 * k));
+        k = k + 1;
+    }
+    if (mode == 1) {
+        k = 0;
+        while (k < m) {
+            store64(o1 + 8 * k, load64(o0 + 8 * k));
+            k = k + 1;
+        }
+        return 0;
+    }
+    var f = _km_fft_spectrum_fast(a, n, _fft6_work);
+    if (f == 2) { f = 1; }
+    k = 0;
+    while (k < m) {
+        store64(o1 + 8 * k, load64(_fft6_work + 8 * k));
+        k = k + 1;
+    }
+    return f;
+}
+
 # The overflow audit's B1 (ADR 0002 #27, #28): ids 33 … 44 as result words (cr_verify.py's AUDIT): mode 0 the public
 # function (an Err as the NaN word 0x7FF8000000000001), the fast path's result at the function's factors and its flag
 # (the monomial's _km_cr_mono_fast; for second_order_concentration and michaelis_menten their Rust-chain fast path);
@@ -4503,6 +5174,10 @@ fn run_audit5(fid, mode, a): (i64, i64, i64) {
 #must_use
 fn run_audit(fid, mode, a): (i64, i64, i64) {
     var nanw = 0x7FF8000000000001;
+    if (fid >= 87) {
+        var g0, g1, gf = run_audit6(fid, mode, a);
+        return (g0, g1, gf);
+    }
     if (fid >= 83) {
         var e0, e1, ef = run_audit5(fid, mode, a);
         return (e0, e1, ef);
@@ -4771,6 +5446,21 @@ fn main(): i64 {
     var n = load64(buf + 16);
     var ar = arity(fid);
     if (got != 8 * (3 + ar * n)) { return 3; }
+    if (fid >= 92 && fid <= 99) {
+        # the FFT families: n/2 + 1 words per slot and argument, then the flag bytes
+        var vw = ar / 2 + 1;
+        var outv = alloc(16 * vw * n + n + 8);
+        var iv = 0;
+        while (iv < n) {
+            var av = buf + 24 + 8 * ar * iv;
+            var fv = run_fft6(fid, mode, av, outv + 8 * vw * iv, outv + 8 * vw * n + 8 * vw * iv);
+            store8(outv + 16 * vw * n + iv, fv);
+            iv = iv + 1;
+        }
+        var wv = file_write_all("res.bin", outv, 16 * vw * n + n);
+        if (wv != 16 * vw * n + n) { return 4; }
+        return 0;
+    }
     var out = alloc(17 * n + 8);
     var i = 0;
     while (i < n) {
@@ -4965,9 +5655,10 @@ def main():
     funcs = [f for f in FUNCS if only is None or f[1] in only]
     stoich = [name for _, name in STOICH if only is None or name in only]
     audit = [name for _, name in AUDIT if only is None or name in only]
+    fft6 = [name for _, name, _, _ in FFT6 if only is None or name in only]
     plan = {}
     wmax = 7 * 600_000 if stoich else 0
-    if audit:
+    if audit or fft6:
         wmax = max(wmax, 12 * 450_000)
     for fid, name, _, _, ref in funcs:
         xs, acc, spans = gen_args(name, lim)
@@ -5096,6 +5787,8 @@ def main():
     failed |= m4a_checks(work, targets, plan)
     failed |= stoich_checks(work, targets, stoich)
     failed |= audit_checks(work, targets, audit)
+    failed |= flame6_bisection_check(work, targets, audit)
+    failed |= fft6_checks(work, targets, fft6)
     print("cr_verify: " + ("FAILED" if failed else "all results correctly rounded, identical on every target"))
     sys.exit(1 if failed else 0)
 

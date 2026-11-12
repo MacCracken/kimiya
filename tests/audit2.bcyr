@@ -41,6 +41,9 @@ include "src/spectroscopy.cyr"
 var _bench_sink = 0;
 
 var _bench_b5 = 0;          # the audit's B5 (ADR 0002 #35): 10 × 6 input words (bench_audit_b5)
+var _bench_b6_sig = 0;      # the audit's B6 (ADR 0002 #36, #37): 4 × 1024 signal words (bench_audit_b6)
+var _bench_b6_out = 0;      # fft_spectrum's out buffer (2 × 256 f64: the in-place transform), find_peaks' indices
+var _bench_b6_flame = 0;    # [("CO2(g)", 10⁻²⁰⁰), ("H2O(g)", 2·10⁻²⁰⁰), ("N2(g)", 7.52·10⁻²⁰⁰)]
 
 # Cyrius-only, the overflow audit's B5 (ADR 0002 #35): the exp / exp10 arguments, on typical inputs, then on the edges
 # that take each one's unbounded-exponent slow path. which: 0 equilibrium_constant (−5000 J/mol, 298 K),
@@ -140,6 +143,81 @@ fn _bench_b5_setup() {
     store64(b5 + 448, 0x7E37E43C8800759C);
 }
 
+# Cyrius-only, the overflow audit's B6 (ADR 0002 #36 … #38): the edges that take the FFT's, find_peaks' and the flame's
+# other paths (the typical inputs are tests/kimiya.bcyr's fft_spectrum_256 … _4096, find_peaks_1000 and
+# adiabatic_flame_ch4_air). which: 0 spectroscopy/fft_spectrum_256_huge (kimiya.bcyr's seeded signal × 10³⁰⁷: the
+# butterflies' sums pass DBL_MAX, the unbounded-exponent transform), 1 fft_spectrum_256_subnormal (× 10⁻³¹⁰: the data
+# below the fast test's 2⁻⁹²¹, the same), 2 fft_spectrum_256_squares (× 10²⁰⁰: Rust's transform in range, every bin's
+# re² + im² past DBL_MAX, the per-bin unbounded magnitude), 3 find_peaks_1000_subnormal (the signal's 1,000 values as
+# subnormal multiples k·2⁻¹⁰⁷⁴, k < 16, threshold ½: the candidates within 4·2⁻¹⁰⁷⁴ of Rust's threshold, about half,
+# decided by the exact predicate), 4 thermochem/adiabatic_flame_tiny (CH₄/air × 10⁻²⁰⁰, ADR 0002 #38's golden row:
+# Rust's bracket product underflows to −0, here bracketed and Newton accepts its guess).
+fn bench_audit_b6(name, which, per_batch, batches) {
+    var sig = _bench_b6_sig + 8 * 1024 * which;
+    if (which >= 3) { sig = _bench_b6_sig + 8 * 1024 * 3; }
+    var th: f64 = 0.5;
+    var dh: f64 = 0x97A2BDD1E669466D;       # −802,300 × 10⁻²⁰⁰ J/mol
+    var t0: f64 = 298.15;
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            if (which <= 2) {
+                var t1, v1 = fft_spectrum(sig, 256, _bench_b6_out, 512);
+                _bench_sink = load64(_bench_b6_out + 8);
+            } elif (which == 3) {
+                var t2, v2 = find_peaks(sig, 1000, th, _bench_b6_out, 1000);
+                _bench_sink = v2;
+            } else {
+                var t3, v3 = adiabatic_flame_temperature(dh, _bench_b6_flame, 3, t0);
+                _bench_sink = v3;
+            }
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# The B6 inputs (bench_audit_b6): kimiya.bcyr's seeded signal (u in [0, 1), 40-bit) scaled three ways, its subnormal
+# multiples, and the flame's products.
+fn _bench_b6_setup() {
+    _bench_b6_sig = alloc(4 * 1024 * 8);
+    _bench_b6_out = alloc(1024 * 8);
+    var e307: f64 = 0x7FAC7B1F3CAC7433;     # 10³⁰⁷
+    var e300: f64 = 0x01A56E1FC2F8F359;     # 10⁻³⁰⁰
+    var e10: f64 = 0x3DDB7CDFD9D7BDBB;      # 10⁻¹⁰
+    var e310: f64 = e300 * e10;             # 10⁻³¹⁰, subnormal
+    var e200: f64 = 0x6974E718D7D7625A;     # 10²⁰⁰
+    var seed = 0x2545F4914F6CDD1D;
+    var j = 0;
+    while (j < 1024) {
+        seed = seed ^ (seed << 13);
+        seed = seed ^ (seed >> 7);
+        seed = seed ^ (seed << 17);
+        var u: f64 = f64_from((seed >> 11) & 0xFFFFFFFFFF);
+        var x: f64 = u / 1099511627776.0;
+        var x0: f64 = x * e307;
+        var x1: f64 = x * e310;
+        var x2: f64 = x * e200;
+        store64(_bench_b6_sig + 8 * j, x0);
+        store64(_bench_b6_sig + 8 * 1024 + 8 * j, x1);
+        store64(_bench_b6_sig + 8 * 2048 + 8 * j, x2);
+        store64(_bench_b6_sig + 8 * 3072 + 8 * j, (seed >> 20) & 15);
+        j = j + 1;
+    }
+    _bench_b6_flame = alloc(48);
+    store64(_bench_b6_flame, "CO2(g)");
+    store64(_bench_b6_flame + 8, 0x16687E92154EF7AC);  # 10⁻²⁰⁰
+    store64(_bench_b6_flame + 16, "H2O(g)");
+    store64(_bench_b6_flame + 24, 0x16787E92154EF7AC); # 2·10⁻²⁰⁰
+    store64(_bench_b6_flame + 32, "N2(g)");
+    store64(_bench_b6_flame + 40, 0x169706561E451C03); # 7.52·10⁻²⁰⁰
+}
+
 # Runs every bench.
 fn main(): i64 {
     alloc_init();
@@ -154,6 +232,12 @@ fn main(): i64 {
     bench_audit_b5("solution/debye_huckel_extended_edge", 7, 1000000, 20);
     bench_audit_b5("solution/debye_huckel_extended_overflow", 8, 1000000, 20);
     bench_audit_b5("solution/davies_activity_edge", 9, 1000000, 20);
+    _bench_b6_setup();
+    bench_audit_b6("spectroscopy/fft_spectrum_256_huge", 0, 100, 20);
+    bench_audit_b6("spectroscopy/fft_spectrum_256_subnormal", 1, 100, 20);
+    bench_audit_b6("spectroscopy/fft_spectrum_256_squares", 2, 1000, 20);
+    bench_audit_b6("spectroscopy/find_peaks_1000_subnormal", 3, 10000, 20);
+    bench_audit_b6("thermochem/adiabatic_flame_tiny", 4, 100000, 20);
     return 0;
 }
 

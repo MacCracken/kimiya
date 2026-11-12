@@ -2728,3 +2728,95 @@ pub fn emit_solution_b5(m: &mut Module) {
         dh_lim(m, z, sq * sq, -a);
     }
 }
+
+// ── The overflow audit's B6 (ADR 0002 #36, #37): the FFT and find_peaks' threshold ──────────────────────────────────
+
+/// How the port obtains `find_peaks`' result (the note's `<how>`).
+pub const PEAKS_HOW: &str = "the threshold test evaluated exactly (w > min·(1 − t) + max·t in rational arithmetic)";
+
+/// ADR 0002 #37: `find_peaks` with Rust's checks, Rust's fold for min and max over the finite values, the neighbour
+/// tests as IEEE, and the threshold test exact ([`exact::peak_above`]); a non-finite candidate compared as IEEE would
+/// against a finite threshold (+∞ above it, NaN never).
+pub fn port_peaks(data: &[f64], t: f64) -> Vec<usize> {
+    if data.len() < 3 || !(0.0..=1.0).contains(&t) {
+        return Vec::new();
+    }
+    let (lo, hi) = data
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)));
+    if lo > hi {
+        return Vec::new();
+    }
+    data.windows(3)
+        .enumerate()
+        .filter(|(_, w)| {
+            let above = if w[1].is_finite() { crate::exact::peak_above(w[1], lo, hi, t) } else { w[1] > 0.0 };
+            w[1] > w[0] && w[1] > w[2] && above
+        })
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
+/// How the port obtains `fft_spectrum`'s result (the note's `<how>`).
+pub const FFT_HOW: &str =
+    "hisab 1.4.0's transform and the magnitudes evaluated with an unbounded exponent (each √ rounded once)";
+
+/// ADR 0002 #36: `fft_spectrum` of a finite signal (a non-power-of-two length, or a NaN or ±∞ sample, keeps Rust's
+/// result: `None`): hisab 1.4.0's `num::fft` — the bit reversal, per stage wn = (cos θ, sin θ) of θ = (−2·π)/len (glibc's
+/// cos and sin, the oracle's, which `validate.py` checks are correctly rounded at every FFT angle: the port's
+/// `_km_cr_sincos`), w = (1, 0), t = w·d (re = w.re·d.re − w.im·d.im, im = w.re·d.im + w.im·d.re), u ± t, w *= wn — on
+/// [`Ux`], every operation rounded to 53 bits with an unbounded exponent, then Complex::abs's √(re·re + im·im) of bins
+/// 0 … n/2 with the squares and their sum on [`Ux`] and the √ rounded once into binary64.
+pub fn port_fft(signal: &[f64]) -> Option<Vec<f64>> {
+    let n = signal.len();
+    if n == 0 || !n.is_power_of_two() || signal.iter().any(|x| !x.is_finite()) {
+        return None;
+    }
+    let mut re: Vec<Ux> = signal.iter().map(|&x| ux(x)).collect();
+    let mut im: Vec<Ux> = vec![ux(0.0); n];
+    if n > 1 {
+        let mut j = 0_usize;
+        for i in 1..n {
+            let mut bit = n >> 1;
+            while j & bit != 0 {
+                j ^= bit;
+                bit >>= 1;
+            }
+            j ^= bit;
+            if i < j {
+                re.swap(i, j);
+                im.swap(i, j);
+            }
+        }
+        let mut len = 2_usize;
+        while len <= n {
+            let half = len / 2;
+            #[allow(clippy::cast_precision_loss)] // a power of two, exact
+            let angle = -2.0 * std::f64::consts::PI / len as f64;
+            let (wnr, wni) = (ux(bb(angle).cos()), ux(bb(angle).sin()));
+            let mut start = 0;
+            while start < n {
+                let (mut wr, mut wi) = (ux(1.0), ux(0.0));
+                for k in 0..half {
+                    let (a, b) = (start + k, start + k + half);
+                    let tr = wr.mul(re[b]).sub(wi.mul(im[b]));
+                    let ti = wr.mul(im[b]).add(wi.mul(re[b]));
+                    let (ur, ui) = (re[a], im[a]);
+                    re[a] = ur.add(tr);
+                    im[a] = ui.add(ti);
+                    re[b] = ur.sub(tr);
+                    im[b] = ui.sub(ti);
+                    let nr = wr.mul(wnr).sub(wi.mul(wni));
+                    let ni = wr.mul(wni).add(wi.mul(wnr));
+                    wr = nr;
+                    wi = ni;
+                }
+                start += len;
+            }
+            len <<= 1;
+        }
+    }
+    Some((0..=n / 2).map(|k| re[k].mul(re[k]).add(im[k].mul(im[k])).sqrt_f64()).collect())
+}

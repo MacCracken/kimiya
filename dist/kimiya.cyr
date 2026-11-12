@@ -6343,6 +6343,108 @@ fn _km_exp_sign(p, n): i64 {
     return 0 - 1;
 }
 
+# The sign (−1, 0 or 1) of the exact sum Σ cᵢ·2^kᵢ of n ≤ 8 terms at any exponents: the doubles cᵢ at cs (finite, each 0
+# or of magnitude in [2⁻¹¹⁰, 4)) with the integers kᵢ at ks (|kᵢ| < 2⁴⁰). The overflow audit's B6 (ADR 0002 #37):
+# find_peaks' exact threshold, whose terms span 2⁻²¹⁵⁰ … 2¹⁰²⁵. Round by round: K is the largest kᵢ of a nonzero term;
+# the terms with kᵢ − K ≥ −900 scale exactly into doubles cᵢ·2^(kᵢ − K) in [2⁻¹⁰¹⁰, 4) (normal, so exact), and their
+# exact sum E (Grow-Expansion with zero elimination, as _km_exp_sign: no overflow, the sum is below 32) is a
+# nonoverlapping expansion whose largest component decides its sign; each deferred term is below 4·2⁻⁹⁰⁰ = 2⁻⁸⁹⁸ in that
+# scale, so at most 8 of them sum below 2⁻⁸⁹⁵. With no deferred term, or |top(E)| ≥ 2⁻⁸⁹⁰ (then |E| > 2⁻⁸⁹¹), E's sign
+# is the sum's. Otherwise E's components (exact doubles, possibly subnormal in that scale) and the deferred terms are
+# the new terms, as (significand, exponent) pairs: no more terms than before, and every one below 2^(K − 888), so K
+# falls by at least 888 each round and the rounds end within five on the kᵢ's range here (an empty list is the sum 0).
+#must_use
+fn _km_sign_scaled(cs, ks, n): i64 {
+    var c: f64[8];
+    var k: i64[8];
+    var ex: f64[8];                                 # a round's expansion, increasing magnitude
+    var dc: f64[8];                                 # a round's deferred terms
+    var dk: i64[8];
+    var m = 0;
+    var i = 0;
+    while (i < n) {
+        var ci: f64 = load64(cs + 8 * i);
+        if (ci != 0.0) {
+            store64(&c + 8 * m, ci);
+            store64(&k + 8 * m, load64(ks + 8 * i));
+            m = m + 1;
+        }
+        i = i + 1;
+    }
+    while (m > 0) {
+        var kmax = load64(&k);
+        i = 1;
+        while (i < m) {
+            var ki = load64(&k + 8 * i);
+            if (ki > kmax) { kmax = ki; }
+            i = i + 1;
+        }
+        var ne = 0;
+        var nd = 0;
+        i = 0;
+        while (i < m) {
+            var cj: f64 = load64(&c + 8 * i);
+            var kj = load64(&k + 8 * i);
+            if (kj - kmax >= 0 - 900) {
+                var sc: f64 = _km_cr_pow2(kj - kmax);
+                var q: f64 = cj * sc;               # exact: in [2⁻¹⁰¹⁰, 4)
+                var j = 0;
+                var w = 0;
+                while (j < ne) {
+                    var ej: f64 = load64(&ex + 8 * j);
+                    var s: f64 = q + ej;
+                    var bb: f64 = s - q;
+                    var er: f64 = (q - (s - bb)) + (ej - bb);
+                    if (er != 0.0) {
+                        store64(&ex + 8 * w, er);
+                        w = w + 1;
+                    }
+                    q = s;
+                    j = j + 1;
+                }
+                if (q != 0.0) {
+                    store64(&ex + 8 * w, q);
+                    w = w + 1;
+                }
+                ne = w;
+            } else {
+                store64(&dc + 8 * nd, cj);
+                store64(&dk + 8 * nd, kj);
+                nd = nd + 1;
+            }
+            i = i + 1;
+        }
+        if (ne > 0) {
+            var top: f64 = load64(&ex + 8 * (ne - 1));
+            var at: f64 = f64_abs(top);
+            var lim: f64 = 0x0850000000000000;      # 2⁻⁸⁹⁰
+            if (nd == 0 || at >= lim) {
+                if (top > 0.0) { return 1; }
+                return 0 - 1;
+            }
+        }
+        if (nd == 0) { return 0; }
+        m = 0;
+        i = 0;
+        while (i < ne) {
+            var e0: f64 = load64(&ex + 8 * i);
+            var es, ee = _km_ux_from(e0);
+            store64(&c + 8 * m, es);
+            store64(&k + 8 * m, kmax + ee);
+            m = m + 1;
+            i = i + 1;
+        }
+        i = 0;
+        while (i < nd) {
+            store64(&c + 8 * m, load64(&dc + 8 * i));
+            store64(&k + 8 * m, load64(&dk + 8 * i));
+            m = m + 1;
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
 # For the n doubles at p: (g + 2·f, c, e) with g the xor of their sign bits, f = 1 if one is ±0 or 2 if one is not
 # finite (else 0), c the count of significands other than 1, stored at out as f64 words in [1, 2), and e the sum of
 # their exponents. A subnormal is first scaled by 2⁵⁴ (exactly).
@@ -10655,6 +10757,13 @@ var KM_SHOMATE_T_MAX: f64[34] = {
 #   there: every physical input, every tabulated segment over its range). A product past DBL_MAX whose sums cancel, or a
 #   Shomate term that over- or underflows, gave ±∞ or NaN although the value is finite or ±∞; here it is that value.
 #   Rust's checks, Err codes and order are kept; a non-finite input keeps Rust's result.
+# - ADR 0002 #38 (the overflow audit's B6; the user's decision "fix all three iterative edges", the flame's being its
+#   bracket's exact sign test): adiabatic_flame_temperature's bracket test f(T₀)·f(T_max) < 0 is an exact sign
+#   comparison, since the product underflows to −0 when |ΔH| and the moles are tiny (a real system scaled by 10⁻²⁰⁰:
+#   Rust's Err, here Newton's answer, Rust's own at a scale where the product does not underflow), and the transcribed
+#   bisection's f(a)·f(b) > 0 likewise (no result changes there).
+#   Newton, its absolute 10⁻³ J/mol tolerance (which accepts the initial guess at once at such scales) and every Err
+#   are Rust's.
 #
 # Units: reaction_enthalpy and reaction_gibbs_energy return **J/mol** (ADR 0002 #1: Rust 1.2 returns
 # kJ/mol; here Rust's kJ difference is multiplied by 1000.0 once, so the value is the oracle's × 1000
@@ -11481,10 +11590,14 @@ fn _km_flame_newton(dh: f64, products, n, cache, t0: f64, x0: f64): (i64, f64) {
 }
 
 # hisab 1.4.0 `num::bisection(f, a, b, tol, max_iter)` on the flame balance, operation for operation,
-# with Rust's FLAME_BISECTION_TOL = 1e-6 and max_iter = 200: fail if f(a)·f(b) > 0; orient so f(lo) < 0
-# (swap when f(a) > 0); per iteration mid = (lo + hi)·0.5, stop with mid if |f(mid)| < tol or
+# with Rust's FLAME_BISECTION_TOL = 1e-6 and max_iter = 200: fail if f(a) and f(b) have the same sign; orient so
+# f(lo) < 0 (swap when f(a) > 0); per iteration mid = (lo + hi)·0.5, stop with mid if |f(mid)| < tol or
 # |hi − lo| < tol, else move the end whose sign f(mid) shares; after max_iter, (lo + hi)·0.5.
-# (KM_ERR_NONE, T) or (KM_ERR_INVALID_INPUT, 0.0) for hisab's opposite-signs error.
+# (KM_ERR_NONE, T) or (KM_ERR_INVALID_INPUT, 0.0) for hisab's opposite-signs error. ADR 0002 #38 (the overflow audit's
+# B6): hisab's test is the product f(a)·f(b) > 0, which a product underflowing to +0 passes although the signs agree;
+# here it is the exact sign comparison (f(a) > 0 and f(b) > 0, or both < 0), the same answer wherever the product does
+# not underflow to a zero (a NaN, ±∞ or ±0 operand included). The flame calls it only after its bracket test proved
+# f(a) and f(b) of strictly opposite signs, and f is deterministic, so neither test refuses there: no result changes.
 #must_use
 fn _km_flame_bisection(dh: f64, products, n, cache, t0: f64, a: f64, b: f64): (i64, f64) {
     var tol: f64 = 0.000001;
@@ -11492,8 +11605,7 @@ fn _km_flame_bisection(dh: f64, products, n, cache, t0: f64, a: f64, b: f64): (i
     var hi: f64 = b;
     var f_lo: f64 = _km_flame_f(dh, products, n, cache, t0, lo);
     var f_hi: f64 = _km_flame_f(dh, products, n, cache, t0, hi);
-    var pr: f64 = f_lo * f_hi;
-    if (pr > 0.0) { return (KM_ERR_INVALID_INPUT, 0.0); }
+    if ((f_lo > 0.0 && f_hi > 0.0) || (f_lo < 0.0 && f_hi < 0.0)) { return (KM_ERR_INVALID_INPUT, 0.0); }
     if (f_lo > 0.0) {
         var sw: f64 = lo;
         lo = hi;
@@ -11526,9 +11638,14 @@ fn _km_flame_bisection(dh: f64, products, n, cache, t0: f64, a: f64, b: f64): (i
 # range [T_min, T_max); Err(KM_ERR_INVALID_INPUT) if ΔH is not finite, the list is empty (or no list),
 # or a product's moles are not positive and finite; Err(KM_ERR_INVALID_REACTION) for a product with no
 # Shomate data (the first bad product in list order decides); Err(KM_ERR_COMPUTATION_ERROR) if the root
-# can't be bracketed (ΔH ≥ 0, or the flame temperature is past T_max; the test is the product
-# f(T₀)·f(T_max) < 0, so NaN fails it) or the bisection fails. Mirrors
-# `thermochem::adiabatic_flame_temperature`, in Rust's order of checks.
+# can't be bracketed (ΔH ≥ 0, or the flame temperature is past T_max: f(T₀) and f(T_max) not of strictly
+# opposite signs, so NaN and ±0 fail it) or the bisection fails. Mirrors
+# `thermochem::adiabatic_flame_temperature`, in Rust's order of checks. ADR 0002 #38 (the overflow audit's B6,
+# the user's decision to fix the iterative edges, here the bracket's exact sign test): Rust tests
+# f(T₀)·f(T_max) < 0, a product that underflows to −0 for a tiny |ΔH| and moles (|f(T₀)·f(T_max)| at most
+# 2⁻¹⁰⁷⁵), so a reaction whose balance does change sign is "not bracketed" (Err); here the signs are compared
+# exactly, the same answer wherever the product does not underflow to a zero (a NaN, ±∞ or ±0 operand included).
+# Newton, its tolerances and every Err are Rust's.
 #must_use
 fn adiabatic_flame_temperature(reaction_enthalpy_j: f64, products, n, t_initial_k: f64): Result {
     if (_km_is_positive(t_initial_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
@@ -11560,14 +11677,17 @@ fn adiabatic_flame_temperature(reaction_enthalpy_j: f64, products, n, t_initial_
     if (t_initial_k < range_min || t_initial_k >= range_max) { return Err(KM_ERR_INVALID_TEMPERATURE); }
 
     # f(T₀) = −ΔH_rxn and f decreases, so a sign change on [T₀, T_max] means an exothermic reaction
-    # whose root lies in the data range. A product test, so NaN fails it.
+    # whose root lies in the data range. ADR 0002 #38: the exact sign test (f_lo < 0 < f_hi or f_hi < 0 < f_lo),
+    # where Rust's f_lo·f_hi < 0 fails when the product underflows to −0. It is Rust's answer wherever the
+    # product does not underflow to a zero: a NaN operand fails both (NaN·x is NaN; NaN compares false), a ±0
+    # operand fails both (the product ±0 or 0·∞ = NaN), and for two nonzero non-NaN values the product's sign is
+    # the xor of theirs, its value negative, −∞ or −0, the last only by underflow.
     var t_lo: f64 = t_initial_k;
     var t_hi: f64 = range_max;
     var f_lo: f64 = _km_flame_f(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_lo);
     var f_hi: f64 = _km_flame_f(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_hi);
-    var pr: f64 = f_lo * f_hi;
     var bracketed = 0;
-    if (pr < 0.0) { bracketed = 1; }
+    if ((f_lo < 0.0 && f_hi > 0.0) || (f_lo > 0.0 && f_hi < 0.0)) { bracketed = 1; }
     if (bracketed != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
 
     # The initial guess: an average Cp of 40 J/(mol·K) per mole of product (Rust's typed constant).
@@ -18555,7 +18675,15 @@ const _KM_RYDBERG_HYDROGEN = 10967758.340280328;
 #   magnitude sqrt(re·re + im·im) (Complex::abs). The twiddle wn = (cos(−2π/len), sin(−2π/len)) is _km_cr_sincos's,
 #   correctly rounded; hisab 3.4.1's num_fft is not used (its twiddles are the stdlib's f64_cos / f64_sin, not
 #   correctly rounded, reseeded every 64 steps: other bits from n = 256 on). The n complex values live in `out` when
-#   cap ≥ 2n (no allocation; `signal` may then be `out` itself), else in 16·n heap bytes.
+#   cap ≥ 2n and `signal` lies outside it (no allocation), else in 16·n heap bytes.
+# - ADR 0002 #36 and #37 (the overflow audit's B6; the user's decision "FFT: both" — the magnitudes and the
+#   butterflies, without the range limit — and find_peaks' exact threshold, settled under the policy): fft_spectrum is
+#   #20's semantics over the whole transform — every butterfly and twiddle operation with an unbounded exponent
+#   (src/mathx.cyr's _km_ux_*), each magnitude's √ rounded once — behind a per-operation fast test that keeps Rust's
+#   bits wherever its transform stays in the normal range (a NaN or ±∞ sample keeps Rust's IEEE spectrum); find_peaks
+#   decides w > min·(1 − t) + max·t exactly (src/mathx.cyr's _km_sign_scaled), Rust's rounded threshold deciding
+#   wherever a proven bound separates the value from it. The golden rows keep the oracle's values; where the port's
+#   differ, the note names its whole result (accepted under ADR 2, counted).
 # - ADR 0002 #21 and #22 (M4e-3, the user's decisions of 2026-11-10): bohr_energy_level, bohr_transition_energy,
 #   rydberg_wavelength and spectral_series_wavelength return their exact rationals (the constant as its double) rounded
 #   once, and reduced_mass the correctly rounded m₁·m₂/(m₁ + m₂) for every pair of positive finite masses (no
@@ -18573,10 +18701,10 @@ const _KM_RYDBERG_HYDROGEN = 10967758.340280328;
 #   representable (vibrational_frequency(500, 2⁻¹⁰²²) is ∞ in Rust, 1.50·10¹⁵⁵ here; rigid_rotor_energy(2³² − 1, 10⁻³⁰⁰)
 #   0, not 1.22·10⁻³¹⁴). Rust's checks and Err codes are kept; the unvalidated inputs (absorbance's, the moment of
 #   inertia's, the rotor's B, concentration_from_absorbance's A) keep Rust's expression where one is not finite.
-# - Kept as Rust's (reviewed in M4e, reported to the user): the FFT's sums and re² + im², find_peaks' interpolated
-#   threshold, and the thresholds 0.001 and 10⁻¹² (heuristic and numerical cutoffs, compared as Rust does): each is a
-#   chain of rounded operations on inputs and physical constants, which ADR 0002's policy leaves as Rust's sequence
-#   (the overflow audit's later batches review the FFT and find_peaks).
+# - Kept as Rust's (reviewed in M4e, reported to the user): the isotope pattern's thresholds 0.001 and 10⁻¹²
+#   (heuristic and numerical cutoffs, compared as Rust does), a chain of rounded operations on inputs which ADR 0002's
+#   policy leaves as Rust's sequence. (The FFT's sums and re² + im² and find_peaks' interpolated threshold, on that
+#   list until the overflow audit's B6, are ADR 0002 #36 and #37 above.)
 
 include "lib/alloc.cyr"
 
@@ -19453,8 +19581,20 @@ fn isotope_pattern(atoms, n, out, cap): Result {
 # correctly rounded _km_cr_sincos, and per block w = (1, 0), each butterfly t = w·d (Complex's mul: re = w.re·d.re −
 # w.im·d.im, im = w.re·d.im + w.im·d.re), u + t and u − t, then w *= wn (mul_assign, the same products): every
 # operation in hisab's order, no FMA, so the result is the oracle's with correctly rounded twiddles.
-fn _km_fft(data, n) {
-    if (n <= 1) { return 0; }
+#
+# ADR 0002 #36 (the overflow audit's B6): it also returns 1 when its products provably stayed in binary64's normal
+# range, else 0 — every component of wn, of each twiddle w a butterfly uses (checked in the first block of a stage: the
+# recurrence is input-independent, the same in every block) and of each butterfly's d is 0 or of magnitude at least
+# 2⁻¹⁰⁰ (wn, w) or 2⁻⁹²¹ (d). Then every product of the transform (w·d and the recurrence's w·wn) is an exact zero (a
+# zero factor) or its exact value is at least 2⁻¹⁰²¹ in magnitude, where binary64's rounding is the 53-bit one unless
+# it overflows; and every sum of two doubles is exact below 2⁻¹⁰²¹ and the 53-bit rounding above unless it overflows
+# (the pure-sum lemma, ADR 0002 #33). So the transform is the unbounded-exponent one (#20's semantics) unless some
+# operation overflowed; fft_spectrum tests that on the retained outputs (an overflow reaches one of them as ±∞ or NaN).
+# The twiddles' bound never binds in practice (their smallest nonzero component is 2⁻⁵⁶ for every n ≤ 2²², wn's at
+# least 2⁻⁶⁰ for every n), so the test is the data's: a d below 2⁻⁹²¹ ≈ 2.2·10⁻²⁷⁷ takes the slow path.
+#must_use
+fn _km_fft(data, n): i64 {
+    if (n <= 1) { return 1; }
     var j = 0;
     var i = 1;
     while (i < n) {
@@ -19474,6 +19614,9 @@ fn _km_fft(data, n) {
         }
         i = i + 1;
     }
+    var ok = 1;
+    var lw: f64 = 0x39B0000000000000;       # 2⁻¹⁰⁰: the twiddles' bound
+    var ld: f64 = 0x0660000000000000;       # 2⁻⁹²¹: the data's bound (their products at least 2⁻¹⁰²¹)
     var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
     var m2pi: f64 = -2.0 * pi;
     var len = 2;
@@ -19482,6 +19625,9 @@ fn _km_fft(data, n) {
         var lf: f64 = f64_from(len);
         var angle: f64 = m2pi / lf;
         var wn_im, wn_re = _km_cr_sincos(angle);
+        var awr: f64 = f64_abs(wn_re);
+        var awi: f64 = f64_abs(wn_im);
+        if ((awr < lw && awr != 0.0) || (awi < lw && awi != 0.0)) { ok = 0; }
         var start = 0;
         while (start < n) {
             var w_re: f64 = 1.0;
@@ -19494,6 +19640,15 @@ fn _km_fft(data, n) {
                 var u_im: f64 = load64(pu + 8);
                 var d_re: f64 = load64(pt);
                 var d_im: f64 = load64(pt + 8);
+                var adr: f64 = f64_abs(d_re);
+                var adi: f64 = f64_abs(d_im);
+                if (adr < ld) { if (adr != 0.0) { ok = 0; } }
+                if (adi < ld) { if (adi != 0.0) { ok = 0; } }
+                if (start == 0) {
+                    var awr2: f64 = f64_abs(w_re);
+                    var awi2: f64 = f64_abs(w_im);
+                    if ((awr2 < lw && awr2 != 0.0) || (awi2 < lw && awi2 != 0.0)) { ok = 0; }
+                }
                 var t_re: f64 = (w_re * d_re) - (w_im * d_im);
                 var t_im: f64 = (w_re * d_im) + (w_im * d_re);
                 var s_re: f64 = u_re + t_re;
@@ -19514,30 +19669,160 @@ fn _km_fft(data, n) {
         }
         len = len << 1;
     }
+    return ok;
+}
+
+# ADR 0002 #36: _km_fft's transform with an unbounded exponent (#20's semantics): every + − × of the bit-reversed
+# butterflies and of the twiddle recurrence on src/mathx.cyr's _km_ux_* (53 bits, nothing over- or underflows; the same
+# operations in the same order, signed zeros as IEEE's), from the n finite doubles at `sig` as (x, +0.0), into the 32·n
+# bytes at `w`: per value re = (s, e), im = (s, e), two words each.
+fn _km_fft_ux(sig, n, w) {
+    var zero: f64 = 0.0;
+    var i = 0;
+    while (i < n) {
+        var x: f64 = load64(sig + 8 * i);
+        var xs, xe = _km_ux_from(x);
+        store64(w + 32 * i, xs);
+        store64(w + 32 * i + 8, xe);
+        store64(w + 32 * i + 16, zero);
+        store64(w + 32 * i + 24, 0);
+        i = i + 1;
+    }
+    if (n <= 1) { return 0; }
+    var j = 0;
+    i = 1;
+    while (i < n) {
+        var bit = n >> 1;
+        while ((j & bit) != 0) {
+            j = j ^ bit;
+            bit = bit >> 1;
+        }
+        j = j ^ bit;
+        if (i < j) {
+            var q = 0;
+            while (q < 4) {
+                var a = load64(w + 32 * i + 8 * q);
+                store64(w + 32 * i + 8 * q, load64(w + 32 * j + 8 * q));
+                store64(w + 32 * j + 8 * q, a);
+                q = q + 1;
+            }
+        }
+        i = i + 1;
+    }
+    var pi: f64 = 0x400921FB54442D18;
+    var m2pi: f64 = -2.0 * pi;
+    var len = 2;
+    while (len <= n) {
+        var half = len >> 1;
+        var lf: f64 = f64_from(len);
+        var angle: f64 = m2pi / lf;
+        var wn_im, wn_re = _km_cr_sincos(angle);
+        var nrs, nre = _km_ux_from(wn_re);
+        var nis, nie = _km_ux_from(wn_im);
+        var start = 0;
+        while (start < n) {
+            var wrs: f64 = 1.0;
+            var wre = 0;
+            var wis: f64 = 0.0;
+            var wie = 0;
+            var k = 0;
+            while (k < half) {
+                var pu = w + 32 * (start + k);
+                var pt = w + 32 * (start + k + half);
+                var urs: f64 = load64(pu);
+                var ure = load64(pu + 8);
+                var uis: f64 = load64(pu + 16);
+                var uie = load64(pu + 24);
+                var drs: f64 = load64(pt);
+                var dre = load64(pt + 8);
+                var dis: f64 = load64(pt + 16);
+                var die = load64(pt + 24);
+                var p1s, p1e = _km_ux_mul(wrs, wre, drs, dre);
+                var p2s, p2e = _km_ux_mul(wis, wie, dis, die);
+                var trs, tre = _km_ux_sub(p1s, p1e, p2s, p2e);
+                var p3s, p3e = _km_ux_mul(wrs, wre, dis, die);
+                var p4s, p4e = _km_ux_mul(wis, wie, drs, dre);
+                var tis, tie = _km_ux_add(p3s, p3e, p4s, p4e);
+                var ars, are = _km_ux_add(urs, ure, trs, tre);
+                var ais, aie = _km_ux_add(uis, uie, tis, tie);
+                var brs, bre = _km_ux_sub(urs, ure, trs, tre);
+                var bis, bie = _km_ux_sub(uis, uie, tis, tie);
+                store64(pu, ars);
+                store64(pu + 8, are);
+                store64(pu + 16, ais);
+                store64(pu + 24, aie);
+                store64(pt, brs);
+                store64(pt + 8, bre);
+                store64(pt + 16, bis);
+                store64(pt + 24, bie);
+                var q1s, q1e = _km_ux_mul(wrs, wre, nrs, nre);
+                var q2s, q2e = _km_ux_mul(wis, wie, nis, nie);
+                var xrs, xre = _km_ux_sub(q1s, q1e, q2s, q2e);
+                var q3s, q3e = _km_ux_mul(wrs, wre, nis, nie);
+                var q4s, q4e = _km_ux_mul(wis, wie, nrs, nre);
+                var xis, xie = _km_ux_add(q3s, q3e, q4s, q4e);
+                wrs = xrs;
+                wre = xre;
+                wis = xis;
+                wie = xie;
+                k = k + 1;
+            }
+            start = start + len;
+        }
+        len = len << 1;
+    }
     return 0;
 }
 
-# The magnitude spectrum of a real signal (an interferogram → its spectrum): the n values at `signal`, n a non-zero
-# power of two, as complex numbers (x, +0.0) (Complex::from_real), transformed by the FFT (_km_fft, hisab 1.4.0's),
-# then the first n/2 + 1 magnitudes √(re·re + im·im) (Complex::abs: DC up to the Nyquist bin) to the caller's buffer
-# `out` of `cap` f64: Ok(n/2 + 1). Err(KM_ERR_INVALID_INPUT) if n is not a non-zero power of two (Rust's check), then if
-# `signal` is null, then if out holds fewer than n/2 + 1 values; Err(KM_ERR_COMPUTATION_ERROR) if the 16·n-byte work
-# table can't be allocated (Rust's FFT error maps there too, unreachable). With cap ≥ 2n the transform runs in `out`
-# itself and nothing is allocated (`signal` may then be `out`: it is read from the end); otherwise it allocates 16·n
-# bytes from the bump allocator, which never frees them. Mirrors `spectroscopy::fft_spectrum`.
+# ADR 0002 #36: |X| = √(re·re + im·im) of an unbounded-exponent value, the two squares and their sum to 53 bits, the √
+# rounded once into binary64 (its subnormal grid, +∞ past DBL_MAX: a sum past DBL_MAX can have a finite √, and a √
+# past it an in-range square sum never does).
 #must_use
-fn fft_spectrum(signal, n, out, cap): Result {
-    if (n <= 0 || (n & (n - 1)) != 0) { return Err(KM_ERR_INVALID_INPUT); }
-    if (signal == 0) { return Err(KM_ERR_INVALID_INPUT); }
+fn _km_fft_mag_ux(rs: f64, re, is: f64, ie): f64 {
+    var as_, ae = _km_ux_mul(rs, re, rs, re);
+    var bs, be = _km_ux_mul(is, ie, is, ie);
+    var ss, se = _km_ux_add(as_, ae, bs, be);
+    var r: f64 = _km_ux_sqrt_f64(ss, se);
+    return r;
+}
+
+# ADR 0002 #36: the magnitude spectrum by the unbounded-exponent transform alone (the slow path, which fft_spectrum
+# takes for a finite signal whose IEEE transform left the normal range; forced by the tests and cr_verify.py): the n
+# finite values at `signal`, n a power of two, transformed by _km_fft_ux into 32·n heap bytes, then the first n/2 + 1
+# magnitudes by _km_fft_mag_ux to `out` (n/2 + 1 f64; `out` may overlap `signal`). 1, or 0 if the work table can't be
+# allocated.
+#must_use
+fn _km_fft_spectrum_ux(signal, n, out): i64 {
+    if (n > 0x0040000000000000) { return 0; }
+    var w = alloc(32 * n);
+    if (w == 0) { return 0; }
+    _km_fft_ux(signal, n, w);
     var m = n / 2 + 1;
-    if (out == 0 || cap < m) { return Err(KM_ERR_INVALID_INPUT); }
-    var data = out;
-    if (cap < 2 * n) {
-        if (n > 0x0080000000000000) { return Err(KM_ERR_COMPUTATION_ERROR); }
-        data = alloc(16 * n);
-        if (data == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var k = 0;
+    while (k < m) {
+        var rs: f64 = load64(w + 32 * k);
+        var is: f64 = load64(w + 32 * k + 16);
+        var mag: f64 = _km_fft_mag_ux(rs, load64(w + 32 * k + 8), is, load64(w + 32 * k + 24));
+        store64(out + 8 * k, mag);
+        k = k + 1;
     }
-    var zero: f64 = 0.0;                    # Complex::from_real's +0.0
+    return 1;
+}
+
+# ADR 0002 #36: the fast path, Rust's IEEE transform (_km_fft) of the n values at `signal` in the 16·n bytes at `data`
+# (not overlapping `signal`), the n/2 + 1 magnitudes left in data's first words (word k is bin k/2's, already read).
+# Where _km_fft's test passed and every retained re and im is finite, the transform is the unbounded-exponent one, and
+# each bin's magnitude is Rust's √(re·re + im·im) where s = re·re + im·im lies in [2⁻⁹⁰⁰, DBL_MAX] or comes from
+# re = im = 0 (#20's square-sum argument, distance_3d's in two dimensions: no square overflowed, and one below 2⁻¹⁰²¹ in
+# either evaluation is added to one of at least 2⁻⁹⁰¹, under a quarter of its ulp, so s is the unbounded sum, a normal
+# double or +0 whose √ is correctly rounded), else _km_fft_mag_ux of the (exact) re and im: 2 when every bin took
+# Rust's, 1 when some took the unbounded magnitude. Otherwise Rust's IEEE magnitudes, and 0. One pass: a bin's
+# unbounded magnitude is computed before a later bin may show the transform invalid (a non-finite re or im), which then
+# sends a finite signal to the slow path, which writes every bin; and a NaN or ±∞ sample makes every output non-finite
+# (it reaches both outputs of each butterfly it enters, so all n after log₂ n stages), so it takes no such magnitude.
+#must_use
+fn _km_fft_spectrum_fast(signal, n, data): i64 {
+    var zero: f64 = 0.0;
     var i = n - 1;
     while (i >= 0) {
         var x = load64(signal + 8 * i);
@@ -19545,29 +19830,225 @@ fn fft_spectrum(signal, n, out, cap): Result {
         store64(data + 16 * i, x);
         i = i - 1;
     }
-    _km_fft(data, n);
+    var ok = _km_fft(data, n);
+    var m = n / 2 + 1;
+    var lo: f64 = 0x07B0000000000000;       # 2⁻⁹⁰⁰
+    var hi: f64 = 0x7FEFFFFFFFFFFFFF;       # DBL_MAX
+    var slow = 0;
     var k = 0;
     while (k < m) {
         var re: f64 = load64(data + 16 * k);
         var im: f64 = load64(data + 16 * k + 8);
         var s: f64 = (re * re) + (im * im);
         var mag: f64 = f64_sqrt(s);
-        store64(out + 8 * k, mag);
+        if (s < lo || s > hi || s != s) {
+            var dr: f64 = re - re;
+            var di: f64 = im - im;
+            if (dr != 0.0 || di != 0.0) {
+                ok = 0;                     # ±∞ or NaN (x − x is NaN): an overflow, or such a sample
+            } elif (ok == 1 && (re != 0.0 || im != 0.0)) {
+                var rs, rx = _km_ux_from(re);
+                var is, ix = _km_ux_from(im);
+                mag = _km_fft_mag_ux(rs, rx, is, ix);
+                slow = 1;
+            }
+        }
+        store64(data + 8 * k, mag);
         k = k + 1;
     }
+    if (ok != 1) { return 0; }
+    if (slow == 1) { return 1; }
+    return 2;
+}
+
+# The magnitude spectrum of a real signal (an interferogram → its spectrum): the n values at `signal`, n a non-zero
+# power of two, as complex numbers (x, +0.0) (Complex::from_real), transformed by the FFT (_km_fft, hisab 1.4.0's),
+# then the first n/2 + 1 magnitudes √(re·re + im·im) (Complex::abs: DC up to the Nyquist bin) to the caller's buffer
+# `out` of `cap` f64: Ok(n/2 + 1). Err(KM_ERR_INVALID_INPUT) if n is not a non-zero power of two (Rust's check), then if
+# `signal` is null, then if out holds fewer than n/2 + 1 values; Err(KM_ERR_COMPUTATION_ERROR) if a work table can't be
+# allocated (Rust's FFT error maps there too, unreachable).
+#
+# ADR 0002 #36 (the overflow audit's B6; the user's decision "FFT: both" — the magnitudes and the butterflies, hisab
+# 1.4.0's transform without the range limit"): #20's semantics over the whole transform — every butterfly and twiddle
+# operation in hisab's order with an unbounded exponent, and each magnitude's √ the final operation, rounded once into
+# binary64 — so a signal near DBL_MAX or subnormal has its spectrum where Rust's over- or underflows
+# (fft_spectrum([1.75·10³⁰⁴]) is [1.75·10³⁰⁴], Rust's [∞]; [−6.96·10⁻³¹⁶] is [6.96·10⁻³¹⁶], Rust's [0]; [3.3·10³⁰²,
+# 3·10³⁰⁴] is [3.03·10³⁰⁴, 2.96·10³⁰⁴], Rust's [∞, ∞]). Rust's IEEE transform and magnitudes run first
+# (_km_fft_spectrum_fast); where its per-operation test proves the transform the unbounded one, it is the result (Rust's
+# bits), with Rust's magnitude of each bin whose square sum is in range and the unbounded one of any other.
+# Otherwise a signal with a NaN or ±∞ keeps Rust's IEEE spectrum (B1's rule for an unvalidated input), and a finite one
+# takes the unbounded transform (_km_fft_spectrum_ux, 32·n heap bytes from the bump allocator, which never frees them).
+# The IEEE transform runs in `out` itself when cap ≥ 2n and `signal` lies outside out's first 2n values (nothing is
+# allocated then); otherwise in 16·n heap bytes, so the signal survives for the slow path. Mirrors
+# `spectroscopy::fft_spectrum`.
+#must_use
+fn fft_spectrum(signal, n, out, cap): Result {
+    if (n <= 0 || (n & (n - 1)) != 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (signal == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    var m = n / 2 + 1;
+    if (out == 0 || cap < m) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n > 0x0040000000000000) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var data = out;
+    var overlap = 0;
+    if (signal < out + 16 * n && out < signal + 8 * n) { overlap = 1; }
+    if (cap < 2 * n || overlap == 1) {
+        data = alloc(16 * n);
+        if (data == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    }
+    var keep = _km_fft_spectrum_fast(signal, n, data);
+    if (keep == 2) { keep = 1; }
+    var k = 0;
+    while (keep != 1 && k < n) {
+        var x: f64 = load64(signal + 8 * k);
+        if (_km_is_finite(x) != 1) { keep = 1; }            # Rust's IEEE spectrum (B1's rule)
+        k = k + 1;
+    }
+    if (keep == 1) {
+        if (data != out) {
+            k = 0;
+            while (k < m) {
+                store64(out + 8 * k, load64(data + 8 * k));
+                k = k + 1;
+            }
+        }
+        return Ok(m);
+    }
+    if (_km_fft_spectrum_ux(signal, n, out) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
     return Ok(m);
 }
 
 # ── peak detection ──────────────────────────────────────────────────────────────────
 
+# 1 if w > a·(1 − t) + b·t exactly, for finite doubles w, a, b and t (the exact rationals; 1 − t not rounded): ADR 0002
+# #37's exact predicate. w − a·(1 − t) − b·t = w − a + t·a − t·b, a sum of six terms at any exponents: w and −a as
+# (significand, exponent) pairs (_km_ux_from), and t·a, −t·b as exact TwoProducts of their significands (in [1, 4), the
+# low part 0 or at least 2⁻¹⁰⁴) at the exponent sums; its sign by src/mathx.cyr's _km_sign_scaled. A zero factor drops
+# its terms (t = 0: w > a).
+#must_use
+fn _km_peak_above_exact(w: f64, a: f64, b: f64, t: f64): i64 {
+    var cs: f64[6];
+    var ks: i64[6];
+    var n = 0;
+    var ws, we = _km_ux_from(w);
+    store64(&cs, ws);
+    store64(&ks, we);
+    n = 1;
+    if (a != 0.0) {
+        var as_, ae = _km_ux_from(a);
+        var na: f64 = -as_;
+        store64(&cs + 8 * n, na);
+        store64(&ks + 8 * n, ae);
+        n = n + 1;
+        if (t != 0.0) {
+            var ts, te = _km_ux_from(t);
+            var ph, pl = _km_two_prod(ts, as_);
+            store64(&cs + 8 * n, ph);
+            store64(&ks + 8 * n, te + ae);
+            store64(&cs + 8 * n + 8, pl);
+            store64(&ks + 8 * n + 8, te + ae);
+            n = n + 2;
+        }
+    }
+    if (b != 0.0 && t != 0.0) {
+        var bs, be = _km_ux_from(b);
+        var ts2, te2 = _km_ux_from(t);
+        var qh, ql = _km_two_prod(ts2, bs);
+        var nqh: f64 = -qh;
+        var nql: f64 = -ql;
+        store64(&cs + 8 * n, nqh);
+        store64(&ks + 8 * n, te2 + be);
+        store64(&cs + 8 * n + 8, nql);
+        store64(&ks + 8 * n + 8, te2 + be);
+        n = n + 2;
+    }
+    var sg = _km_sign_scaled(&cs, &ks, n);
+    if (sg > 0) { return 1; }
+    return 0;
+}
+
+# find_peaks' scan (the public function's body after its checks): the indices of the strict local maxima of the n ≥ 3
+# values at `data` above the threshold of t, min lo and max hi of the finite values (lo ≤ hi), to `out` (room for `room`
+# indices; a pass that only counts when that may be too few). (count or −1 when more peaks are found than fit, the
+# number of candidates decided by the exact predicate); with `force` every candidate goes to it (the tests and
+# cr_verify.py check the fast test against it). ADR 0002 #37 (the overflow audit's B6, the user's decision "find_peaks'
+# threshold evaluated exactly"): a candidate w (w > its two neighbours, IEEE) is a peak when w > lo + t·(hi − lo)
+# exactly. A non-finite w can only be +∞ there (NaN and −∞ fail the neighbour test), above every finite threshold. For
+# a finite w the fast test decides with Rust's T = RN(RN(lo·RN(1 − t)) + RN(hi·t)) where it is finite: |T − θ| ≤
+# 2.5u(1 + u)(|lo| + |hi|) + (1 + u)·2⁻¹⁰⁷⁴ (u = 2⁻⁵³: 1 − t rounds by at most u/2 for t < ½ and is exact above, the
+# two products by u relative plus 2⁻¹⁰⁷⁵ each, the sum by u), below B = RN(RN(|lo|·2⁻⁵¹) + RN(|hi|·2⁻⁵¹)) + 2⁻¹⁰⁷²
+# (at least (1 − u)²·(4u(|lo| + |hi|) + 3·2⁻¹⁰⁷⁴)); RN is monotone, so RN(w − T) > B proves w − T > B and the peak, and
+# RN(w − T) < −B proves w < θ. Otherwise (|w − T| ≤ B, or T = ±∞ past DBL_MAX) _km_peak_above_exact decides.
+#must_use
+fn _km_find_peaks_run(data, n, t: f64, lo: f64, hi: f64, out, room, force): (i64, i64) {
+    var omt: f64 = 1.0 - t;
+    var thr: f64 = (lo * omt) + (hi * t);  # Rust's interpolated threshold
+    var c51: f64 = 0x3CC0000000000000;      # 2⁻⁵¹
+    var alo: f64 = f64_abs(lo);
+    var ahi: f64 = f64_abs(hi);
+    var b1: f64 = alo * c51;
+    var b2: f64 = ahi * c51;
+    var m1022: f64 = 0x0010000000000000;    # 2⁻¹⁰²²
+    var p50: f64 = 0x3CD0000000000000;      # 2⁻⁵⁰
+    var tiny: f64 = m1022 * p50;            # 2⁻¹⁰⁷², exactly
+    var bnd: f64 = (b1 + b2) + tiny;
+    var tfin = _km_is_finite(thr);
+    if (force == 1) { tfin = 0; }
+    var count_first = 0;
+    if (room < (n - 1) / 2) { count_first = 1; }
+    var pass = count_first;                 # pass 1 counts (only when the buffer might be too small), pass 0 writes
+    var slow = 0;
+    while (pass >= 0) {
+        var cnt = 0;
+        slow = 0;
+        var i = 1;
+        while (i < n - 1) {
+            var w0: f64 = load64(data + 8 * (i - 1));
+            var w1: f64 = load64(data + 8 * i);
+            var w2: f64 = load64(data + 8 * (i + 1));
+            if (w1 > w0 && w1 > w2) {
+                var above = 0;
+                var dw: f64 = w1 - w1;
+                if (dw != 0.0) {
+                    above = 1;              # +∞ (NaN and −∞ fail the neighbour test)
+                } elif (tfin == 1) {
+                    var d: f64 = w1 - thr;
+                    var nb: f64 = -bnd;
+                    if (d > bnd) {
+                        above = 1;
+                    } elif (d >= nb) {
+                        above = _km_peak_above_exact(w1, lo, hi, t);
+                        slow = slow + 1;
+                    }
+                } else {
+                    above = _km_peak_above_exact(w1, lo, hi, t);
+                    slow = slow + 1;
+                }
+                if (above == 1) {
+                    if (pass == 0) { store64(out + 8 * cnt, i); }
+                    cnt = cnt + 1;
+                }
+            }
+            i = i + 1;
+        }
+        if (pass == 0) { return (cnt, slow); }
+        if (cnt > room) { return (0 - 1, slow); }
+        pass = pass - 1;
+    }
+    return (0, slow);
+}
+
 # Strict local maxima above a threshold: the indices i (1 ≤ i ≤ n − 2: end points are never peaks) of the n values at
-# `data` with data[i] > data[i − 1], data[i] > data[i + 1] and data[i] > min·(1 − t) + max·t, min and max taken over
-# the finite values (Rust's fold from (+∞, −∞) with its NaN-ignoring min / max; the interpolation never forms
-# max − min, which can overflow), t = `threshold`, a fraction of the range. NaN comparisons are false. The indices, in
-# ascending order, go to the caller's buffer `out` of `cap` i64 words: Ok(count); Ok(0) when n < 3, t is not in
-# [0, 1] (NaN included) or no value is finite, as Rust's empty Vec. Err(KM_ERR_INVALID_INPUT) if (data, n) is no
-# slice, or if more peaks are found than cap holds (`out` untouched; at most (n − 1)/2 can be). Mirrors
-# `spectroscopy::find_peaks`.
+# `data` with data[i] > data[i − 1], data[i] > data[i + 1] and data[i] > min + t·(max − min), min and max taken over
+# the finite values (Rust's fold from (+∞, −∞) with its NaN-ignoring min / max), t = `threshold`, a fraction of the
+# range. NaN comparisons are false. ADR 0002 #37 (the overflow audit's B6): the threshold test is exact — data[i] >
+# min·(1 − t) + max·t in rational arithmetic with t the given double, where Rust rounds the threshold (1 − t, the two
+# products and the sum, at the subnormal grid too) before comparing: [−0, 5·10⁻³²⁴, 0] at t = 0.75 has the exact
+# threshold 3.7·10⁻³²⁴, so index 1 is a peak (Rust's rounds to 5·10⁻³²⁴: none), and [10, 10.2, 10, 11, 10] at t = 1 −
+# 2⁻⁵³ the exact 11 − 2⁻⁵³ (Rust's 11), so index 3 is one. Rust's threshold decides wherever a proven bound separates
+# the value from it (_km_find_peaks_run). The indices, in ascending order, go to the caller's buffer `out` of `cap` i64
+# words: Ok(count); Ok(0) when n < 3, t is not in [0, 1] (NaN included) or no value is finite, as Rust's empty Vec.
+# Err(KM_ERR_INVALID_INPUT) if (data, n) is no slice, or if more peaks are found than cap holds (`out` untouched; at
+# most (n − 1)/2 can be). Mirrors `spectroscopy::find_peaks`.
 #must_use
 fn find_peaks(data, n, threshold: f64, out, cap): Result {
     if (n < 0 || (n > 0 && data == 0)) { return Err(KM_ERR_INVALID_INPUT); }
@@ -19586,29 +20067,9 @@ fn find_peaks(data, n, threshold: f64, out, cap): Result {
         k = k + 1;
     }
     if (lo > hi) { return Ok(0); }          # no finite values
-    var omt: f64 = 1.0 - threshold;
-    var abs_threshold: f64 = (lo * omt) + (hi * threshold);
     var room = cap;
     if (out == 0 || room < 0) { room = 0; }
-    var count_first = 0;
-    if (room < (n - 1) / 2) { count_first = 1; }
-    var pass = count_first;                 # pass 1 counts (only when the buffer might be too small), pass 0 writes
-    while (pass >= 0) {
-        var cnt = 0;
-        var i = 1;
-        while (i < n - 1) {
-            var w0: f64 = load64(data + 8 * (i - 1));
-            var w1: f64 = load64(data + 8 * i);
-            var w2: f64 = load64(data + 8 * (i + 1));
-            if (w1 > w0 && w1 > w2 && w1 > abs_threshold) {
-                if (pass == 0) { store64(out + 8 * cnt, i); }
-                cnt = cnt + 1;
-            }
-            i = i + 1;
-        }
-        if (pass == 0) { return Ok(cnt); }
-        if (cnt > room) { return Err(KM_ERR_INVALID_INPUT); }
-        pass = pass - 1;
-    }
-    return Ok(0);
+    var cnt, slow = _km_find_peaks_run(data, n, threshold, lo, hi, out, room, 0);
+    if (cnt < 0) { return Err(KM_ERR_INVALID_INPUT); }
+    return Ok(cnt);
 }

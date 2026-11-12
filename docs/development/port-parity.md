@@ -1762,6 +1762,73 @@ pending, 45,080 accepted (809 under ADR 6; under ADR 2 as §24 plus 845 #35 rows
 809), 0 glibc-matching (failed) ===
 ```
 
+## 26. The overflow audit's B6: the FFT, find_peaks' threshold, the flame's bracket, ADR 0002 #36 … #38 (2026-11-11)
+
+B1's decisions unchanged, with the user's "FFT: both" (the magnitudes and the butterflies, without the range limit) and
+"fix all three iterative edges" (the flame's being its bracket's exact sign test); `find_peaks`' exact threshold settled
+under the policy (ADR 0002's B6 addition). `fft_spectrum` (#36) runs hisab 1.4.0's transform with #20's semantics over
+every operation, each magnitude's √ rounded once, behind a per-operation operand test on Rust's own transform (a bin
+whose square sum alone leaves the range gets its unbounded √; a NaN or ±∞ sample keeps Rust's IEEE spectrum);
+`find_peaks` (#37) compares a candidate with the exact min + t·(max − min), Rust's rounded threshold deciding behind a
+proven error bound; `adiabatic_flame_temperature` (#38) compares the signs of f(T₀) and f(T_max) exactly, and so does its
+transcribed bisection. Rust's checks, Err codes and order are kept. The corpus keeps the oracle's values;
+`scripts/oracle/` appends each function's B6 edge rows with its own seed: spectroscopy 67,869 → 70,777 (2,393
+`find_peaks`, 515 `fft_spectrum` rows), thermochem 11,149 → 11,592 (443 flame rows).
+
+| Function | Class | Rows | Oracle Ok | Oracle Err | Noted (port ≠ oracle) | changing, of the rows before B6 | ulp of the rest |
+|---|---|---|---|---|---|---|---|
+| `spectroscopy::fft_spectrum` | C | 728 | 704 | 24 | 418 (#36) | 41 of 213 | 0 |
+| `spectroscopy::find_peaks` | A | 3,387 | 3,387 | 0 | 222 (#37) | 3 of 994 | — |
+| `thermochem::adiabatic_flame_temperature` | B | 2,380 | 1,938 | 442 | 273 (#38: Rust's ComputationError, the port's Ok) | 16 of 1,937 | 0 |
+
+- **The noted rows** carry the port's whole result (`(v:n f:… …)` for the spectrum, `(v:n i:… …)` for the peaks; the
+  harness's `_par_map_toks`) or its value and solver path (`(newton, 0 steps) = <x> (f:…)`; `_par_got_noted`), and are
+  accepted under ADR 2. Every other row is the port's result and its reference at once. Of the rows before B6 exactly
+  the survey's and the brief's: 41 `fft_spectrum` rows (40 where a bin of Rust's is 0, ±∞ or NaN and the port's
+  representable — 2,158 bins; the survey counted 2,156 — and 1 where Rust's NaN is the value ∞; a magnitude-only fix
+  would repair 28 of them), 3 `find_peaks` rows (`[−0, 5·10⁻³²⁴, 0]` at t = 0.75 and 1 − 2⁻⁵³, `[10, 10.2, 10, 11, 10]`
+  at 1 − 2⁻⁵³) and 16 flame rows (four real systems at 10⁻²⁰⁰ and 10⁻¹⁷⁰, at T₀ = 298.15 and 500 K).
+- **The flame's kept Rust behaviour**: at such a scale |f| is below Newton's absolute 10⁻³ J/mol from the start, so the
+  port returns Newton's initial guess unconverged (CH₄/air at 10⁻²⁰⁰: 2204.756463878327 K; the scale-free root 2327.18
+  K), Rust's own answer at any scale where its product does not underflow (10⁻¹⁵⁰, within an ulp).
+- **The proofs** (`validate.py` §24). The flame: every row recomputed with the exact tests (2,345 past validation; 47 with
+  an underflowed zero product of equal signs, Err in both; 111 with a subnormal nonzero product, bracketed in both), the
+  sign tests against Rust's products on 21,444 pairs (they differ on 1,439 and 1,478, each an underflowing product), and
+  B4's replay of the flame's Shomate evaluations with the port's own (664,046, all in #34's box). `find_peaks`: every row
+  in `Fraction`s; Rust's threshold within the proven bound and the port's bound above it on every row past the checks;
+  6,546 candidates, 3,993 decided by the fast test (each the exact decision), 233 where Rust's threshold decides
+  otherwise (109 at subnormal or zero thresholds, 16 with ±DBL_MAX ends, 108 other normal near-ties). The FFT: every row
+  with a finite signal recomputed on `mpfr_ref.UX` (656 such signals); no row whose chain stays in the normal range noted
+  (226), nor one where the port's fast test passes with every bin in range (194); the noted rows by their worst bin: 408
+  where Rust's is 0, ±∞ or NaN and the port's representable, 1 where Rust's NaN is ±∞, 8 degraded, 1 within 2 ulp
+  (9,177 noted bins).
+- **`cr_verify.py`**: `flame` 14,010 arguments (and its bisection's exact same-sign test, 4,604 of them refusing), `pk3`,
+  `pk5`, `pk8`, `pk16` 95,000 arrays each (the exact predicate forced on every candidate), `fft1` … `fft256` 110,718 signals
+  (the unbounded transform forced), `signsc` 140,110 sums (`_km_sign_scaled` against `Fraction`; its region of a round's
+  remainder against a larger deferred term caught a mistyped bound in review, corrected): 0 mismatches, the same bits and
+  flags on x86_64 ELF, x86_64 PE and aarch64.
+
+Tests: `tests/thermochem.tcyr`'s `cyrius_adr38_flame_sign` (the survey's example, its ends' −0 product, the endothermic
+Err, the bisection's refusal of a +0 product, CH₄/air at 10⁻²⁰⁰ against 10⁻¹⁵⁰) and `tests/spectroscopy.tcyr`'s ADR 0002
+#36 group (the survey's examples, the data bound 2⁻⁹²¹ ulp by ulp, n = 4's product below 2⁻¹⁰²², an aliased signal, a
+non-finite sample, a bin's square sum past DBL_MAX, 3,000 seeded signals against the forced slow path) and #37 group
+(the survey's cases, a 53-bit tie, ±DBL_MAX thresholds, a +∞ candidate, `_km_sign_scaled` across rounds, 20,000 seeded
+arrays with near-ties against the exact predicate forced); no Rust test changes.
+
+**Cost** (`tests/kimiya.bcyr` before → after, the same host, alternating runs; `bench_audit_b6` in `tests/audit2.bcyr`;
+`docs/benchmarks-rust-v-cyrius.md`'s B6 section): `fft_spectrum_256` 27.3 → 30.5 µs, `_1024` 129.2 → 143.1, `_4096`
+605.6 → 669.4 (+11–12 %), `find_peaks_1000` 19.0 → 20.3 µs, `adiabatic_flame_ch4_air` 3.37 → 3.40 µs; the edges
+`fft_spectrum_256_huge` 27.7 → 318.1 µs, `_subnormal` 35.4 → 349.8, `_squares` 27.4 → 45.1,
+`find_peaks_1000_subnormal` 19.5 → 39.0 µs, `adiabatic_flame_tiny` 0.96 → 1.48 µs.
+
+Summary, every target (x86_64 ELF, x86_64 PE and aarch64): **18 modules, 0 failing; 338,883 ok, 0 failed, 0 measured, 0
+pending, 45,993 accepted (809 under ADR 6; under ADR 2 as §25 plus 913 #36–#38 rows), 0 glibc-matching.**
+
+```text
+=== parity summary: 18 modules, 0 failing | rows: 338883 ok, 0 failed, 0 measured, 0 pending, 45993 accepted (ADR 6:
+809), 0 glibc-matching (failed) ===
+```
+
 ## How to reproduce
 
 ```sh

@@ -119,14 +119,16 @@ type for average oxidation states, no separate extrapolating Antoine function. I
   - [x] B7 — F9, exp and exp10 arguments (`equilibrium_constant`'s −ΔG/(R·T), the three activity models' log₁₀ γ with an
     unbounded exponent, the argument's final operation rounded once, then the unchanged correctly rounded exp / 10^x;
     no new primitive) — done in the Cyrius API (ADR 0002 #35), the audit's B5
-  - [ ] B8 — the FFT (both the magnitudes' re² + im² and the butterflies, hisab 1.4.0's transform without the range
+  - [x] B8 — the FFT (both the magnitudes' re² + im² and the butterflies, hisab 1.4.0's transform without the range
     limit, by the user's answer "Both"), the flame's exact bracket sign test, `find_peaks`' threshold evaluated exactly
+    — done in the Cyrius API (ADR 0002 #36, #37 and #38's flame part; `src/mathx.cyr`'s new `_km_sign_scaled`), the
+    audit's B6
   - [ ] B9 — F15, an exact `balance_equation`
   - [ ] B10 — F10's unbounded exponentials and the exponential × prefactor functions
   - [ ] B11 — F11 and F12 (`nth_order_half_life`'s pow, `henderson_hasselbalch`'s log10)
   - [ ] B12 — the iterative functions, by the user's answer "Fix all three": the weak acid/base pH Newton with an
     unbounded exponent on a slow path only; Peng–Robinson's coefficient edges only (Rust's cubic unchanged); the flame's
-    exact sign test (if not already done in B8)
+    exact sign test was done in B8 (ADR 0002 #38, which B12 extends with the other two)
 - [ ] *additive* — `fitting::fit_beer_lambert` → also return the intercept
 - [ ] *additive* — `spectroscopy::rydberg_wavelength` → nuclear-mass parameter for the reduced-mass correction
 - [ ] `integration::soorat::MolecularStructure::from_molecule` → `Result`
