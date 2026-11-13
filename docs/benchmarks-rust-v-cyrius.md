@@ -1,9 +1,10 @@
 # Benchmarks — Rust 1.2.0 vs the Cyrius port
 
 Each row times one benchmark body: the same work in Rust (`rust-old/`, release build) and in
-Cyrius (`tests/kimiya.bcyr`, and since the overflow audit's B4 `tests/audit.bcyr` for the audit's Cyrius-only benches;
-`cyrius bench` runs both). Port milestones append rows as they land. Numbers
-are host-specific, so compare within a column set, never across hosts.
+Cyrius (`tests/kimiya.bcyr`; since the overflow audit's B4 `tests/audit.bcyr` and since B5 `tests/audit2.bcyr` for the
+audit's Cyrius-only benches; since M5a `tests/numerics.bcyr`; `cyrius bench` runs all four). The release's full table is
+[2.0.0: every benchmark](#200-every-benchmark-2026-11-13); the milestone sections after it appended their rows as they
+landed. Numbers are host-specific, so compare within a column set, never across hosts.
 
 ## Method
 
@@ -17,6 +18,247 @@ are host-specific, so compare within a column set, never across hosts.
 - **Host:** x86_64 Linux, HPET clocksource. Toolchains: rustc 1.99.1 (release); Cyrius 6.7.18
   (ganita 1.2.15).
 
+## 2.0.0: every benchmark (2026-11-13)
+
+The release's numbers: one `cyrius bench` run of all four bench files on 2026-11-13 (the 2.0.0 tree; nothing
+re-optimised for it), on the host and toolchains of the Method above (the clock-read floor measured 1.21 µs).
+Rust's column is `rust-old/benchmarks.md`'s *latest* criterion median. The milestone sections below describe
+each body, the optimizations and why the gap is what it is; their Cyrius numbers are that milestone's run, so
+they differ from these by run-to-run noise (a few per cent) and by the later changes they record.
+
+### The 31 Rust benchmarks
+
+Every bench of `rust-old/benches/benchmarks.rs` has its Cyrius counterpart, the same name and body (`dynamics/*`
+and `fitting/*` in `tests/numerics.bcyr`, the rest in `tests/kimiya.bcyr`).
+
+| Bench | Rust 1.2.0 | Cyrius 2.0.0 | Cyrius / Rust |
+|---|---|---|---|
+| `element/lookup_by_number` | 0.84 ns | 4.63 ns | 5.5× |
+| `element/lookup_by_symbol` | 44.73 ns | 67.7 ns | 1.5× |
+| `molecule/molecular_weight_glucose` | 3.63 ns | 27.8 ns | 7.6× |
+| `stoichiometry/balance_ch4_combustion` | 233.90 ns | 783 ns | 3.3× |
+| `stoichiometry/oxidation_states_kmno4` | 22.38 ns | 121 ns | 5.4× |
+| `gas/ideal_gas_pressure` | 2.18 ns | 115 ns | 52.8× |
+| `gas/peng_robinson_z_n2_1mpa` | 61.39 ns | 282 ns | 4.6× |
+| `reaction/gibbs_free_energy` | 1.75 ns | 17.9 ns | 10.2× |
+| `thermo/heat_transfer` | 0.95 ns | 65.8 ns | 69.2× |
+| `thermochem/adiabatic_flame_ch4_air` | 301.48 ns | 3.34 µs | 11.1× |
+| `thermochem/enthalpy_change_cp` | 24.00 ns | 166 ns | 6.9× |
+| `thermochem/reaction_enthalpy_ch4` | 38.58 ns | 302 ns | 7.8× |
+| `thermochem/shomate_cp` | 2.34 ns | 32.9 ns | 14.1× |
+| `thermochem/vant_hoff_k` | 9.51 ns | 74.5 ns | 7.8× |
+| `kinetics/arrhenius_rate` | 6.78 ns | 65.6 ns | 9.7× |
+| `kinetics/eyring_rate` | 6.73 ns | 60.4 ns | 9.0× |
+| `kinetics/michaelis_menten` | 2.92 ns | 24.3 ns | 8.3× |
+| `dynamics/consecutive_100steps` | 5.04 µs | 18.7 µs | 3.7× |
+| `dynamics/first_order_100steps` | 4.41 µs | 9.70 µs | 2.2× |
+| `solution/ph_from_h` | 9.73 ns | 86.5 ns | 8.9× |
+| `solution/weak_acid_ph` | 34.85 ns | 221 ns | 6.3× |
+| `electrochemistry/lookup_half_reaction` | 57.06 ns | 123 ns | 2.2× |
+| `electrochemistry/nernst_potential` | 6.42 ns | 89.8 ns | 14.0× |
+| `spectroscopy/absorbance` | 0.98 ns | 65.7 ns | 67.0× |
+| `spectroscopy/bohr_energy_level` | 1.21 ns | 46.8 ns | 38.7× |
+| `spectroscopy/isotope_pattern_glucose` | 2.80 µs | 15.5 µs | 5.5× |
+| `nuclear/binding_energy_per_nucleon_fe56` | 2.02 ns | 27.7 ns | 13.7× |
+| `nuclear/semi_empirical_fe56` | 18.50 ns | 131 ns | 7.1× |
+| `potential/dihedral_angle` | 20.35 ns | 133 ns | 6.5× |
+| `fitting/arrhenius_6pts` | 233.40 ns | 951 ns | 4.1× |
+| `fitting/polynomial_deg2_20pts` | 500.05 ns | 2.19 µs | 4.4× |
+
+Over the 31: the median Cyrius / Rust ratio is 7.7× and the geometric mean 8.2× (1.5× to 69×). The four
+largest are bodies of a few multiplies that the port rounds once: `thermo/heat_transfer` (ADR 0002 #27; 5.4 ns before
+the overflow audit's B1, 65 ns after), `spectroscopy/absorbance` (#30; 5 → 68 ns) and `gas/ideal_gas_pressure` (#31;
+18 → 119 ns) through the correctly rounded monomial, and `spectroscopy/bohr_energy_level`, the exact Rydberg rational
+rounded once (#21; 9 → 49 ns). Rust inlines each into two or three multiplies. Every body computes what the golden
+corpus checks: the oracle's bits, or the value an ADR accepts; parity, not speed, is the bar.
+
+### The Cyrius-only benchmarks
+
+No Rust counterpart: the port's own benches, by file. 163 rows, 160 distinct benches (`mathx/cr_exp`, `cr_expm1`
+and `cr_exp10` are in two files). Where a milestone section gives an ad hoc Rust timing of the same body, it is there.
+
+**`tests/kimiya.bcyr`** (54): the port's own benches beside Rust's: the correctly rounded primitives against the stdlib's, more bodies per module, the ADR 0002 ties and slow paths.
+
+| Bench | Cyrius 2.0.0 |
+|---|---|
+| `mathx/cr_exp` | 39.2 ns |
+| `mathx/cr_expm1` | 49.8 ns |
+| `mathx/cr_exp10` | 54.1 ns |
+| `mathx/cr_ln` | 48.3 ns |
+| `mathx/cr_log10` | 76.8 ns |
+| `mathx/cr_pow` | 133 ns |
+| `mathx/ganita_f64_pow` | 188 ns |
+| `mathx/cr_pow_1.409e-132` | 171 ns |
+| `mathx/ganita_f64_pow_1.409e-132` | 207 ns |
+| `organic/enthalpy_from_bonds` | 48.4 ns |
+| `inorganic/lookup_ionic_radius` | 108 ns |
+| `nuclear/decay_chain_two_step` | 254 ns |
+| `mathx/cr_sin` | 73.3 ns |
+| `mathx/f64_sin` | 36.6 ns |
+| `mathx/cr_cos` | 80.5 ns |
+| `mathx/f64_cos` | 39.2 ns |
+| `mathx/cr_sincos` | 114 ns |
+| `mathx/cr_atan2` | 111 ns |
+| `mathx/ganita_f64_atan2` | 51.8 ns |
+| `mathx/cr_acos` | 138 ns |
+| `potential/bond_angle` | 215 ns |
+| `potential/lennard_jones` | 37.0 ns |
+| `potential/lj_equilibrium_distance` | 103 ns |
+| `potential/morse` | 62.4 ns |
+| `mathx/cr_exp2_scaled` | 141 ns |
+| `potential/distance_3d` | 16.0 ns |
+| `potential/distance_3d_2p600` | 315 ns |
+| `potential/bond_angle_2p600` | 1.13 µs |
+| `potential/dihedral_angle_2p600` | 1.31 µs |
+| `potential/bond_angle_linear` | 138 ns |
+| `spectroscopy/bohr_transition_energy` | 71.1 ns |
+| `spectroscopy/rydberg_wavelength` | 73.7 ns |
+| `spectroscopy/series_wavelength_balmer_alpha` | 78.6 ns |
+| `spectroscopy/reduced_mass_hcl` | 73.0 ns |
+| `spectroscopy/bohr_transition_energy_tie` | 2.44 µs |
+| `spectroscopy/reduced_mass_tie` | 2.20 µs |
+| `spectroscopy/isotope_pattern_cystine` | 18.3 µs |
+| `spectroscopy/isotope_pattern_s8` | 18.4 µs |
+| `spectroscopy/fft_spectrum_256` | 29.1 µs |
+| `spectroscopy/fft_spectrum_1024` | 137 µs |
+| `spectroscopy/fft_spectrum_4096` | 639 µs |
+| `spectroscopy/find_peaks_1000` | 19.7 µs |
+| `spectroscopy/wavenumber_from_wavelength` | 47.5 ns |
+| `stoichiometry/balance_kmno4_hcl` | 2.19 µs |
+| `stoichiometry/oxidation_states_fe3o4` | 110 ns |
+| `stoichiometry/limiting_reagent` | 33.1 ns |
+| `stoichiometry/theoretical_yield_moles` | 115 ns |
+| `stoichiometry/percent_yield` | 82.1 ns |
+| `stoichiometry/percent_composition_glucose` | 269 ns |
+| `stoichiometry/empirical_formula_glucose` | 592 ns |
+| `stoichiometry/theoretical_yield_moles_tie` | 132 ns |
+| `stoichiometry/percent_yield_subnormal` | 1.63 µs |
+| `stoichiometry/limiting_reagent_tie` | 93.5 ns |
+| `stoichiometry/empirical_formula_edge` | 7.49 µs |
+
+**`tests/audit.bcyr`** (66): the overflow audit's B1–B4: the rounded-once functions, their edges, ties and slow paths.
+
+| Bench | Cyrius 2.0.0 |
+|---|---|
+| `thermo/specific_heat_from_calorimetry` | 86.1 ns |
+| `phase/boiling_point_elevation` | 66.6 ns |
+| `phase/freezing_point_depression` | 66.9 ns |
+| `phase/osmotic_pressure` | 140 ns |
+| `kinetics/second_order_concentration` | 32.6 ns |
+| `kinetics/zero_order_half_life` | 16.8 ns |
+| `kinetics/steady_state_intermediate` | 89.4 ns |
+| `kinetics/pre_equilibrium_rate` | 126 ns |
+| `thermo/heat_transfer_tie` | 369 ns |
+| `phase/osmotic_pressure_subnormal` | 4.05 µs |
+| `kinetics/second_order_concentration_edge` | 229 ns |
+| `kinetics/michaelis_menten_edge` | 126 ns |
+| `solution/dilution` | 84.4 ns |
+| `solution/solution_conductivity` | 70.8 ns |
+| `electrochemistry/faraday_mass_deposited` | 107 ns |
+| `electrochemistry/faraday_charge_required` | 118 ns |
+| `electrochemistry/faraday_mass_ratio` | 147 ns |
+| `spectroscopy/concentration_from_absorbance` | 87.7 ns |
+| `spectroscopy/vibrational_frequency` | 85.1 ns |
+| `spectroscopy/rigid_rotor_energy` | 109 ns |
+| `spectroscopy/rotational_constant` | 115 ns |
+| `spectroscopy/diatomic_moment_of_inertia` | 72.4 ns |
+| `electrochemistry/nernst_potential_edge` | 197 ns |
+| `spectroscopy/vibrational_frequency_edge` | 85.5 ns |
+| `spectroscopy/vibrational_frequency_subnormal` | 884 ns |
+| `electrochemistry/faraday_mass_ratio_tie` | 393 ns |
+| `gas/ideal_gas_volume` | 116 ns |
+| `gas/gas_density` | 105 ns |
+| `gas/van_der_waals_pressure` | 52.2 ns |
+| `gas/peng_robinson_pressure` | 95.1 ns |
+| `gas/redlich_kwong_pressure` | 182 ns |
+| `potential/coulomb` | 120 ns |
+| `potential/coulomb_force` | 141 ns |
+| `potential/morse_width_parameter` | 119 ns |
+| `inorganic/born_lande_lattice_energy` | 48.2 ns |
+| `gas/van_der_waals_pressure_edge` | 257 ns |
+| `gas/peng_robinson_pressure_edge` | 602 ns |
+| `gas/redlich_kwong_pressure_edge` | 566 ns |
+| `potential/lennard_jones_edge` | 204 ns |
+| `potential/morse_width_parameter_subnormal` | 1.22 µs |
+| `inorganic/born_lande_lattice_energy_edge` | 258 ns |
+| `nuclear/binding_energy_per_nucleon_edge` | 114 ns |
+| `potential/morse_width_parameter_tie` | 1.23 µs |
+| `thermo/hess_law` | 14.9 ns |
+| `thermo/enthalpy_from_formation` | 22.7 ns |
+| `thermochem/reaction_gibbs_energy` | 298 ns |
+| `thermochem/reaction_entropy` | 284 ns |
+| `nuclear/q_value` | 25.7 ns |
+| `solution/ionic_strength` | 32.4 ns |
+| `inorganic/born_haber_lattice_energy` | 14.4 ns |
+| `solution/kohlrausch_molar_conductivity` | 28.3 ns |
+| `solution/limiting_molar_conductivity` | 23.9 ns |
+| `kinetics/zero_order_concentration` | 17.3 ns |
+| `thermochem/shomate_enthalpy_antiderivative` | 54.7 ns |
+| `thermo/hess_law_edge` | 165 ns |
+| `thermo/enthalpy_from_formation_edge` | 211 ns |
+| `thermochem/reaction_enthalpy_edge` | 594 ns |
+| `nuclear/q_value_edge` | 261 ns |
+| `solution/ionic_strength_edge` | 137 ns |
+| `inorganic/born_haber_lattice_energy_edge` | 175 ns |
+| `reaction/gibbs_free_energy_edge` | 117 ns |
+| `solution/kohlrausch_molar_conductivity_edge` | 127 ns |
+| `solution/limiting_molar_conductivity_edge` | 132 ns |
+| `kinetics/zero_order_concentration_edge` | 140 ns |
+| `thermochem/shomate_cp_edge` | 320 ns |
+| `thermochem/shomate_enthalpy_antiderivative_edge` | 474 ns |
+
+**`tests/audit2.bcyr`** (33): the overflow audit's B5–B10a: the exp / exp10 arguments, the FFT, `find_peaks`, the flame, unbounded balancing, the unbounded-exponent primitives (`mathx/cr_exp`, `cr_expm1` and `cr_exp10` repeat `tests/kimiya.bcyr`'s as the B10a baseline).
+
+| Bench | Cyrius 2.0.0 |
+|---|---|
+| `reaction/equilibrium_constant` | 63.4 ns |
+| `solution/debye_huckel_limiting` | 86.4 ns |
+| `solution/debye_huckel_extended` | 100 ns |
+| `solution/davies_activity` | 96.0 ns |
+| `reaction/equilibrium_constant_edge` | 151 ns |
+| `reaction/equilibrium_constant_subnormal` | 165 ns |
+| `solution/debye_huckel_limiting_edge` | 92.5 ns |
+| `solution/debye_huckel_extended_edge` | 277 ns |
+| `solution/debye_huckel_extended_overflow` | 277 ns |
+| `solution/davies_activity_edge` | 162 ns |
+| `spectroscopy/fft_spectrum_256_huge` | 306 µs |
+| `spectroscopy/fft_spectrum_256_subnormal` | 340 µs |
+| `spectroscopy/fft_spectrum_256_squares` | 43.2 µs |
+| `spectroscopy/find_peaks_1000_subnormal` | 37.6 µs |
+| `thermochem/adiabatic_flame_tiny` | 1.42 µs |
+| `stoichiometry/balance_survey_2x3` | 3.61 µs |
+| `stoichiometry/balance_overflow_10x9` | 56.2 µs |
+| `stoichiometry/balance_dense_30x31` | 157.4 ms |
+| `mathx/cr_exp` | 39.0 ns |
+| `mathx/cr_exp_ux` | 49.0 ns |
+| `mathx/cr_exp_ux_acc` | 1.71 µs |
+| `mathx/cr_exp_ux_subnormal` | 76.1 ns |
+| `mathx/cr_exp_ux_minus_1e4` | 145 ns |
+| `mathx/cr_exp_ux_1e12` | 145 ns |
+| `mathx/cr_exp_ux_1e15` | 568 ns |
+| `mathx/cr_exp_ux_acc_minus_1e4` | 1.98 µs |
+| `mathx/cr_expm1` | 50.1 ns |
+| `mathx/cr_expm1_ux` | 59.5 ns |
+| `mathx/cr_expm1_ux_1e4` | 152 ns |
+| `mathx/cr_exp10` | 54.1 ns |
+| `mathx/cr_exp10_ux` | 64.2 ns |
+| `mathx/cr_exp10_ux_1e4` | 147 ns |
+| `mathx/cr_exp10_ux_acc_minus_1e12` | 1.99 µs |
+
+**`tests/numerics.bcyr`** (10): M5's systems: the integrators, the elimination, the normal draw, the network rank, the gradients.
+
+| Bench | Cyrius 2.0.0 |
+|---|---|
+| `dynamics/adaptive_first_order` | 5.04 µs |
+| `dynamics/stiff_robertson_400steps` | 425 µs |
+| `dynamics/stochastic_100steps` | 21.7 µs |
+| `numerics/gaussian_elimination_8x8` | 2.15 µs |
+| `numerics/pcg32_next_normal` | 177 ns |
+| `network/stoichiometric_matrix_h2_br2` | 277 ns |
+| `network/rank_michaelis_menten` | 919 ns |
+| `network/rank_chapman` | 138 µs |
+| `sensitivity/arrhenius_gradient` | 100 ns |
+| `sensitivity/compute_gradient_arrhenius` | 496 ns |
 ## M1 Foundation (2026-11-09)
 
 | Bench | Body | Rust | Cyrius | Cyrius / Rust |

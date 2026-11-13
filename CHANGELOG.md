@@ -7,10 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Rust 1.2.0 is frozen in
-`rust-old/` as the parity oracle (ADR 0001).
+## [2.0.0] - 2026-11-13
+
+**The Cyrius port.** kimiya 2.0.0 is a Cyrius library (toolchain 6.7.18, hisab 3.4.1), ported from the Rust crate
+1.2.0, which stays frozen in `rust-old/` as the parity oracle (ADR 0001; plan: `docs/development/kimiya-port-plan.md`,
+milestones M0–M7). All 22 in-scope modules are ported. Their golden corpus is 342,485 rows ok and 46,634 accepted, with
+0 failed, on x86_64 ELF, x86_64 PE and aarch64. The accepted rows are ADR 0002's API changes and ADR 0006's correctly
+rounded values. Of Rust's 688 tests, 652 are ported, 1 is n/a (serde) and 35 are deferred with their modules. Every one
+of `rust-old/src`'s 519 public items is ported, renamed by ADR 0002, n/a or deferred
+(`docs/development/rust-parity.md`). The bridges, the soorat integration and the `logging` feature wait on a Cyrius
+consumer (port plan §2.2).
+
+### Breaking (relative to Rust 1.2.0)
+- The Cyrius API is not source-compatible with the Rust crate. It keeps Rust's names and semantics in Cyrius's form
+  (port plan §6.3–§6.4: handles for table lookups, value-form `Result` / `Option`, caller buffers for `Vec` results,
+  function pointers with a context for closures), and it changes Rust's API or results on purpose where ADR 0002 says
+  so. *Migration:* [ADR 0002](docs/adr/0002-port-api-divergences.md) lists every change with how the parity harness
+  compares it; the "Breaking (relative to Rust 1.2.0, ADR 0002 #N)" sections below give each one's migration note.
+  Rust 1.x stays on crates.io for the Rust dependents, with 1.2.0's documented behaviour (there is no Rust 2.0)
 
 ### Added
+- **M7 release** (port plan §4):
+  - the Rust-test ledger `docs/development/rust-parity.md`, written and gated (`--check`) by
+    `scripts/rust_test_ledger.py`: each of the 688 Rust tests (662 unit, 24 integration, 2 doc) is ported (652, 25 of
+    them adapted to an ADR 0002 change or the flat API), n/a (1: molecule's serde round-trip) or deferred (35: bridge 22,
+    soorat 12, logging 1); every port's `test_group` is the Rust name and its file's `main` calls it
+  - `tests/integration.tcyr`: the 16 integration tests not yet ported and the 2 doc tests (the README's Quick Start,
+    `adiabatic_flame_temperature`'s example), against the bundle `dist/kimiya.cyr`; three adapted to ADR 0002 #1's J/mol
+  - `scripts/surface_parity.py` covers the whole surface: all 519 public items of `rust-old/src` (429 ported, 2 renamed
+    by ADR 0002, 39 n/a, 49 deferred), lib.rs's module declarations and re-exports, every `pub` line accounted for, and
+    the 124 derived trait impls (`--markdown` writes the ledger page's table)
+  - `docs/benchmarks-rust-v-cyrius.md`: every Rust benchmark with its 2.0.0 Cyrius number and the 160 Cyrius-only ones
+  - CI: the ledger's `--check` beside surface parity
 - **M0 initialize** — `cyrius port` scaffold on Cyrius 6.7.18; `cyrius.cyml` with hisab 3.4.1; golden-value
   generator `scripts/oracle/` (constants 45 + math 18,647 rows, glibc 2.44-pinned, `--check`, independent
   `validate.py`); generated `src/constants.cyr` (14 `KM_` physical constants); parity harness
@@ -1329,6 +1357,9 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   the matrix's entries itself.
 
 ### Changed
+- `VERSION` 2.0.0 (`cyrius.cyml` reads it through `${file:VERSION}`; `dist/kimiya.cyr` regenerated); `README.md`
+  describes the Cyrius library: its modules, its use from a `cyrius.cyml`, a Quick Start that compiles, and the API's
+  mapping from Rust
 - Rust crate, CI, cargo scripts, benchmarks and architecture overview moved to `rust-old/`; CI is now Cyrius
   (`test`, `test --bounds`, `deps --locked`, `audit`)
 - **Results differ from Rust 1.2.0 in the last bit wherever glibc misrounds** (M3c, ADR 0006). 1.2.0's transcendentals
@@ -1688,5 +1719,6 @@ Initial scaffold with real chemistry implementations.
 - **thermo** — heat transfer (q = mcΔT), Hess's law, formation enthalpy, specific heat from calorimetry
 - **error** — `KimiyaError` with `#[non_exhaustive]` and `thiserror` integration
 
+[2.0.0]: https://github.com/MacCracken/kimiya/releases/tag/2.0.0
 [1.2.0]: https://github.com/MacCracken/kimiya/releases/tag/1.2.0
 [1.0.0]: https://github.com/MacCracken/kimiya/releases/tag/v1.0.0

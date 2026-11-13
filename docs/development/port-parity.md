@@ -2011,6 +2011,27 @@ count).
 Summary, every target (22 modules; numerics apart): **342,485 ok, 0 failed, 0 measured, 0 pending, 46,634 accepted
 (ADR 6: 810), 0 glibc-matching** — §29's 339,944 ok plus 2,541, and 227 more accepted under ADR 2 (#2).
 
+## 31. M7: release 2.0.0 (2026-11-13)
+
+No golden row changes: M7 adds no function and no row. The corpus is §30's on every target (22 modules; numerics apart):
+**342,485 ok, 0 failed, 0 measured, 0 pending, 46,634 accepted (ADR 6: 810), 0 glibc-matching**, identical on x86_64
+ELF, x86_64 PE and aarch64.
+
+- **The Rust tests** ([`rust-parity.md`](rust-parity.md), `scripts/rust_test_ledger.py --check`): 688 (662 unit, 24
+  integration, 2 doc), 652 ported (25 adapted to an ADR 0002 change or the flat API), 0 folded into golden rows, 1 n/a
+  (molecule's serde round-trip), 35 deferred with the §2.2 modules. The last 18 (16 integration tests and the 2 doc
+  tests) are `tests/integration.tcyr`'s, which includes the bundle `dist/kimiya.cyr`; it passes on every target.
+- **The whole surface** (`scripts/surface_parity.py`): every public item of every file under `rust-old/src`, and every
+  `pub` line before `#[cfg(test)]` one of them — 519 items, 429 ported (417 by their Cyrius name, 12 in another form:
+  the 8 statics as generated columns read through handles, the oxidation-states slice as a count and an accessor, the
+  `Result` alias and the two type aliases as the value-form Result and flat records), 2 renamed by
+  ADR 0002 #6 (`KM_GEOMETRY_T_SHAPED`, `functional_group_is_hydrogen_bond_donor`, each checked to exist), 39 n/a (lib.rs's
+  21 module declarations and 18 prelude re-exports, each re-export checked to name a public item of its module) and 49
+  deferred (bridge's 7 items, soorat's 37, logging's 1, and their 4 module declarations). The 124 derived trait impls
+  on 28 types: KimiyaError's thiserror `Error` is `km_error_name` / `km_error_message`, the other 81 live ones n/a
+  (Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize), soorat's 42 deferred. The in-scope modules' count
+  stays 431/431.
+
 ## How to reproduce
 
 ```sh
@@ -2021,8 +2042,11 @@ python3 -I scripts/oracle/validate.py . --sensitivity   # S of the class-C funct
 python3 -I scripts/oracle/cr_verify.py                  # the correctly rounded primitives against MPFR, every target
 python3 -I scripts/oracle/mathx_tables.py --check       # the generated tables and their proofs (2^(1/6)'s bound included)
 python3 -I scripts/oracle/isotope_sources.py . DIR      # ADR 0002 #23's isotope records against fresh downloads in DIR
+python3 -I -B scripts/surface_parity.py .               # the whole Rust surface against src/ (§31)
+python3 -I -B scripts/rust_test_ledger.py . --check     # every Rust test ported or recorded (§31)
 cyrius test tests/parity.tcyr                  # x86_64 ELF
 cyrius test tests/numerics.tcyr                # the numerics module (M5a)
+cyrius test tests/integration.tcyr             # the integration and doc tests, on the bundle (M7)
 cyrius test --win tests/parity.tcyr            # x86_64 PE, needs wine
 cyrius test --aarch64 tests/parity.tcyr        # aarch64, needs qemu-aarch64
 ```

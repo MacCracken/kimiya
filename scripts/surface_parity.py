@@ -19,14 +19,23 @@ Cyrius name the porting rules give (CLAUDE.md, port plan §6.4):
                                         (KimiyaError: `enum KmError`, `KM_ERR_<SNAKE(V)>`)
 - `pub struct S`                     -> `struct Km<S> {`, or a handle with accessors (STRUCT_ACCESSORS)
 - a `pub` field f of a struct        -> the accessor STRUCT_ACCESSORS names, or a field of `Km<S>`
-Anything else needs an entry in EXCEPTIONS with its reason. Every file under rust-old/src must be
-in MODULES, PENDING_MODULES (a later milestone), DEFERRED_MODULES or NOT_APPLICABLE_MODULES. Exits 1
-on any item missing, an EXCEPTIONS entry that names no Rust item, or a file unaccounted for.
+A Rust item ADR 0002 renames needs an entry in RENAMED (its Cyrius name, which must exist); anything else
+needs an entry in EXCEPTIONS with its reason (ported in another form). Every file under rust-old/src
+must be in MODULES, PENDING_MODULES (a later milestone), DEFERRED_MODULES or NOT_APPLICABLE_MODULES.
+
+The whole surface (M7, the release gate): every public item of every file under rust-old/src, the
+deferred modules' item by item, lib.rs's `pub mod` declarations and `pub use` re-exports (each of which
+must name a public item of its module), and the trait impls the types derive. Every `pub` line before
+`#[cfg(test)]` must be one of the items counted. Each item is ported (by its Cyrius name, or in another
+form), renamed by ADR 0002, n/a, or deferred (port plan §2.2). Exits 1 on any item missing, an
+EXCEPTIONS or RENAMED entry that names no Rust item, a `pub` line no item accounts for, or a file
+unaccounted for. `--markdown` prints the whole-surface table instead (docs/development/rust-parity.md).
 """
 import re, sys
 from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
+markdown = "--markdown" in sys.argv[2:]
 
 # The ported modules: the free-fn prefix and which Rust structs keep a Cyrius struct.
 MODULES = {
@@ -109,10 +118,6 @@ EXCEPTIONS = {
                                                     "src/electrochemistry_data.cyr (KM_STANDARD_POTENTIALS_COUNT "
                                                     "rows), read through handles (row + 1): lookup_half_reaction and "
                                                     "the half_reaction_* accessors (port plan §6.4)",
-    "organic::Geometry::TShapedThreeLonePairs": "renamed KM_GEOMETRY_T_SHAPED by ADR 0002 #6 (at its Rust position, 7): "
-                                                "the Rust name is a misnomer, ClF₃ has two lone pairs",
-    "organic::FunctionalGroup::hydrogen_bonding": "renamed functional_group_is_hydrogen_bond_donor by ADR 0002 #6 (with "
-                                                  "the new functional_group_is_hydrogen_bond_acceptor beside it)",
     "inorganic::static IONIC_RADII": "the generated columns KM_IONIC_RADII_CHARGE / _COORDINATION / _RADIUS_PM and the "
                                      "symbol blob _KM_IONIC_RADII_SYMBOL_BYTES in src/inorganic_data.cyr "
                                      "(KM_IONIC_RADII_COUNT rows), read through handles (row + 1): lookup_ionic_radius and "
@@ -125,6 +130,31 @@ EXCEPTIONS = {
     "nuclear::static ISOTOPES": "the generated columns KM_ISOTOPES_Z / _A / _HALF_LIFE_S, the symbol blob and the UTF-8 "
                                 "decay-mode blob in src/nuclear_data.cyr (KM_ISOTOPES_COUNT rows), read through handles "
                                 "(row + 1): lookup_isotope and the isotope_* accessors (port plan §6.4)",
+}
+
+# Rust item -> (its Cyrius name, which must be defined in src/, and the ADR 0002 row that renames it).
+RENAMED = {
+    "organic::Geometry::TShapedThreeLonePairs": ("KM_GEOMETRY_T_SHAPED", "ADR 0002 #6, at its Rust position (7): the Rust "
+                                                 "name is a misnomer, ClF₃ has two lone pairs"),
+    "organic::FunctionalGroup::hydrogen_bonding": ("functional_group_is_hydrogen_bond_donor", "ADR 0002 #6, with the new "
+                                                   "functional_group_is_hydrogen_bond_acceptor beside it"),
+}
+
+# The whole surface (M7): the reasons for what is not a module's own item.
+LIB_MOD_NA = "n/a: a module declaration; Cyrius has one flat namespace, the module is src/<module>.cyr in [lib]"
+LIB_USE_NA = "n/a: a re-export (the prelude) of a public item counted in its own module; one flat namespace"
+# Derived trait -> its status in the port.
+DERIVE_STATUS = {
+    "Debug": "n/a: Rust formatting for `{:?}`; a Cyrius value is a word, a struct or a handle",
+    "Clone": "n/a: a Cyrius struct or handle is copied by value",
+    "Copy": "n/a: a Cyrius enum value or struct is copied by value",
+    "PartialEq": "n/a: a Cyrius enum value or handle is a word, compared with ==",
+    "Eq": "n/a: as PartialEq",
+    "Hash": "n/a: no Cyrius hashed collection holds the enums",
+    "Serialize": "n/a: serde is not carried over (port plan §2.4)",
+    "Deserialize": "n/a: serde is not carried over (port plan §2.4)",
+    "Error": "ported in another form: thiserror's Display text without its payload is km_error_message, the variant "
+             "km_error_name (src/error.cyr; port plan §6.4)",
 }
 
 # Later milestones (port plan §2.1): counted, not checked.
@@ -154,18 +184,24 @@ def snake(camel):
     return "".join(out)
 
 
-def rust_items(module):
-    """(label, kind, owner, name) for every public item before #[cfg(test)]."""
+def rust_source(module):
+    """rust-old/src/<module>.rs up to its #[cfg(test)]."""
     src = (root / f"rust-old/src/{module}.rs").read_text()
     cut = src.find("#[cfg(test)]")
-    src = src if cut < 0 else src[:cut]
+    return src if cut < 0 else src[:cut]
+
+
+def rust_items(module, with_lines=False):
+    """(label, kind, owner, name) for every public item before #[cfg(test)]; with_lines adds its line number."""
+    src = rust_source(module)
     vis = r"pub(?:\(crate\))?"
     items = []
     depth = 0
     impl = None
     block = None  # ("struct" | "enum", name) while inside its body at depth 1
-    for line in src.splitlines():
+    for lineno, line in enumerate(src.splitlines(), 1):
         s = line.strip()
+        before = len(items)
         if depth == 0:
             m = re.match(r"impl(?:<[^>]*>)?\s+(?:\w+(?:::\w+)*\s+for\s+)?(\w+)\s*\{", s)
             if m:
@@ -200,6 +236,8 @@ def rust_items(module):
                 m = re.match(r"([A-Z]\w*)\s*(?:\(|,|\{|$)", s)
                 if m and not s.startswith("#"):
                     items.append((f"{module}::{block[1]}::{m.group(1)}", "variant", block[1], m.group(1)))
+        if with_lines:
+            items[before:] = [it + (lineno,) for it in items[before:]]
         depth += line.count("{") - line.count("}")
         if depth == 0:
             impl = None
@@ -251,46 +289,204 @@ def has_counterpart(module, kind, owner, name):
 
 
 missing = 0
+unaccounted = 0   # public items (and `pub` lines) with no status: each is also counted in missing
+out = []          # the report's lines (printed unless --markdown)
 total_found = total_items = 0
 all_labels = set()
+whole = []        # (Rust file, label, status, detail) for the whole surface
 for module in MODULES:
     found = 0
     items = rust_items(module)
     for label, kind, owner, name in items:
         all_labels.add(label)
-        if label in EXCEPTIONS:
-            found += 1
-            continue
         if has_counterpart(module, kind, owner, name):
             found += 1
+            whole.append((module, label, "by name", ""))
+        elif label in RENAMED:
+            cname, why = RENAMED[label]
+            if re.search(rf"(^fn {cname}\(|\b{cname} =)", cyr, re.M) is None:
+                missing += 1
+                unaccounted += 1
+                out.append(f"MISSING  {label}: RENAMED names {cname}, which src/ does not define")
+                continue
+            found += 1
+            whole.append((module, label, "renamed", f"`{cname}` ({why})"))
+        elif label in EXCEPTIONS:
+            found += 1
+            whole.append((module, label, "another form", EXCEPTIONS[label]))
         else:
             missing += 1
-            print(f"MISSING  {label} ({kind})")
+            unaccounted += 1
+            out.append(f"MISSING  {label} ({kind})")
     total_found += found
     total_items += len(items)
-    print(f"{module:<12} {found}/{len(items)} Rust public items have a Cyrius counterpart or a reason")
-for label in EXCEPTIONS:
-    if label not in all_labels:
-        missing += 1
-        print(f"STALE    EXCEPTIONS names {label}, which is no public item of a ported module")
+    out.append(f"{module:<12} {found}/{len(items)} Rust public items have a Cyrius counterpart or a reason")
+for table, what in ((EXCEPTIONS, "EXCEPTIONS"), (RENAMED, "RENAMED")):
+    for label in table:
+        if label not in all_labels:
+            missing += 1
+            out.append(f"STALE    {what} names {label}, which is no public item of a ported module")
 # Every file under rust-old/src must be ported, pending, deferred or not applicable.
 known = set(MODULES) | set(PENDING_MODULES) | set(DEFERRED_MODULES) | set(NOT_APPLICABLE_MODULES)
+files = []
 for path in sorted((root / "rust-old/src").rglob("*.rs")):
     mod = str(path.relative_to(root / "rust-old/src"))[:-3]
+    files.append(mod)
     if mod not in known:
         missing += 1
-        print(f"UNKNOWN  rust-old/src/{mod}.rs is not ported, pending, deferred or marked not applicable")
+        out.append(f"UNKNOWN  rust-old/src/{mod}.rs is not ported, pending, deferred or marked not applicable")
 for mod in sorted(set(PENDING_MODULES) | set(DEFERRED_MODULES) | set(NOT_APPLICABLE_MODULES)):
     if not (root / f"rust-old/src/{mod}.rs").exists():
         missing += 1
-        print(f"STALE    {mod}: listed, but rust-old/src/{mod}.rs does not exist")
+        out.append(f"STALE    {mod}: listed, but rust-old/src/{mod}.rs does not exist")
 pend = {}
 for mod, ms in PENDING_MODULES.items():
     pend.setdefault(ms, []).append(mod)
 for ms in sorted(pend):
     n = sum(len(rust_items(m)) for m in pend[ms])
-    print(f"pending {ms}: {len(pend[ms])} modules, {n} Rust public items ({', '.join(sorted(pend[ms]))})")
+    out.append(f"pending {ms}: {len(pend[ms])} modules, {n} Rust public items ({', '.join(sorted(pend[ms]))})")
 for mod, why in {**DEFERRED_MODULES, **NOT_APPLICABLE_MODULES}.items():
-    print(f"{mod:<20} {len(rust_items(mod))} Rust public items, not ported: {why}")
-print(f"surface parity: {total_found}/{total_items} in the ported modules; {missing} missing")
+    out.append(f"{mod:<20} {len(rust_items(mod))} Rust public items, not ported: {why}")
+
+# ── The whole surface (M7) ──────────────────────────────────────────────────────────────────────────────────────────
+# The deferred modules, item by item.
+for mod in DEFERRED_MODULES:
+    for label, kind, owner, name in rust_items(mod):
+        whole.append((mod, label, "deferred", DEFERRED_MODULES[mod]))
+# The module declarations and re-exports of lib.rs and integration/mod.rs: lines, not items of a module.
+decl_lines = {}   # module -> the line numbers of its `pub mod` / `pub use` lines
+labels_of = {}    # module -> the labels of its items
+for mod in files:
+    if mod in known and mod not in NOT_APPLICABLE_MODULES:
+        labels_of[mod] = {it[0] for it in rust_items(mod)}
+for mod in NOT_APPLICABLE_MODULES:
+    decl_lines[mod] = set()
+    for lineno, line in enumerate(rust_source(mod).splitlines(), 1):
+        s = line.strip()
+        m = re.match(r"pub mod (\w+);", s)
+        if m:
+            decl_lines[mod].add(lineno)
+            child = m.group(1) if mod == "lib" else f"{mod.rsplit('/', 1)[0]}/{m.group(1)}"
+            children = [d for d in DEFERRED_MODULES if d == child or d.startswith(child + "/")]
+            if children:
+                whole.append((mod, f"{mod}::mod {m.group(1)}", "deferred", "the module declaration of "
+                              + ", ".join(children) + " (port plan §2.2)"))
+            elif child in MODULES:
+                whole.append((mod, f"{mod}::mod {m.group(1)}", "n/a", LIB_MOD_NA))
+            else:
+                missing += 1
+                out.append(f"UNKNOWN  rust-old/src/{mod}.rs: `pub mod {m.group(1)}` declares no known module")
+            continue
+        m = re.match(r"pub use (\w+)::(?:\{([^}]*)\}|(\w+));", s)
+        if m:
+            decl_lines[mod].add(lineno)
+            target = m.group(1)
+            for name in [n.strip() for n in (m.group(2) or m.group(3)).split(",") if n.strip()]:
+                cands = {f"{target}::{name}", f"{target}::const {name}", f"{target}::static {name}",
+                         f"{target}::type {name}"}
+                if not cands & labels_of.get(target, set()):
+                    missing += 1
+                    unaccounted += 1
+                    out.append(f"MISSING  rust-old/src/{mod}.rs re-exports {target}::{name}, no public item of {target}")
+                    continue
+                status = "deferred" if target in DEFERRED_MODULES else "n/a"
+                whole.append((mod, f"{mod}::use {target}::{name}", status, LIB_USE_NA))
+# Every `pub` line is one of the items counted (the parser misses nothing).
+for mod in files:
+    if mod not in known:
+        continue
+    seen = decl_lines.get(mod, set()) | {it[4] for it in rust_items(mod, with_lines=True)}
+    for lineno, line in enumerate(rust_source(mod).splitlines(), 1):
+        if re.match(r"\s*pub(\([\w:]+\))?\s", line) and lineno not in seen:
+            missing += 1
+            unaccounted += 1
+            out.append(f"UNCOUNTED rust-old/src/{mod}.rs:{lineno}: {line.strip()}")
+# The trait impls the types derive.
+derived = []      # (Rust file, type, trait, status)
+for mod in files:
+    if mod not in known:
+        continue
+    lines = rust_source(mod).splitlines()
+    for k, line in enumerate(lines):
+        m = re.match(r"\s*#\[derive\(([^)]*)\)\]", line)
+        if not m:
+            continue
+        ty = None
+        for nxt in lines[k + 1 : k + 6]:
+            t = re.match(r"\s*pub(?:\([\w:]+\))? (?:struct|enum) (\w+)", nxt)
+            if t:
+                ty = t.group(1)
+                break
+        if ty is None:
+            missing += 1
+            out.append(f"UNKNOWN  rust-old/src/{mod}.rs:{k + 1}: a derive on no public type")
+            continue
+        for trait in [x.strip() for x in m.group(1).split(",") if x.strip()]:
+            if mod in DEFERRED_MODULES:
+                derived.append((mod, ty, trait, "deferred"))
+            elif trait in DERIVE_STATUS:
+                derived.append((mod, ty, trait, DERIVE_STATUS[trait].split(":")[0]))
+            else:
+                missing += 1
+                out.append(f"UNKNOWN  rust-old/src/{mod}.rs: {ty} derives {trait}, which DERIVE_STATUS does not list")
+
+STATUSES = ("by name", "another form", "renamed", "n/a", "deferred")
+counts = {st: sum(1 for w in whole if w[2] == st) for st in STATUSES}
+n_whole = len(whole)
+d_counts = {}
+for _, _, _, st in derived:
+    d_counts[st] = d_counts.get(st, 0) + 1
+n_types = len({(m, t) for m, t, _, _ in derived})
+out.append(f"whole surface: {n_whole} public items in rust-old/src: {counts['by name'] + counts['another form']} ported "
+           f"({counts['by name']} by name, {counts['another form']} in another form), {counts['renamed']} renamed by "
+           f"ADR 0002, {counts['n/a']} n/a (lib.rs's module declarations and re-exports), {counts['deferred']} deferred "
+           f"(port plan §2.2)")
+out.append(f"derived trait impls: {len(derived)} on {n_types} types: "
+           + ", ".join(f"{v} {k}" for k, v in sorted(d_counts.items())))
+out.append(f"surface parity: {total_found}/{total_items} in the ported modules; whole surface {n_whole}/{n_whole + unaccounted} "
+           f"accounted for; {missing} missing")
+
+if not markdown:
+    print("\n".join(out))
+else:
+    md = []
+    md.append("| Rust file | Public items | Ported by name | Ported in another form | Renamed (ADR 0002) | N/A | "
+              "Deferred (§2.2) |")
+    md.append("|---|---:|---:|---:|---:|---:|---:|")
+    for mod in files:
+        rows = [w for w in whole if w[0] == mod]
+        c = {st: sum(1 for w in rows if w[2] == st) for st in STATUSES}
+        md.append(f"| `{mod}.rs` | {len(rows)} | {c['by name']} | {c['another form']} | {c['renamed']} | {c['n/a']} | "
+                  f"{c['deferred']} |")
+    md.append(f"| **Total** | **{n_whole}** | **{counts['by name']}** | **{counts['another form']}** | "
+              f"**{counts['renamed']}** | **{counts['n/a']}** | **{counts['deferred']}** |")
+    md.append("")
+    md.append("Renamed by ADR 0002:")
+    md.append("")
+    for mod, label, st, detail in whole:
+        if st == "renamed":
+            md.append(f"- `{label}` → {detail}.")
+    md.append("")
+    md.append("Ported in another form (the port's conventions, port plan §6.3–§6.4):")
+    md.append("")
+    md.append("| Rust item | Cyrius form |")
+    md.append("|---|---|")
+    for mod, label, st, detail in whole:
+        if st == "another form":
+            md.append(f"| `{label}` | {detail} |")
+    md.append("")
+    md.append(f"Derived trait impls (not items; {len(derived)} on {n_types} types):")
+    md.append("")
+    md.append("| Trait | Impls | Status |")
+    md.append("|---|---:|---|")
+    traits = sorted({t for _, _, t, _ in derived}, key=lambda t: list(DERIVE_STATUS).index(t))
+    for trait in traits:
+        live = sum(1 for m, _, t, st in derived if t == trait and st != "deferred")
+        dfr = sum(1 for m, _, t, st in derived if t == trait and st == "deferred")
+        note = DERIVE_STATUS[trait] + (f" ({dfr} of them on soorat's types: deferred)" if dfr else "")
+        md.append(f"| `{trait}` | {live + dfr} | {note} |")
+    print("\n".join(md))
+    if missing:
+        print("\n".join(o for o in out if not o.startswith((" ",)) and o.split()[0] in
+                        ("MISSING", "STALE", "UNKNOWN", "UNCOUNTED")), file=sys.stderr)
 sys.exit(1 if missing else 0)

@@ -2,25 +2,18 @@
 
 ## Status
 
-**v1.2.0** — Refresh + audit release. Rust 1.99 / edition 2024, hisab 1.4, criterion 0.8.
-23 modules, 118 elements, 688 tests (662 unit + 24 integration + 2 doc), `#![warn(missing_docs)]` clean.
-Public API unchanged from 1.1 apart from additions.
+**v2.0.0** (2026-11-13) — the Cyrius port of Rust 1.2.0, the plan of record
+[`kimiya-port-plan.md`](kimiya-port-plan.md) done (M0–M7; tanmatra's template: Rust 1.2.0 frozen in `rust-old/` as the
+parity oracle). 22 in-scope modules; the golden corpus 342,485 rows ok and 46,634 accepted (ADR 0002's API changes, ADR
+0006's correct rounding), 0 failed, on x86_64 ELF, x86_64 PE and aarch64; the Rust tests and the public surface
+accounted for in [`rust-parity.md`](rust-parity.md). Live status in [`state.md`](state.md).
 
-Next: **Cyrius port** — plan of record: [`kimiya-port-plan.md`](kimiya-port-plan.md)
-(tanmatra template: Rust 1.2.0 frozen in `rust-old/` as the parity oracle, Cyrius ships 2.0.0).
-M0–M3 and M3c are done (M3c, ADR 0006: every transcendental the port calls is correctly rounded, and every class-C row
-is gated at 0 ulp against the corrected oracle); M4 (structure, nuclear, spectroscopy) is done: M4b (organic,
-inorganic), M4c (nuclear), M4a (correctly rounded sin, cos, atan2, acos), M4d (potential, the trig switch), M4e
-(spectroscopy, hisab 1.4.0's FFT transcribed), M4e-2 (potential's geometry with an unbounded exponent, ADR 0002 #20),
-M4e-3 (the Bohr model, the Rydberg formula and the reduced mass rounded once, ADR 0002 #21 and #22), M4e-4 (the cited
-AME2020 / TICE 2009 isotope table with ³⁶S, ADR 0002 #23), M4f (stoichiometry: the integer matrix and the rational
-oxidation states, ADR 0002 #7) and M4f-2 (stoichiometry's yields, limiting reagent and empirical formula exact, ADR 0002
-#24–#26). The library-wide overflow audit ran B1–B7 and B10a after M4, then was **paused** by the user's decision of
-2026-11-12: it is post-port work and resumes after M5 / M7 over the whole library, M5's modules included. **M5a** (numerics,
-reaction_dynamics: hisab 1.4.0's RK4, Dormand–Prince, Gaussian elimination and Euler–Maruyama transcribed, every golden
-row bit-identical) and **M5b** (network, fitting, sensitivity: hisab 1.4.0's least squares, Jacobi rank and CSR
-compression transcribed, `compute_gradient` on hisab 3.4.1's tape, ADR 0002 #2 realised) are done, so M5 is; M7 (release
-2.0.0) next — live status in [`state.md`](state.md).
+Next, post-release (the Backlog): the library-wide overflow audit, **paused after B10a** by the user's decision of
+2026-11-12, resumes over the whole library, M5's modules included; the oracle's unconverging Jacobi rank waits on a
+decision; the deferred modules (bridges, soorat, logging; port plan §2.2) wait on a Cyrius consumer.
+
+The Rust crate stays at **v1.2.0** (refresh + audit release; Rust 1.99 / edition 2024, hisab 1.4, criterion 0.8; 23
+modules, 118 elements, 688 tests: 662 unit + 24 integration + 2 doc). There is no Rust 2.0.
 
 ---
 
@@ -38,6 +31,18 @@ compression transcribed, `compute_gradient` on hisab 3.4.1's tape, ADR 0002 #2 r
 - [x] No `unwrap`/`expect`/`panic!`/`unreachable!` in library code
 - [x] Every public item documented; README example runs as a doctest
 - [x] Benchmarks for every repaired hot path
+
+### v2.0.0 — the Cyrius port (2026-11-13)
+- [x] M0 initialize: the oracle frozen at tag `1.2.0`, the golden-value generator `scripts/oracle/`, the parity harness
+- [x] M1 foundation: error, constants, the math helpers, validate, element, molecule
+- [x] M2 thermochemistry and gases: reaction, thermo, thermochem, phase, gas
+- [x] M3 solutions and electrochemistry: solution, electrochemistry, kinetics; M3c: every transcendental correctly
+  rounded (ADR 0006)
+- [x] M4 structure, nuclear and spectroscopy: stoichiometry, organic, inorganic, potential, nuclear, spectroscopy
+- [x] The overflow audit's B1–B7 and B10a (ADR 0002 #27–#39, #40's primitives); the rest is post-release (Backlog)
+- [x] M5 numerics: reaction_dynamics, network, fitting, sensitivity, on hisab 1.4.0's transcribed routines (ADR 0003)
+- [x] M7 release: the Rust-test ledger (688 tests: 652 ported, 1 n/a, 35 deferred), the whole-surface parity (519 items:
+  429 ported, 2 renamed by ADR 0002, 39 n/a, 49 deferred), every Rust benchmark beside its Cyrius number, `VERSION` 2.0.0
 
 ---
 
@@ -69,15 +74,15 @@ jnana, tara) calls any of them. Proposed defaults: energies in J/mol, a small ex
 type for average oxidation states, no separate extrapolating Antoine function. Items marked
 *additive* are demand-gated and can land in either implementation without breaking anything.
 
-- [ ] `thermochem::reaction_enthalpy` / `reaction_gibbs_energy` return **kJ/mol** while every other energy API uses J/mol
-- [ ] `sensitivity::*_gradient` → `Result` (today invalid T, n = 0 or Q ≤ 0 yield non-finite values); `compute_gradient`'s `Result` is never `Err`
+- [x] `thermochem::reaction_enthalpy` / `reaction_gibbs_energy` return **kJ/mol** while every other energy API uses J/mol — done in the Cyrius API (M2b, ADR 0002 #1): J/mol
+- [x] `sensitivity::*_gradient` → `Result` (today invalid T, n = 0 or Q ≤ 0 yield non-finite values); `compute_gradient`'s `Result` is never `Err` — done in the Cyrius API (M5b, ADR 0002 #2): validated closed-form gradients; `compute_gradient`'s Err only for a caller's tape's failures
 - [x] `nuclear::semi_empirical_binding_energy` → `Result` (`NaN` for z > a or a = 0 in Rust 1.2) — done in the Cyrius API (M4c, ADR 0002 #3): `Err(KM_ERR_INVALID_INPUT)`
-- [ ] `phase::antoine_pressure_mmhg` / `_pa` → `Result` with range checking (today `NaN` at the pole, silent extrapolation outside the fitted range)
-- [ ] `bridge::*` → `Result` instead of `NaN` sentinels; remove `ionization_to_bond_energy_estimate` (physically unfounded heuristic)
+- [x] `phase::antoine_pressure_mmhg` / `_pa` → `Result` with range checking (today `NaN` at the pole, silent extrapolation outside the fitted range) — done in the Cyrius API (M2a, ADR 0002 #4): Err outside `t_min_c..t_max_c`
+- [ ] `bridge::*` → `Result` instead of `NaN` sentinels; remove `ionization_to_bond_energy_estimate` (physically unfounded heuristic) — deferred with `bridge.rs` until a Cyrius consumer exists (port plan §2.2; ADR 0002 #5)
 - [x] `organic::FunctionalGroup::hydrogen_bonding` → `hydrogen_bond_donor` (+ `hydrogen_bond_acceptor`); `Geometry::TShapedThreeLonePairs` → `TShaped` — done in the Cyrius API (M4b, ADR 0002 #6): `functional_group_is_hydrogen_bond_donor`, the new cited `functional_group_is_hydrogen_bond_acceptor`, `KM_GEOMETRY_T_SHAPED`
 - [x] `stoichiometry::assign_oxidation_states` → rational result so average states (Fe₃O₄ +8/3) are representable (today `Err`); `balance_equation` → integer matrix input — done in the Cyrius API (M4f, ADR 0002 #7): (Z, numerator, denominator) records, an average outside i32 Rust's Err; a flat row-major integer matrix with Rust's |entry| ≤ 2⁵³
 - [x] M4f's measured candidates under the inexact-formula policy: `percent_yield`, `theoretical_yield_moles`, `percent_composition` → their exact rationals rounded once; `limiting_reagent` → the exact comparison of the ratios; `empirical_formula` → exact ratios and an exact 1/10 tolerance — done in the Cyrius API (M4f-2, ADR 0002 #24, #25 and #26, the user's decisions of 2026-11-10)
-- [ ] `balance_equation`'s i64 elimination overflowing where a valid u32 solution exists (M4f's measurement; with the overflow audit)
+- [x] `balance_equation`'s i64 elimination overflowing where a valid u32 solution exists (M4f's measurement; with the overflow audit) — done in the Cyrius API (the audit's B7, ADR 0002 #39): Rust's elimination on unbounded integers
 - [x] `inorganic::cfse_octahedral` → the exact (3·e_g − 2·t₂g)/5 instead of `t2g·(−0.4) + eg·0.6` (which misses it on 13 of
   22 cases, d⁵ high-spin and d¹⁰ ≠ 0) — done in the Cyrius API (M4b, ADR 0002 #12, the user's decision)
 - [x] `nuclear::atoms_after_half_lives`, `is_secular_equilibrium`, `inorganic::delta_tet_from_oct` → the exact N₀/2ⁿ (correctly
@@ -93,6 +98,42 @@ type for average oxidation states, no separate extrapolating Antoine function. I
   the exact rational rounded once (−R exactly at n = Z; no cancellation of 1/n₁² − 1/n₂² or E₂ − E₁ for close large n);
   `reduced_mass` → the correctly rounded m₁·m₂/(m₁ + m₂) for every pair (m/2 exactly; no over- or underflow) — done in the
   Cyrius API (M4e-3, ADR 0002 #21 and #22, the user's decisions)
+- The library-wide overflow audit (after M4; B1–B7 and B10a done, ADR 0002 #27–#39 and #40's primitives) and the
+  oracle's unconverging Jacobi rank (M5b) are post-release work: see the Backlog's *Post-release* list
+- [ ] *additive* — `fitting::fit_beer_lambert` → also return the intercept
+- [ ] *additive* — `spectroscopy::rydberg_wavelength` → nuclear-mass parameter for the reduced-mass correction
+- [ ] `integration::soorat::MolecularStructure::from_molecule` → `Result` — deferred with soorat (port plan §2.2; ADR 0002 #10)
+- [ ] *additive* — `reaction_dynamics::simulate_stiff` → return the full trajectory (today endpoints only)
+
+### Data to re-check against a primary source
+
+- [ ] Standard potentials: Sn⁴⁺/Sn²⁺ 0.154 (CRC 0.151), ClO⁻/Cl⁻ 0.890 (CRC 0.81), Sn²⁺/Sn −0.136 (CRC −0.1375), Cr₂O₇²⁻/Cr³⁺ 1.33 (editions list 1.36 or 1.232)
+- [ ] Shomate HF(g) — known defect: Cp below 7R/2 (needs a sourced NIST/JANAF fit)
+- [ ] Shomate C₂H₆ (+3.4 % at 298 K) and C₃H₈ (+8.4 %) — no NIST Shomate set exists; replace with a sourced fit (NASA-7 / Burcat)
+- [ ] Shomate high-T segments for NH₃ (> 1400 K), H₂S, SO₂, etc. — today out-of-range use returns `Err`
+- [ ] Antoine acetone range (−20–77 °C) unconfirmed
+- [ ] `organic::BondType::energy_kj` — the 45 average bond energies (kJ/mol) carry no source citation in 1.2.0; tie them to a
+  primary compilation (e.g. the CRC Handbook's or Luo's bond dissociation energies) and record the source (M4b review)
+- [x] `organic` hydrogen-bond acceptor classification (Cyrius 2.0, ADR 0002 #6) — decided by the user (2026-11-09): IUPAC
+  2011's criterion with the weak acceptors (π systems, thiol S, C–X halogens), every group but the alkane, each family
+  cited
+- [ ] IUPAC 2011 hydrogen-bond definition — check the acceptor sentence quoted in `src/organic_data.cyr` against the
+  published *Pure Appl. Chem.* 83, 1637 PDF (quoted from a secondary copy; the PDF was unreachable in M4b)
+- [ ] Na₂CO₃ ΔGf° is inconsistent with ΔHf°/S° by 2.55 kJ/mol in NBS/CRC (pinned as a known exception in tests)
+- [x] `spectroscopy::isotope_abundances` — the masses were AME2020's to five decimals (¹H 1.00783 for 1.007825032, ¹³C
+  13.00335 for 13.003354835; within 5·10⁻⁶ u), and sulfur omitted ³⁶S (0.0001; its abundances summed to 0.9999). Done in the
+  Cyrius port (M4e-4, ADR 0002 #23, the user's decision of 2026-11-10): the full AME2020 masses (Wang et al., Chin. Phys. C
+  45, 030003 (2021)) and the TICE 2009 abundances (Berglund & Wieser, Pure Appl. Chem. 83, 397 (2011)) with ³⁶S, from the
+  cited records in `scripts/oracle/isotopes.tsv`; Rust 1.2.0 keeps its table (no Rust release)
+
+---
+
+## Backlog
+
+### Post-release (after 2.0.0)
+
+Paused or deferred by the user's decisions; each is a Cyrius API change for ADR 0002 when it lands.
+
 - [ ] after M4: the library-wide audit of intermediate over- and underflow of products and quotients of inputs (the user's
   decisions of 2026-11-09, "Library-wide audit", and 2026-11-10, "Round once": a single product or quotient rounds once,
   a sum inside gets #20's edge fix; one ADR 0002 row per family; `state.md` has the survey's sixteen families and the
@@ -171,35 +212,8 @@ type for average oxidation states, no separate extrapolating Antoine function. I
   for Chapman's ozone cycle, Robertson's kinetics, the H₂ + Br₂ chain and 159 of the 563 golden matrices (all finite ones). The port
   reproduces it (ADR 0003's M5b amendment); a fix (a reachable test, Rust's answer wherever it converges) is a Cyrius
   API change for ADR 0002
-- [ ] *additive* — `fitting::fit_beer_lambert` → also return the intercept
-- [ ] *additive* — `spectroscopy::rydberg_wavelength` → nuclear-mass parameter for the reduced-mass correction
-- [ ] `integration::soorat::MolecularStructure::from_molecule` → `Result`
-- [ ] *additive* — `reaction_dynamics::simulate_stiff` → return the full trajectory (today endpoints only)
 
-### Data to re-check against a primary source
-
-- [ ] Standard potentials: Sn⁴⁺/Sn²⁺ 0.154 (CRC 0.151), ClO⁻/Cl⁻ 0.890 (CRC 0.81), Sn²⁺/Sn −0.136 (CRC −0.1375), Cr₂O₇²⁻/Cr³⁺ 1.33 (editions list 1.36 or 1.232)
-- [ ] Shomate HF(g) — known defect: Cp below 7R/2 (needs a sourced NIST/JANAF fit)
-- [ ] Shomate C₂H₆ (+3.4 % at 298 K) and C₃H₈ (+8.4 %) — no NIST Shomate set exists; replace with a sourced fit (NASA-7 / Burcat)
-- [ ] Shomate high-T segments for NH₃ (> 1400 K), H₂S, SO₂, etc. — today out-of-range use returns `Err`
-- [ ] Antoine acetone range (−20–77 °C) unconfirmed
-- [ ] `organic::BondType::energy_kj` — the 45 average bond energies (kJ/mol) carry no source citation in 1.2.0; tie them to a
-  primary compilation (e.g. the CRC Handbook's or Luo's bond dissociation energies) and record the source (M4b review)
-- [x] `organic` hydrogen-bond acceptor classification (Cyrius 2.0, ADR 0002 #6) — decided by the user (2026-11-09): IUPAC
-  2011's criterion with the weak acceptors (π systems, thiol S, C–X halogens), every group but the alkane, each family
-  cited
-- [ ] IUPAC 2011 hydrogen-bond definition — check the acceptor sentence quoted in `src/organic_data.cyr` against the
-  published *Pure Appl. Chem.* 83, 1637 PDF (quoted from a secondary copy; the PDF was unreachable in M4b)
-- [ ] Na₂CO₃ ΔGf° is inconsistent with ΔHf°/S° by 2.55 kJ/mol in NBS/CRC (pinned as a known exception in tests)
-- [x] `spectroscopy::isotope_abundances` — the masses were AME2020's to five decimals (¹H 1.00783 for 1.007825032, ¹³C
-  13.00335 for 13.003354835; within 5·10⁻⁶ u), and sulfur omitted ³⁶S (0.0001; its abundances summed to 0.9999). Done in the
-  Cyrius port (M4e-4, ADR 0002 #23, the user's decision of 2026-11-10): the full AME2020 masses (Wang et al., Chin. Phys. C
-  45, 030003 (2021)) and the TICE 2009 abundances (Berglund & Wieser, Pure Appl. Chem. 83, 397 (2011)) with ³⁶S, from the
-  cited records in `scripts/oracle/isotopes.tsv`; Rust 1.2.0 keeps its table (no Rust release)
-
----
-
-## Backlog (demand-gated)
+### Demand-gated
 
 - Collision-frequency helper σ·√(8k_BT/πμ)·N_A for `kinetics::collision_theory_rate`
 - Liquid/stable-phase selection for Peng–Robinson fugacity (roots are available via `peng_robinson_z_roots`)

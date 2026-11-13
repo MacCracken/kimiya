@@ -1,0 +1,288 @@
+# integration.tcyr — rust-old/tests/integration.rs's cross-module tests and the oracle's two doc tests (the README's
+# Quick Start, run by `src/lib.rs`'s ReadmeDoctests, and `thermochem::adiabatic_flame_temperature`'s example), ported
+# at M7 (the Rust-test ledger, docs/development/rust-parity.md). Each test_group is the Rust test's name; a doc test's
+# is `doc_<what>`.
+#
+# rust-old/tests/integration.rs has 24 tests: these 16, and 8 ported earlier beside their module's tests (organic,
+# spectroscopy, reaction_dynamics and fitting have two each). Like the Rust integration tests, this file sees the
+# library as a consumer does: it includes the bundle dist/kimiya.cyr (`cyrius distlib --all`), not src/.
+#
+# Adapted beyond the port's form (port plan §6.4: `Result::unwrap` is `is_ok` + the payload, a lookup's `unwrap` a
+# non-zero handle read with its accessors, a `&[(&str, f64)]` species list 16-byte (formula, coefficient) records, a
+# value Rust writes with an exponent written positionally): ADR 0002 #1 (reaction_enthalpy and reaction_gibbs_energy
+# return J/mol) changes three. methane_combustion_cross_module asserts Rust's −800 kJ/mol as −800,000 J/mol;
+# thermochem_enthalpy_entropy_gibbs_triangle computes ΔH − T·ΔS in J/mol with Rust's 1 kJ/mol tolerance as 1,000 J/mol;
+# doc_adiabatic_flame_temperature passes the J/mol ΔH on as it is, where Rust's example multiplies its kJ/mol by 1000.
+# The golden corpus separately checks every function these tests call over its grid (tests/parity.tcyr).
+
+include "dist/kimiya.cyr"
+
+# 1 if |a − b| < eps.
+#must_use
+fn near(a: f64, b: f64, eps: f64): i64 {
+    var d: f64 = f64_abs(a - b);
+    if (d < eps) { return 1; }
+    return 0;
+}
+
+# f64::EPSILON.
+#must_use
+fn eps64(): f64 {
+    var e: f64 = 0.0000000000000002220446049250313;
+    return e;
+}
+
+# A species list of two (formula, coefficient) records.
+#must_use
+fn sp2(f1, c1: f64, f2, c2: f64): i64 {
+    var b = alloc(32);
+    store64(b, f1);
+    store64(b + 8, c1);
+    store64(b + 16, f2);
+    store64(b + 24, c2);
+    return b;
+}
+
+# A species list of three (formula, coefficient) records.
+#must_use
+fn sp3(f1, c1: f64, f2, c2: f64, f3, c3: f64): i64 {
+    var b = alloc(48);
+    store64(b, f1);
+    store64(b + 8, c1);
+    store64(b + 16, f2);
+    store64(b + 24, c2);
+    store64(b + 32, f3);
+    store64(b + 40, c3);
+    return b;
+}
+
+# The handle of a symbol that must be in the table.
+#must_use
+fn el(sym): i64 {
+    var h = element_lookup_by_symbol(sym);
+    assert(h != 0, "element_lookup_by_symbol");
+    return h;
+}
+
+# ── rust-old/tests/integration.rs ───────────────────────────────────────────────────
+
+fn _t_water_weight_from_elements() {
+    test_group("water_weight_from_elements");
+    var t, v = KmMolecule_water().molecular_weight();
+    var mw: f64 = v;
+    assert(is_ok(t) == 1 && near(mw, 18.015, 0.01) == 1, "H2O ≈ 18.015 g/mol");
+}
+
+fn _t_ideal_gas_at_stp() {
+    test_group("ideal_gas_at_stp");
+    var t, v = ideal_gas_volume(1.0, KM_STP_TEMPERATURE, KM_STP_PRESSURE);
+    var m3: f64 = v;
+    var liters: f64 = m3 * 1000.0;
+    # V = RT/P = 8.314462618 × 273.15 / 101325 m³ = 22.413969 L
+    assert(is_ok(t) == 1 && near(liters, 22.413969, 0.00001) == 1, "V = 22.413969 L");
+}
+
+fn _t_pure_water_is_neutral() {
+    test_group("pure_water_is_neutral");
+    var t, v = ph_from_h_concentration(0.0000001);
+    var ph: f64 = v;
+    assert(is_ok(t) == 1 && near(ph, 7.0, 0.01) == 1, "pH 7");
+}
+
+fn _t_arrhenius_temperature_dependence() {
+    test_group("arrhenius_temperature_dependence");
+    var t1, v1 = arrhenius_rate(10000000000000.0, 50000.0, 300.0);
+    var t2, v2 = arrhenius_rate(10000000000000.0, 50000.0, 500.0);
+    var k_low: f64 = v1;
+    var k_high: f64 = v2;
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && k_high > k_low, "k(500 K) > k(300 K)");
+}
+
+fn _t_daniell_cell_is_spontaneous() {
+    test_group("daniell_cell_is_spontaneous");
+    var t, v = cell_potential_from_couples("Cu2+/Cu", "Zn2+/Zn");
+    var e: f64 = v;
+    assert(is_ok(t) == 1 && is_spontaneous_cell(e) == 1, "spontaneous");
+    assert(near(e, 1.104, 0.01) == 1, "E ≈ 1.104 V");
+    # ΔG should be negative for a spontaneous cell
+    var tg, vg = cell_gibbs_energy(2, e);
+    var dg: f64 = vg;
+    assert(is_ok(tg) == 1 && dg < 0.0, "ΔG < 0");
+}
+
+fn _t_nernst_reduces_to_standard_at_q1() {
+    test_group("nernst_reduces_to_standard_at_q1");
+    var h = lookup_half_reaction("Ag+/Ag");
+    assert(h != 0, "Ag+/Ag is in the table");
+    var e_std: f64 = half_reaction_standard_potential(h);
+    var t, v = nernst_potential(e_std, 1, 298.15, 1.0);
+    var e: f64 = v;
+    assert(is_ok(t) == 1 && near(e, e_std, 0.0000000001) == 1, "E(Q = 1) = E°");
+}
+
+fn _t_methane_combustion_cross_module() {
+    test_group("methane_combustion_cross_module");
+    # ADR 0002 #1: J/mol, so Rust's −800 kJ/mol is −800,000 J/mol.
+    var p = sp2("CO2(g)", 1.0, "H2O(l)", 2.0);
+    var r = sp2("CH4(g)", 1.0, "O2(g)", 2.0);
+    var t, v = reaction_enthalpy(p, 2, r, 2);
+    var dh: f64 = v;
+    assert(is_ok(t) == 1 && dh < -800000.0, "methane combustion should be < -800 kJ/mol");
+}
+
+fn _t_vant_hoff_le_chatelier() {
+    test_group("vant_hoff_le_chatelier");
+    # For an exothermic reaction, increasing T should decrease K.
+    var k_298: f64 = 1000.0;
+    var t, v = vant_hoff_k(k_298, -100000.0, 298.15, 400.0);
+    var k_400: f64 = v;
+    assert(is_ok(t) == 1 && k_400 < k_298, "Le Chatelier: exothermic + higher T → lower K");
+}
+
+fn _t_electrochemistry_gibbs_matches_reaction_gibbs() {
+    test_group("electrochemistry_gibbs_matches_reaction_gibbs");
+    # Daniell cell: Zn + Cu²⁺ → Zn²⁺ + Cu; ΔG = −nFE = −2 × 96485 × 1.104 ≈ −213,038 J
+    var t, v = cell_potential_from_couples("Cu2+/Cu", "Zn2+/Zn");
+    var e_cell: f64 = v;
+    var tg, vg = cell_gibbs_energy(2, e_cell);
+    var dg: f64 = vg;
+    var tk, vk = equilibrium_constant(dg, 298.15);
+    var k: f64 = vk;
+    assert(is_ok(t) == 1 && is_ok(tg) == 1 && is_ok(tk) == 1 && k > 1.0, "spontaneous cell: K > 1");
+    assert(dg < -200000.0, "ΔG ≈ -213 kJ");
+}
+
+fn _t_thermochem_enthalpy_entropy_gibbs_triangle() {
+    test_group("thermochem_enthalpy_entropy_gibbs_triangle");
+    # For methane combustion, ΔG ≈ ΔH − TΔS at 298.15 K. ADR 0002 #1: ΔH and ΔG in J/mol, so ΔH − T·ΔS needs no
+    # ÷ 1000, and Rust's 1 kJ/mol tolerance is 1,000 J/mol.
+    var p = sp2("CO2(g)", 1.0, "H2O(l)", 2.0);
+    var r = sp2("CH4(g)", 1.0, "O2(g)", 2.0);
+    var th, vh = reaction_enthalpy(p, 2, r, 2);
+    var ts, vs = reaction_entropy(p, 2, r, 2);
+    var tg, vg = reaction_gibbs_energy(p, 2, r, 2);
+    var dh: f64 = vh;
+    var ds: f64 = vs;
+    var dg: f64 = vg;
+    var tds: f64 = 298.15 * ds;
+    var dg_calc: f64 = dh - tds;
+    assert(is_ok(th) == 1 && is_ok(ts) == 1 && is_ok(tg) == 1, "Ok");
+    assert(near(dg_calc, dg, 1000.0) == 1, "ΔG ≈ ΔH − TΔS");
+}
+
+fn _t_weak_acid_ph_acetic_acid() {
+    test_group("weak_acid_ph_acetic_acid");
+    # 0.1 M acetic acid (Ka = 1.8e-5): the full charge balance gives pH 2.875277.
+    var t, v = weak_acid_ph(0.000018, 0.1);
+    var ph: f64 = v;
+    assert(is_ok(t) == 1 && near(ph, 2.875277, 0.000001) == 1, "pH 2.875277");
+}
+
+fn _t_cp_integration_heating_co2() {
+    test_group("cp_integration_heating_co2");
+    # Heat CO2 from 300 K to 600 K with the analytic Shomate enthalpy.
+    # JANAF: H(600) − H(298.15) = 12.906 kJ/mol, H(300) − H(298.15) = 0.069 kJ/mol.
+    var t, v = enthalpy_change_cp("CO2(g)", 300.0, 600.0);
+    var dh: f64 = v;
+    assert(is_ok(t) == 1 && near(dh, 12837.0, 50.0) == 1, "CO2 300 → 600 K ΔH ≈ 12,837 J/mol");
+}
+
+fn _t_full_periodic_table_118() {
+    test_group("full_periodic_table_118");
+    assert_eq(KM_ELEMENT_COUNT, 118, "ELEMENTS.len() = 118");
+    assert_eq(element_atomic_number(el("Og")), 118, "Og is Z = 118");
+}
+
+fn _t_lanthanides_and_actinides() {
+    test_group("lanthanides_and_actinides");
+    assert_eq(element_category(el("La")), KM_ELEMENT_CATEGORY_LANTHANIDE, "La is a lanthanide");
+    assert_eq(element_category(el("U")), KM_ELEMENT_CATEGORY_ACTINIDE, "U is an actinide");
+}
+
+fn _t_michaelis_menten_at_km_is_half_vmax() {
+    test_group("michaelis_menten_at_km_is_half_vmax");
+    var t, v = michaelis_menten(100.0, 5.0, 5.0);
+    var rate: f64 = v;
+    assert(is_ok(t) == 1 && near(rate, 50.0, eps64()) == 1, "v([S] = Km) = Vmax/2");
+}
+
+fn _t_eyring_consistent_with_arrhenius() {
+    test_group("eyring_consistent_with_arrhenius");
+    # Different models, different magnitudes, but both positive at reasonable conditions.
+    var ta, va = arrhenius_rate(10000000000000.0, 80000.0, 298.0);
+    var te, ve = eyring_rate(80000.0, 298.0);
+    var k_arr: f64 = va;
+    var k_eyr: f64 = ve;
+    assert(is_ok(ta) == 1 && k_arr > 0.0, "Arrhenius k > 0");
+    assert(is_ok(te) == 1 && k_eyr > 0.0, "Eyring k > 0");
+}
+
+# ── the doc tests ───────────────────────────────────────────────────────────────────
+
+# rust-old/README.md's Quick Start (src/lib.rs's ReadmeDoctests); README.md's Cyrius example is the same program. Rust
+# prints Fe's name and mass; here they are asserted.
+fn _t_doc_readme_quick_start() {
+    test_group("doc_readme_quick_start");
+    var fe = element_lookup_by_symbol("Fe");
+    assert(fe != 0, "Fe is in the table (Rust: ok_or_else InvalidElement)");
+    var mass: f64 = element_atomic_mass(fe);
+    assert(streq(element_name(fe), "Iron") == 1 && near(mass, 55.845, 0.0005) == 1, "Iron: 55.845 g/mol");
+
+    var tw, vw = KmMolecule_water().molecular_weight();
+    var mw: f64 = vw;
+    assert(is_ok(tw) == 1 && near(mw, 18.015, 0.01) == 1, "H2O ≈ 18.015 g/mol");
+
+    # 1 mol of ideal gas at 273.15 K and 1 atm occupies ~22.4 L.
+    var tv, vv = ideal_gas_volume(1.0, KM_STP_TEMPERATURE, KM_STP_PRESSURE);
+    var m3: f64 = vv;
+    var liters: f64 = m3 * 1000.0;
+    assert(is_ok(tv) == 1 && near(liters, 22.414, 0.01) == 1, "≈ 22.414 L");
+
+    # Weak acid pH solves the full charge balance, so dilute acids stay below 7.
+    var tp, vp = weak_acid_ph(0.000018, 0.1);   # 0.1 M acetic acid
+    var ph: f64 = vp;
+    assert(is_ok(tp) == 1 && near(ph, 2.87, 0.01) == 1, "pH ≈ 2.87");
+}
+
+# rust-old/src/thermochem.rs, adiabatic_flame_temperature's example: CH₄ + 2 O₂ → CO₂ + 2 H₂O(g), burned in air (7.52
+# mol N₂ per mol CH₄). ADR 0002 #1: reaction_enthalpy is J/mol already (Rust's `dh_kj * 1000.0`).
+fn _t_doc_adiabatic_flame_temperature() {
+    test_group("doc_adiabatic_flame_temperature");
+    var p = sp2("CO2(g)", 1.0, "H2O(g)", 2.0);
+    var r = sp2("CH4(g)", 1.0, "O2(g)", 2.0);
+    var th, vh = reaction_enthalpy(p, 2, r, 2);
+    var dh: f64 = vh;
+    var flame = sp3("CO2(g)", 1.0, "H2O(g)", 2.0, "N2(g)", 7.52);
+    var tt, vt = adiabatic_flame_temperature(dh, flame, 3, 298.15);
+    var t: f64 = vt;
+    assert(is_ok(th) == 1 && is_ok(tt) == 1 && near(t, 2327.0, 10.0) == 1, "T ≈ 2327 K");
+}
+
+# Runs the 16 integration tests in Rust's order, then the 2 doc tests.
+fn main() {
+    alloc_init();
+    _t_water_weight_from_elements();
+    _t_ideal_gas_at_stp();
+    _t_pure_water_is_neutral();
+    _t_arrhenius_temperature_dependence();
+    _t_daniell_cell_is_spontaneous();
+    _t_nernst_reduces_to_standard_at_q1();
+    _t_methane_combustion_cross_module();
+    _t_vant_hoff_le_chatelier();
+    _t_electrochemistry_gibbs_matches_reaction_gibbs();
+    _t_thermochem_enthalpy_entropy_gibbs_triangle();
+    _t_weak_acid_ph_acetic_acid();
+    _t_cp_integration_heating_co2();
+    _t_full_periodic_table_118();
+    _t_lanthanides_and_actinides();
+    _t_michaelis_menten_at_km_is_half_vmax();
+    _t_eyring_consistent_with_arrhenius();
+    _t_doc_readme_quick_start();
+    _t_doc_adiabatic_flame_temperature();
+    return assert_summary();
+}
+
+var exit_code = main();
+# Clamp before exiting: assert_summary() returns the raw failure count, and a wait status is only 8 bits.
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

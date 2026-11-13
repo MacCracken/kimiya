@@ -5,8 +5,8 @@
 # current), not src/, so the bundle compiles warning-free as one unit and its modules work
 # together. The reference tests are tests/{error,validate,element,molecule,reaction,thermo,thermochem,
 # phase,gas,solution,electrochemistry,kinetics,stoichiometry,organic,inorganic,potential,nuclear,spectroscopy,
-# reaction_dynamics,network,fitting,sensitivity}.tcyr;
-# the golden corpus is tests/parity.tcyr.
+# reaction_dynamics,network,fitting,sensitivity}.tcyr, and tests/integration.tcyr the cross-module and doc tests (also
+# on the bundle); the golden corpus is tests/parity.tcyr.
 
 include "dist/kimiya.cyr"
 
