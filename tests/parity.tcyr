@@ -58,10 +58,14 @@ include "src/nuclear_data.cyr"
 include "src/nuclear.cyr"
 include "src/spectroscopy_data.cyr"
 include "src/spectroscopy.cyr"
+include "src/numerics.cyr"
+include "src/reaction_dynamics.cyr"
 
 alloc_init();
 
 include "tests/parity_core.cyr"
+include "tests/rd_systems.cyr"
+include "tests/rd_rows.cyr"
 
 # ── dispatch ────────────────────────────────────────────────────────────────────────
 # Each module's dispatcher fills the got list for one row. It returns 1 when it handled
@@ -2518,6 +2522,105 @@ fn _par_stoichiometry(fp, fl): i64 {
     return 0;
 }
 
+# ── reaction_dynamics (M5a) ─────────────────────────────────────────────────────────
+# `reaction_dynamics` rows: src/reaction_dynamics.cyr on src/numerics.cyr. The built-in rate laws take their floats and
+# `i:steps` (a usize as its word); the custom systems are named by `s:` tokens with their parameters
+# (tests/rd_systems.cyr, scripts/oracle/src/systems.rs), y0 is `v:n` + floats, and a trajectory goes to the caller's
+# buffer (port plan §4, M5), replayed as `v:points` + each point's `f:t v:n f:y…`. RK4 and backward Euler are class B,
+# dopri45 and Euler–Maruyama class C at bound 0 (their pow, ln and cos are correctly rounded).
+fn _par_reaction_dynamics(fp, fl): i64 {
+    if (_rd_alloc() != 1) { return 0 - 1; }
+    var out = _rd_out;
+    if (_par_eq(fp, fl, "reaction_dynamics::simulate_first_order") == 1) {
+        var x: f64 = _par_in(0);
+        var k: f64 = _par_in(1);
+        var t: f64 = _par_in(2);
+        var r, v = simulate_first_order(x, k, t, _par_in(3), out, _rd_cap(1));
+        _rd_got_traj(r, v, out, 1, 0);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "reaction_dynamics::simulate_second_order") == 1) {
+        var x2: f64 = _par_in(0);
+        var k2: f64 = _par_in(1);
+        var t2: f64 = _par_in(2);
+        var r2, v2 = simulate_second_order(x2, k2, t2, _par_in(3), out, _rd_cap(1));
+        _rd_got_traj(r2, v2, out, 1, 0);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "reaction_dynamics::simulate_consecutive") == 1) {
+        var a3: f64 = _par_in(0);
+        var k31: f64 = _par_in(1);
+        var k32: f64 = _par_in(2);
+        var t3: f64 = _par_in(3);
+        var r3, v3 = simulate_consecutive(a3, k31, k32, t3, _par_in(4), out, _rd_cap(3));
+        _rd_got_traj(r3, v3, out, 3, 0);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "reaction_dynamics::simulate_reversible") == 1) {
+        var a4: f64 = _par_in(0);
+        var b4: f64 = _par_in(1);
+        var kf: f64 = _par_in(2);
+        var kr: f64 = _par_in(3);
+        var t4: f64 = _par_in(4);
+        var r4, v4 = simulate_reversible(a4, b4, kf, kr, t4, _par_in(5), out, _rd_cap(2));
+        _rd_got_traj(r4, v4, out, 2, 0);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "reaction_dynamics::simulate_michaelis_menten") == 1) {
+        var s5: f64 = _par_in(0);
+        var vm: f64 = _par_in(1);
+        var km: f64 = _par_in(2);
+        var t5: f64 = _par_in(3);
+        var r5, v5 = simulate_michaelis_menten(s5, vm, km, t5, _par_in(4), out, _rd_cap(2));
+        _rd_got_traj(r5, v5, out, 2, 0);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "reaction_dynamics::simulate_adaptive") == 1) {
+        var k6 = _rd_in_sys(0, _rd_p);
+        if (k6 < 0) { return 0 - 1; }
+        var f6 = _rd_rhs(_rd_name_p, _rd_name_l);
+        k6 = _rd_in_vec(k6, _rd_y);
+        if (f6 == 0 || k6 < 0 || k6 + 2 != _par_in_n) { return 0 - 1; }
+        var n6 = _rd_vec_n;
+        var t6: f64 = _par_in(k6);
+        var tol: f64 = _par_in(k6 + 1);
+        var r6, v6 = simulate_adaptive(f6, _rd_p, _rd_y, n6, t6, tol, out, _rd_cap(n6));
+        _rd_got_traj(r6, v6, out, n6, 0);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "reaction_dynamics::simulate_stiff") == 1) {
+        var k7 = _rd_in_sys(0, _rd_p);
+        if (k7 < 0) { return 0 - 1; }
+        var f7 = _rd_rhs(_rd_name_p, _rd_name_l);
+        var j7 = _rd_jac(_rd_name_p, _rd_name_l);
+        k7 = _rd_in_vec(k7, _rd_y);
+        if (f7 == 0 || j7 == 0 || k7 < 0 || k7 + 2 != _par_in_n) { return 0 - 1; }
+        var n7 = _rd_vec_n;
+        var t7: f64 = _par_in(k7);
+        var r7, v7 = simulate_stiff(f7, _rd_p, j7, _rd_p, _rd_y, n7, t7, _par_in(k7 + 1), out, _rd_cap(n7));
+        _rd_got_traj(r7, v7, out, n7, 0);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "reaction_dynamics::simulate_stochastic") == 1) {
+        var k8 = _rd_in_sys(0, _rd_p);
+        if (k8 < 0) { return 0 - 1; }
+        var f8 = _rd_rhs(_rd_name_p, _rd_name_l);
+        k8 = _rd_in_sys(k8, _rd_q);
+        if (k8 < 0) { return 0 - 1; }
+        var g8 = _rd_diffusion(_rd_name_p, _rd_name_l);
+        k8 = _rd_in_vec(k8, _rd_y);
+        if (f8 == 0 || g8 == 0 || k8 < 0 || k8 + 3 != _par_in_n) { return 0 - 1; }
+        var n8 = _rd_vec_n;
+        var t8: f64 = _par_in(k8);
+        var steps = _par_in(k8 + 1);
+        var seed = _par_in(k8 + 2);
+        var r8, v8 = simulate_stochastic(f8, _rd_p, g8, _rd_q, _rd_y, n8, t8, steps, seed, out, _rd_cap(n8));
+        _rd_got_traj(r8, v8, out, n8, 0);
+        return 1;
+    }
+    return 0;
+}
+
 # Routes a row to its module's dispatcher. 0 (pending) for a module with none yet.
 fn _par_dispatch(mp, ml, fp, fl): i64 {
     _par_got_n = 0;
@@ -2541,6 +2644,7 @@ fn _par_dispatch(mp, ml, fp, fl): i64 {
     if (_par_eq(mp, ml, "potential") == 1) { return _par_potential(fp, fl); }
     if (_par_eq(mp, ml, "spectroscopy") == 1) { return _par_spectroscopy(fp, fl); }
     if (_par_eq(mp, ml, "stoichiometry") == 1) { return _par_stoichiometry(fp, fl); }
+    if (_par_eq(mp, ml, "reaction_dynamics") == 1) { return _par_reaction_dynamics(fp, fl); }
     return 0;
 }
 
@@ -2717,6 +2821,8 @@ fn _par_c_bound(fp, fl): i64 {
     if (_par_eq(fp, fl, "spectroscopy::transmittance") == 1) { return 0; }            # M4e: exp10
     if (_par_eq(fp, fl, "spectroscopy::absorbance_from_transmittance") == 1) { return 0; }   # M4e: log10
     if (_par_eq(fp, fl, "spectroscopy::fft_spectrum") == 1) { return 0; }             # M4e: sincos (the twiddles)
+    if (_par_eq(fp, fl, "reaction_dynamics::simulate_adaptive") == 1) { return 0; }   # M5a: pow (dopri45's factor)
+    if (_par_eq(fp, fl, "reaction_dynamics::simulate_stochastic") == 1) { return 0; } # M5a: ln, cos (Box–Muller)
     return 0 - 1;
 }
 
@@ -3118,9 +3224,11 @@ fn _par_module_done(mp, ml) {
     return 0;
 }
 
-# kimiya has one harness: no module is skipped.
+# The numerics module (M5a: hisab 1.4.0's routines that src/numerics.cyr transcribes, called directly) is replayed by
+# tests/numerics.tcyr; every other module here.
 #must_use
 fn _par_skip(mp, ml): i64 {
+    if (_par_eq(mp, ml, "numerics") == 1) { return 1; }
     return 0;
 }
 

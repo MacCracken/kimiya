@@ -1,0 +1,683 @@
+# reaction_dynamics.tcyr — the tests of rust-old/src/reaction_dynamics.rs, ported one for one (each test_group is the
+# Rust test's name; all 26), its two integration tests (rust-old/tests/integration.rs), and Cyrius-only groups for the
+# caller's trajectory buffer, the out-of-type inputs, the inline constants, the order of the checks and the reused
+# Jacobian. Adaptations: a trajectory is the caller's buffer of points of 1 + n f64 (port plan §4, M5), so
+# `traj.len()` is the Ok count and `traj[k]` the point at out + 8·k·(1 + n); the closures are function pointers with
+# a context (port plan §6.3), here tests/rd_systems.cyr's systems; usize::MAX is the word −1; a value Rust writes with
+# an exponent is written positionally. `stiff_resized_jacobian_is_error_not_panic` has no direct counterpart (the flat
+# n × n Jacobian cannot be resized): its group checks the nearest Cyrius case, a Jacobian callback that writes nothing,
+# which leaves J = 0 and is no panic either. The golden corpus separately checks every function over its grid
+# (tests/parity.tcyr).
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/numerics.cyr"
+include "src/reaction_dynamics.cyr"
+
+include "tests/rd_systems.cyr"
+
+alloc_init();
+
+# 1 if |actual − expected| ≤ tol: Rust's assert_close.
+#must_use
+fn close(actual: f64, expected: f64, tol: f64): i64 {
+    var d: f64 = actual - expected;
+    var a: f64 = f64_abs(d);
+    if (a <= tol) { return 1; }
+    return 0;
+}
+
+# 1 if the Result (t, v) is Err(code).
+#must_use
+fn is_err_code(t, v, code): i64 {
+    if (is_err_result(t) == 1 && v == code) { return 1; }
+    return 0;
+}
+
+# The trajectory buffer of the tests: 4096 points of up to 4 f64.
+var traj = 0;
+var TCAP = 4096;
+
+# Point k's time in a trajectory of n components at buf.
+#must_use
+fn pt_t(buf, n, k): f64 {
+    var t: f64 = load64(buf + 8 * k * (1 + n));
+    return t;
+}
+# Component i of point k of a trajectory of n components at buf.
+#must_use
+fn pt_y(buf, n, k, i): f64 {
+    var y: f64 = load64(buf + 8 * (k * (1 + n) + 1 + i));
+    return y;
+}
+
+# One f64 value (a parameter or a state), in a fresh buffer.
+#must_use
+fn vals1(a: f64): i64 {
+    var p = alloc(8);
+    store64(p, a);
+    return p;
+}
+# Two f64 values, in a fresh buffer.
+#must_use
+fn vals2(a: f64, b: f64): i64 {
+    var p = alloc(16);
+    store64(p, a);
+    store64(p + 8, b);
+    return p;
+}
+# Three f64 values, in a fresh buffer.
+#must_use
+fn vals3(a: f64, b: f64, c: f64): i64 {
+    var p = alloc(24);
+    store64(p, a);
+    store64(p + 8, b);
+    store64(p + 16, c);
+    return p;
+}
+
+# A quiet NaN (Rust's f64::NAN).
+#must_use
+fn nan(): f64 {
+    var x: f64 = 0x7FF8000000000000;
+    return x;
+}
+
+# +∞.
+#must_use
+fn inf(): f64 {
+    var x: f64 = 0x7FF0000000000000;
+    return x;
+}
+
+# ── the built-in rate laws ──────────────────────────────────────────────────────────
+
+fn _t_first_order_decay() {
+    test_group("first_order_decay");
+    var t, v = simulate_first_order(1.0, 0.1, 10.0, 100, traj, TCAP);
+    assert(is_ok(t) == 1 && v == 101, "100 steps + initial");
+    var t0: f64 = pt_t(traj, 1, 0);
+    var y0: f64 = pt_y(traj, 1, 0, 0);
+    assert(t0 == 0.0 && y0 == 1.0, "traj[0] = (0, [1])");
+    var te: f64 = pt_t(traj, 1, 100);
+    assert(close(te, 10.0, 0.000000000001) == 1, "end time");
+    var a: f64 = pt_y(traj, 1, 100, 0);
+    var e: f64 = _km_cr_exp(-1.0);
+    assert(close(a, e, 0.0000000001) == 1, "first order at t=10");
+}
+
+fn _t_first_order_monotonically_decreasing() {
+    test_group("first_order_monotonically_decreasing");
+    var t, v = simulate_first_order(1.0, 0.5, 5.0, 50, traj, TCAP);
+    var ok = is_ok(t);
+    var k = 1;
+    while (k < v) {
+        var a: f64 = pt_y(traj, 1, k, 0);
+        var b: f64 = pt_y(traj, 1, k - 1, 0);
+        if (a >= b) { ok = 0; }
+        k = k + 1;
+    }
+    assert(ok == 1, "concentration should decrease");
+}
+
+fn _t_second_order_decay() {
+    test_group("second_order_decay");
+    var t, v = simulate_second_order(1.0, 0.1, 10.0, 100, traj, TCAP);
+    var a: f64 = pt_y(traj, 1, 100, 0);
+    assert(is_ok(t) == 1 && close(a, 0.5, 0.000000001) == 1, "second order at t=10");
+}
+
+fn _t_consecutive_matches_analytic_and_conserves_mass() {
+    test_group("consecutive_matches_analytic_and_conserves_mass");
+    var k1: f64 = 0.5;
+    var k2: f64 = 0.1;
+    var t, v = simulate_consecutive(1.0, k1, k2, 20.0, 200, traj, TCAP);
+    assert(is_ok(t) == 1 && v == 201, "Ok(201)");
+    var err_a: f64 = 0.0;
+    var err_b: f64 = 0.0;
+    var mass = 1;
+    var k = 0;
+    while (k < v) {
+        var tt: f64 = pt_t(traj, 3, k);
+        var a: f64 = pt_y(traj, 3, k, 0);
+        var b: f64 = pt_y(traj, 3, k, 1);
+        var c: f64 = pt_y(traj, 3, k, 2);
+        var total: f64 = a + b;
+        total = total + c;
+        if (close(total, 1.0, 0.0000000000001) != 1) { mass = 0; }
+        var x1: f64 = -k1 * tt;
+        var x2: f64 = -k2 * tt;
+        var ea: f64 = _km_cr_exp(x1);
+        var eb: f64 = _km_cr_exp(x2);
+        var r: f64 = k1 / (k2 - k1);
+        var bb: f64 = ea - eb;
+        bb = r * bb;
+        var da: f64 = a - ea;
+        var db: f64 = b - bb;
+        var ada: f64 = f64_abs(da);
+        var adb: f64 = f64_abs(db);
+        err_a = _km_max(err_a, ada);
+        err_b = _km_max(err_b, adb);
+        k = k + 1;
+    }
+    assert(mass == 1, "mass conservation");
+    assert(err_a < 0.00000003 && err_b < 0.00000003, "max errors below 3e-8");
+    var cf: f64 = pt_y(traj, 3, 200, 2);
+    assert(cf > 0.8, "at end, most should be C");
+}
+
+fn _t_consecutive_intermediate_peaks() {
+    test_group("consecutive_intermediate_peaks");
+    var t, v = simulate_consecutive(1.0, 1.0, 0.1, 10.0, 100, traj, TCAP);
+    var max_b: f64 = 0.0;
+    var k = 0;
+    while (k < v) {
+        var b: f64 = pt_y(traj, 3, k, 1);
+        max_b = _km_max(max_b, b);
+        k = k + 1;
+    }
+    var final_b: f64 = pt_y(traj, 3, v - 1, 1);
+    assert(is_ok(t) == 1 && max_b > final_b, "intermediate B should peak then decay");
+}
+
+fn _t_reversible_reaches_equilibrium() {
+    test_group("reversible_reaches_equilibrium");
+    var t, v = simulate_reversible(1.0, 0.0, 1.0, 0.5, 20.0, 200, traj, TCAP);
+    var a: f64 = pt_y(traj, 2, 200, 0);
+    var b: f64 = pt_y(traj, 2, 200, 1);
+    var q: f64 = b / a;
+    assert(is_ok(t) == 1 && close(q, 2.0, 0.000000001) == 1, "[B]/[A]");
+}
+
+fn _t_reversible_mass_conservation() {
+    test_group("reversible_mass_conservation");
+    var t, v = simulate_reversible(0.8, 0.2, 0.5, 0.3, 10.0, 100, traj, TCAP);
+    var ok = is_ok(t);
+    var k = 0;
+    while (k < v) {
+        var a: f64 = pt_y(traj, 2, k, 0);
+        var b: f64 = pt_y(traj, 2, k, 1);
+        var s: f64 = a + b;
+        if (close(s, 1.0, 0.0000000000001) != 1) { ok = 0; }
+        k = k + 1;
+    }
+    assert(ok == 1, "mass conservation");
+}
+
+fn _t_michaelis_menten_substrate_depletes() {
+    test_group("michaelis_menten_substrate_depletes");
+    var t, v = simulate_michaelis_menten(10.0, 1.0, 2.0, 30.0, 300, traj, TCAP);
+    var s: f64 = pt_y(traj, 2, 300, 0);
+    var p: f64 = pt_y(traj, 2, 300, 1);
+    assert(is_ok(t) == 1 && s < 1.0, "substrate should deplete");
+    assert(p > 9.0, "product should accumulate");
+    var sum: f64 = s + p;
+    assert(close(sum, 10.0, 0.00000000001) == 1, "mass conservation");
+}
+
+fn _t_michaelis_menten_mass_conservation() {
+    test_group("michaelis_menten_mass_conservation");
+    var t, v = simulate_michaelis_menten(5.0, 2.0, 1.0, 10.0, 100, traj, TCAP);
+    var ok = is_ok(t);
+    var k = 0;
+    while (k < v) {
+        var s: f64 = pt_y(traj, 2, k, 0);
+        var p: f64 = pt_y(traj, 2, k, 1);
+        var sum: f64 = s + p;
+        if (close(sum, 5.0, 0.000000000001) != 1) { ok = 0; }
+        k = k + 1;
+    }
+    assert(ok == 1, "[S]+[P]");
+}
+
+fn _t_adaptive_first_order() {
+    test_group("adaptive_first_order");
+    var k = vals1(0.1);
+    var y0 = vals1(1.0);
+    var t, v = simulate_adaptive(&_rd_f_decay, k, y0, 1, 10.0, 0.00000001, traj, TCAP);
+    assert(is_ok(t) == 1 && v > 2, "Ok");
+    var te: f64 = pt_t(traj, 1, v - 1);
+    var a: f64 = pt_y(traj, 1, v - 1, 0);
+    var e: f64 = _km_cr_exp(-1.0);
+    assert(close(te, 10.0, 0.000000000001) == 1, "end time");
+    assert(close(a, e, 0.00000001) == 1, "adaptive");
+}
+
+# ── the errors ──────────────────────────────────────────────────────────────────────
+
+fn _t_first_order_negative_concentration_is_error() {
+    test_group("first_order_negative_concentration_is_error");
+    var t, v = simulate_first_order(-1.0, 0.1, 10.0, 100, traj, TCAP);
+    assert(is_err_result(t) == 1, "Err");
+}
+
+fn _t_first_order_zero_time_is_error() {
+    test_group("first_order_zero_time_is_error");
+    var t, v = simulate_first_order(1.0, 0.1, 0.0, 100, traj, TCAP);
+    assert(is_err_result(t) == 1, "Err");
+}
+
+fn _t_invalid_rate_constants_are_rejected() {
+    test_group("invalid_rate_constants_are_rejected");
+    var ks: f64[3];
+    ks[0] = -0.1;
+    ks[1] = nan();
+    ks[2] = inf();
+    var ok = 1;
+    var j = 0;
+    while (j < 3) {
+        var k: f64 = ks[j];
+        var t1, v1 = simulate_first_order(1.0, k, 10.0, 10, traj, TCAP);
+        var t2, v2 = simulate_second_order(1.0, k, 10.0, 10, traj, TCAP);
+        var t3, v3 = simulate_consecutive(1.0, k, 0.1, 10.0, 10, traj, TCAP);
+        var t4, v4 = simulate_consecutive(1.0, 0.1, k, 10.0, 10, traj, TCAP);
+        var t5, v5 = simulate_reversible(1.0, 0.0, k, 0.1, 10.0, 10, traj, TCAP);
+        var t6, v6 = simulate_reversible(1.0, 0.0, 0.1, k, 10.0, 10, traj, TCAP);
+        var t7, v7 = simulate_michaelis_menten(1.0, k, 1.0, 10.0, 10, traj, TCAP);
+        var t8, v8 = simulate_michaelis_menten(1.0, 1.0, k, 10.0, 10, traj, TCAP);
+        if (is_err_result(t1) != 1 || is_err_result(t2) != 1 || is_err_result(t3) != 1) { ok = 0; }
+        if (is_err_result(t4) != 1 || is_err_result(t5) != 1 || is_err_result(t6) != 1) { ok = 0; }
+        if (is_err_result(t7) != 1 || is_err_result(t8) != 1) { ok = 0; }
+        j = j + 1;
+    }
+    assert(ok == 1, "−0.1, NaN, ∞ rejected by every rate law");
+    var t, v = simulate_first_order(1.0, 0.0, 10.0, 10, traj, TCAP);
+    var a: f64 = pt_y(traj, 1, 10, 0);
+    assert(is_ok(t) == 1 && a == 1.0, "zero rate constants are valid (nothing happens)");
+}
+
+fn _t_invalid_initial_concentrations_and_times_are_rejected() {
+    test_group("invalid_initial_concentrations_and_times_are_rejected");
+    var cs: f64[2];
+    cs[0] = nan();
+    cs[1] = inf();
+    var ok = 1;
+    var j = 0;
+    while (j < 2) {
+        var c: f64 = cs[j];
+        var t1, v1 = simulate_first_order(c, 0.1, 10.0, 10, traj, TCAP);
+        var t2, v2 = simulate_second_order(c, 0.1, 10.0, 10, traj, TCAP);
+        var t3, v3 = simulate_consecutive(c, 0.1, 0.1, 10.0, 10, traj, TCAP);
+        var t4, v4 = simulate_reversible(1.0, c, 0.1, 0.1, 10.0, 10, traj, TCAP);
+        var t5, v5 = simulate_michaelis_menten(c, 1.0, 1.0, 10.0, 10, traj, TCAP);
+        if (is_err_result(t1) != 1 || is_err_result(t2) != 1 || is_err_result(t3) != 1) { ok = 0; }
+        if (is_err_result(t4) != 1 || is_err_result(t5) != 1) { ok = 0; }
+        j = j + 1;
+    }
+    assert(ok == 1, "NaN and ∞ concentrations rejected");
+    var ts: f64[3];
+    ts[0] = nan();
+    ts[1] = inf();
+    ts[2] = -1.0;
+    var y0 = vals1(1.0);
+    ok = 1;
+    j = 0;
+    while (j < 3) {
+        var tt: f64 = ts[j];
+        var u1, w1 = simulate_first_order(1.0, 0.1, tt, 10, traj, TCAP);
+        var u2, w2 = simulate_second_order(1.0, 0.1, tt, 10, traj, TCAP);
+        var u3, w3 = simulate_consecutive(1.0, 0.1, 0.1, tt, 10, traj, TCAP);
+        var u4, w4 = simulate_reversible(1.0, 0.0, 0.1, 0.1, tt, 10, traj, TCAP);
+        var u5, w5 = simulate_michaelis_menten(1.0, 1.0, 1.0, tt, 10, traj, TCAP);
+        var u6, w6 = simulate_adaptive(&_rd_f_zero, 0, y0, 1, tt, 0.00000001, traj, TCAP);
+        var u7, w7 = simulate_stiff(&_rd_f_zero, 0, &_rd_f_zero, 0, y0, 1, tt, 10, traj, TCAP);
+        var u8, w8 = simulate_stochastic(&_rd_f_zero, 0, &_rd_f_zero, 0, y0, 1, tt, 10, 1, traj, TCAP);
+        if (is_err_result(u1) != 1 || is_err_result(u2) != 1 || is_err_result(u3) != 1) { ok = 0; }
+        if (is_err_result(u4) != 1 || is_err_result(u5) != 1 || is_err_result(u6) != 1) { ok = 0; }
+        if (is_err_result(u7) != 1 || is_err_result(u8) != 1) { ok = 0; }
+        j = j + 1;
+    }
+    assert(ok == 1, "NaN, ∞ and −1 end times rejected by all eight");
+}
+
+fn _t_huge_step_counts_are_rejected() {
+    test_group("huge_step_counts_are_rejected");
+    var y0 = vals1(1.0);
+    var ok = 1;
+    var j = 0;
+    while (j < 2) {
+        var steps = 0 - 1;                  # usize::MAX
+        if (j == 1) { steps = 10000001; }   # MAX_STEPS + 1
+        var t1, v1 = simulate_first_order(1.0, 0.1, 10.0, steps, traj, TCAP);
+        var t2, v2 = simulate_second_order(1.0, 0.1, 10.0, steps, traj, TCAP);
+        var t3, v3 = simulate_consecutive(1.0, 0.1, 0.1, 10.0, steps, traj, TCAP);
+        var t4, v4 = simulate_reversible(1.0, 0.0, 0.1, 0.1, 10.0, steps, traj, TCAP);
+        var t5, v5 = simulate_michaelis_menten(1.0, 1.0, 1.0, 10.0, steps, traj, TCAP);
+        var t6, v6 = simulate_stiff(&_rd_f_zero, 0, &_rd_f_zero, 0, y0, 1, 1.0, steps, traj, TCAP);
+        var t7, v7 = simulate_stochastic(&_rd_f_zero, 0, &_rd_f_zero, 0, y0, 1, 1.0, steps, 1, traj, TCAP);
+        if (is_err_result(t1) != 1 || is_err_result(t2) != 1 || is_err_result(t3) != 1) { ok = 0; }
+        if (is_err_result(t4) != 1 || is_err_result(t5) != 1 || is_err_result(t6) != 1) { ok = 0; }
+        if (is_err_result(t7) != 1) { ok = 0; }
+        j = j + 1;
+    }
+    assert(ok == 1, "usize::MAX and MAX_STEPS + 1 rejected");
+}
+
+fn _t_unstable_rk4_is_error_not_nan() {
+    test_group("unstable_rk4_is_error_not_nan");
+    var t, v = simulate_first_order(1.0, 1000.0, 10.0, 100, traj, TCAP);
+    assert(is_err_code(t, v, KM_ERR_COMPUTATION_ERROR) == 1, "k·h = 100: ComputationError");
+}
+
+fn _t_adaptive_rejects_bad_tolerance_and_state() {
+    test_group("adaptive_rejects_bad_tolerance_and_state");
+    var k = vals1(1.0);
+    var y0 = vals1(1.0);
+    var tols: f64[4];
+    tols[0] = 0.0;
+    tols[1] = -0.00000001;
+    tols[2] = nan();
+    tols[3] = inf();
+    var ok = 1;
+    var j = 0;
+    while (j < 4) {
+        var tol: f64 = tols[j];
+        var t, v = simulate_adaptive(&_rd_f_decay, k, y0, 1, 1.0, tol, traj, TCAP);
+        if (is_err_code(t, v, KM_ERR_INVALID_INPUT) != 1) { ok = 0; }
+        j = j + 1;
+    }
+    assert(ok == 1, "tol 0, −1e-8, NaN, ∞: InvalidInput");
+    var yn = vals1(nan());
+    var t2, v2 = simulate_adaptive(&_rd_f_decay, k, yn, 1, 1.0, 0.00000001, traj, TCAP);
+    assert(is_err_result(t2) == 1, "a NaN state");
+}
+
+# ── stiff (backward Euler) ──────────────────────────────────────────────────────────
+
+fn _t_stiff_linear_matches_backward_euler_recurrence() {
+    test_group("stiff_linear_matches_backward_euler_recurrence");
+    var k = vals1(50.0);
+    var y0 = vals1(1.0);
+    var t, v = simulate_stiff(&_rd_f_decay, k, &_rd_j_decay, k, y0, 1, 1.0, 100, traj, TCAP);
+    assert(is_ok(t) == 1 && v == 2, "only the end points are returned");
+    var t0: f64 = pt_t(traj, 1, 0);
+    var a0: f64 = pt_y(traj, 1, 0, 0);
+    var t1: f64 = pt_t(traj, 1, 1);
+    assert(t0 == 0.0 && a0 == 1.0 && t1 == 1.0, "(0, [1]) and t = 1");
+    var expected: f64 = _km_powi(1.5, 0 - 100);
+    var got: f64 = pt_y(traj, 1, 1, 0);
+    var rel: f64 = (got - expected) / expected;
+    var arel: f64 = f64_abs(rel);
+    assert(arel < 0.000000000001, "y_n = y_0 / (1 + h·k)^n");
+}
+
+fn _t_stiff_nonlinear_matches_backward_euler_recurrence() {
+    test_group("stiff_nonlinear_matches_backward_euler_recurrence");
+    var k: f64 = 3.0;
+    var h: f64 = 0.05;
+    var p = vals1(k);
+    var y0 = vals1(2.0);
+    var tend: f64 = h * 40.0;
+    var t, v = simulate_stiff(&_rd_f_decay2, p, &_rd_j_decay2, p, y0, 1, tend, 40, traj, TCAP);
+    var expected: f64 = 2.0;
+    var s = 0;
+    while (s < 40) {
+        var a: f64 = h * k;
+        var q: f64 = 4.0 * a;
+        q = q * expected;
+        q = 1.0 + q;
+        var r: f64 = f64_sqrt(q);
+        var den: f64 = 1.0 + r;
+        var num: f64 = 2.0 * expected;
+        expected = num / den;
+        s = s + 1;
+    }
+    var got: f64 = pt_y(traj, 1, 1, 0);
+    var rel: f64 = (got - expected) / expected;
+    var arel: f64 = f64_abs(rel);
+    assert(is_ok(t) == 1 && arel < 0.000000000001, "h·k·y² + y − y_old = 0 per step");
+}
+
+fn _t_stiff_robertson_conserves_mass() {
+    test_group("stiff_robertson_conserves_mass");
+    var y0 = vals3(1.0, 0.0, 0.0);
+    var t, v = simulate_stiff(&_rd_f_robertson, 0, &_rd_j_robertson, 0, y0, 3, 40.0, 400, traj, TCAP);
+    var a: f64 = pt_y(traj, 3, 1, 0);
+    var b: f64 = pt_y(traj, 3, 1, 1);
+    var c: f64 = pt_y(traj, 3, 1, 2);
+    var sum: f64 = a + b;
+    sum = sum + c;
+    assert(is_ok(t) == 1 && close(sum, 1.0, 0.000000000001) == 1, "mass conservation");
+    assert(close(a, 0.7158, 0.005) == 1, "y1(40)");
+    assert(b > 0.0 && b < 0.00002, "y2(40)");
+}
+
+fn _t_stiff_singular_newton_system_is_error() {
+    test_group("stiff_singular_newton_system_is_error");
+    var c = vals1(10.0);                    # steps / t_end
+    var y0 = vals1(1.0);
+    var t, v = simulate_stiff(&_rd_f_affine, c, &_rd_j_affine, c, y0, 1, 1.0, 10, traj, TCAP);
+    assert(is_err_code(t, v, KM_ERR_COMPUTATION_ERROR) == 1, "J = 1/h: ComputationError");
+}
+
+fn _t_stiff_non_convergent_newton_is_error() {
+    test_group("stiff_non_convergent_newton_is_error");
+    var y0 = vals1(1.0);
+    var t, v = simulate_stiff(&_rd_f_badjac, 0, &_rd_j_badjac, 0, y0, 1, 1.0, 1, traj, TCAP);
+    assert(is_err_code(t, v, KM_ERR_COMPUTATION_ERROR) == 1, "a wrong-sign Jacobian: ComputationError");
+}
+
+fn _t_stiff_resized_jacobian_is_error_not_panic() {
+    test_group("stiff_resized_jacobian_is_error_not_panic");
+    # Rust's `j.clear()` has no flat counterpart; a callback that writes nothing leaves J = 0, so Newton is the
+    # fixed-point iteration y₊ = y + h·f(y₊), which for f = −y, h = 1 oscillates: an Err, no panic.
+    var k = vals1(1.0);
+    var y0 = vals1(1.0);
+    var t, v = simulate_stiff(&_rd_f_decay, k, &_rd_f_zero, 0, y0, 1, 1.0, 1, traj, TCAP);
+    assert(is_err_code(t, v, KM_ERR_COMPUTATION_ERROR) == 1, "J left at 0: ComputationError");
+}
+
+fn _t_stiff_rejects_non_finite_state() {
+    test_group("stiff_rejects_non_finite_state");
+    var k = vals1(1.0);
+    var yn = vals1(nan());
+    var y1 = vals1(1.0);
+    var t, v = simulate_stiff(&_rd_f_decay, k, &_rd_j_decay, k, yn, 1, 1.0, 1, traj, TCAP);
+    assert(is_err_result(t) == 1, "a NaN state");
+    var t2, v2 = simulate_stiff(&_rd_f_nan, 0, &_rd_j_nan, 0, y1, 1, 1.0, 1, traj, TCAP);
+    assert(is_err_result(t2) == 1, "a NaN derivative");
+}
+
+# ── stochastic ──────────────────────────────────────────────────────────────────────
+
+fn _t_stochastic_is_reproducible_and_zero_noise_is_euler() {
+    test_group("stochastic_is_reproducible_and_zero_noise_is_euler");
+    var k = vals1(1.0);
+    var y0 = vals1(1.0);
+    var t, v = simulate_stochastic(&_rd_f_decay, k, &_rd_g_zero, 0, y0, 1, 1.0, 10, 7, traj, TCAP);
+    var a: f64 = pt_y(traj, 1, 10, 0);
+    var e: f64 = _km_powi(0.9, 10);
+    assert(is_ok(t) == 1 && close(a, e, 0.00000000000001) == 1, "Euler: (1 − h)^n");
+    var s = vals1(0.1);
+    var b1 = alloc(8 * 2 * 51);
+    var b2 = alloc(8 * 2 * 51);
+    var t1, v1 = simulate_stochastic(&_rd_f_decay, k, &_rd_g_const, s, y0, 1, 1.0, 50, 42, b1, 51);
+    var t2, v2 = simulate_stochastic(&_rd_f_decay, k, &_rd_g_const, s, y0, 1, 1.0, 50, 42, b2, 51);
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && v1 == 51 && memeq(b1, b2, 8 * 2 * 51) == 1, "same seed → same path");
+}
+
+fn _t_stochastic_blow_up_is_error_not_inf() {
+    test_group("stochastic_blow_up_is_error_not_inf");
+    var c = vals1(1000.0);
+    var y0 = vals1(1.0);
+    var t, v = simulate_stochastic(&_rd_f_blowup, c, &_rd_g_zero, 0, y0, 1, 1.0, 100, 1, traj, TCAP);
+    assert(is_err_code(t, v, KM_ERR_COMPUTATION_ERROR) == 1, "blow-up: ComputationError");
+    var yn = vals1(nan());
+    var t2, v2 = simulate_stochastic(&_rd_f_blowup, c, &_rd_g_zero, 0, yn, 1, 1.0, 10, 1, traj, TCAP);
+    assert(is_err_result(t2) == 1, "a NaN state");
+}
+
+# ── the integration tests (rust-old/tests/integration.rs) ───────────────────────────
+
+fn _t_reaction_dynamics_first_order_matches_analytical() {
+    test_group("reaction_dynamics_first_order_matches_analytical");
+    var t, v = simulate_first_order(1.0, 0.1, 10.0, 1000, traj, TCAP);
+    var a: f64 = pt_y(traj, 1, 1000, 0);
+    var e: f64 = _km_cr_exp(-1.0);
+    assert(is_ok(t) == 1 && close(a, e, 0.0000000001) == 1, "ODE should match analytical");
+}
+
+fn _t_reaction_dynamics_reversible_equilibrium() {
+    test_group("reaction_dynamics_reversible_equilibrium");
+    var t, v = simulate_reversible(1.0, 0.0, 2.0, 1.0, 10.0, 1000, traj, TCAP);
+    var a: f64 = pt_y(traj, 2, 1000, 0);
+    var b: f64 = pt_y(traj, 2, 1000, 1);
+    var q: f64 = b / a;
+    assert(is_ok(t) == 1 && close(q, 2.0, 0.000000001) == 1, "should reach K_eq = 2");
+}
+
+# ── Cyrius-only ─────────────────────────────────────────────────────────────────────
+
+# The caller's buffer: Ok(count) written; too small an `out` is Err(KM_ERR_INVALID_INPUT) after Rust's own errors,
+# with a fixed-step method's buffer untouched; the adaptive method's first cap points written.
+fn _t_cyrius_trajectory_buffer() {
+    test_group("cyrius_trajectory_buffer");
+    var small: f64[20];
+    var mark: f64 = 777.0;
+    var i = 0;
+    while (i < 20) {
+        small[i] = mark;
+        i = i + 1;
+    }
+    var t, v = simulate_first_order(1.0, 0.1, 10.0, 100, &small, 10);
+    var m0: f64 = small[0];
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT) == 1 && m0 == 777.0, "101 points in 10: InvalidInput, untouched");
+    var t1, v1 = simulate_first_order(1.0, 0.1, 10.0, 9, &small, 10);
+    var m19: f64 = small[19];
+    assert(is_ok(t1) == 1 && v1 == 10 && m19 != 777.0, "10 points in 10: Ok(10)");
+    var t2, v2 = simulate_first_order(1.0, 1000.0, 10.0, 100, &small, 10);
+    assert(is_err_code(t2, v2, KM_ERR_COMPUTATION_ERROR) == 1, "unstable and too small: Rust's error first");
+    var t3, v3 = simulate_first_order(-1.0, 0.1, 10.0, 100, 0, 0);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_CONCENTRATION) == 1, "null out: Rust's checks first");
+    var t4, v4 = simulate_first_order(1.0, 0.1, 10.0, 100, 0, 1000);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "null out: InvalidInput");
+    var k = vals1(0.1);
+    var y0 = vals1(1.0);
+    var t5, v5 = simulate_adaptive(&_rd_f_decay, k, y0, 1, 10.0, 0.00000001, &small, 3);
+    var s0: f64 = small[0];
+    var s1: f64 = small[1];
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_INPUT) == 1 && s0 == 0.0 && s1 == 1.0, "adaptive: the first cap kept");
+    var t6, v6 = simulate_stiff(&_rd_f_decay, k, &_rd_j_decay, k, y0, 1, 1.0, 10, &small, 1);
+    assert(is_err_code(t6, v6, KM_ERR_INVALID_INPUT) == 1, "stiff: cap < 2");
+    var t7, v7 = simulate_stochastic(&_rd_f_decay, k, &_rd_g_zero, 0, y0, 1, 1.0, 10, 1, &small, 2);
+    assert(is_err_code(t7, v7, KM_ERR_INVALID_INPUT) == 1, "stochastic: 11 points in 2");
+}
+
+# Out-of-type inputs: a null function pointer, a negative count, a null state with values.
+fn _t_cyrius_out_of_type() {
+    test_group("cyrius_out_of_type");
+    var y0 = vals1(1.0);
+    var t, v = simulate_adaptive(0, 0, y0, 1, 1.0, 0.00000001, traj, TCAP);
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT) == 1, "adaptive: f null");
+    var t1, v1 = simulate_stiff(&_rd_f_zero, 0, 0, 0, y0, 1, 1.0, 10, traj, TCAP);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "stiff: jac null");
+    var t2, v2 = simulate_stochastic(&_rd_f_zero, 0, 0, 0, y0, 1, 1.0, 10, 1, traj, TCAP);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "stochastic: diffusion null");
+    var t3, v3 = simulate_stiff(&_rd_f_zero, 0, &_rd_f_zero, 0, y0, 0 - 1, 1.0, 10, traj, TCAP);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT) == 1, "a negative count");
+    var t4, v4 = simulate_stochastic(&_rd_f_zero, 0, &_rd_f_zero, 0, 0, 2, 1.0, 10, 1, traj, TCAP);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "a null state with values");
+    var t5, v5 = simulate_stiff(&_rd_f_zero, 0, &_rd_f_zero, 0, 0, 0, 1.0, 10, traj, TCAP);
+    assert(is_ok(t5) == 1 && v5 == 2, "a null state with no values is the empty state");
+}
+
+# The inline constants: the decimal literals the stiff loop types (their bits), MAX_STEPS at its edges.
+fn _t_cyrius_inline_constants() {
+    test_group("cyrius_inline_constants");
+    var rtol: f64 = 0.0000000001;
+    var atol: f64 = 0.000001;
+    assert(_km_bits(rtol) == 0x3DDB7CDFD9D7BDBB, "STIFF_NEWTON_RTOL = 1e-10");
+    assert(_km_bits(atol) == 0x3EB0C6F7A0B5ED8D, "STIFF_ACCEPT_RTOL = 1e-6");
+    var t, v = simulate_stiff(&_rd_f_zero, 0, &_rd_f_zero, 0, 0, 0, 1.0, 10000000, traj, TCAP);
+    assert(is_ok(t) == 1 && v == 2, "10⁷ steps accepted (the empty system)");
+    var t1, v1 = simulate_stiff(&_rd_f_zero, 0, &_rd_f_zero, 0, 0, 0, 1.0, 10000001, traj, TCAP);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "10⁷ + 1 rejected");
+    var t2, v2 = simulate_first_order(1.0, 0.1, 1.0, 0, traj, TCAP);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "0 steps rejected");
+}
+
+# The order of the checks: concentration, then each rate constant in order, then t_end and steps.
+fn _t_cyrius_check_order() {
+    test_group("cyrius_check_order");
+    var t, v = simulate_reversible(nan(), 0.0, -1.0, -1.0, -1.0, 0, traj, TCAP);
+    assert(is_err_code(t, v, KM_ERR_INVALID_CONCENTRATION) == 1, "reversible: the concentration first");
+    var t1, v1 = simulate_michaelis_menten(1.0, 0.0, 1.0, -1.0, 0, traj, TCAP);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "Michaelis–Menten: Vmax = 0");
+    var t2, v2 = simulate_michaelis_menten(-0.0, 1.0, 1.0, 1.0, 1, traj, TCAP);
+    assert(is_ok(t2) == 1 && v2 == 2, "[S]₀ = −0 is non-negative");
+    var y0 = vals1(1.0);
+    var t3, v3 = simulate_adaptive(&_rd_f_zero, 0, 0, 0, 1.0, 0.00000001, traj, TCAP);
+    assert(is_err_code(t3, v3, KM_ERR_COMPUTATION_ERROR) == 1, "adaptive, the empty state: hisab's error");
+    var tiny: f64 = 0.0;
+    store64(&tiny, 1);                      # 2⁻¹⁰⁷⁴
+    var t4, v4 = simulate_adaptive(&_rd_f_zero, 0, y0, 1, tiny, 0.00000001, traj, TCAP);
+    assert(is_err_code(t4, v4, KM_ERR_COMPUTATION_ERROR) == 1, "adaptive, t_end/100 = 0: hisab's h_init error");
+}
+
+# The Jacobian buffer is zeroed once and reused, never re-zeroed: a callback that writes J on its first call only
+# gives the result of one that writes it every time (a linear system: the same J throughout).
+var _jac_calls = 0;
+fn _jac_once(ctx, t: f64, y, j, n) {
+    if (_jac_calls == 0) { _rd_j_reversible(ctx, t, y, j, n); }
+    _jac_calls = _jac_calls + 1;
+    return 0;
+}
+fn _t_cyrius_jacobian_reused() {
+    test_group("cyrius_jacobian_reused");
+    var p = vals2(1.0, 0.5);
+    var y0 = vals2(1.0, 0.0);
+    var b1 = alloc(8 * 3 * 2);
+    var b2 = alloc(8 * 3 * 2);
+    var t1, v1 = simulate_stiff(&_rd_f_reversible, p, &_rd_j_reversible, p, y0, 2, 20.0, 50, b1, 2);
+    _jac_calls = 0;
+    var t2, v2 = simulate_stiff(&_rd_f_reversible, p, &_jac_once, p, y0, 2, 20.0, 50, b2, 2);
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && memeq(b1, b2, 48) == 1, "J written once = J written every time");
+    assert(_jac_calls > 50, "the callback was called every iteration");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main(): i64 {
+    traj = alloc(8 * 4 * TCAP);
+    _t_first_order_decay();
+    _t_first_order_monotonically_decreasing();
+    _t_second_order_decay();
+    _t_consecutive_matches_analytic_and_conserves_mass();
+    _t_consecutive_intermediate_peaks();
+    _t_reversible_reaches_equilibrium();
+    _t_reversible_mass_conservation();
+    _t_michaelis_menten_substrate_depletes();
+    _t_michaelis_menten_mass_conservation();
+    _t_adaptive_first_order();
+    _t_first_order_negative_concentration_is_error();
+    _t_first_order_zero_time_is_error();
+    _t_invalid_rate_constants_are_rejected();
+    _t_invalid_initial_concentrations_and_times_are_rejected();
+    _t_huge_step_counts_are_rejected();
+    _t_unstable_rk4_is_error_not_nan();
+    _t_adaptive_rejects_bad_tolerance_and_state();
+    _t_stiff_linear_matches_backward_euler_recurrence();
+    _t_stiff_nonlinear_matches_backward_euler_recurrence();
+    _t_stiff_robertson_conserves_mass();
+    _t_stiff_singular_newton_system_is_error();
+    _t_stiff_non_convergent_newton_is_error();
+    _t_stiff_resized_jacobian_is_error_not_panic();
+    _t_stiff_rejects_non_finite_state();
+    _t_stochastic_is_reproducible_and_zero_noise_is_euler();
+    _t_stochastic_blow_up_is_error_not_inf();
+    _t_reaction_dynamics_first_order_matches_analytical();
+    _t_reaction_dynamics_reversible_equilibrium();
+    _t_cyrius_trajectory_buffer();
+    _t_cyrius_out_of_type();
+    _t_cyrius_inline_constants();
+    _t_cyrius_check_order();
+    _t_cyrius_jacobian_reused();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

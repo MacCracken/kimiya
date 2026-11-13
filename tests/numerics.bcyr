@@ -1,0 +1,186 @@
+# numerics.bcyr — benchmarks of the M5 numerics milestone (M5a: src/numerics.cyr, src/reaction_dynamics.cyr), the
+# method of tests/kimiya.bcyr: each timed batch is a tight loop of `per_batch` calls, inputs from globals (Rust's
+# `black_box`), results to a sink. A third bench file keeps tests/kimiya.bcyr (about 176 s) and the audit files inside
+# `cyrius bench`'s 300 s per-file deadline (the user's decision of 2026-11-11: split rather than raise it).
+#
+# `dynamics/first_order_100steps` and `dynamics/consecutive_100steps` are rust-old/benches/benchmarks.rs's bodies; Rust
+# returns a fresh Vec of trajectory points (101 heap vectors), the port fills the caller's buffer. The others are
+# Cyrius-only: the adaptive, stiff and stochastic solvers on the Rust tests' systems, the dense solve and the normal
+# draw.
+
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/numerics.cyr"
+include "src/reaction_dynamics.cyr"
+include "tests/rd_systems.cyr"
+
+var _bench_sink = 0;
+var _bench_in = 0;          # 8 f64 input slots, filled by main()
+var _bench_out = 0;         # the trajectory buffer: 4096 points of up to 4 f64
+var _bench_p = 0;           # system parameters
+var _bench_y = 0;           # initial states
+var _bench_m = 0;           # an 8 × 9 augmented matrix and its work copy
+var _bench_x = 0;
+
+# dynamics/first_order_100steps: `simulate_first_order(black_box(1.0), black_box(0.1), black_box(10.0),
+# black_box(100)).unwrap()`.
+fn bench_first_order_100steps(per_batch, batches) {
+    var c: f64 = load64(_bench_in);
+    var k: f64 = load64(_bench_in + 8);
+    var t: f64 = load64(_bench_in + 16);
+    var b = bench_new("dynamics/first_order_100steps");
+    var j = 0;
+    while (j < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var r, v = simulate_first_order(c, k, t, 100, _bench_out, 4096);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        j = j + 1;
+    }
+    bench_report(b);
+}
+
+# dynamics/consecutive_100steps: `simulate_consecutive(black_box(1.0), black_box(0.5), black_box(0.1),
+# black_box(20.0), black_box(100)).unwrap()`.
+fn bench_consecutive_100steps(per_batch, batches) {
+    var a: f64 = load64(_bench_in);
+    var k1: f64 = load64(_bench_in + 24);
+    var k2: f64 = load64(_bench_in + 8);
+    var t: f64 = load64(_bench_in + 32);
+    var b = bench_new("dynamics/consecutive_100steps");
+    var j = 0;
+    while (j < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            var r, v = simulate_consecutive(a, k1, k2, t, 100, _bench_out, 4096);
+            _bench_sink = v;
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        j = j + 1;
+    }
+    bench_report(b);
+}
+
+# dynamics/<name> (Cyrius-only): `which` 0 simulate_adaptive (decay k = 0.1 to t = 10, tol 1e-8: the Rust test),
+# 1 simulate_stiff (Robertson to t = 40 in 400 steps: the Rust test), 2 simulate_stochastic (decay with σ = 0.1, 100
+# steps, seed 42).
+fn bench_custom(name, which, per_batch, batches) {
+    var t: f64 = load64(_bench_in + 16);
+    var tol: f64 = load64(_bench_in + 40);
+    var tr: f64 = load64(_bench_in + 48);
+    var one: f64 = load64(_bench_in);
+    var b = bench_new(name);
+    var j = 0;
+    while (j < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            if (which == 0) {
+                var r, v = simulate_adaptive(&_rd_f_decay, _bench_p, _bench_y, 1, t, tol, _bench_out, 4096);
+                _bench_sink = v;
+            } elif (which == 1) {
+                var r1, v1 = simulate_stiff(&_rd_f_robertson, 0, &_rd_j_robertson, 0, _bench_y + 8, 3, tr, 400,
+                  _bench_out, 4096);
+                _bench_sink = v1;
+            } else {
+                var r2, v2 = simulate_stochastic(&_rd_f_decay, _bench_p + 8, &_rd_g_const, _bench_p, _bench_y, 1, one,
+                  100, 42, _bench_out, 4096);
+                _bench_sink = v2;
+            }
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        j = j + 1;
+    }
+    bench_report(b);
+}
+
+# numerics/gaussian_elimination_8x8 (Cyrius-only): hisab 1.4.0's partial-pivoting solve of a fixed, well-conditioned
+# 8 × 9 augmented matrix (copied in each call, as simulate_stiff rebuilds its Newton system);
+# numerics/pcg32_next_normal: one Box–Muller draw (two PCG32 outputs, a ln, a √ and a cos).
+fn bench_kernel(name, which, per_batch, batches) {
+    var rng = pcg32_new(42);
+    var b = bench_new(name);
+    var j = 0;
+    while (j < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            if (which == 0) {
+                memcpy(_bench_m + 8 * 72, _bench_m, 8 * 72);
+                var r, v = _km_gaussian_elimination(_bench_m + 8 * 72, 8, _bench_x);
+                _bench_sink = load64(_bench_x);
+            } else {
+                var z: f64 = _km_pcg32_next_normal(rng);
+                _bench_sink = z;
+            }
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        j = j + 1;
+    }
+    bench_report(b);
+}
+
+# Runs every bench.
+fn main(): i64 {
+    alloc_init();
+    _bench_in = alloc(8 * 8);
+    var ins: f64[8];
+    ins[0] = 1.0;
+    ins[1] = 0.1;
+    ins[2] = 10.0;
+    ins[3] = 0.5;
+    ins[4] = 20.0;
+    ins[5] = 0.00000001;
+    ins[6] = 40.0;
+    ins[7] = 0.0;
+    memcpy(_bench_in, &ins, 64);
+    _bench_out = alloc(8 * 4 * 4096);
+    _bench_p = alloc(16);
+    var pv: f64[2];
+    pv[0] = 0.1;                            # σ (stochastic), k (adaptive)
+    pv[1] = 1.0;                            # k (stochastic)
+    memcpy(_bench_p, &pv, 16);
+    _bench_y = alloc(32);
+    var yv: f64[4];
+    yv[0] = 1.0;
+    yv[1] = 1.0;                            # Robertson's (1, 0, 0)
+    yv[2] = 0.0;
+    yv[3] = 0.0;
+    memcpy(_bench_y, &yv, 32);
+    _bench_m = alloc(8 * 144);
+    _bench_x = alloc(8 * 8);
+    var row = 0;
+    while (row < 8) {
+        var c = 0;
+        while (c < 9) {
+            var d: f64 = f64_from(row + 2 * c + 1);
+            var e: f64 = 1.0 / d;
+            if (row == c) { e = e + 4.0; }
+            store64(_bench_m + 8 * (row * 9 + c), e);
+            c = c + 1;
+        }
+        row = row + 1;
+    }
+    bench_first_order_100steps(10000, 20);
+    bench_consecutive_100steps(10000, 20);
+    bench_custom("dynamics/adaptive_first_order", 0, 10000, 20);
+    bench_custom("dynamics/stiff_robertson_400steps", 1, 200, 20);
+    bench_custom("dynamics/stochastic_100steps", 2, 5000, 20);
+    bench_kernel("numerics/gaussian_elimination_8x8", 0, 100000, 20);
+    bench_kernel("numerics/pcg32_next_normal", 1, 1000000, 20);
+    return 0;
+}
+
+var r = main();
+sys_exit_group(r);

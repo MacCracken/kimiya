@@ -1,0 +1,396 @@
+# numerics.tcyr — src/numerics.cyr, the hisab 1.4.0 routines kimiya transcribes (ADR 0003; M5a), against the Rust
+# oracle: the golden rows of tests/golden/numerics.tsv (scripts/oracle/src/m_numerics.rs calls hisab 1.4.0 directly),
+# replayed through tests/parity_core.cyr's machinery (tests/parity.tcyr skips this module), then Cyrius-only groups.
+#
+# The rows: `num::Pcg32::next_u32` (class A: hisab 3.4.1's pcg32_new / pcg32_next against 1.4.0's
+# `Pcg32::new(seed, 1)`, bit for bit), `num::Pcg32::next_normal` (C: the Box–Muller draws, ln and cos correctly
+# rounded), `num::rk4_trajectory` and `num::gaussian_elimination` (B), `num::dopri45` and `num::euler_maruyama` (C at
+# bound 0). Systems are named by `s:` tokens (tests/rd_systems.cyr); a trajectory is replayed as `v:points` + each
+# point's `f:t v:n f:y…`, the elimination's output as the solution `v:n f:…` then the eliminated matrix `v:n(n+1)
+# f:…`, an error as hisab's variant (`E:ZeroSteps`, `E:InvalidInput`, `E:NoConvergence`, `E:SingularPivot`). The
+# Cyrius-only groups cover what no oracle row reaches: work tables past the stack ones (the heap path), the trajectory
+# capacity (points stored while k < cap, the final state in `fin`), the Neumaier compensation's two branches, and the
+# scratch reuse that leaves an unwritten derivative at its previous value.
+
+include "tests/ulp.cyr"
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/numerics.cyr"
+
+alloc_init();
+
+include "tests/parity_core.cyr"
+include "tests/rd_systems.cyr"
+include "tests/rd_rows.cyr"
+
+# `numerics` rows. Every other module is replayed by tests/parity.tcyr.
+fn _par_numerics(fp, fl): i64 {
+    if (_rd_alloc() != 1) { return 0 - 1; }
+    var out = _rd_out;
+    if (_par_eq(fp, fl, "num::Pcg32::next_u32") == 1 || _par_eq(fp, fl, "num::Pcg32::next_normal") == 1) {
+        if (_par_in_n != 2) { return 0 - 1; }
+        var rng = pcg32_new(_par_in(0));
+        if (rng == 0) { return 0 - 1; }
+        var count = _par_in(1);
+        _par_got_seq(count);
+        var normal = _par_eq(fp, fl, "num::Pcg32::next_normal");
+        var k = 0;
+        while (k < count) {
+            if (normal == 1) {
+                var z: f64 = _km_pcg32_next_normal(rng);
+                _par_got_f(z);
+            } else {
+                _par_got_i(pcg32_next(rng));
+            }
+            k = k + 1;
+        }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "num::rk4_trajectory") == 1) {
+        var k1 = _rd_in_sys(0, _rd_p);
+        if (k1 < 0) { return 0 - 1; }
+        var f1 = _rd_rhs(_rd_name_p, _rd_name_l);
+        if (f1 == 0 || k1 >= _par_in_n) { return 0 - 1; }
+        var t0: f64 = _par_in(k1);
+        k1 = _rd_in_vec(k1 + 1, _rd_y);
+        if (k1 < 0 || k1 + 2 != _par_in_n) { return 0 - 1; }
+        var n1 = _rd_vec_n;
+        var te: f64 = _par_in(k1);
+        var steps = _par_in(k1 + 1);
+        if (steps >= _rd_cap(n1)) { return 0 - 1; }
+        var r1, v1 = _km_rk4_trajectory(f1, _rd_p, t0, _rd_y, n1, te, steps, out, _rd_cap(n1), 0);
+        _rd_got_traj(r1, v1, out, n1, 1);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "num::dopri45") == 1) {
+        var k2 = _rd_in_sys(0, _rd_p);
+        if (k2 < 0) { return 0 - 1; }
+        var f2 = _rd_rhs(_rd_name_p, _rd_name_l);
+        if (f2 == 0 || k2 >= _par_in_n) { return 0 - 1; }
+        var t02: f64 = _par_in(k2);
+        k2 = _rd_in_vec(k2 + 1, _rd_y);
+        if (k2 < 0 || k2 + 3 != _par_in_n) { return 0 - 1; }
+        var n2 = _rd_vec_n;
+        var te2: f64 = _par_in(k2);
+        var tol: f64 = _par_in(k2 + 1);
+        var h: f64 = _par_in(k2 + 2);
+        var r2, v2 = _km_dopri45(f2, _rd_p, t02, _rd_y, n2, te2, tol, h, out, _rd_cap(n2));
+        if (is_ok(r2) == 1 && v2 > _rd_cap(n2)) { return 0 - 1; }
+        _rd_got_traj(r2, v2, out, n2, 1);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "num::euler_maruyama") == 1) {
+        var k3 = _rd_in_sys(0, _rd_p);
+        if (k3 < 0) { return 0 - 1; }
+        var f3 = _rd_rhs(_rd_name_p, _rd_name_l);
+        k3 = _rd_in_sys(k3, _rd_q);
+        if (k3 < 0) { return 0 - 1; }
+        var g3 = _rd_diffusion(_rd_name_p, _rd_name_l);
+        if (f3 == 0 || g3 == 0 || k3 >= _par_in_n) { return 0 - 1; }
+        var t03: f64 = _par_in(k3);
+        k3 = _rd_in_vec(k3 + 1, _rd_y);
+        if (k3 < 0 || k3 + 3 != _par_in_n) { return 0 - 1; }
+        var n3 = _rd_vec_n;
+        var te3: f64 = _par_in(k3);
+        var steps3 = _par_in(k3 + 1);
+        if (steps3 >= _rd_cap(n3)) { return 0 - 1; }
+        var rng3 = pcg32_new(_par_in(k3 + 2));
+        if (rng3 == 0) { return 0 - 1; }
+        var c3 = _rd_cap(n3);
+        var r3, v3 = _km_euler_maruyama_system(f3, _rd_p, g3, _rd_q, t03, _rd_y, n3, te3, steps3, rng3, out, c3, 0);
+        _rd_got_traj(r3, v3, out, n3, 1);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "num::gaussian_elimination") == 1) {
+        if (_par_in_n < 1 || load64(_par_in_k) != 118) { return 0 - 1; }
+        var n4 = _par_in(0);
+        if (n4 < 0 || n4 * (n4 + 1) > _PAR_MAX) { return 0 - 1; }
+        var at = 1;
+        var row = 0;
+        while (row < n4) {
+            if (at >= _par_in_n || _par_in(at) != n4 + 1) { return 0 - 1; }
+            var c = 0;
+            while (c <= n4) {
+                store64(_rd_mat + 8 * (row * (n4 + 1) + c), _par_in(at + 1 + c));
+                c = c + 1;
+            }
+            at = at + n4 + 2;
+            row = row + 1;
+        }
+        if (at != _par_in_n) { return 0 - 1; }
+        var r4, v4 = _km_gaussian_elimination(_rd_mat, n4, _rd_x);
+        if (is_err_result(r4) == 1) {
+            _rd_got_herr(v4);
+            return 1;
+        }
+        _par_got_seq(n4);
+        var i = 0;
+        while (i < n4) {
+            _par_got_f(load64(_rd_x + 8 * i));
+            i = i + 1;
+        }
+        _par_got_seq(n4 * (n4 + 1));
+        i = 0;
+        while (i < n4 * (n4 + 1)) {
+            _par_got_f(load64(_rd_mat + 8 * i));
+            i = i + 1;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+# Routes a row to its dispatcher: only the numerics module's here.
+fn _par_dispatch(mp, ml, fp, fl): i64 {
+    _par_got_n = 0;
+    _par_hist_on = 1;
+    if (_par_eq(mp, ml, "numerics") == 1) { return _par_numerics(fp, fl); }
+    return 0;
+}
+
+fn _par_shadows(mp, ml, fp, fl, cls) {
+    return 0;
+}
+
+# The class-C rows: dopri45's err^(−0.2) and the Box–Muller ln and cos are correctly rounded (_km_cr_pow, _km_cr_ln,
+# _km_cr_cos), so they are compared exactly against the corrected oracle (ADR 0006).
+#must_use
+fn _par_c_bound(fp, fl): i64 {
+    if (_par_eq(fp, fl, "num::dopri45") == 1) { return 0; }
+    if (_par_eq(fp, fl, "num::euler_maruyama") == 1) { return 0; }
+    if (_par_eq(fp, fl, "num::Pcg32::next_normal") == 1) { return 0; }
+    return 0 - 1;
+}
+
+# No divergence is accepted here.
+#must_use
+fn _par_accepted(fp, fl, ip, il): i64 {
+    return 0;
+}
+
+#must_use
+fn _par_accepted_quiet(adr): i64 {
+    return 0;
+}
+
+#must_use
+fn _par_accepted_bits(adr): i64 {
+    return 0;
+}
+
+fn _par_module_done(mp, ml) {
+    return 0;
+}
+
+#must_use
+fn _par_skip(mp, ml): i64 {
+    if (_par_eq(mp, ml, "numerics") == 1) { return 0; }
+    return 1;
+}
+
+# ── Cyrius-only groups ──────────────────────────────────────────────────────────────
+
+# 1 if the n f64 at a and b are bit-identical.
+#must_use
+fn _num_same(a, b, n): i64 {
+    var k = 0;
+    while (k < n) {
+        if (load64(a + 8 * k) != load64(b + 8 * k)) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# Work tables past the stack ones: a 20-component decay (RK4's 7·20 and dopri45's 9·20 words exceed _KM_NUM_STACK,
+# so they come from the heap) gives each component the 1-component result, bit for bit.
+fn _t_cyrius_heap_tables() {
+    test_group("cyrius_heap_tables");
+    var k: f64 = 0.7;
+    var p: f64[1];
+    store64(&p, k);
+    var y0: f64[20];
+    var one: f64 = 1.0;
+    var i = 0;
+    while (i < 20) {
+        store64(&y0 + 8 * i, one);
+        i = i + 1;
+    }
+    var big = alloc(8 * 21 * 11);
+    var small = alloc(8 * 2 * 11);
+    var r, v = _km_rk4_trajectory(&_rd_f_decay, &p, 0.0, &y0, 20, 2.0, 10, big, 11, 0);
+    var r1, v1 = _km_rk4_trajectory(&_rd_f_decay, &p, 0.0, &y0, 1, 2.0, 10, small, 11, 0);
+    assert(is_ok(r) == 1 && v == 11 && is_ok(r1) == 1 && v1 == 11, "rk4 Ok(11) on both");
+    var ok = 1;
+    var s = 0;
+    while (s < 11) {
+        var yb: f64 = load64(big + 8 * (s * 21 + 20));
+        var ys: f64 = load64(small + 8 * (s * 2 + 1));
+        if (_km_bits(yb) != _km_bits(ys)) { ok = 0; }
+        s = s + 1;
+    }
+    assert(ok == 1, "rk4: the 20th component of the heap-table run is the 1-component run's");
+    var dbig = alloc(8 * 21 * 200);
+    var dsmall = alloc(8 * 2 * 200);
+    var tol: f64 = 0.000001;
+    var hi: f64 = 0.02;
+    var rd, vd = _km_dopri45(&_rd_f_decay, &p, 0.0, &y0, 20, 2.0, tol, hi, dbig, 200);
+    var rs, vs = _km_dopri45(&_rd_f_decay, &p, 0.0, &y0, 1, 2.0, tol, hi, dsmall, 200);
+    assert(is_ok(rd) == 1 && is_ok(rs) == 1 && vd == vs && vd > 2 && vd < 200, "dopri45: the same step count");
+    var fb: f64 = load64(dbig + 8 * ((vd - 1) * 21 + 20));
+    var fs: f64 = load64(dsmall + 8 * ((vs - 1) * 2 + 1));
+    assert(_km_bits(fb) == _km_bits(fs), "dopri45: the same final state");
+}
+
+# The capacity: points stored while k < cap, the count returned regardless, the final state in `fin`.
+fn _t_cyrius_capacity() {
+    test_group("cyrius_capacity");
+    var k: f64 = 1.0;
+    var p: f64[1];
+    store64(&p, k);
+    var y0: f64[1];
+    var one: f64 = 1.0;
+    store64(&y0, one);
+    var full: f64[22];
+    var part: f64[22];
+    var mark: f64 = 12345.0;
+    var i = 0;
+    while (i < 22) {
+        store64(&part + 8 * i, mark);
+        i = i + 1;
+    }
+    var fin: f64[1];
+    var r, v = _km_rk4_trajectory(&_rd_f_decay, &p, 0.0, &y0, 1, 1.0, 10, &full, 11, 0);
+    var r2, v2 = _km_rk4_trajectory(&_rd_f_decay, &p, 0.0, &y0, 1, 1.0, 10, &part, 4, &fin);
+    assert(is_ok(r) == 1 && v == 11 && is_ok(r2) == 1 && v2 == 11, "Ok(steps + 1) whatever the capacity");
+    assert(_num_same(&full, &part, 8) == 1, "the first cap points are written");
+    var m8: f64 = load64(&part + 64);
+    assert(_km_bits(m8) == _km_bits(mark), "nothing past cap");
+    var yf: f64 = load64(&full + 8 * 21);
+    var yfin: f64 = load64(&fin);
+    assert(_km_bits(yf) == _km_bits(yfin), "fin is the final state");
+    var r3, v3 = _km_rk4_trajectory(&_rd_f_decay, &p, 0.0, &y0, 1, 1.0, 10, 0, 0, &fin);
+    var yfin2: f64 = load64(&fin);
+    assert(is_ok(r3) == 1 && v3 == 11 && _km_bits(yfin2) == _km_bits(yf), "out = 0: integrate without storing");
+    var g: f64[2];
+    var r4, v4 = _km_dopri45(&_rd_f_decay, &p, 0.0, &y0, 1, 1.0, 0.000001, 0.01, &g, 1);
+    var t0: f64 = load64(&g);
+    var g0: f64 = load64(&g + 8);
+    assert(is_ok(r4) == 1 && v4 > 1 && t0 == 0.0 && g0 == 1.0, "dopri45: the count past cap, the first point kept");
+    var r5, v5 = _km_rk4_trajectory(&_rd_f_decay, &p, 0.0, &y0, 1, 1.0, 0, &full, 11, 0);
+    assert(is_err_result(r5) == 1 && v5 == _KM_NUM_ERR_ZERO_STEPS, "steps = 0: ZeroSteps");
+}
+
+# A derivative that writes nothing keeps the work buffer's previous value (Rust's reused, never re-zeroed vectors):
+# with `zero` the state stays put (the k buffers start at 0; a −0 component becomes +0 at the first y + 0, as in Rust),
+# and the Neumaier branch with |y| < |delta| is taken by a decay from 0 forced upwards.
+fn _t_cyrius_scratch_reuse() {
+    test_group("cyrius_scratch_reuse");
+    var y0: f64[3];
+    var a: f64 = 1.0;
+    var b: f64 = -0.0;
+    var c: f64 = 2.5;
+    store64(&y0, a);
+    store64(&y0 + 8, b);
+    store64(&y0 + 16, c);
+    var out: f64[20];
+    var r, v = _km_rk4_trajectory(&_rd_f_zero, 0, 0.0, &y0, 3, 1.0, 4, &out, 5, 0);
+    assert(is_ok(r) == 1 && v == 5, "Ok(5)");
+    assert(_num_same(&out + 8, &y0, 3) == 1, "zero: the first point is y0, −0 included");
+    var f0: f64 = load64(&out + 8 * 17);
+    var f1: f64 = load64(&out + 8 * 18);
+    var f2: f64 = load64(&out + 8 * 19);
+    assert(f0 == 1.0 && _km_bits(f1) == 0 && f2 == 2.5, "zero: the state stays (−0 + 0 = +0, as in Rust)");
+    var p: f64[2];
+    var k: f64 = 1.0;
+    var cf: f64 = 3.0;
+    store64(&p, k);
+    store64(&p + 8, cf);
+    var z: f64[1];
+    var zero: f64 = 0.0;
+    store64(&z, zero);
+    var o2: f64[22];
+    var r2, v2 = _km_rk4_trajectory(&_rd_f_forced, &p, 0.0, &z, 1, 1.0, 10, &o2, 11, 0);
+    var y1: f64 = load64(&o2 + 24);
+    assert(is_ok(r2) == 1 && v2 == 11 && y1 > 0.0, "forced from 0: the first step's |y| < |delta| branch");
+}
+
+# The elimination's pivot rule on a fixed system and the EPSILON_F64 edge, on the private helper.
+fn _t_cyrius_elimination() {
+    test_group("cyrius_elimination");
+    var m: f64[6];
+    var x: f64[2];
+    var e0: f64 = 0.0;
+    var e1: f64 = 1.0;
+    var e2: f64 = 2.0;
+    var e3: f64 = 3.0;
+    store64(&m, e0);
+    store64(&m + 8, e1);
+    store64(&m + 16, e2);
+    store64(&m + 24, e1);
+    store64(&m + 32, e0);
+    store64(&m + 40, e3);
+    var r, v = _km_gaussian_elimination(&m, 2, &x);
+    var x0: f64 = load64(&x);
+    var x1: f64 = load64(&x + 8);
+    assert(is_ok(r) == 1 && v == 2 && x0 == 3.0 && x1 == 2.0, "[0 1 | 2; 1 0 | 3]: a swap, x = (3, 2)");
+    var s: f64[2];
+    var piv: f64 = EPSILON_F64;
+    var below: f64 = 0x3D719799812DEA10;
+    store64(&s, below);
+    store64(&s + 8, e1);
+    var r1, v1 = _km_gaussian_elimination(&s, 1, &x);
+    assert(is_err_result(r1) == 1 && v1 == _KM_NUM_ERR_SINGULAR_PIVOT, "a pivot one ulp below 1e-12: SingularPivot");
+    store64(&s, piv);
+    store64(&s + 8, e1);
+    var r2, v2 = _km_gaussian_elimination(&s, 1, &x);
+    assert(is_ok(r2) == 1 && v2 == 1, "a pivot of exactly 1e-12 passes");
+    var r3, v3 = _km_gaussian_elimination(&s, 0, &x);
+    assert(is_err_result(r3) == 1 && v3 == _KM_NUM_ERR_INVALID_INPUT, "the empty matrix: InvalidInput");
+}
+
+# The PCG32 handle is hisab 3.4.1's: stream 1 (inc = 3), and the f64 draw is u/2³² exactly.
+fn _t_cyrius_pcg32() {
+    test_group("cyrius_pcg32");
+    var a = pcg32_new(42);
+    var b = pcg32_new(42);
+    assert(a != 0 && b != 0 && load64(a + 8) == 3, "stream 1: inc = 3");
+    var u = pcg32_next(a);
+    var d: f64 = _km_pcg32_next_f64(b);
+    var fu: f64 = f64_from(u);
+    var q: f64 = fu / 4294967296.0;
+    assert(_km_bits(d) == _km_bits(q), "next_f64 = next_u32 / 2³²");
+}
+
+# Replays the numerics golden rows, then runs the Cyrius-only groups; nonzero on any failure, pending or measured row.
+fn main(): i64 {
+    if (_par_alloc() != 0) { return 1; }
+    var failing = _par_module("numerics", 8);
+    print("=== numerics golden rows: ", 26);
+    fmt_int(_par_rows_ok);
+    print(" ok, ", 5);
+    fmt_int(_par_rows_fail);
+    print(" failed, ", 9);
+    fmt_int(_par_rows_meas);
+    print(" measured, ", 11);
+    fmt_int(_par_rows_pend);
+    print(" pending, ", 10);
+    fmt_int(_par_rows_acc);
+    print(" accepted (ADR 6: ", 18);
+    fmt_int(_par_rows_adr6);
+    println(") ===");
+    _t_cyrius_heap_tables();
+    _t_cyrius_capacity();
+    _t_cyrius_scratch_reuse();
+    _t_cyrius_elimination();
+    _t_cyrius_pcg32();
+    var bad = assert_summary();
+    if (failing > 0 || _par_rows_pend > 0 || _par_rows_meas > 0) { bad = bad + 1; }
+    return bad;
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

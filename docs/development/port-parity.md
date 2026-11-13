@@ -1912,6 +1912,54 @@ unscaled 84 ns, the double-double reduction 158–165 ns, the integer one 614 ns
 
 Summary, every target: unchanged from §27.
 
+## 29. M5a: numerics and reaction_dynamics (2026-11-12)
+
+`src/numerics.cyr` transcribes hisab 1.4.0's `rk4_trajectory`, `dopri45`, `gaussian_elimination` and `euler_maruyama`
+(ADR 0003's M5a amendment) and `src/reaction_dynamics.cyr` ports the eight `simulate_*` on them. The overflow audit is
+paused after B10a (the user's decision of 2026-11-12), so M5a is ported at §5's classes without its rework. Two new
+golden modules (`scripts/oracle/src/m_numerics.rs`, `m_reaction_dynamics.rs`, the test systems of `systems.rs`):
+
+| Function | Class | Rows | Ok | Err | Floats | ulp |
+|---|---|---|---|---|---|---|
+| `num::Pcg32::next_u32` | A | 22 | 22 | — | (2,960 u32) | equal |
+| `num::Pcg32::next_normal` | C, bound 0 | 22 | 22 | — | 2,960 | 0 (3 rows against the corrected oracle) |
+| `num::rk4_trajectory` | B | 48 | 47 | 1 (ZeroSteps) | 6,327 | 0 |
+| `num::dopri45` | C, bound 0 | 40 | 32 | 8 | 4,330 | 0 |
+| `num::gaussian_elimination` | B | 96 | 83 | 13 | 3,958 | 0 |
+| `num::euler_maruyama` | C, bound 0 | 15 | 14 | 1 | 3,205 | 0 |
+| `reaction_dynamics::simulate_first_order` | B | 151 | 110 | 41 | 36,916 | 0 |
+| `reaction_dynamics::simulate_second_order` | B | 108 | 67 | 41 | 16,236 | 0 |
+| `reaction_dynamics::simulate_consecutive` | B | 121 | 78 | 43 | 29,372 | 0 |
+| `reaction_dynamics::simulate_reversible` | B | 136 | 85 | 51 | 22,473 | 0 |
+| `reaction_dynamics::simulate_michaelis_menten` | B | 120 | 77 | 43 | 22,164 | 0 |
+| `reaction_dynamics::simulate_adaptive` | C, bound 0 | 90 | 61 | 29 | 13,955 | 0 (1 row against the corrected oracle) |
+| `reaction_dynamics::simulate_stiff` | B | 156 | 121 | 35 | 550 | 0 |
+| `reaction_dynamics::simulate_stochastic` | C, bound 0 | 72 | 61 | 11 | 28,847 | 0 |
+
+Over the two modules 1,197 rows: 880 Ok (72,658 trajectory points, 191,293 floats), 317 Err (`validate.py` §26's count).
+
+- **Bit equality.** Every float of every row is the oracle's (or the corrected oracle's): the transcriptions keep
+  hisab's operation order (the Neumaier-compensated RK4 sum with both branches, the tableau as Rust's const quotients,
+  `t += h`, the strictly-larger pivot rule), the scratch vectors are zeroed once and reused, and the only transcendentals
+  (dopri45's err^(−0.2), Box–Muller's ln and cos) are correctly rounded. No row needs class D, and no tolerance is used:
+  class B rows and class C rows at bound 0 alike measure 0 ulp.
+- **The corrected oracle** (ADR 0006). glibc misrounds 2 of the golden pow calls that change a result (in the
+  1,766-point Brusselator run at tol 10⁻¹², which moves every later step), and 4 cos and 1 log in three
+  `next_normal` rows: `tests/golden/reaction_dynamics.cr.tsv` (1 row) and `numerics.cr.tsv` (3 rows), against which the
+  port is exact. Other misrounded calls do not change their row's outputs (1 `next_normal`, 2 `euler_maruyama` rows).
+- **PCG32.** hisab 3.4.1's `pcg32_new` / `pcg32_next` equal 1.4.0's `Pcg32::new(seed, 1).next_u32()` on all 22 rows
+  (seeds 0 … u64::MAX, 2,000 draws on one), so the port calls hisab for the generator.
+- **The paths** (`validate.py` §26): `simulate_stiff`'s Newton exits recomputed — 101 rows converged, 19 accepted at the
+  10⁻⁶ floor, 19 not converged, 1 singular, 1 non-finite, 1 empty system; `dopri45`'s 100 000-step limit reached;
+  STIFF_NEWTON_RTOL halved / doubled changes 30 / 15 rows, STIFF_ACCEPT_RTOL 2 / 2, STIFF_MAX_NEWTON ∓ 1 22 / 21;
+  MAX_STEPS pinned by the rows at 10⁷ (Ok) and 10⁷ + 1 (Err).
+
+`tests/numerics.tcyr` replays `numerics` (`tests/parity.tcyr` skips it: "replayed by another harness") and prints
+`=== numerics golden rows: 240 ok, 0 failed, 0 measured, 0 pending, 3 accepted (ADR 6: 3) ===`.
+
+Summary, every target (19 modules; numerics apart): **339,944 ok, 0 failed, 0 measured, 0 pending, 46,407 accepted (ADR
+6: 810), 0 glibc-matching** — §27's 338,991 ok plus 953, and one more accepted under ADR 6 (the `simulate_adaptive` row).
+
 ## How to reproduce
 
 ```sh
@@ -1923,6 +1971,7 @@ python3 -I scripts/oracle/cr_verify.py                  # the correctly rounded 
 python3 -I scripts/oracle/mathx_tables.py --check       # the generated tables and their proofs (2^(1/6)'s bound included)
 python3 -I scripts/oracle/isotope_sources.py . DIR      # ADR 0002 #23's isotope records against fresh downloads in DIR
 cyrius test tests/parity.tcyr                  # x86_64 ELF
+cyrius test tests/numerics.tcyr                # the numerics module (M5a)
 cyrius test --win tests/parity.tcyr            # x86_64 PE, needs wine
 cyrius test --aarch64 tests/parity.tcyr        # aarch64, needs qemu-aarch64
 ```

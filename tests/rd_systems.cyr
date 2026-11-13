@@ -1,0 +1,361 @@
+# rd_systems.cyr — the test systems of the M5a golden rows and tests, as the port's callbacks: f(ctx, t, y, dy, n),
+# jac(ctx, t, y, j, n) (the flat n × n Jacobian) and the diffusions g(ctx, t, y, g, n), ctx pointing to the parameters
+# (f64). Included by tests/parity.tcyr and tests/numerics.tcyr (through tests/rd_rows.cyr, which names them for the
+# golden rows), tests/reaction_dynamics.tcyr and tests/numerics.bcyr.
+#
+# scripts/oracle/src/systems.rs defines each system as the Rust closure the oracle integrates; this file has the same
+# formulas in the same operation order, and validate.py has a third copy. A system that writes nothing (`zero`, the
+# diffusion `none`) leaves the solver's buffer as it was, as Rust's `|_, _, _| {}` does.
+
+# ── right-hand sides ────────────────────────────────────────────────────────────────
+
+# dy_i = −k·y_i.
+fn _rd_f_decay(ctx, t: f64, y, dy, n) {
+    var k: f64 = load64(ctx);
+    var nk: f64 = -k;
+    var i = 0;
+    while (i < n) {
+        var yi: f64 = load64(y + 8 * i);
+        var d: f64 = nk * yi;
+        store64(dy + 8 * i, d);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# dy_i = −k·y_i².
+fn _rd_f_decay2(ctx, t: f64, y, dy, n) {
+    var k: f64 = load64(ctx);
+    var nk: f64 = -k;
+    var i = 0;
+    while (i < n) {
+        var yi: f64 = load64(y + 8 * i);
+        var d: f64 = nk * yi;
+        d = d * yi;
+        store64(dy + 8 * i, d);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# A → B → C.
+fn _rd_f_consecutive(ctx, t: f64, y, dy, n) {
+    var k1: f64 = load64(ctx);
+    var k2: f64 = load64(ctx + 8);
+    var a: f64 = load64(y);
+    var b: f64 = load64(y + 8);
+    var nk1: f64 = -k1;
+    var da: f64 = nk1 * a;
+    var p: f64 = k1 * a;
+    var q: f64 = k2 * b;
+    var db: f64 = p - q;
+    store64(dy, da);
+    store64(dy + 8, db);
+    store64(dy + 16, q);
+    return 0;
+}
+
+# A ⇌ B.
+fn _rd_f_reversible(ctx, t: f64, y, dy, n) {
+    var kf: f64 = load64(ctx);
+    var kr: f64 = load64(ctx + 8);
+    var a: f64 = load64(y);
+    var b: f64 = load64(y + 8);
+    var nkf: f64 = -kf;
+    var p: f64 = nkf * a;
+    var q: f64 = kr * b;
+    var da: f64 = p + q;
+    var r: f64 = kf * a;
+    var db: f64 = r - q;
+    store64(dy, da);
+    store64(dy + 8, db);
+    return 0;
+}
+
+# Michaelis–Menten with depletion.
+fn _rd_f_michaelis_menten(ctx, t: f64, y, dy, n) {
+    var vmax: f64 = load64(ctx);
+    var km: f64 = load64(ctx + 8);
+    var s: f64 = load64(y);
+    var num: f64 = vmax * s;
+    var den: f64 = km + s;
+    var rate: f64 = num / den;
+    var nrate: f64 = -rate;
+    store64(dy, nrate);
+    store64(dy + 8, rate);
+    return 0;
+}
+
+# Robertson's stiff kinetics: r1 = 0.04·y0, r2 = 3e7·y1·y1, r3 = 1e4·y1·y2.
+fn _rd_f_robertson(ctx, t: f64, y, dy, n) {
+    var y0: f64 = load64(y);
+    var y1: f64 = load64(y + 8);
+    var y2: f64 = load64(y + 16);
+    var r1: f64 = 0.04 * y0;
+    var r2: f64 = 30000000.0 * y1;
+    r2 = r2 * y1;
+    var r3: f64 = 10000.0 * y1;
+    r3 = r3 * y2;
+    var nr1: f64 = -r1;
+    var d0: f64 = nr1 + r3;
+    var d1: f64 = r1 - r2;
+    d1 = d1 - r3;
+    store64(dy, d0);
+    store64(dy + 8, d1);
+    store64(dy + 16, r2);
+    return 0;
+}
+
+# The Brusselator: dx = A + x²y − (B + 1)·x, dy = B·x − x²y.
+fn _rd_f_brusselator(ctx, t: f64, y, dy, n) {
+    var a: f64 = load64(ctx);
+    var b: f64 = load64(ctx + 8);
+    var x: f64 = load64(y);
+    var w: f64 = load64(y + 8);
+    var xxy: f64 = x * x;
+    xxy = xxy * w;
+    var b1: f64 = b + 1.0;
+    var bx: f64 = b1 * x;
+    var d0: f64 = a + xxy;
+    d0 = d0 - bx;
+    var p: f64 = b * x;
+    var d1: f64 = p - xxy;
+    store64(dy, d0);
+    store64(dy + 8, d1);
+    return 0;
+}
+
+# dy = −k·y + c·t.
+fn _rd_f_forced(ctx, t: f64, y, dy, n) {
+    var k: f64 = load64(ctx);
+    var c: f64 = load64(ctx + 8);
+    var y0: f64 = load64(y);
+    var nk: f64 = -k;
+    var p: f64 = nk * y0;
+    var q: f64 = c * t;
+    var d: f64 = p + q;
+    store64(dy, d);
+    return 0;
+}
+
+# dy = c·y + 1.
+fn _rd_f_affine(ctx, t: f64, y, dy, n) {
+    var c: f64 = load64(ctx);
+    var y0: f64 = load64(y);
+    var p: f64 = c * y0;
+    var d: f64 = p + 1.0;
+    store64(dy, d);
+    return 0;
+}
+
+# dy = NaN.
+fn _rd_f_nan(ctx, t: f64, y, dy, n) {
+    var i = 0;
+    while (i < n) {
+        store64(dy + 8 * i, 0x7FF8000000000000);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# dy = c·y².
+fn _rd_f_blowup(ctx, t: f64, y, dy, n) {
+    var c: f64 = load64(ctx);
+    var y0: f64 = load64(y);
+    var d: f64 = c * y0;
+    d = d * y0;
+    store64(dy, d);
+    return 0;
+}
+
+# dy = −y (with the wrong-sign Jacobian 3).
+fn _rd_f_badjac(ctx, t: f64, y, dy, n) {
+    var y0: f64 = load64(y);
+    var d: f64 = -y0;
+    store64(dy, d);
+    return 0;
+}
+
+# Writes nothing.
+fn _rd_f_zero(ctx, t: f64, y, dy, n) {
+    return 0;
+}
+
+# ── Jacobians (the flat n × n buffer) ───────────────────────────────────────────────
+
+# J_ii = −k (decay, forced).
+fn _rd_j_decay(ctx, t: f64, y, j, n) {
+    var k: f64 = load64(ctx);
+    var nk: f64 = -k;
+    var i = 0;
+    while (i < n) {
+        store64(j + 8 * (i * n + i), nk);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# J_ii = −2·k·y_i.
+fn _rd_j_decay2(ctx, t: f64, y, j, n) {
+    var k: f64 = load64(ctx);
+    var c: f64 = -2.0 * k;
+    var i = 0;
+    while (i < n) {
+        var yi: f64 = load64(y + 8 * i);
+        var d: f64 = c * yi;
+        store64(j + 8 * (i * n + i), d);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _rd_j_consecutive(ctx, t: f64, y, j, n) {
+    var k1: f64 = load64(ctx);
+    var k2: f64 = load64(ctx + 8);
+    var a: f64 = -k1;
+    var b: f64 = -k2;
+    store64(j, a);
+    store64(j + 8 * 3, k1);
+    store64(j + 8 * 4, b);
+    store64(j + 8 * 7, k2);
+    return 0;
+}
+
+fn _rd_j_reversible(ctx, t: f64, y, j, n) {
+    var kf: f64 = load64(ctx);
+    var kr: f64 = load64(ctx + 8);
+    var a: f64 = -kf;
+    var b: f64 = -kr;
+    store64(j, a);
+    store64(j + 8, kr);
+    store64(j + 16, kf);
+    store64(j + 24, b);
+    return 0;
+}
+
+fn _rd_j_michaelis_menten(ctx, t: f64, y, j, n) {
+    var vmax: f64 = load64(ctx);
+    var km: f64 = load64(ctx + 8);
+    var y0: f64 = load64(y);
+    var s: f64 = km + y0;
+    var num: f64 = vmax * km;
+    var den: f64 = s * s;
+    var d: f64 = num / den;
+    var nd: f64 = -d;
+    store64(j, nd);
+    store64(j + 16, d);
+    return 0;
+}
+
+fn _rd_j_robertson(ctx, t: f64, y, j, n) {
+    var y1: f64 = load64(y + 8);
+    var y2: f64 = load64(y + 16);
+    var a00: f64 = -0.04;
+    var a01: f64 = 10000.0 * y2;
+    var a02: f64 = 10000.0 * y1;
+    var c6: f64 = -60000000.0;
+    var p: f64 = c6 * y1;
+    var q: f64 = 10000.0 * y2;
+    var a11: f64 = p - q;
+    var c4: f64 = -10000.0;
+    var a12: f64 = c4 * y1;
+    var a21: f64 = 60000000.0 * y1;
+    var z: f64 = 0.0;
+    var c04: f64 = 0.04;
+    store64(j, a00);
+    store64(j + 8, a01);
+    store64(j + 16, a02);
+    store64(j + 24, c04);
+    store64(j + 32, a11);
+    store64(j + 40, a12);
+    store64(j + 48, z);
+    store64(j + 56, a21);
+    store64(j + 64, z);
+    return 0;
+}
+
+fn _rd_j_brusselator(ctx, t: f64, y, j, n) {
+    var b: f64 = load64(ctx + 8);
+    var x: f64 = load64(y);
+    var w: f64 = load64(y + 8);
+    var xy2: f64 = 2.0 * x;
+    xy2 = xy2 * w;
+    var xx: f64 = x * x;
+    var b1: f64 = b + 1.0;
+    var a00: f64 = xy2 - b1;
+    var a10: f64 = b - xy2;
+    var a11: f64 = -xx;
+    store64(j, a00);
+    store64(j + 8, xx);
+    store64(j + 16, a10);
+    store64(j + 24, a11);
+    return 0;
+}
+
+fn _rd_j_affine(ctx, t: f64, y, j, n) {
+    store64(j, load64(ctx));
+    return 0;
+}
+
+fn _rd_j_nan(ctx, t: f64, y, j, n) {
+    var m1: f64 = -1.0;
+    store64(j, m1);
+    return 0;
+}
+
+fn _rd_j_blowup(ctx, t: f64, y, j, n) {
+    var c: f64 = load64(ctx);
+    var y0: f64 = load64(y);
+    var d: f64 = 2.0 * c;
+    d = d * y0;
+    store64(j, d);
+    return 0;
+}
+
+fn _rd_j_badjac(ctx, t: f64, y, j, n) {
+    var three: f64 = 3.0;
+    store64(j, three);
+    return 0;
+}
+
+# J = −c (slowjac: f is decay's −k·y).
+fn _rd_j_slowjac(ctx, t: f64, y, j, n) {
+    var c: f64 = load64(ctx + 8);
+    var nc: f64 = -c;
+    store64(j, nc);
+    return 0;
+}
+
+# ── diffusions ──────────────────────────────────────────────────────────────────────
+
+fn _rd_g_const(ctx, t: f64, y, g, n) {
+    var s: f64 = load64(ctx);
+    var i = 0;
+    while (i < n) {
+        store64(g + 8 * i, s);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _rd_g_zero(ctx, t: f64, y, g, n) {
+    var z: f64 = 0.0;
+    var i = 0;
+    while (i < n) {
+        store64(g + 8 * i, z);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _rd_g_mult(ctx, t: f64, y, g, n) {
+    var s: f64 = load64(ctx);
+    var i = 0;
+    while (i < n) {
+        var yi: f64 = load64(y + 8 * i);
+        var d: f64 = s * yi;
+        store64(g + 8 * i, d);
+        i = i + 1;
+    }
+    return 0;
+}

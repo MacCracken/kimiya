@@ -1,0 +1,153 @@
+# rd_rows.cyr — the M5a golden rows' helpers, shared by tests/parity.tcyr (reaction_dynamics) and tests/numerics.tcyr
+# (numerics): the systems by name (the `s:` tokens of scripts/oracle/src/systems.rs, implemented in
+# tests/rd_systems.cyr), the input readers and the trajectory output. Include it after tests/parity_core.cyr and
+# tests/rd_systems.cyr.
+
+# ── names ───────────────────────────────────────────────────────────────────────────
+
+# The right-hand side named by text [p, p + l), or 0.
+#must_use
+fn _rd_rhs(p, l): i64 {
+    if (_par_eq(p, l, "decay") == 1) { return &_rd_f_decay; }
+    if (_par_eq(p, l, "decay2") == 1) { return &_rd_f_decay2; }
+    if (_par_eq(p, l, "consecutive") == 1) { return &_rd_f_consecutive; }
+    if (_par_eq(p, l, "reversible") == 1) { return &_rd_f_reversible; }
+    if (_par_eq(p, l, "michaelis_menten") == 1) { return &_rd_f_michaelis_menten; }
+    if (_par_eq(p, l, "robertson") == 1) { return &_rd_f_robertson; }
+    if (_par_eq(p, l, "brusselator") == 1) { return &_rd_f_brusselator; }
+    if (_par_eq(p, l, "forced") == 1) { return &_rd_f_forced; }
+    if (_par_eq(p, l, "affine") == 1) { return &_rd_f_affine; }
+    if (_par_eq(p, l, "nan") == 1) { return &_rd_f_nan; }
+    if (_par_eq(p, l, "blowup") == 1) { return &_rd_f_blowup; }
+    if (_par_eq(p, l, "badjac") == 1) { return &_rd_f_badjac; }
+    if (_par_eq(p, l, "slowjac") == 1) { return &_rd_f_decay; }
+    if (_par_eq(p, l, "zero") == 1) { return &_rd_f_zero; }
+    return 0;
+}
+
+# The Jacobian of the system named by [p, p + l), or 0.
+#must_use
+fn _rd_jac(p, l): i64 {
+    if (_par_eq(p, l, "decay") == 1 || _par_eq(p, l, "forced") == 1) { return &_rd_j_decay; }
+    if (_par_eq(p, l, "decay2") == 1) { return &_rd_j_decay2; }
+    if (_par_eq(p, l, "consecutive") == 1) { return &_rd_j_consecutive; }
+    if (_par_eq(p, l, "reversible") == 1) { return &_rd_j_reversible; }
+    if (_par_eq(p, l, "michaelis_menten") == 1) { return &_rd_j_michaelis_menten; }
+    if (_par_eq(p, l, "robertson") == 1) { return &_rd_j_robertson; }
+    if (_par_eq(p, l, "brusselator") == 1) { return &_rd_j_brusselator; }
+    if (_par_eq(p, l, "affine") == 1) { return &_rd_j_affine; }
+    if (_par_eq(p, l, "nan") == 1) { return &_rd_j_nan; }
+    if (_par_eq(p, l, "blowup") == 1) { return &_rd_j_blowup; }
+    if (_par_eq(p, l, "badjac") == 1) { return &_rd_j_badjac; }
+    if (_par_eq(p, l, "slowjac") == 1) { return &_rd_j_slowjac; }
+    if (_par_eq(p, l, "zero") == 1) { return &_rd_f_zero; }
+    return 0;
+}
+
+# The diffusion named by [p, p + l), or 0.
+#must_use
+fn _rd_diffusion(p, l): i64 {
+    if (_par_eq(p, l, "const") == 1) { return &_rd_g_const; }
+    if (_par_eq(p, l, "zero") == 1) { return &_rd_g_zero; }
+    if (_par_eq(p, l, "mult") == 1) { return &_rd_g_mult; }
+    if (_par_eq(p, l, "none") == 1) { return &_rd_f_zero; }
+    return 0;
+}
+
+# ── row helpers ─────────────────────────────────────────────────────────────────────
+
+# The work buffers, allocated once (_rd_alloc): parameters (two sets, 64 words each), the state (_PAR_MAX words), the
+# trajectory (_RD_TRAJ words), a matrix and a solution (numerics' elimination rows).
+var _RD_TRAJ = 65536;
+var _rd_p = 0;
+var _rd_q = 0;
+var _rd_y = 0;
+var _rd_out = 0;
+var _rd_mat = 0;
+var _rd_x = 0;
+#must_use
+fn _rd_alloc(): i64 {
+    if (_rd_out != 0) { return 1; }
+    _rd_p = _par_words(64);
+    _rd_q = _par_words(64);
+    _rd_y = _par_words(_PAR_MAX);
+    _rd_out = _par_words(_RD_TRAJ);
+    _rd_mat = _par_words(_PAR_MAX);
+    _rd_x = _par_words(_PAR_MAX);
+    if (_rd_p == 0 || _rd_q == 0 || _rd_y == 0 || _rd_out == 0 || _rd_mat == 0 || _rd_x == 0) { return 0; }
+    return 1;
+}
+
+# The trajectory capacity, in points of 1 + n words.
+#must_use
+fn _rd_cap(n): i64 { return _RD_TRAJ / (1 + n); }
+
+# Reads `s:name v:n f:…` at input token k: the name into (_rd_name_p, _rd_name_l), the parameters into buf (at most 64).
+# The index after it, or -1.
+var _rd_name_p = 0;
+var _rd_name_l = 0;
+#must_use
+fn _rd_in_sys(k, buf): i64 {
+    if (k + 1 >= _par_in_n) { return 0 - 1; }
+    if (load64(_par_in_k + 8 * k) != 115 || load64(_par_in_k + 8 * (k + 1)) != 118) { return 0 - 1; }
+    _rd_name_p = load64(_par_in_v + 8 * k);
+    _rd_name_l = load64(_par_in_l + 8 * k);
+    var np = _par_in(k + 1);
+    if (np < 0 || np > 64 || k + 2 + np > _par_in_n) { return 0 - 1; }
+    var n = _par_in_f64s(k + 1, buf);
+    return k + 2 + n;
+}
+
+# Reads `v:n f:…` at input token k into buf; the index after it, or -1. The count is _rd_vec_n.
+var _rd_vec_n = 0;
+#must_use
+fn _rd_in_vec(k, buf): i64 {
+    if (k >= _par_in_n || load64(_par_in_k + 8 * k) != 118) { return 0 - 1; }
+    var n = _par_in(k);
+    if (n < 0 || k + 1 + n > _par_in_n) { return 0 - 1; }
+    _rd_vec_n = _par_in_f64s(k, buf);
+    return k + 1 + n;
+}
+
+# The HisabError variant name of a src/numerics.cyr code.
+#must_use
+fn _rd_herr_name(code): i64 {
+    if (code == _KM_NUM_ERR_ZERO_STEPS) { return "ZeroSteps"; }
+    if (code == _KM_NUM_ERR_INVALID_INPUT) { return "InvalidInput"; }
+    if (code == _KM_NUM_ERR_NO_CONVERGENCE) { return "NoConvergence"; }
+    if (code == _KM_NUM_ERR_SINGULAR_PIVOT) { return "SingularPivot"; }
+    return "AllocFailure";
+}
+
+# Appends a hisab error (`E:Variant`) to the got list.
+fn _rd_got_herr(code) {
+    var name = _rd_herr_name(code);
+    var at = _par_got_n * 8;
+    store64(_par_got_k + at, 69);
+    store64(_par_got_v + at, name);
+    store64(_par_got_l + at, strlen(name));
+    _par_got_n = _par_got_n + 1;
+}
+
+# Appends a trajectory Result's tokens: `v:points`, then each point's `f:t v:n f:y…` from buf; or its Err, named by
+# `names` (1: hisab's variants, numerics; 0: kimiya's).
+fn _rd_got_traj(t, v, buf, n, names) {
+    if (is_err_result(t) == 1) {
+        if (names == 1) { _rd_got_herr(v); } else { _par_got_err(v); }
+        return 0;
+    }
+    _par_got_seq(v);
+    var k = 0;
+    while (k < v) {
+        var p = buf + 8 * k * (1 + n);
+        _par_got_f(load64(p));
+        _par_got_seq(n);
+        var i = 0;
+        while (i < n) {
+            _par_got_f(load64(p + 8 + 8 * i));
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}

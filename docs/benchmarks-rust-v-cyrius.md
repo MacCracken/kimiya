@@ -710,3 +710,36 @@ is the first, second or double-double tier.
 
 `tests/audit2.bcyr` takes 66 s with B10a's benches (49 s before); `tests/kimiya.bcyr` and `tests/audit.bcyr` are
 unchanged.
+
+## M5a numerics, reaction_dynamics (2026-11-12)
+
+`tests/numerics.bcyr`, a new bench file (39 s; `tests/kimiya.bcyr` and the audit files are unchanged). The two benches
+with a Rust counterpart are `rust-old/benches/benchmarks.rs`'s bodies, Rust's criterion medians from
+`rust-old/benchmarks.md`; the five others are Cyrius-only benches of the Rust tests' systems, compared with an ad hoc
+Rust timing of the same bodies (`std::time::Instant` around a `black_box` loop, the median of 21 batches, release build
+against `rust-old/`, the same host and idle; it reads 4.75 and 5.72 µs for the two criterion benches, 8–13 % above
+criterion's medians, so its column is a rough guide). Rust returns a fresh `Vec` of trajectory points (one heap vector
+per point); the port fills the caller's buffer.
+
+| Bench | Body | Rust | Cyrius | Cyrius / Rust |
+|---|---|---|---|---|
+| `dynamics/first_order_100steps` | `simulate_first_order(1, 0.1, 10, 100)`: 100 RK4 steps (4 callbacks each, Neumaier compensation), 101 points | 4.41 µs | 11.2 µs | 2.5× |
+| `dynamics/consecutive_100steps` | `simulate_consecutive(1, 0.5, 0.1, 20, 100)`: the same over 3 species | 5.04 µs | 21.4 µs | 4.3× |
+| `dynamics/adaptive_first_order` | `simulate_adaptive` of dy = −0.1·y to t = 10, tol 10⁻⁸ (the Rust test): Dormand–Prince, 7 callbacks and one correctly rounded pow per step | 1.80 µs (ad hoc) | 6.19 µs | 3.4× |
+| `dynamics/stiff_robertson_400steps` | `simulate_stiff` of Robertson to t = 40 in 400 steps (the Rust test): Newton per step, a 3 × 4 elimination per iteration | 121 µs (ad hoc) | 498 µs | 4.1× |
+| `dynamics/stochastic_100steps` | `simulate_stochastic` of dy = −y, σ = 0.1, 100 steps, seed 42: two callbacks and one Box–Muller draw per step | 4.85 µs (ad hoc) | 24.8 µs | 5.1× |
+| `numerics/gaussian_elimination_8x8` | `_km_gaussian_elimination` of a fixed 8 × 9 augmented matrix, copied in each call (Rust: `gaussian_elimination` on a clone) | 353 ns (ad hoc) | 2.48 µs | 7.0× |
+| `numerics/pcg32_next_normal` | one Box–Muller draw: two PCG32 outputs, ln, √, cos | 22.6 ns (ad hoc) | 200 ns | 8.8× |
+
+Every body is bit-identical to Rust's on the golden rows (`reaction_dynamics` 954, `numerics` 243, 0 ulp; the four rows
+where glibc misrounds a pow, ln or cos are the corrected oracle's).
+
+**One optimization, measured.** The elimination addressed each entry as m + 8·(row·(n + 1) + j) inside its inner loops;
+it now keeps each row's base pointer and steps by 8 bytes (the same operations, the same bits): the two versions side by
+side in one bench run, `gaussian_elimination_8x8` 3.15 → 2.56 µs (−19 %). `simulate_stiff` solves one such system per
+Newton iteration.
+
+**Reading the gap.** The RK4 and Euler–Maruyama loops are the port's typical 2.5–5× (each callback is a `callptr` with
+five arguments, each component's update a few loads and stores through the work tables, where Rust inlines the closure);
+the normal draw is mostly the correctly rounded ln and cos (`mathx/cr_ln` 49 ns, `mathx/cr_cos` 82 ns);
+dopri45's correctly rounded pow is one call per step. Parity, not speed, is the bar.

@@ -14,6 +14,9 @@ description = "Drives the frozen Rust kimiya 1.2.0 in rust-old/ to write the Cyr
 # value the corpus records.
 [dependencies]
 kimiya = { path = "../../rust-old" }
+# M5a: numerics.tsv calls hisab 1.4.0's routines directly (the ones src/numerics.cyr transcribes, ADR 0003). It is
+# the oracle's own hisab, already in the lock: the same version and features (kimiya enables `num` and `autodiff`).
+hisab = { version = "=1.4.0", default-features = false, features = ["num"] }
 
 [[bin]]
 name = "oracle"

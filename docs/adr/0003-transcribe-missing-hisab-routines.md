@@ -141,3 +141,39 @@ rows). `_km_flame_bisection`'s opposite-signs check, hisab 1.4.0's `f(a)·f(b) >
 which differs only where that product underflows to +0 and cannot change a flame result (the flame reaches it only after
 its bracket proved opposite signs at the same two points); the bracket test itself is ADR 0002 #38. The status stays
 **Accepted**.
+
+## Amendment (M5a, 2026-11-12)
+
+**The ODE integrators and the dense solve are transcribed as decided; PCG32 is hisab 3.4.1's.** `src/numerics.cyr` has
+`_km_rk4_trajectory` (with its `_km_rk4_step`), `_km_dopri45`, `_km_gaussian_elimination` and
+`_km_euler_maruyama_system`: hisab 1.4.0's `src/num/ode.rs` (`rk4_step`, `rk4_trajectory`, `dopri45`, `euler_maruyama`)
+and `src/num/roots.rs` (`gaussian_elimination`) operation for operation — the stage sums left to right as Rust parses
+them (`y + hd·a21·k1` is `y + (hd·a21)·k1`), the Neumaier-compensated RK4 increment with both of its branches, the
+Butcher tableau as Rust's const quotients of integers (each evaluated as the same correctly rounded division), the step
+clamp and the `t += h` time accumulation, the scratch vectors zeroed once and reused, never re-zeroed (a callback that
+leaves an entry alone sees its previous value, as in Rust), the strictly-larger pivot rule and its 10⁻¹² threshold (hisab
+3.4.1's `EPSILON_F64`, the same bits), whole-row swaps, and back substitution from b down the row. The closures are a
+function pointer and a context pointer (`f(ctx, t, y, dy, n)`, called through `callptr`), and the trajectory a flat
+buffer of (t, y[n]) points (port plan §4, M5). `backward_euler` is not transcribed: `simulate_stiff` never called it
+(it is kimiya's own loop, in `src/reaction_dynamics.cyr`).
+
+- **PCG32.** `pcg32_new(seed)` / `pcg32_next` of hisab 3.4.1 (stream 1: inc = 3, the advance, `state += seed`, the
+  advance) give 1.4.0's `Pcg32::new(seed, 1).next_u32()` bit for bit: `tests/golden/numerics.tsv`'s 22 `num::Pcg32::next_u32`
+  rows (seeds 0, 1, 2, 7, 42, 2024, 2³², 2⁶³, u64::MAX − 1, u64::MAX and ten seeded ones; 64 or 2,000 draws) are all
+  equal, so nothing was transcribed there. 1.4.0's `next_f64` (u / (u32::MAX + 1), exact) and `next_normal` (Box–Muller,
+  √(−2·ln max(u₁, 10⁻³⁰⁰))·cos(τ·u₂)) are transcribed on its output, as `_km_pcg32_next_f64` and `_km_pcg32_next_normal`.
+- **Classes.** RK4, the elimination and the backward-Euler loop are + − × ÷ and √ only: class B, and every golden row is
+  0 ulp. dopri45's step factor 0.9·err^(−0.2) and the Box–Muller ln and cos are transcendental, which this ADR sent to
+  class D; under ADR 0006 they are `src/mathx.cyr`'s correctly rounded `_km_cr_pow`, `_km_cr_ln` and `_km_cr_cos`, so
+  `num::dopri45`, `num::euler_maruyama`, `num::Pcg32::next_normal`, `simulate_adaptive` and `simulate_stochastic` are
+  class C at **bound 0** against the corrected oracle, bit-identical too. glibc misrounds a few of those calls; where
+  that changes a golden row's outputs (two pows in a 1,766-point Brusselator run at tol 10⁻¹² move every later point;
+  four cos and one ln over three `next_normal` rows) the row gets an ADR 0006 correction
+  (`tests/golden/numerics.cr.tsv`, `reaction_dynamics.cr.tsv`), against which the port is exact.
+- **The golden rows** call hisab 1.4.0 directly (`scripts/oracle/src/m_numerics.rs`, the generator's one direct
+  dependency besides the oracle, the same locked hisab) on the edges kimiya's guards never pass on: t₀ ≠ 0, backward
+  integration, t_end = t₀, the empty state, h_init 0, negative, NaN or larger than the span, the 100 000-step limit, NaN
+  and ±∞ pivots, pivots at 10⁻¹² ± 1 ulp, ties in the pivot search, Hilbert matrices. `tests/numerics.tcyr` replays them
+  (`tests/parity.tcyr` skips the module); `validate.py` §26 recomputes every row with its own transcription.
+- `num::least_squares_poly` (fitting) and `matrix_rank` (network) join `src/numerics.cyr` in M5b. The hisab feature
+  request (system integrators, a dense solver, …) stands. The status stays **Accepted**.

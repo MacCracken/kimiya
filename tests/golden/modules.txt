@@ -8,10 +8,12 @@ kinetics
 math
 molecule
 nuclear
+numerics
 organic
 phase
 potential
 reaction
+reaction_dynamics
 solution
 spectroscopy
 stoichiometry

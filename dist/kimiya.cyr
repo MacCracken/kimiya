@@ -21526,3 +21526,1078 @@ fn find_peaks(data, n, threshold: f64, out, cap): Result {
     if (cnt < 0) { return Err(KM_ERR_INVALID_INPUT); }
     return Ok(cnt);
 }
+
+# --- numerics.cyr ---
+
+# numerics.cyr — the hisab 1.4.0 numerical routines kimiya 1.2.0 calls that hisab 3.4.1 lacks, transcribed (ADR 0003,
+# port plan §6.2; M5a).
+#
+# The oracle's reaction_dynamics integrates systems of ODEs through hisab 1.4.0's `num::rk4_trajectory`, `num::dopri45`
+# and `num::euler_maruyama`, and solves its backward-Euler Newton systems with `num::gaussian_elimination`. hisab 3.4.1
+# has scalar ODE steps only and no dense direct solver, so each routine is here, private, operation for operation from
+# ~/.cargo/registry/src/*/hisab-1.4.0/src/num/{ode,roots,rng}.rs: the same loops, the same left-to-right sums, the same
+# scratch buffers reused (and never re-zeroed) across steps, no FMA. Only + − × ÷ and √ are on the RK4, Euler–Maruyama
+# drift and elimination paths; dopri45's step factor is err^(−0.2) and the Box–Muller normal draw takes ln and cos,
+# which are src/mathx.cyr's correctly rounded _km_cr_pow, _km_cr_ln and _km_cr_cos (ADR 0006), so every routine gives
+# the corrected oracle's bits on every target. The PCG32 generator is hisab 3.4.1's (pcg32_new / pcg32_next, stream 1:
+# its output is 1.4.0's `Pcg32::new(seed, 1)` bit for bit, tests/numerics.tcyr's golden rows); next_f64 and
+# next_normal are 1.4.0's, transcribed here on its u32 output.
+#
+# The Rust closures `Fn(f64, &[f64], &mut [f64])` are a function pointer and a context pointer (port plan §6.3):
+# f(ctx, t, y, dy, n), called through `callptr`, with y and dy pointers to n f64 each (the slices' common length n). A
+# trajectory is a flat buffer of points, each 1 + n f64 (t, then y[0 .. n)), point k at out + 8·k·(1 + n): the
+# routines store point k only while k < cap (out may then be 0 with cap 0) and return the point count, so a caller
+# can integrate without keeping the path. `fin`, when not 0, receives the final state (n f64). Errors are the
+# HisabError variants (the _KM_NUM_ERR_* codes below, private; tests/numerics.tcyr names them), and _KM_NUM_ERR_ALLOC
+# where a work table can't be allocated (Rust would abort). Work tables of up to _KM_NUM_STACK f64 are on the stack;
+# larger ones come from the bump allocator (which never frees), zeroed as Rust's `vec![0.0; n]`.
+#
+# hisab 1.4.0's `num::least_squares_poly` (fitting) and `num::matrix_rank` (network) join this file in M5b.
+
+include "lib/alloc.cyr"
+include "lib/hisab.cyr"
+
+# hisab 1.4.0's HisabError variants, as the private routines return them.
+const _KM_NUM_ERR_ZERO_STEPS = 1;           # HisabError::ZeroSteps
+const _KM_NUM_ERR_INVALID_INPUT = 2;        # HisabError::InvalidInput
+const _KM_NUM_ERR_NO_CONVERGENCE = 3;       # HisabError::NoConvergence
+const _KM_NUM_ERR_SINGULAR_PIVOT = 4;       # HisabError::SingularPivot
+const _KM_NUM_ERR_ALLOC = 5;                # a work table could not be allocated (no Rust counterpart)
+
+# Work-table words kept on the stack (RK4 needs 7·n, dopri45 10·n, Euler–Maruyama 3·n).
+const _KM_NUM_STACK = 96;
+
+# n zeroed f64 words: the caller's stack table `st` (cap words) when n fits, else the bump allocator; 0 when that
+# fails or 8·n would overflow.
+#must_use
+fn _km_num_table(st, cap, n): i64 {
+    var p = st;
+    if (n > cap) {
+        if (n > 0x0080000000000000) { return 0; }
+        p = alloc(8 * n);
+        if (p == 0) { return 0; }
+    }
+    var k = 0;
+    while (k < n) {
+        store64(p + 8 * k, 0);
+        k = k + 1;
+    }
+    return p;
+}
+
+# Copies n f64 words from src to dst.
+fn _km_num_copy(dst, src, n) {
+    var k = 0;
+    while (k < n) {
+        store64(dst + 8 * k, load64(src + 8 * k));
+        k = k + 1;
+    }
+    return 0;
+}
+
+# Stores trajectory point k = (t, y[0 .. n)) at out when k < cap.
+fn _km_num_point(out, cap, k, t: f64, y, n) {
+    if (k >= cap) { return 0; }
+    var p = out + 8 * k * (1 + n);
+    store64(p, t);
+    _km_num_copy(p + 8, y, n);
+    return 0;
+}
+
+# ── classical RK4 (num::rk4_trajectory) ──────────────────────────────────────────────
+
+# One RK4 step in place, hisab 1.4.0's `rk4_step`: the four stages, then each component's increment
+# h/6·(k1 + 2·k2 + 2·k3 + k4) added with Neumaier compensation, `comp` carrying each component's running correction
+# across steps.
+fn _km_rk4_step(f, ctx, t: f64, h: f64, y, k1, k2, k3, k4, tmp, comp, n) {
+    callptr(f, ctx, t, y, k1, n);
+    var hh: f64 = 0.5 * h;
+    var i = 0;
+    while (i < n) {
+        var yi: f64 = load64(y + 8 * i);
+        var ki: f64 = load64(k1 + 8 * i);
+        var s: f64 = hh * ki;
+        var v: f64 = yi + s;
+        store64(tmp + 8 * i, v);
+        i = i + 1;
+    }
+    var th: f64 = t + hh;
+    callptr(f, ctx, th, tmp, k2, n);
+    i = 0;
+    while (i < n) {
+        var yi2: f64 = load64(y + 8 * i);
+        var ki2: f64 = load64(k2 + 8 * i);
+        var s2: f64 = hh * ki2;
+        var v2: f64 = yi2 + s2;
+        store64(tmp + 8 * i, v2);
+        i = i + 1;
+    }
+    callptr(f, ctx, th, tmp, k3, n);
+    i = 0;
+    while (i < n) {
+        var yi3: f64 = load64(y + 8 * i);
+        var ki3: f64 = load64(k3 + 8 * i);
+        var s3: f64 = h * ki3;
+        var v3: f64 = yi3 + s3;
+        store64(tmp + 8 * i, v3);
+        i = i + 1;
+    }
+    var t1: f64 = t + h;
+    callptr(f, ctx, t1, tmp, k4, n);
+    var h6: f64 = h / 6.0;
+    i = 0;
+    while (i < n) {
+        var a: f64 = load64(k1 + 8 * i);
+        var b: f64 = load64(k2 + 8 * i);
+        var c: f64 = load64(k3 + 8 * i);
+        var d: f64 = load64(k4 + 8 * i);
+        var b2: f64 = 2.0 * b;
+        var c2: f64 = 2.0 * c;
+        var sum: f64 = a + b2;
+        sum = sum + c2;
+        sum = sum + d;
+        var delta: f64 = h6 * sum;
+        var yv: f64 = load64(y + 8 * i);
+        var ns: f64 = yv + delta;
+        var cv: f64 = load64(comp + 8 * i);
+        var ay: f64 = f64_abs(yv);
+        var ad: f64 = f64_abs(delta);
+        if (ay >= ad) {
+            var e1: f64 = yv - ns;
+            e1 = e1 + delta;
+            cv = cv + e1;
+        } else {
+            var e2: f64 = delta - ns;
+            e2 = e2 + yv;
+            cv = cv + e2;
+        }
+        store64(comp + 8 * i, cv);
+        var yn: f64 = ns + cv;
+        store64(y + 8 * i, yn);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# hisab 1.4.0's `num::rk4_trajectory`: dy/dt = f(t, y) from (t0, y0[0 .. n)) to t_end in `steps` RK4 steps of
+# h = (t_end − t0)/steps, t advanced by repeated `t += h`; the steps + 1 points (t0, y0), …, go to `out` (the first cap
+# of them), the final state to `fin` (if not 0). Ok(steps + 1); Err(_KM_NUM_ERR_ZERO_STEPS) for steps = 0;
+# Err(_KM_NUM_ERR_ALLOC). `steps` is a usize: the caller keeps it in 1 ..= 10⁷ (hisab pre-allocates the path).
+#must_use
+fn _km_rk4_trajectory(f, ctx, t0: f64, y0, n, t_end: f64, steps, out, cap, fin): Result {
+    if (steps == 0) { return Err(_KM_NUM_ERR_ZERO_STEPS); }
+    var st: f64[96];
+    var w = _km_num_table(&st, _KM_NUM_STACK, 7 * n);
+    if (w == 0) { return Err(_KM_NUM_ERR_ALLOC); }
+    var y = w;
+    var k1 = w + 8 * n;
+    var k2 = w + 16 * n;
+    var k3 = w + 24 * n;
+    var k4 = w + 32 * n;
+    var tmp = w + 40 * n;
+    var comp = w + 48 * n;
+    _km_num_copy(y, y0, n);
+    var span: f64 = t_end - t0;
+    var ns: f64 = f64_from(steps);
+    var h: f64 = span / ns;
+    var t: f64 = t0;
+    _km_num_point(out, cap, 0, t, y, n);
+    var s = 0;
+    while (s < steps) {
+        _km_rk4_step(f, ctx, t, h, y, k1, k2, k3, k4, tmp, comp, n);
+        t = t + h;
+        s = s + 1;
+        _km_num_point(out, cap, s, t, y, n);
+    }
+    if (fin != 0) { _km_num_copy(fin, y, n); }
+    return Ok(steps + 1);
+}
+
+# ── Dormand–Prince 4(5) (num::dopri45) ───────────────────────────────────────────────
+
+# hisab 1.4.0's `num::dopri45`: the adaptive Dormand–Prince RK4(5) from (t0, y0[0 .. n)) to t_end with error tolerance
+# `tol` (component scale max(tol, tol·|y|), the RMS error norm) and first step h_init, at most 100 000 attempted steps;
+# every accepted point, starting with (t0, y0), goes to `out` (the first cap of them). The Butcher tableau is Rust's
+# const expressions (each a correctly rounded quotient of two integers, evaluated here the same way), the step factor
+# 0.9·err^(−0.2) (5 for err = 0 or NaN) clamped to [0.2, 5], the step clamped so as not to pass t_end, the direction
+# that of t_end − t0. Ok(point count, which may exceed cap); Err(_KM_NUM_ERR_INVALID_INPUT) for n = 0 or h_init ≤ 0
+# (a NaN h_init passes, as in Rust, and min ignores it); Err(_KM_NUM_ERR_NO_CONVERGENCE) when |t − t_end| > h/100
+# after the 100 000 steps; Err(_KM_NUM_ERR_ALLOC).
+#must_use
+fn _km_dopri45(f, ctx, t0: f64, y0, n, t_end: f64, tol: f64, h_init: f64, out, cap): Result {
+    if (n == 0) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
+    if (h_init <= 0.0) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
+    var a21: f64 = 1.0 / 5.0;
+    var a31: f64 = 3.0 / 40.0;
+    var a32: f64 = 9.0 / 40.0;
+    var a41: f64 = 44.0 / 45.0;
+    var a42: f64 = -56.0 / 15.0;
+    var a43: f64 = 32.0 / 9.0;
+    var a51: f64 = 19372.0 / 6561.0;
+    var a52: f64 = -25360.0 / 2187.0;
+    var a53: f64 = 64448.0 / 6561.0;
+    var a54: f64 = -212.0 / 729.0;
+    var a61: f64 = 9017.0 / 3168.0;
+    var a62: f64 = -355.0 / 33.0;
+    var a63: f64 = 46732.0 / 5247.0;
+    var a64: f64 = 49.0 / 176.0;
+    var a65: f64 = -5103.0 / 18656.0;
+    var b1: f64 = 35.0 / 384.0;
+    var b3: f64 = 500.0 / 1113.0;
+    var b4: f64 = 125.0 / 192.0;
+    var b5: f64 = -2187.0 / 6784.0;
+    var b6: f64 = 11.0 / 84.0;
+    var e1: f64 = 71.0 / 57600.0;
+    var e3: f64 = -71.0 / 16695.0;
+    var e4: f64 = 71.0 / 1920.0;
+    var e5: f64 = -17253.0 / 339200.0;
+    var e6: f64 = 22.0 / 525.0;
+    var e7: f64 = -1.0 / 40.0;
+    var c2: f64 = 1.0 / 5.0;
+    var c3: f64 = 3.0 / 10.0;
+    var c4: f64 = 4.0 / 5.0;
+    var c5: f64 = 8.0 / 9.0;
+    var st: f64[96];
+    if (n > 0x0010000000000000) { return Err(_KM_NUM_ERR_ALLOC); }
+    var w = _km_num_table(&st, _KM_NUM_STACK, 9 * n);
+    if (w == 0) { return Err(_KM_NUM_ERR_ALLOC); }
+    var y = w;
+    var k1 = w + 8 * n;
+    var k2 = w + 16 * n;
+    var k3 = w + 24 * n;
+    var k4 = w + 32 * n;
+    var k5 = w + 40 * n;
+    var k6 = w + 48 * n;
+    var k7 = w + 56 * n;
+    var yt = w + 64 * n;
+    var t: f64 = t0;
+    _km_num_copy(y, y0, n);
+    var span: f64 = t_end - t0;
+    var aspan: f64 = f64_abs(span);
+    var h: f64 = _km_min(h_init, aspan);
+    var dir: f64 = -1.0;
+    if (t_end >= t0) { dir = 1.0; }
+    var nf: f64 = f64_from(n);
+    var mexp: f64 = -0.2;
+    _km_num_point(out, cap, 0, t, y, n);
+    var count = 1;
+    var it = 0;
+    while (it < 100000) {
+        var d0: f64 = t - t_end;
+        var d1: f64 = d0 * dir;
+        if (d1 >= 0.0) { break; }
+        var dh: f64 = dir * h;
+        var tn: f64 = t + dh;
+        var ov: f64 = tn - t_end;
+        ov = ov * dir;
+        if (ov > 0.0) {
+            var rem: f64 = t_end - t;
+            h = f64_abs(rem);
+        }
+        var hd: f64 = dir * h;
+        # Stage 1
+        callptr(f, ctx, t, y, k1, n);
+        # Stage 2
+        var q21: f64 = hd * a21;
+        var i = 0;
+        while (i < n) {
+            var yv: f64 = load64(y + 8 * i);
+            var x1: f64 = load64(k1 + 8 * i);
+            var s21: f64 = q21 * x1;
+            var v2: f64 = yv + s21;
+            store64(yt + 8 * i, v2);
+            i = i + 1;
+        }
+        var tc2: f64 = hd * c2;
+        tc2 = t + tc2;
+        callptr(f, ctx, tc2, yt, k2, n);
+        # Stage 3
+        i = 0;
+        while (i < n) {
+            var yv3: f64 = load64(y + 8 * i);
+            var p1: f64 = load64(k1 + 8 * i);
+            var p2: f64 = load64(k2 + 8 * i);
+            var u1: f64 = a31 * p1;
+            var u2: f64 = a32 * p2;
+            var s3: f64 = u1 + u2;
+            s3 = hd * s3;
+            var v3: f64 = yv3 + s3;
+            store64(yt + 8 * i, v3);
+            i = i + 1;
+        }
+        var tc3: f64 = hd * c3;
+        tc3 = t + tc3;
+        callptr(f, ctx, tc3, yt, k3, n);
+        # Stage 4
+        i = 0;
+        while (i < n) {
+            var yv4: f64 = load64(y + 8 * i);
+            var q1: f64 = load64(k1 + 8 * i);
+            var q2: f64 = load64(k2 + 8 * i);
+            var q3: f64 = load64(k3 + 8 * i);
+            var w1: f64 = a41 * q1;
+            var w2: f64 = a42 * q2;
+            var w3: f64 = a43 * q3;
+            var s4: f64 = w1 + w2;
+            s4 = s4 + w3;
+            s4 = hd * s4;
+            var v4: f64 = yv4 + s4;
+            store64(yt + 8 * i, v4);
+            i = i + 1;
+        }
+        var tc4: f64 = hd * c4;
+        tc4 = t + tc4;
+        callptr(f, ctx, tc4, yt, k4, n);
+        # Stage 5
+        i = 0;
+        while (i < n) {
+            var yv5: f64 = load64(y + 8 * i);
+            var r1: f64 = load64(k1 + 8 * i);
+            var r2: f64 = load64(k2 + 8 * i);
+            var r3: f64 = load64(k3 + 8 * i);
+            var r4: f64 = load64(k4 + 8 * i);
+            var z1: f64 = a51 * r1;
+            var z2: f64 = a52 * r2;
+            var z3: f64 = a53 * r3;
+            var z4: f64 = a54 * r4;
+            var s5: f64 = z1 + z2;
+            s5 = s5 + z3;
+            s5 = s5 + z4;
+            s5 = hd * s5;
+            var v5: f64 = yv5 + s5;
+            store64(yt + 8 * i, v5);
+            i = i + 1;
+        }
+        var tc5: f64 = hd * c5;
+        tc5 = t + tc5;
+        callptr(f, ctx, tc5, yt, k5, n);
+        # Stage 6
+        i = 0;
+        while (i < n) {
+            var yv6: f64 = load64(y + 8 * i);
+            var m1: f64 = load64(k1 + 8 * i);
+            var m2: f64 = load64(k2 + 8 * i);
+            var m3: f64 = load64(k3 + 8 * i);
+            var m4: f64 = load64(k4 + 8 * i);
+            var m5: f64 = load64(k5 + 8 * i);
+            var g1: f64 = a61 * m1;
+            var g2: f64 = a62 * m2;
+            var g3: f64 = a63 * m3;
+            var g4: f64 = a64 * m4;
+            var g5: f64 = a65 * m5;
+            var s6: f64 = g1 + g2;
+            s6 = s6 + g3;
+            s6 = s6 + g4;
+            s6 = s6 + g5;
+            s6 = hd * s6;
+            var v6: f64 = yv6 + s6;
+            store64(yt + 8 * i, v6);
+            i = i + 1;
+        }
+        var tc6: f64 = t + hd;
+        callptr(f, ctx, tc6, yt, k6, n);
+        # The 5th-order solution
+        i = 0;
+        while (i < n) {
+            var yv7: f64 = load64(y + 8 * i);
+            var n1: f64 = load64(k1 + 8 * i);
+            var n3: f64 = load64(k3 + 8 * i);
+            var n4: f64 = load64(k4 + 8 * i);
+            var n5: f64 = load64(k5 + 8 * i);
+            var n6: f64 = load64(k6 + 8 * i);
+            var h1: f64 = b1 * n1;
+            var h3: f64 = b3 * n3;
+            var h4: f64 = b4 * n4;
+            var h5: f64 = b5 * n5;
+            var h6: f64 = b6 * n6;
+            var s7: f64 = h1 + h3;
+            s7 = s7 + h4;
+            s7 = s7 + h5;
+            s7 = s7 + h6;
+            s7 = hd * s7;
+            var v7: f64 = yv7 + s7;
+            store64(yt + 8 * i, v7);
+            i = i + 1;
+        }
+        # Stage 7 (for the error estimate)
+        callptr(f, ctx, tc6, yt, k7, n);
+        # The error estimate
+        var err: f64 = 0.0;
+        i = 0;
+        while (i < n) {
+            var o1: f64 = load64(k1 + 8 * i);
+            var o3: f64 = load64(k3 + 8 * i);
+            var o4: f64 = load64(k4 + 8 * i);
+            var o5: f64 = load64(k5 + 8 * i);
+            var o6: f64 = load64(k6 + 8 * i);
+            var o7: f64 = load64(k7 + 8 * i);
+            var j1: f64 = e1 * o1;
+            var j3: f64 = e3 * o3;
+            var j4: f64 = e4 * o4;
+            var j5: f64 = e5 * o5;
+            var j6: f64 = e6 * o6;
+            var j7: f64 = e7 * o7;
+            var se: f64 = j1 + j3;
+            se = se + j4;
+            se = se + j5;
+            se = se + j6;
+            se = se + j7;
+            var ei: f64 = hd * se;
+            var yti: f64 = load64(yt + 8 * i);
+            var ay: f64 = f64_abs(yti);
+            var ty: f64 = tol * ay;
+            var scale: f64 = _km_max(tol, ty);
+            var qa: f64 = ei / scale;
+            var qb: f64 = ei / scale;
+            var sq: f64 = qa * qb;
+            err = err + sq;
+            i = i + 1;
+        }
+        var en: f64 = err / nf;
+        err = f64_sqrt(en);
+        if (err <= 1.0) {
+            # Accept the step
+            t = t + hd;
+            _km_num_copy(y, yt, n);
+            _km_num_point(out, cap, count, t, y, n);
+            count = count + 1;
+        }
+        # Adapt the step size
+        var factor: f64 = 5.0;
+        if (err > 0.0) {
+            var pw: f64 = _km_cr_pow(err, mexp);
+            factor = 0.9 * pw;
+        }
+        if (factor < 0.2) { factor = 0.2; }
+        if (factor > 5.0) { factor = 5.0; }
+        h = h * factor;
+        it = it + 1;
+    }
+    var gap: f64 = t - t_end;
+    gap = f64_abs(gap);
+    var lim: f64 = h * 0.01;
+    if (gap > lim) { return Err(_KM_NUM_ERR_NO_CONVERGENCE); }
+    return Ok(count);
+}
+
+# ── dense solve (num::gaussian_elimination) ──────────────────────────────────────────
+
+# hisab 1.4.0's `num::gaussian_elimination` with partial pivoting: solves A·x = b for the augmented n × (n + 1) matrix
+# [A | b] at `m` (row-major f64, entry (i, j) at m + 8·(i·(n + 1) + j)), modified in place: per column the first row
+# of largest |entry| at or below the diagonal (a strictly larger one replaces it, so NaN never does), Err when that
+# magnitude is below hisab's EPSILON_F64 (10⁻¹²; a NaN one passes), the rows swapped whole, the rows below reduced by
+# m[r][j] −= (m[r][col]/pivot)·m[col][j] for j = col ..= n; then back substitution, the sum from b down the row. x
+# (n f64) goes to `x`. Ok(n); Err(_KM_NUM_ERR_INVALID_INPUT) for n = 0 (Rust's ragged-row check has no flat
+# counterpart: the buffer is n × (n + 1) by construction); Err(_KM_NUM_ERR_SINGULAR_PIVOT).
+#must_use
+fn _km_gaussian_elimination(m, n, x): Result {
+    if (n == 0) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
+    var eps: f64 = EPSILON_F64;
+    var w8 = 8 * (n + 1);                   # a row's bytes
+    var col = 0;
+    while (col < n) {
+        var pc = m + col * w8;              # row col
+        var max_row = col;
+        var c0: f64 = load64(pc + 8 * col);
+        var max_val: f64 = f64_abs(c0);
+        var row = col + 1;
+        while (row < n) {
+            var cr: f64 = load64(m + row * w8 + 8 * col);
+            var val: f64 = f64_abs(cr);
+            if (val > max_val) {
+                max_val = val;
+                max_row = row;
+            }
+            row = row + 1;
+        }
+        if (max_val < eps) { return Err(_KM_NUM_ERR_SINGULAR_PIVOT); }
+        if (max_row != col) {
+            var pm = m + max_row * w8;
+            var j = 0;
+            while (j < w8) {
+                var sa = load64(pc + j);
+                store64(pc + j, load64(pm + j));
+                store64(pm + j, sa);
+                j = j + 8;
+            }
+        }
+        var pivot: f64 = load64(pc + 8 * col);
+        row = col + 1;
+        while (row < n) {
+            var pr = m + row * w8;
+            var rc: f64 = load64(pr + 8 * col);
+            var factor: f64 = rc / pivot;
+            var jj = 8 * col;
+            while (jj < w8) {
+                var val2: f64 = load64(pc + jj);
+                var cur: f64 = load64(pr + jj);
+                var fv: f64 = factor * val2;
+                var nv: f64 = cur - fv;
+                store64(pr + jj, nv);
+                jj = jj + 8;
+            }
+            row = row + 1;
+        }
+        col = col + 1;
+    }
+    var k = 0;
+    while (k < n) {
+        store64(x + 8 * k, 0);
+        k = k + 1;
+    }
+    var i = n - 1;
+    while (i >= 0) {
+        var pi = m + i * w8;
+        var sum: f64 = load64(pi + 8 * n);
+        var j2 = i + 1;
+        while (j2 < n) {
+            var aij: f64 = load64(pi + 8 * j2);
+            var xj: f64 = load64(x + 8 * j2);
+            var px: f64 = aij * xj;
+            sum = sum - px;
+            j2 = j2 + 1;
+        }
+        var aii: f64 = load64(pi + 8 * i);
+        var xi: f64 = sum / aii;
+        store64(x + 8 * i, xi);
+        i = i - 1;
+    }
+    return Ok(n);
+}
+
+# ── PCG32 draws and Euler–Maruyama (num::Pcg32, num::euler_maruyama) ─────────────────
+
+# hisab 1.4.0's `Pcg32::next_f64`: the next u32 (hisab 3.4.1's pcg32_next) over u32::MAX + 1 = 2³², exact.
+#must_use
+fn _km_pcg32_next_f64(rng): f64 {
+    var u = pcg32_next(rng);
+    var fu: f64 = f64_from(u);
+    var d: f64 = 4294967295.0 + 1.0;
+    var r: f64 = fu / d;
+    return r;
+}
+
+# hisab 1.4.0's `Pcg32::next_normal`, the Box–Muller transform: u1 = max(next_f64, 10⁻³⁰⁰), u2 = next_f64, then
+# √(−2·ln u1)·cos(τ·u2), with the correctly rounded ln and cos (the oracle's glibc log and cos, ADR 0006).
+#must_use
+fn _km_pcg32_next_normal(rng): f64 {
+    var tiny: f64 = 0x01A56E1FC2F8F359;     # 1e-300
+    var tau: f64 = 0x401921FB54442D18;      # std::f64::consts::TAU
+    var r1: f64 = _km_pcg32_next_f64(rng);
+    var u1: f64 = _km_max(r1, tiny);
+    var u2: f64 = _km_pcg32_next_f64(rng);
+    var l: f64 = _km_cr_ln(u1);
+    var m2: f64 = -2.0 * l;
+    var r: f64 = f64_sqrt(m2);
+    var ang: f64 = tau * u2;
+    var c: f64 = _km_cr_cos(ang);
+    var z: f64 = r * c;
+    return z;
+}
+
+# hisab 1.4.0's `num::euler_maruyama`: dX = drift(t, X)·dt + diffusion(t, X)·dW from (t0, y0[0 .. n)) to t_end in
+# `steps` steps of dt = (t_end − t0)/steps (t advanced by `t += dt`), with drift(dctx, t, y, a, n) and the diffusion
+# diff(gctx, t, y, b, n) evaluated at the start of each step and one draw dW = next_normal·√dt per component,
+# in order, from `rng` (a hisab 3.4.1 pcg32 handle); y[i] += a[i]·dt + b[i]·dW. The steps + 1 points go to `out`
+# (the first cap of them), the final state to `fin` (if not 0). Ok(steps + 1); Err(_KM_NUM_ERR_ZERO_STEPS) for
+# steps = 0; Err(_KM_NUM_ERR_ALLOC). `steps` as for _km_rk4_trajectory.
+#must_use
+fn _km_euler_maruyama_system(drift, dctx, diff, gctx, t0: f64, y0, n, t_end: f64, steps, rng, out, cap, fin): Result {
+    if (steps == 0) { return Err(_KM_NUM_ERR_ZERO_STEPS); }
+    var st: f64[96];
+    var w = _km_num_table(&st, _KM_NUM_STACK, 3 * n);
+    if (w == 0) { return Err(_KM_NUM_ERR_ALLOC); }
+    var y = w;
+    var a = w + 8 * n;
+    var b = w + 16 * n;
+    var span: f64 = t_end - t0;
+    var ns: f64 = f64_from(steps);
+    var dt: f64 = span / ns;
+    var sqrt_dt: f64 = f64_sqrt(dt);
+    _km_num_copy(y, y0, n);
+    var t: f64 = t0;
+    _km_num_point(out, cap, 0, t, y, n);
+    var s = 0;
+    while (s < steps) {
+        callptr(drift, dctx, t, y, a, n);
+        callptr(diff, gctx, t, y, b, n);
+        var i = 0;
+        while (i < n) {
+            var z: f64 = _km_pcg32_next_normal(rng);
+            var dw: f64 = z * sqrt_dt;
+            var ai: f64 = load64(a + 8 * i);
+            var bi: f64 = load64(b + 8 * i);
+            var p: f64 = ai * dt;
+            var q: f64 = bi * dw;
+            var inc: f64 = p + q;
+            var yi: f64 = load64(y + 8 * i);
+            var yn: f64 = yi + inc;
+            store64(y + 8 * i, yn);
+            i = i + 1;
+        }
+        t = t + dt;
+        s = s + 1;
+        _km_num_point(out, cap, s, t, y, n);
+    }
+    if (fin != 0) { _km_num_copy(fin, y, n); }
+    return Ok(steps + 1);
+}
+
+# --- reaction_dynamics.cyr ---
+
+# reaction_dynamics.cyr — the time evolution of chemical systems by ODE integration (port of
+# rust-old/src/reaction_dynamics.rs; M5a).
+#
+# Concentration trajectories from 0 to t_end, in the time unit of the rate constants (s for rate constants in s⁻¹),
+# concentrations in mol/L: classical RK4 (fixed step, explicit) for the five built-in rate laws, Dormand–Prince 4(5)
+# (adaptive, explicit) for a custom system, backward Euler (implicit, Newton iteration on a dense solve) for a stiff
+# one, and Euler–Maruyama for a stochastic one. The integrators are hisab 1.4.0's, transcribed into src/numerics.cyr
+# (ADR 0003); the backward-Euler loop is kimiya's own, transcribed here. Rust's checks, Err codes and check order are
+# kept; every expression keeps Rust's operation order, so the RK4 and backward-Euler trajectories are bit-identical to
+# the oracle's (class B), and the adaptive and stochastic ones, which take a pow per step and a ln and a cos per normal
+# draw, the corrected oracle's (class C, bound 0, ADR 0006). Fixed-step methods accept at most 10 000 000 steps.
+#
+# - **Callbacks** (port plan §6.3). Rust's `impl Fn(f64, &[f64], &mut [f64])` closures are a function pointer and a
+#   context pointer each: f(ctx, t, y, dy, n) fills dy[0 .. n) from y[0 .. n) at time t (y and dy point to n f64, the
+#   state's dimension; the return value is ignored); the Jacobian is jac(ctx, t, y, j, n), filling the flat row-major
+#   n × n buffer j (∂fᵢ/∂yⱼ at j + 8·(i·n + j)). As in Rust, every work buffer a callback writes (dy, the Jacobian, the
+#   diffusion) starts zeroed and is reused, never re-zeroed, between calls, so a callback that leaves an entry alone
+#   leaves its previous value. The flat Jacobian cannot be resized, so Rust's "Jacobian must stay n×n" Err has no
+#   counterpart (port plan §4, M5).
+# - **Trajectories** (port plan §4, M5). Rust's `Vec<TrajectoryPoint>`, `TrajectoryPoint = (f64, Vec<f64>)`, is the
+#   caller's buffer `out` of `cap` points, each 1 + n f64 (t, then the n concentrations), point k at
+#   out + 8·k·(1 + n): Ok(points written). A slice argument (y0) is a pointer and a count; a negative count, a null
+#   pointer with values or a null function pointer is Err(KM_ERR_INVALID_INPUT), checked first (an out-of-type
+#   input, port plan §6.4). Err(KM_ERR_INVALID_INPUT) when the trajectory doesn't fit, checked after Rust's own
+#   errors: an RK4 or Euler–Maruyama run knows its steps + 1 points and then integrates without storing, to give
+#   Rust's error first, and leaves `out` untouched; simulate_stiff writes its two points only at the end; the adaptive
+#   run stores the first cap points while it integrates. On Err(KM_ERR_COMPUTATION_ERROR) the buffer holds whatever
+#   the solver wrote before it failed.
+# - **Integers.** `steps` is Rust's usize: a negative word is past 10 000 000 (Err), never wrapped; `seed` is a u64
+#   word, used as its bits.
+# - **Typed constants.** Rust's MAX_STEPS (10⁷), STIFF_MAX_NEWTON (20), STIFF_NEWTON_RTOL (10⁻¹⁰) and
+#   STIFF_ACCEPT_RTOL (10⁻⁶) are typed inline (port plan §6.4); the golden rows and tests/reaction_dynamics.tcyr pin
+#   them.
+
+include "lib/alloc.cyr"
+include "lib/hisab.cyr"
+
+# Rust's MAX_STEPS: the largest accepted step count.
+const _KM_RD_MAX_STEPS = 10000000;
+
+# Work-table words kept on the stack by simulate_stiff (y, y₊, f, δ: 4n; the Jacobian n²; the Newton system
+# n·(n + 1): 2n² + 5n, so n ≤ 8 here).
+const _KM_RD_STIFF_STACK = 168;
+
+# Rust's validate_time_and_steps: KM_ERR_NONE, or the code for a t_end that is not positive and finite, then a step
+# count of 0 or past 10⁷ (a negative word is a usize past it).
+#must_use
+fn _km_rd_time_and_steps(t_end: f64, steps): i64 {
+    if (_km_is_positive(t_end) != 1) { return KM_ERR_INVALID_INPUT; }
+    if (steps == 0) { return KM_ERR_INVALID_INPUT; }
+    if (steps < 0 || steps > _KM_RD_MAX_STEPS) { return KM_ERR_INVALID_INPUT; }
+    return KM_ERR_NONE;
+}
+
+# 1 if every one of the n f64 at y is finite (Rust's validate_state, and finish_trajectory's final-state test).
+#must_use
+fn _km_rd_all_finite(y, n): i64 {
+    var k = 0;
+    while (k < n) {
+        var v: f64 = load64(y + 8 * k);
+        if (_km_is_finite(v) != 1) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# 1 if (p, n) is a slice: n ≥ 0, and p not null when n > 0.
+#must_use
+fn _km_rd_slice(p, n): i64 {
+    if (n < 0 || (n > 0 && p == 0)) { return 0; }
+    return 1;
+}
+
+# ∞-norm of n f64 at v, Rust's max_abs: fold from 0 with max (NaN-ignoring) of |x|.
+#must_use
+fn _km_rd_max_abs(v, n): f64 {
+    var m: f64 = 0.0;
+    var k = 0;
+    while (k < n) {
+        var x: f64 = load64(v + 8 * k);
+        var a: f64 = f64_abs(x);
+        m = _km_max(m, a);
+        k = k + 1;
+    }
+    return m;
+}
+
+# ── the built-in rate laws (Rust's closures; ctx points to the rate constants) ────────
+
+# d[A]/dt = −k[A].
+fn _km_rd_first_order_f(ctx, t: f64, y, dy, n) {
+    var k: f64 = load64(ctx);
+    var nk: f64 = -k;
+    var a: f64 = load64(y);
+    var d: f64 = nk * a;
+    store64(dy, d);
+    return 0;
+}
+
+# d[A]/dt = −k[A]².
+fn _km_rd_second_order_f(ctx, t: f64, y, dy, n) {
+    var k: f64 = load64(ctx);
+    var nk: f64 = -k;
+    var a: f64 = load64(y);
+    var d: f64 = nk * a;
+    d = d * a;
+    store64(dy, d);
+    return 0;
+}
+
+# A →(k₁) B →(k₂) C: d[A]/dt = −k₁[A], d[B]/dt = k₁[A] − k₂[B], d[C]/dt = k₂[B].
+fn _km_rd_consecutive_f(ctx, t: f64, y, dy, n) {
+    var k1: f64 = load64(ctx);
+    var k2: f64 = load64(ctx + 8);
+    var a: f64 = load64(y);
+    var b: f64 = load64(y + 8);
+    var nk1: f64 = -k1;
+    var da: f64 = nk1 * a;
+    var p: f64 = k1 * a;
+    var q: f64 = k2 * b;
+    var db: f64 = p - q;
+    store64(dy, da);
+    store64(dy + 8, db);
+    store64(dy + 16, q);
+    return 0;
+}
+
+# A ⇌ B: d[A]/dt = −k_f[A] + k_r[B], d[B]/dt = k_f[A] − k_r[B].
+fn _km_rd_reversible_f(ctx, t: f64, y, dy, n) {
+    var kf: f64 = load64(ctx);
+    var kr: f64 = load64(ctx + 8);
+    var a: f64 = load64(y);
+    var b: f64 = load64(y + 8);
+    var nkf: f64 = -kf;
+    var p: f64 = nkf * a;
+    var q: f64 = kr * b;
+    var da: f64 = p + q;
+    var r: f64 = kf * a;
+    var db: f64 = r - q;
+    store64(dy, da);
+    store64(dy + 8, db);
+    return 0;
+}
+
+# Michaelis–Menten with depletion: rate = Vmax·[S]/(Km + [S]), d[S]/dt = −rate, d[P]/dt = rate.
+fn _km_rd_michaelis_menten_f(ctx, t: f64, y, dy, n) {
+    var vmax: f64 = load64(ctx);
+    var km: f64 = load64(ctx + 8);
+    var s: f64 = load64(y);
+    var num: f64 = vmax * s;
+    var den: f64 = km + s;
+    var rate: f64 = num / den;
+    var nrate: f64 = -rate;
+    store64(dy, nrate);
+    store64(dy + 8, rate);
+    return 0;
+}
+
+# A built-in rate law integrated by RK4 from (0, y0[0 .. n)), n ≤ 3, after Rust's checks, then Rust's
+# finish_trajectory: Ok(steps + 1); Err(KM_ERR_COMPUTATION_ERROR) if the solver fails or the final state is not
+# finite; Err(KM_ERR_INVALID_INPUT) if the steps + 1 points don't fit (after integrating without storing, so Rust's
+# error comes first and `out` is untouched).
+#must_use
+fn _km_rd_rk4(f, ctx, y0, n, t_end: f64, steps, out, cap): Result {
+    var count = steps + 1;
+    var o = out;
+    var c = cap;
+    if (out == 0 || cap < count) {
+        o = 0;
+        c = 0;
+    }
+    var fin: f64[3];
+    var r, v = _km_rk4_trajectory(f, ctx, 0.0, y0, n, t_end, steps, o, c, &fin);
+    if (is_err_result(r) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (_km_rd_all_finite(&fin, n) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (o == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    return Ok(count);
+}
+
+# First-order decay, d[A]/dt = −k[A], from [A]₀ (mol/L) with k (s⁻¹), by RK4 in `steps` steps (1 ..= 10⁷) to t_end:
+# the steps + 1 points (t, [A]) from t = 0, 2 f64 each, to the caller's buffer `out` of `cap` points. RK4 is explicit:
+# it is only stable for k·t_end/steps ≲ 2.78. Ok(steps + 1); Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ is negative or
+# not finite; Err(KM_ERR_INVALID_INPUT) if k is negative or not finite, t_end is not positive and finite, or steps is
+# 0 or above 10⁷; Err(KM_ERR_COMPUTATION_ERROR) if the solver fails or the final state is not finite;
+# Err(KM_ERR_INVALID_INPUT) if the points don't fit. Mirrors `reaction_dynamics::simulate_first_order`.
+#must_use
+fn simulate_first_order(initial_concentration: f64, rate_constant: f64, t_end: f64, steps, out, cap): Result {
+    if (_km_is_non_negative(initial_concentration) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    if (_km_is_non_negative(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_rd_time_and_steps(t_end, steps);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var k: f64[1];
+    store64(&k, rate_constant);
+    var y0: f64[1];
+    store64(&y0, initial_concentration);
+    return _km_rd_rk4(&_km_rd_first_order_f, &k, &y0, 1, t_end, steps, out, cap);
+}
+
+# Second-order decay, d[A]/dt = −k[A]², from [A]₀ (mol/L) with k (L·mol⁻¹·s⁻¹), by RK4 in `steps` steps to t_end: the
+# steps + 1 points (t, [A]), 2 f64 each, to `out` (cap points). Ok(steps + 1); the errors of simulate_first_order.
+# Mirrors `reaction_dynamics::simulate_second_order`.
+#must_use
+fn simulate_second_order(initial_concentration: f64, rate_constant: f64, t_end: f64, steps, out, cap): Result {
+    if (_km_is_non_negative(initial_concentration) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    if (_km_is_non_negative(rate_constant) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_rd_time_and_steps(t_end, steps);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var k: f64[1];
+    store64(&k, rate_constant);
+    var y0: f64[1];
+    store64(&y0, initial_concentration);
+    return _km_rd_rk4(&_km_rd_second_order_f, &k, &y0, 1, t_end, steps, out, cap);
+}
+
+# Consecutive reactions A →(k₁) B →(k₂) C from ([A]₀, 0, 0) (mol/L) with first-order k₁, k₂ (s⁻¹), by RK4 in `steps`
+# steps to t_end: the steps + 1 points (t, [A], [B], [C]), 4 f64 each, to `out` (cap points). Ok(steps + 1);
+# Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ is negative or not finite; Err(KM_ERR_INVALID_INPUT) if k₁, then k₂, is
+# negative or not finite, then for t_end and steps as simulate_first_order; Err(KM_ERR_COMPUTATION_ERROR) if the
+# final state is not finite; Err(KM_ERR_INVALID_INPUT) if the points don't fit. Mirrors
+# `reaction_dynamics::simulate_consecutive`.
+#must_use
+fn simulate_consecutive(initial_a: f64, k1: f64, k2: f64, t_end: f64, steps, out, cap): Result {
+    if (_km_is_non_negative(initial_a) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    if (_km_is_non_negative(k1) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(k2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_rd_time_and_steps(t_end, steps);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var k: f64[2];
+    store64(&k, k1);
+    store64(&k + 8, k2);
+    var y0: f64[3];
+    var z: f64 = 0.0;
+    store64(&y0, initial_a);
+    store64(&y0 + 8, z);
+    store64(&y0 + 16, z);
+    return _km_rd_rk4(&_km_rd_consecutive_f, &k, &y0, 3, t_end, steps, out, cap);
+}
+
+# The reversible reaction A ⇌ B from ([A]₀, [B]₀) (mol/L) with first-order k_f, k_r (s⁻¹), by RK4 in `steps` steps to
+# t_end: the steps + 1 points (t, [A], [B]), 3 f64 each, to `out` (cap points). Ok(steps + 1);
+# Err(KM_ERR_INVALID_CONCENTRATION) if [A]₀ or [B]₀ is negative or not finite; Err(KM_ERR_INVALID_INPUT) if k_f, then
+# k_r, is negative or not finite, then for t_end and steps as simulate_first_order; Err(KM_ERR_COMPUTATION_ERROR) if
+# the final state is not finite; Err(KM_ERR_INVALID_INPUT) if the points don't fit. Mirrors
+# `reaction_dynamics::simulate_reversible`.
+#must_use
+fn simulate_reversible(initial_a: f64, initial_b: f64, k_forward: f64, k_reverse: f64, t_end: f64, steps, out,
+  cap): Result {
+    if (_km_is_non_negative(initial_a) != 1 || _km_is_non_negative(initial_b) != 1) {
+        return Err(KM_ERR_INVALID_CONCENTRATION);
+    }
+    if (_km_is_non_negative(k_forward) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_non_negative(k_reverse) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_rd_time_and_steps(t_end, steps);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var k: f64[2];
+    store64(&k, k_forward);
+    store64(&k + 8, k_reverse);
+    var y0: f64[2];
+    store64(&y0, initial_a);
+    store64(&y0 + 8, initial_b);
+    return _km_rd_rk4(&_km_rd_reversible_f, &k, &y0, 2, t_end, steps, out, cap);
+}
+
+# Michaelis–Menten kinetics with substrate depletion, E + S ⇌ ES → E + P simplified to d[S]/dt = −Vmax·[S]/(Km + [S]),
+# d[P]/dt = Vmax·[S]/(Km + [S]), from ([S]₀, 0) (mol/L) with Vmax (mol·L⁻¹·s⁻¹) and Km (mol/L), by RK4 in `steps` steps
+# to t_end: the steps + 1 points (t, [S], [P]), 3 f64 each, to `out` (cap points). Ok(steps + 1);
+# Err(KM_ERR_INVALID_CONCENTRATION) if [S]₀ is negative or not finite; Err(KM_ERR_INVALID_INPUT) if Vmax, then Km, is
+# not positive and finite, then for t_end and steps as simulate_first_order; Err(KM_ERR_COMPUTATION_ERROR) if the
+# final state is not finite; Err(KM_ERR_INVALID_INPUT) if the points don't fit. Mirrors
+# `reaction_dynamics::simulate_michaelis_menten`.
+#must_use
+fn simulate_michaelis_menten(initial_substrate: f64, v_max: f64, km: f64, t_end: f64, steps, out, cap): Result {
+    if (_km_is_non_negative(initial_substrate) != 1) { return Err(KM_ERR_INVALID_CONCENTRATION); }
+    if (_km_is_positive(v_max) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(km) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_rd_time_and_steps(t_end, steps);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    var k: f64[2];
+    store64(&k, v_max);
+    store64(&k + 8, km);
+    var y0: f64[2];
+    var z: f64 = 0.0;
+    store64(&y0, initial_substrate);
+    store64(&y0 + 8, z);
+    return _km_rd_rk4(&_km_rd_michaelis_menten_f, &k, &y0, 2, t_end, steps, out, cap);
+}
+
+# A custom reaction system f(ctx, t, y, dy, n) from (0, y0[0 .. n)) to t_end by Dormand–Prince 4(5) with error
+# tolerance `tol` (the per-component scale max(tol, tol·|y|)) and first step t_end/100: an explicit adaptive
+# Runge–Kutta for non-stiff systems whose rates change quickly (a stiff one forces tiny steps until the solver gives
+# up after 100 000; use simulate_stiff). Every accepted step (t, y), 1 + n f64 each, starting at (0, y0) and ending at
+# t_end, goes to the caller's buffer `out` of `cap` points. Ok(points); Err(KM_ERR_INVALID_INPUT) if t_end, then tol,
+# is not positive and finite, or y0 has a non-finite value; Err(KM_ERR_COMPUTATION_ERROR) if y0 is empty or the
+# solver needs more than 100 000 steps; Err(KM_ERR_INVALID_INPUT) if the trajectory has more than cap points (found
+# after the integration; its first cap points are then written). Mirrors `reaction_dynamics::simulate_adaptive`.
+#must_use
+fn simulate_adaptive(f, ctx, y0, n, t_end: f64, tol: f64, out, cap): Result {
+    if (f == 0 || _km_rd_slice(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(t_end) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(tol) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_rd_all_finite(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var h_init: f64 = t_end / 100.0;
+    var o = out;
+    var c = cap;
+    if (out == 0 || cap < 0) {
+        o = 0;
+        c = 0;
+    }
+    var r, v = _km_dopri45(f, ctx, 0.0, y0, n, t_end, tol, h_init, o, c);
+    if (is_err_result(r) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (v > c) { return Err(KM_ERR_INVALID_INPUT); }
+    return Ok(v);
+}
+
+# A stiff reaction system by backward Euler (implicit): f(fctx, t, y, dy, n) and its Jacobian jac(jctx, t, y, j, n)
+# (the flat n × n buffer, zeroed once and reused, not re-zeroed), from (0, y0[0 .. n)) in `steps` equal steps of
+# h = t_end/steps (1 ..= 10⁷; the last step's time is t_end, step k's h·k). Each step solves y₊ = y + h·f(t₊, y₊) by
+# Newton iteration on (I − h·J)·δ = −(y₊ − y − h·f) (src/numerics.cyr's hisab 1.4.0 Gaussian elimination), from
+# y₊ = y; it converges when ‖δ‖∞ ≤ 10⁻¹⁰·‖y₊‖∞ within 20 iterations, or is still accepted when the 20th leaves
+# ‖δ‖∞ ≤ 10⁻⁶·‖y₊‖∞ (the round-off floor of very stiff systems). Suits systems with widely separated timescales.
+# Exactly two points, (0, y0) and (t_end, y(t_end)), 1 + n f64 each, go to `out` (cap ≥ 2 points): Ok(2). For n = 0
+# nothing is integrated. Err(KM_ERR_INVALID_INPUT) if t_end is not positive and finite, steps is 0 or above 10⁷, or
+# y0 has a non-finite value; Err(KM_ERR_COMPUTATION_ERROR) if I − h·J is singular (a pivot below 10⁻¹²), an iterate is
+# not finite, or Newton fails to converge in a step; Err(KM_ERR_INVALID_INPUT) if cap < 2 (after the integration; out
+# untouched on every Err). Mirrors `reaction_dynamics::simulate_stiff`; Rust's Err for a resized Jacobian has no
+# counterpart (the buffer is flat).
+#must_use
+fn simulate_stiff(f, fctx, jac, jctx, y0, n, t_end: f64, steps, out, cap): Result {
+    if (f == 0 || jac == 0 || _km_rd_slice(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_rd_time_and_steps(t_end, steps);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    if (_km_rd_all_finite(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n > 0x01000000) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var ns: f64 = f64_from(steps);
+    var h: f64 = t_end / ns;
+    var st: f64[168];
+    var w = _km_num_table(&st, _KM_RD_STIFF_STACK, 2 * n * n + 5 * n);
+    if (w == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var y = w;
+    var yn = w + 8 * n;
+    var fv = w + 16 * n;
+    var delta = w + 24 * n;
+    var jm = w + 32 * n;
+    var aug = jm + 8 * n * n;
+    var wa = n + 1;
+    var rtol: f64 = 0.0000000001;           # STIFF_NEWTON_RTOL = 1e-10
+    var atol: f64 = 0.000001;               # STIFF_ACCEPT_RTOL = 1e-6
+    _km_num_copy(y, y0, n);
+    _km_num_copy(yn, y0, n);
+    if (n > 0) {
+        var step = 1;
+        while (step <= steps) {
+            var t: f64 = t_end;
+            if (step != steps) {
+                var sf: f64 = f64_from(step);
+                t = h * sf;
+            }
+            _km_num_copy(yn, y, n);
+            var last: f64 = _KM_INF;
+            var converged = 0;
+            var it = 0;
+            while (it < 20) {
+                callptr(f, fctx, t, yn, fv, n);
+                callptr(jac, jctx, t, yn, jm, n);
+                # The augmented Newton system [I − h·J | −(y₊ − y − h·f)].
+                var i = 0;
+                while (i < n) {
+                    var j = 0;
+                    while (j < n) {
+                        var id: f64 = 0.0;
+                        if (i == j) { id = 1.0; }
+                        var jij: f64 = load64(jm + 8 * (i * n + j));
+                        var hj: f64 = h * jij;
+                        var en: f64 = id - hj;
+                        store64(aug + 8 * (i * wa + j), en);
+                        j = j + 1;
+                    }
+                    var ynx: f64 = load64(yn + 8 * i);
+                    var yx: f64 = load64(y + 8 * i);
+                    var fx: f64 = load64(fv + 8 * i);
+                    var dyx: f64 = ynx - yx;
+                    var hf: f64 = h * fx;
+                    var rr: f64 = dyx - hf;
+                    var rhs: f64 = -rr;
+                    store64(aug + 8 * (i * wa + n), rhs);
+                    i = i + 1;
+                }
+                var gr, gv = _km_gaussian_elimination(aug, n, delta);
+                if (is_err_result(gr) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                i = 0;
+                while (i < n) {
+                    var a: f64 = load64(yn + 8 * i);
+                    var dl: f64 = load64(delta + 8 * i);
+                    var s: f64 = a + dl;
+                    store64(yn + 8 * i, s);
+                    i = i + 1;
+                }
+                if (_km_rd_all_finite(yn, n) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                last = _km_rd_max_abs(delta, n);
+                var ynorm: f64 = _km_rd_max_abs(yn, n);
+                var lim: f64 = rtol * ynorm;
+                if (last <= lim) {
+                    converged = 1;
+                    break;
+                }
+                it = it + 1;
+            }
+            if (converged == 0) {
+                var ynorm2: f64 = _km_rd_max_abs(yn, n);
+                var lim2: f64 = atol * ynorm2;
+                if (last > lim2) { return Err(KM_ERR_COMPUTATION_ERROR); }
+            }
+            _km_num_copy(y, yn, n);
+            step = step + 1;
+        }
+    }
+    if (out == 0 || cap < 2) { return Err(KM_ERR_INVALID_INPUT); }
+    var zero: f64 = 0.0;
+    _km_num_point(out, 2, 0, zero, y0, n);
+    _km_num_point(out, 2, 1, t_end, y, n);
+    return Ok(2);
+}
+
+# A stochastic reaction system by Euler–Maruyama: dX = drift(t, X)·dt + diffusion(t, X)·dW, molecular noise as one
+# independent Wiener increment per component; drift(dctx, t, y, dy, n) is the deterministic part (as an ODE's f),
+# diffusion(gctx, t, y, g, n) the noise amplitude, from (0, y0[0 .. n)) in `steps` steps (1 ..= 10⁷) to t_end, the
+# normal draws from hisab's PCG32 seeded with `seed` (stream 1, as Rust's `Pcg32::new(seed, 1)`), so a seed gives the
+# same path every time. The steps + 1 points (t, y), 1 + n f64 each, go to `out` (cap points). Ok(steps + 1);
+# Err(KM_ERR_INVALID_INPUT) if t_end is not positive and finite, steps is 0 or above 10⁷, or y0 has a non-finite value;
+# Err(KM_ERR_COMPUTATION_ERROR) if the solver fails or the final state is not finite (or the generator can't be
+# allocated); Err(KM_ERR_INVALID_INPUT) if the points don't fit (after integrating without storing, out untouched).
+# Mirrors `reaction_dynamics::simulate_stochastic`.
+#must_use
+fn simulate_stochastic(drift, dctx, diffusion, gctx, y0, n, t_end: f64, steps, seed, out, cap): Result {
+    if (drift == 0 || diffusion == 0 || _km_rd_slice(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var e = _km_rd_time_and_steps(t_end, steps);
+    if (e != KM_ERR_NONE) { return Err(e); }
+    if (_km_rd_all_finite(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var rng = pcg32_new(seed);
+    if (rng == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var count = steps + 1;
+    var o = out;
+    var c = cap;
+    if (out == 0 || cap < count) {
+        o = 0;
+        c = 0;
+    }
+    var st: f64[16];
+    var fin = _km_num_table(&st, 16, n);
+    if (fin == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var r, v = _km_euler_maruyama_system(drift, dctx, diffusion, gctx, 0.0, y0, n, t_end, steps, rng, o, c, fin);
+    if (is_err_result(r) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (_km_rd_all_finite(fin, n) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (o == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    return Ok(count);
+}

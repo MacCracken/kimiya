@@ -14,7 +14,7 @@
 //! since M4e-4 a whole token list, `(v:n f:… …)]`: [`tokens_note`]).
 
 /// Parity tolerance class of a row (port plan §5).
-#[allow(dead_code)] // D arrives with the Newton loops and the ODE trajectories (M3, M5)
+#[allow(dead_code)] // D: no row needs it yet (the M5a trajectories are B and C, bit-identical)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
     /// Bit-identical (NaN matches any NaN), or equal integers / strings.
@@ -172,6 +172,13 @@ impl Module {
     /// `validate.py` only; the harness ignores the note.
     pub fn row_noted(&mut self, func: &str, class: Class, ins: &[Tok], outs: &[Tok], extra: &str) {
         let note = format!("{func}({}) -> {} [{extra}]", human_list(ins), human_list(outs));
+        self.push(func, class, ins, outs, &note);
+    }
+
+    /// As [`Module::row`], with the note's result part given: `func(<inputs>) -> <summary>`. For rows whose output is
+    /// too long to restate (M5a: a trajectory's thousands of floats, summarised as its point count and last point).
+    pub fn row_summarised(&mut self, func: &str, class: Class, ins: &[Tok], outs: &[Tok], summary: &str) {
+        let note = format!("{func}({}) -> {summary}", human_list(ins));
         self.push(func, class, ins, outs, &note);
     }
 

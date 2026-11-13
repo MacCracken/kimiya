@@ -15,7 +15,10 @@ inorganic), M4c (nuclear), M4a (correctly rounded sin, cos, atan2, acos), M4d (p
 M4e-3 (the Bohr model, the Rydberg formula and the reduced mass rounded once, ADR 0002 #21 and #22), M4e-4 (the cited
 AME2020 / TICE 2009 isotope table with ³⁶S, ADR 0002 #23), M4f (stoichiometry: the integer matrix and the rational
 oxidation states, ADR 0002 #7) and M4f-2 (stoichiometry's yields, limiting reagent and empirical formula exact, ADR 0002
-#24–#26); M5 (numerics) next — live status in [`state.md`](state.md).
+#24–#26). The library-wide overflow audit ran B1–B7 and B10a after M4, then was **paused** by the user's decision of
+2026-11-12: it is post-port work and resumes after M5 / M7 over the whole library, M5's modules included. **M5a** (numerics,
+reaction_dynamics: hisab 1.4.0's RK4, Dormand–Prince, Gaussian elimination and Euler–Maruyama transcribed, every golden
+row bit-identical) is done; M5b (network, fitting, sensitivity) next — live status in [`state.md`](state.md).
 
 ---
 
@@ -126,6 +129,8 @@ type for average oxidation states, no separate extrapolating Antoine function. I
   - [x] B9 — F15, an exact `balance_equation` (Rust's elimination on multi-word integers, no size limit) — done in the
     Cyrius API (ADR 0002 #39; the signed multi-word `_km_sb_*` with Lehmer's gcd, the tables from a proven Hadamard
     bound), the audit's B7
+  - **Paused after B10a** (the user's decision of 2026-11-12): the rest of the audit is post-port work; it resumes after
+    M5 / M7 over the whole library, M5's modules included (their candidate spots are listed under M5 below)
   - [ ] B10 — F10's unbounded exponentials and the exponential × prefactor functions
     - [x] B10a — the primitives: e^x, e^x − 1 and 10^x correctly rounded to 53 bits with an unbounded exponent
       (`_km_cr_exp_ux`, `_km_cr_expm1_ux`, `_km_cr_exp10_ux`), exact up to MPFR's widest exponent range and verified
@@ -136,6 +141,19 @@ type for average oxidation states, no separate extrapolating Antoine function. I
   - [ ] B12 — the iterative functions, by the user's answer "Fix all three": the weak acid/base pH Newton with an
     unbounded exponent on a slow path only; Peng–Robinson's coefficient edges only (Rust's cubic unchanged); the flame's
     exact sign test was done in B8 (ADR 0002 #38, which B12 extends with the other two)
+  - [ ] M5 (for the resumed audit; M5a ported at the plan's parity classes without the rework, listed here, not fixed):
+    - `simulate_michaelis_menten`'s rate Vmax·[S]/(Km + [S]) over- or underflows in Vmax·[S] or Km + [S] where the rate
+      is representable (kinetics' `michaelis_menten` is #28's)
+    - `simulate_second_order`'s −k·[A]·[A] and the consecutive / reversible closures' k₁[A] − k₂[B] (a product chain, and
+      sums with cancellation, as #28 and #33)
+    - RK4's increment h/6·(k₁ + 2k₂ + 2k₃ + k₄) and stage points y + ½h·k: the rate sum overflows where h/6 times it is
+      representable (huge rates, tiny steps)
+    - dopri45's stage combinations Σ aᵢⱼ·kⱼ and its error terms before the × hd (the error norm's squares and the
+      tol·|y| scale need nothing: they over- or underflow only far beyond where the step factor clamps, err below
+      1.9·10⁻⁴ or above 1,845, and the accept test err ≤ 1)
+    - `simulate_stiff`'s Newton tolerances 10⁻¹⁰·‖y₊‖∞ and 10⁻⁶·‖y₊‖∞ underflow for ‖y₊‖∞ below about 10⁻²⁹⁸ (a state
+      that small then needs an exact zero correction to converge), and its h·J and h·f products
+    - Euler–Maruyama's a·dt + b·dW, and the Gaussian elimination's factor·a products (hisab 1.4.0's, as transcribed)
 - [ ] *additive* — `fitting::fit_beer_lambert` → also return the intercept
 - [ ] *additive* — `spectroscopy::rydberg_wavelength` → nuclear-mass parameter for the reduced-mass correction
 - [ ] `integration::soorat::MolecularStructure::from_molecule` → `Result`

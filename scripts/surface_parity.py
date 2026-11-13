@@ -48,6 +48,7 @@ MODULES = {
     "potential": {"prefix": "", "structs": set()},
     "spectroscopy": {"prefix": "", "structs": set()},
     "stoichiometry": {"prefix": "", "structs": set()},    # M4f: ADR 0002 #7's integer matrix and rational states
+    "reaction_dynamics": {"prefix": "", "structs": set()},  # M5a: closures → fn pointer + context, flat trajectories
 }
 
 # Rust enums with `impl` methods (M4b): their const property methods are free functions of the enum value,
@@ -113,6 +114,8 @@ EXCEPTIONS = {
                                      "symbol blob _KM_IONIC_RADII_SYMBOL_BYTES in src/inorganic_data.cyr "
                                      "(KM_IONIC_RADII_COUNT rows), read through handles (row + 1): lookup_ionic_radius and "
                                      "the ionic_radius_* accessors (port plan §6.4)",
+    "reaction_dynamics::type TrajectoryPoint": "a point of the caller's flat trajectory buffer: 1 + n f64 (t, then the "
+                                               "n concentrations), point k at out + 8·k·(1 + n) (port plan §4, M5)",
     "nuclear::static ISOTOPES": "the generated columns KM_ISOTOPES_Z / _A / _HALF_LIFE_S, the symbol blob and the UTF-8 "
                                 "decay-mode blob in src/nuclear_data.cyr (KM_ISOTOPES_COUNT rows), read through handles "
                                 "(row + 1): lookup_isotope and the isotope_* accessors (port plan §6.4)",
@@ -120,7 +123,7 @@ EXCEPTIONS = {
 
 # Later milestones (port plan §2.1): counted, not checked.
 PENDING_MODULES = {
-    "reaction_dynamics": "M5", "network": "M5", "fitting": "M5", "sensitivity": "M5",
+    "network": "M5", "fitting": "M5", "sensitivity": "M5",
 }
 DEFERRED_MODULES = {
     "bridge": "deferred until a Cyrius consumer exists (port plan §2.2)",

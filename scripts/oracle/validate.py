@@ -102,6 +102,15 @@ and no Python packages. Usage, from the repo root:
    mean masses against CIAAW's intervals, src/spectroscopy_data.cyr against the file, and every isotope_abundances and
    isotope_pattern row's port result (r_pattern on the new table): noted exactly where it differs from the oracle's, the
    note's tokens it bit for bit; the isotope thresholds pinned on the port's results too.
+26. numerics.tsv and reaction_dynamics.tsv (M5a), every row recomputed: hisab 1.4.0's rk4_trajectory, dopri45,
+   gaussian_elimination, Pcg32 (next_u32, next_f64, next_normal) and euler_maruyama transcribed from its src/num/
+   {ode,roots,rng}.rs, reaction_dynamics.rs's guards, finish_trajectory and backward-Euler loop from rust-old/src, the
+   test systems as scripts/oracle/src/systems.rs writes them; dopri45's powf(-0.2) and the Box–Muller ln and cos (glibc's)
+   logged for the corrected oracle, which re-runs a trajectory with them correctly rounded. simulate_stiff's Newton exits
+   (converged, accepted at the 1e-6 floor, not converged, singular, non-finite, the empty system) must each have a row,
+   some dopri45 row must reach the 100 000-step limit, and each of Rust's typed stiff constants (STIFF_NEWTON_RTOL,
+   STIFF_ACCEPT_RTOL halved and doubled; STIFF_MAX_NEWTON ± 1) must change some golden row; MAX_STEPS is pinned by an Ok
+   row at 10⁷ and an Err row at 10⁷ + 1.
 Every function in every .tsv must have a rule here: a new one fails until it gets one.
 
     python3 -I scripts/oracle/validate.py . --write-corrections
@@ -869,9 +878,19 @@ class Pairs(list):
     """A Vec<(f64, f64)> (M4e: the isotope pattern and abundances): `v:n`, then each pair's two floats."""
 class Ints(list):
     """A Vec<usize> (M4e: find_peaks' indices): `v:n`, then n `i:` tokens."""
+class Traj(list):
+    """A trajectory, Vec<(f64, Vec<f64>)> (M5a): `v:points`, then each point's `f:t v:n f:y…`."""
+class Elim(tuple):
+    """gaussian_elimination's result (M5a): the solution `v:n f:…`, then the eliminated matrix `v:n(n+1) f:…`."""
 def out_toks(x):
     """The golden tokens of a Rust result: Err, a root list (`v:n` + floats), an int, or a float."""
     if isinstance(x, Err): return [("E", x.name, None)]
+    if isinstance(x, Traj):
+        toks = [("v", len(x), None)]
+        for t_, y_ in x:
+            toks += [("f", t_, f2b(t_)), ("v", len(y_), None)] + [("f", z, f2b(z)) for z in y_]
+        return toks
+    if isinstance(x, Elim): return out_toks(list(x[0])) + out_toks(list(x[1]))
     if isinstance(x, Pairs): return [("v", len(x), None)] + [("f", z, f2b(z)) for pr in x for z in pr]
     if isinstance(x, Ints): return [("v", len(x), None)] + [("i", z, None) for z in x]
     if isinstance(x, list): return [("v", len(x), None)] + [("f", z, f2b(z)) for z in x]
@@ -5729,8 +5748,420 @@ check(all(b7_still_err.get(k, 0) > 0 for k in ("ambiguous or trivial", "zero", "
       f"ADR 0002 #39: an Err class after Rust's overflow has no golden row: {b7_still_err}")
 check(b7_pbits_max >= 3000, f"ADR 0002 #39: the largest product before reduce_row is only {b7_pbits_max} bits")
 
+# ── 26. M5a: numerics.tsv and reaction_dynamics.tsv ───────────────────────────────────────────────────────────────────
+# hisab 1.4.0's rk4_trajectory, dopri45, gaussian_elimination, Pcg32 and euler_maruyama transcribed from
+# ~/.cargo/registry/src/*/hisab-1.4.0/src/num/{ode,roots,rng}.rs, and reaction_dynamics.rs's guards, finish_trajectory
+# and backward-Euler loop from rust-old/src, in their operation order; the test systems are scripts/oracle/src/systems.rs's
+# (the README's list). dopri45's err.powf(-0.2) and the Box–Muller ln and cos are logged primitives, so the corrected
+# oracle re-runs a trajectory with them correctly rounded (a different step or draw changes every later point).
+def rd_rhs(name, p, t, y, dy):
+    n = len(y)
+    if name in ("decay", "slowjac"):
+        for i_ in range(n): dy[i_] = -p[0] * y[i_]
+    elif name == "decay2":
+        for i_ in range(n): dy[i_] = -p[0] * y[i_] * y[i_]
+    elif name == "consecutive":
+        dy[0] = -p[0] * y[0]; dy[1] = p[0] * y[0] - p[1] * y[1]; dy[2] = p[1] * y[1]
+    elif name == "reversible":
+        dy[0] = -p[0] * y[0] + p[1] * y[1]; dy[1] = p[0] * y[0] - p[1] * y[1]
+    elif name == "michaelis_menten":
+        rate = dv(p[0] * y[0], p[1] + y[0]); dy[0] = -rate; dy[1] = rate
+    elif name == "robertson":
+        r1 = 0.04 * y[0]; r2 = 3e7 * y[1] * y[1]; r3 = 1e4 * y[1] * y[2]
+        dy[0] = -r1 + r3; dy[1] = r1 - r2 - r3; dy[2] = r2
+    elif name == "brusselator":
+        xxy = y[0] * y[0] * y[1]; dy[0] = p[0] + xxy - (p[1] + 1.0) * y[0]; dy[1] = p[1] * y[0] - xxy
+    elif name == "forced": dy[0] = -p[0] * y[0] + p[1] * t
+    elif name == "affine": dy[0] = p[0] * y[0] + 1.0
+    elif name == "nan":
+        for i_ in range(len(dy)): dy[i_] = math.nan
+    elif name == "blowup": dy[0] = p[0] * y[0] * y[0]
+    elif name == "badjac": dy[0] = -y[0]
+    elif name != "zero": raise KeyError(name)
+def rd_jac(name, p, t, y, j):
+    n = len(y)
+    if name in ("decay", "forced"):
+        for i_ in range(n): j[i_][i_] = -p[0]
+    elif name == "decay2":
+        for i_ in range(n): j[i_][i_] = -2.0 * p[0] * y[i_]
+    elif name == "consecutive":
+        j[0][0] = -p[0]; j[1][0] = p[0]; j[1][1] = -p[1]; j[2][1] = p[1]
+    elif name == "reversible":
+        j[0][0] = -p[0]; j[0][1] = p[1]; j[1][0] = p[0]; j[1][1] = -p[1]
+    elif name == "michaelis_menten":
+        s_ = p[1] + y[0]; d = dv(p[0] * p[1], s_ * s_); j[0][0] = -d; j[1][0] = d
+    elif name == "robertson":
+        j[0] = [-0.04, 1e4 * y[2], 1e4 * y[1]]
+        j[1] = [0.04, -6e7 * y[1] - 1e4 * y[2], -1e4 * y[1]]
+        j[2] = [0.0, 6e7 * y[1], 0.0]
+    elif name == "brusselator":
+        xy2 = 2.0 * y[0] * y[1]; xx = y[0] * y[0]
+        j[0][0] = xy2 - (p[1] + 1.0); j[0][1] = xx; j[1][0] = p[1] - xy2; j[1][1] = -xx
+    elif name == "affine": j[0][0] = p[0]
+    elif name == "nan": j[0][0] = -1.0
+    elif name == "blowup": j[0][0] = 2.0 * p[0] * y[0]
+    elif name == "badjac": j[0][0] = 3.0
+    elif name == "slowjac": j[0][0] = -p[1]
+    elif name != "zero": raise KeyError(name)
+def rd_diffusion(name, p, t, y, g):
+    if name == "const":
+        for i_ in range(len(g)): g[i_] = p[0]
+    elif name == "zero":
+        for i_ in range(len(g)): g[i_] = 0.0
+    elif name == "mult":
+        for i_ in range(len(y)): g[i_] = p[0] * y[i_]
+    elif name != "none": raise KeyError(name)
+
+RD_PATH = {}        # simulate_stiff's Newton exits over the golden rows, recomputed
+def h_rk4_trajectory(f, t0, y0, t_end, n):
+    if n == 0: return Err("ZeroSteps")
+    dim = len(y0)
+    h = (t_end - t0) / float(n)
+    t, y = t0, list(y0)
+    k1, k2, k3, k4, tmp, comp = ([0.0] * dim for _ in range(6))
+    tr = Traj([(t, list(y))])
+    for _ in range(n):
+        f(t, y, k1)
+        for i_ in range(dim): tmp[i_] = y[i_] + 0.5 * h * k1[i_]
+        f(t + 0.5 * h, tmp, k2)
+        for i_ in range(dim): tmp[i_] = y[i_] + 0.5 * h * k2[i_]
+        f(t + 0.5 * h, tmp, k3)
+        for i_ in range(dim): tmp[i_] = y[i_] + h * k3[i_]
+        f(t + h, tmp, k4)
+        h6 = h / 6.0
+        for i_ in range(dim):
+            delta = h6 * (k1[i_] + 2.0 * k2[i_] + 2.0 * k3[i_] + k4[i_])
+            new_sum = y[i_] + delta
+            if abs(y[i_]) >= abs(delta): comp[i_] += (y[i_] - new_sum) + delta
+            else: comp[i_] += (delta - new_sum) + y[i_]
+            y[i_] = new_sum + comp[i_]
+        t += h
+        tr.append((t, list(y)))
+    return tr
+DP_A = [1.0 / 5.0, [3.0 / 40.0, 9.0 / 40.0], [44.0 / 45.0, -56.0 / 15.0, 32.0 / 9.0],
+        [19372.0 / 6561.0, -25360.0 / 2187.0, 64448.0 / 6561.0, -212.0 / 729.0],
+        [9017.0 / 3168.0, -355.0 / 33.0, 46732.0 / 5247.0, 49.0 / 176.0, -5103.0 / 18656.0]]
+DP_B = [35.0 / 384.0, 0.0, 500.0 / 1113.0, 125.0 / 192.0, -2187.0 / 6784.0, 11.0 / 84.0, 0.0]
+DP_E = [71.0 / 57600.0, 0.0, -71.0 / 16695.0, 71.0 / 1920.0, -17253.0 / 339200.0, 22.0 / 525.0, -1.0 / 40.0]
+DP_STEPS = [0]      # the most attempted steps of any golden dopri45 run
+def h_dopri45(f, t0, y0, t_end, tol, h_init):
+    dim = len(y0)
+    if dim == 0: return Err("InvalidInput")
+    if h_init <= 0.0: return Err("InvalidInput")
+    a21, a3, a4, a5, a6 = DP_A
+    t, y = t0, list(y0)
+    h = r_min(h_init, abs(t_end - t0))
+    direction = 1.0 if t_end >= t0 else -1.0
+    tr = Traj([(t, list(y))])
+    k1, k2, k3, k4, k5, k6, k7, yt = ([0.0] * dim for _ in range(8))
+    it = 0
+    for it in range(100000):
+        if (t - t_end) * direction >= 0.0: break
+        if (t + direction * h - t_end) * direction > 0.0: h = abs(t_end - t)
+        hd = direction * h
+        f(t, y, k1)
+        for i_ in range(dim): yt[i_] = y[i_] + hd * a21 * k1[i_]
+        f(t + hd * (1.0 / 5.0), yt, k2)
+        for i_ in range(dim): yt[i_] = y[i_] + hd * (a3[0] * k1[i_] + a3[1] * k2[i_])
+        f(t + hd * (3.0 / 10.0), yt, k3)
+        for i_ in range(dim): yt[i_] = y[i_] + hd * (a4[0] * k1[i_] + a4[1] * k2[i_] + a4[2] * k3[i_])
+        f(t + hd * (4.0 / 5.0), yt, k4)
+        for i_ in range(dim):
+            yt[i_] = y[i_] + hd * (a5[0] * k1[i_] + a5[1] * k2[i_] + a5[2] * k3[i_] + a5[3] * k4[i_])
+        f(t + hd * (8.0 / 9.0), yt, k5)
+        for i_ in range(dim):
+            yt[i_] = y[i_] + hd * (a6[0] * k1[i_] + a6[1] * k2[i_] + a6[2] * k3[i_] + a6[3] * k4[i_] + a6[4] * k5[i_])
+        f(t + hd, yt, k6)
+        for i_ in range(dim):
+            yt[i_] = y[i_] + hd * (DP_B[0] * k1[i_] + DP_B[2] * k3[i_] + DP_B[3] * k4[i_] + DP_B[4] * k5[i_]
+                                   + DP_B[5] * k6[i_])
+        f(t + hd, yt, k7)
+        err_norm = 0.0
+        for i_ in range(dim):
+            ei = hd * (DP_E[0] * k1[i_] + DP_E[2] * k3[i_] + DP_E[3] * k4[i_] + DP_E[4] * k5[i_] + DP_E[5] * k6[i_]
+                       + DP_E[6] * k7[i_])
+            scale = r_max(tol, tol * abs(yt[i_]))
+            err_norm += dv(ei, scale) * dv(ei, scale)
+        err_norm = r_sqrt(err_norm / float(dim))
+        if err_norm <= 1.0:
+            t += hd
+            y = list(yt)
+            tr.append((t, list(y)))
+        factor = 0.9 * _pow(err_norm, -0.2, "pow") if err_norm > 0.0 else 5.0
+        h *= r_clamp(factor, 0.2, 5.0)
+    DP_STEPS[0] = max(DP_STEPS[0], it + 1)
+    if abs(t - t_end) > h * 0.01: return Err("NoConvergence")
+    return tr
+HISAB_EPS = b2f(0x3D719799812DEA11)    # hisab's EPSILON_F64 (1.4.0: crate::EPSILON_F64; 3.4.1: the same bits)
+check(HISAB_EPS == 1e-12, "hisab's EPSILON_F64 is not 1e-12")
+def h_gaussian_elimination(mat):
+    n = len(mat)
+    if n == 0: return Err("InvalidInput")
+    if any(len(r_) != n + 1 for r_ in mat): return Err("InvalidInput")
+    for col in range(n):
+        max_row, max_val = col, abs(mat[col][col])
+        for row in range(col + 1, n):
+            val = abs(mat[row][col])
+            if val > max_val: max_val, max_row = val, row
+        if max_val < HISAB_EPS: return Err("SingularPivot")
+        if max_row != col: mat[col], mat[max_row] = mat[max_row], mat[col]
+        pivot = mat[col][col]
+        for row in range(col + 1, n):
+            factor = dv(mat[row][col], pivot)
+            for j_ in range(col, n + 1):
+                val = mat[col][j_]
+                mat[row][j_] -= factor * val
+    x = [0.0] * n
+    for i_ in reversed(range(n)):
+        sm = mat[i_][n]
+        for j_ in range(i_ + 1, n): sm -= mat[i_][j_] * x[j_]
+        x[i_] = dv(sm, mat[i_][i_])
+    return x
+M64 = (1 << 64) - 1
+class Pcg32:
+    """hisab 1.4.0's num::Pcg32 (PCG-XSH-RR 64/32), its f64 and normal draws."""
+    def __init__(self, seed, stream):
+        self.state, self.inc = 0, ((stream << 1) | 1) & M64
+        self.next_u32()
+        self.state = (self.state + seed) & M64
+        self.next_u32()
+    def next_u32(self):
+        old = self.state
+        self.state = (old * 6364136223846793005 + self.inc) & M64
+        xs = (((old >> 18) ^ old) >> 27) & 0xFFFFFFFF
+        rot = old >> 59
+        return ((xs >> rot) | (xs << ((-rot) & 31))) & 0xFFFFFFFF
+    def next_f64(self): return self.next_u32() / (4294967295.0 + 1.0)
+    def next_normal(self):
+        u1 = r_max(self.next_f64(), 1e-300)
+        u2 = self.next_f64()
+        return r_sqrt(-2.0 * p_ln(u1)) * p_cos(TAU * u2)
+def h_euler_maruyama(drift, diffusion, t0, y0, t_end, n, rng):
+    if n == 0: return Err("ZeroSteps")
+    dim = len(y0)
+    dt = (t_end - t0) / float(n)
+    sqrt_dt = r_sqrt(dt)
+    t, y = t0, list(y0)
+    tr = Traj([(t, list(y))])
+    a, b = [0.0] * dim, [0.0] * dim
+    for _ in range(n):
+        drift(t, y, a)
+        diffusion(t, y, b)
+        for i_ in range(dim):
+            dw = rng.next_normal() * sqrt_dt
+            y[i_] += a[i_] * dt + b[i_] * dw
+        t += dt
+        tr.append((t, list(y)))
+    return tr
+
+# reaction_dynamics.rs
+RD_MAX_STEPS = 10_000_000
+def rd_time_and_steps(t_end, steps):
+    if not is_positive(t_end): return Err("InvalidInput")
+    if steps == 0 or steps > RD_MAX_STEPS: return Err("InvalidInput")
+    return None
+def rd_finish(r):
+    if isinstance(r, Err): return Err("ComputationError")
+    return r if r and all(math.isfinite(v) for v in r[-1][1]) else Err("ComputationError")
+def rd_builtin(sys_, p, y0, t_end, steps):
+    e = rd_time_and_steps(t_end, steps)
+    if e: return e
+    return rd_finish(h_rk4_trajectory(lambda t_, y_, d_: rd_rhs(sys_, p, t_, y_, d_), 0.0, y0, t_end, steps))
+def rd_first(sys_, c, k, t_end, steps):
+    if not is_non_negative(c): return Err("InvalidConcentration")
+    if not is_non_negative(k): return Err("InvalidInput")
+    return rd_builtin(sys_, [k], [c], t_end, steps)
+def rd_consecutive(a, k1, k2, t_end, steps):
+    if not is_non_negative(a): return Err("InvalidConcentration")
+    if not is_non_negative(k1) or not is_non_negative(k2): return Err("InvalidInput")
+    return rd_builtin("consecutive", [k1, k2], [a, 0.0, 0.0], t_end, steps)
+def rd_reversible(a, b, kf, kr, t_end, steps):
+    if not is_non_negative(a) or not is_non_negative(b): return Err("InvalidConcentration")
+    if not is_non_negative(kf) or not is_non_negative(kr): return Err("InvalidInput")
+    return rd_builtin("reversible", [kf, kr], [a, b], t_end, steps)
+def rd_mm(s0, v, km, t_end, steps):
+    if not is_non_negative(s0): return Err("InvalidConcentration")
+    if not is_positive(v) or not is_positive(km): return Err("InvalidInput")
+    return rd_builtin("michaelis_menten", [v, km], [s0, 0.0], t_end, steps)
+def rd_adaptive(sys_, p, y0, t_end, tol):
+    if not is_positive(t_end) or not is_positive(tol): return Err("InvalidInput")
+    if not all(math.isfinite(v) for v in y0): return Err("InvalidInput")
+    r = h_dopri45(lambda t_, y_, d_: rd_rhs(sys_, p, t_, y_, d_), 0.0, y0, t_end, tol, t_end / 100.0)
+    return Err("ComputationError") if isinstance(r, Err) else r
+def rd_max_abs(v):
+    m_ = 0.0
+    for x in v: m_ = r_max(m_, abs(x))
+    return m_
+def rd_stiff(sys_, p, y0, t_end, steps, rtol=1e-10, atol=1e-6, max_newton=20):
+    e = rd_time_and_steps(t_end, steps)
+    if e: return e
+    if not all(math.isfinite(v) for v in y0): return Err("InvalidInput")
+    dim = len(y0)
+    h = t_end / float(steps)
+    y, yn, fv = list(y0), list(y0), [0.0] * dim
+    jm = [[0.0] * dim for _ in range(dim)]
+    path = "empty"
+    if dim > 0:
+        path = "converged"
+        for step in range(1, steps + 1):
+            t = t_end if step == steps else h * float(step)
+            yn = list(y)
+            last, converged = math.inf, False
+            for _ in range(max_newton):
+                rd_rhs(sys_, p, t, yn, fv)
+                rd_jac(sys_, p, t, yn, jm)
+                aug = [[(1.0 if i_ == j_ else 0.0) - h * jm[i_][j_] for j_ in range(dim)]
+                       + [-(yn[i_] - y[i_] - h * fv[i_])] for i_ in range(dim)]
+                delta = h_gaussian_elimination(aug)
+                if isinstance(delta, Err):
+                    RD_PATH["singular"] = RD_PATH.get("singular", 0) + 1
+                    return Err("ComputationError")
+                for i_ in range(dim): yn[i_] += delta[i_]
+                if not all(math.isfinite(v) for v in yn):
+                    RD_PATH["non-finite"] = RD_PATH.get("non-finite", 0) + 1
+                    return Err("ComputationError")
+                last = rd_max_abs(delta)
+                if last <= rtol * rd_max_abs(yn):
+                    converged = True
+                    break
+            if not converged and last > atol * rd_max_abs(yn):
+                RD_PATH["not converged"] = RD_PATH.get("not converged", 0) + 1
+                return Err("ComputationError")
+            if not converged: path = "accepted at the 1e-6 floor"
+            y = list(yn)
+    RD_PATH[path] = RD_PATH.get(path, 0) + 1
+    return Traj([(0.0, list(y0)), (t_end, y)])
+def rd_stochastic(dr, p, df, q, y0, t_end, steps, seed):
+    e = rd_time_and_steps(t_end, steps)
+    if e: return e
+    if not all(math.isfinite(v) for v in y0): return Err("InvalidInput")
+    rng = Pcg32(seed, 1)
+    return rd_finish(h_euler_maruyama(lambda t_, y_, d_: rd_rhs(dr, p, t_, y_, d_),
+                                      lambda t_, y_, g_: rd_diffusion(df, q, t_, y_, g_), 0.0, y0, t_end, steps, rng))
+
+# Token readers: `s:name v:n f:…`, `v:n f:…`, and an `i:` word as Rust's usize / u64.
+def rd_sys(ins, k):
+    n = ins[k + 1][1]
+    return ins[k][1], [t_[1] for t_ in ins[k + 2:k + 2 + n]], k + 2 + n
+def rd_vec(ins, k):
+    n = ins[k][1]
+    return [t_[1] for t_ in ins[k + 1:k + 1 + n]], k + 1 + n
+def u64(x): return x & M64
+def rd_rule_adaptive(ins):
+    sys_, p, k = rd_sys(ins, 0)
+    y0, k = rd_vec(ins, k)
+    return rd_adaptive(sys_, p, y0, ins[k][1], ins[k + 1][1])
+def rd_rule_stiff(ins, **kw):
+    sys_, p, k = rd_sys(ins, 0)
+    y0, k = rd_vec(ins, k)
+    return rd_stiff(sys_, p, y0, ins[k][1], u64(ins[k + 1][1]), **kw)
+def rd_rule_stochastic(ins):
+    dr, p, k = rd_sys(ins, 0)
+    df, q, k = rd_sys(ins, k)
+    y0, k = rd_vec(ins, k)
+    return rd_stochastic(dr, p, df, q, y0, ins[k][1], u64(ins[k + 1][1]), u64(ins[k + 2][1]))
+def num_rule_rk4(ins):
+    sys_, p, k = rd_sys(ins, 0)
+    t0 = ins[k][1]
+    y0, k = rd_vec(ins, k + 1)
+    return h_rk4_trajectory(lambda t_, y_, d_: rd_rhs(sys_, p, t_, y_, d_), t0, y0, ins[k][1], u64(ins[k + 1][1]))
+def num_rule_dopri45(ins):
+    sys_, p, k = rd_sys(ins, 0)
+    t0 = ins[k][1]
+    y0, k = rd_vec(ins, k + 1)
+    return h_dopri45(lambda t_, y_, d_: rd_rhs(sys_, p, t_, y_, d_), t0, y0, ins[k][1], ins[k + 1][1], ins[k + 2][1])
+def num_rule_em(ins):
+    dr, p, k = rd_sys(ins, 0)
+    df, q, k = rd_sys(ins, k)
+    t0 = ins[k][1]
+    y0, k = rd_vec(ins, k + 1)
+    return h_euler_maruyama(lambda t_, y_, d_: rd_rhs(dr, p, t_, y_, d_), lambda t_, y_, g_: rd_diffusion(df, q, t_, y_, g_),
+                            t0, y0, ins[k][1], u64(ins[k + 1][1]), Pcg32(u64(ins[k + 2][1]), 1))
+def num_rule_gauss(ins):
+    n, k, mat = ins[0][1], 1, []
+    for _ in range(n):
+        row, k = rd_vec(ins, k)
+        mat.append(row)
+    x = h_gaussian_elimination(mat)
+    return x if isinstance(x, Err) else Elim((x, [v for r_ in mat for v in r_]))
+def num_rule_pcg(normal):
+    def rule(ins):
+        rng = Pcg32(u64(ins[0][1]), 1)
+        n = ins[1][1]
+        return [rng.next_normal() for _ in range(n)] if normal else Ints([rng.next_u32() for _ in range(n)])
+    return rule
+M5_RULES = {
+    "num::Pcg32::next_u32": ("A", num_rule_pcg(False)),
+    "num::Pcg32::next_normal": ("C", num_rule_pcg(True)),
+    "num::rk4_trajectory": ("B", num_rule_rk4),
+    "num::dopri45": ("C", num_rule_dopri45),
+    "num::gaussian_elimination": ("B", num_rule_gauss),
+    "num::euler_maruyama": ("C", num_rule_em),
+    "reaction_dynamics::simulate_first_order": ("B", lambda a: rd_first("decay", a[0][1], a[1][1], a[2][1], u64(a[3][1]))),
+    "reaction_dynamics::simulate_second_order": ("B", lambda a: rd_first("decay2", a[0][1], a[1][1], a[2][1],
+                                                                          u64(a[3][1]))),
+    "reaction_dynamics::simulate_consecutive": ("B", lambda a: rd_consecutive(*fl(a)[:4], u64(a[4][1]))),
+    "reaction_dynamics::simulate_reversible": ("B", lambda a: rd_reversible(*fl(a)[:5], u64(a[5][1]))),
+    "reaction_dynamics::simulate_michaelis_menten": ("B", lambda a: rd_mm(*fl(a)[:4], u64(a[4][1]))),
+    "reaction_dynamics::simulate_adaptive": ("C", rd_rule_adaptive),
+    "reaction_dynamics::simulate_stiff": ("B", rd_rule_stiff),
+    "reaction_dynamics::simulate_stochastic": ("C", rd_rule_stochastic),
+}
+m5_counts, m5_shape = {}, 0
+m5_out = {"Ok": 0, "Err": 0, "points": 0, "floats": 0}
+for mod in ("numerics", "reaction_dynamics"):
+    for fn, cls, ins, outs, where in R.get(mod, []):
+        m5_counts[fn] = m5_counts.get(fn, 0) + 1
+        if fn not in M5_RULES:
+            check(False, f"{where}: {mod}.tsv function {fn} has no rule here")
+            continue
+        want_cls, rule = M5_RULES[fn]
+        check(cls == want_cls, f"{where}: {fn} class {cls}")
+        CALLS[0] = 0
+        NUDGE[0] = None
+        CALL_LOG.clear()
+        base = rule(ins)
+        log = list(CALL_LOG)
+        want = out_toks(base)
+        m5_out["Err" if isinstance(base, Err) else "Ok"] += 1
+        if isinstance(base, Traj): m5_out["points"] += len(base)
+        m5_out["floats"] += sum(1 for t_ in want if t_[0] == "f")
+        if cls == "C" and not LIBM_EXACT:
+            check(toks_shape(outs, want), f"{where}: {fn} shape differs from the recomputation")
+            m5_shape += 1
+        else:
+            check(toks_equal(outs, want), f"{where}: {fn}: the golden outputs are not the recomputation's "
+                  f"({len(outs)} tokens, recomputed {len(want)})")
+        if log:
+            corrected_row(mod, fn, rule, ins, outs, where, log)
+for fn in sorted(M5_RULES):
+    check(fn in m5_counts, f"M5a: no golden rows for {fn}")
+print("M5a rows checked:", sum(m5_counts.values()), "over", len(m5_counts), "functions"
+      + (f" ({m5_shape} class-C rows by shape only)" if m5_shape else "")
+      + f": {m5_out['Ok']} Ok ({m5_out['points']} trajectory points, {m5_out['floats']} floats), {m5_out['Err']} Err")
+print("reaction_dynamics: simulate_stiff's Newton exits (recomputed):", dict(sorted(RD_PATH.items())))
+for path in ("converged", "accepted at the 1e-6 floor", "not converged", "singular", "non-finite", "empty"):
+    check(RD_PATH.get(path, 0) > 0, f"reaction_dynamics: no simulate_stiff row exits {path!r}")
+print(f"numerics: the most dopri45 steps attempted by one golden row: {DP_STEPS[0]}")
+check(DP_STEPS[0] == 100000, "M5a: no golden dopri45 row reaches the 100 000-step limit")
+# Rust's typed stiff constants must each change some golden row when perturbed (the corpus pins them): STIFF_NEWTON_RTOL
+# 1e-10, STIFF_ACCEPT_RTOL 1e-6 (each halved and doubled) and STIFF_MAX_NEWTON 20 (19, 21); MAX_STEPS is pinned by the
+# rows at 10⁷ (Ok) and 10⁷ + 1 (Err).
+stiff_rows = [(ins, outs) for fn, cls, ins, outs, where in R.get("reaction_dynamics", [])
+              if fn == "reaction_dynamics::simulate_stiff"]
+for what, kw in (("STIFF_NEWTON_RTOL / 2", {"rtol": 0.5e-10}), ("STIFF_NEWTON_RTOL * 2", {"rtol": 2e-10}),
+                 ("STIFF_ACCEPT_RTOL / 2", {"atol": 0.5e-6}), ("STIFF_ACCEPT_RTOL * 2", {"atol": 2e-6}),
+                 ("STIFF_MAX_NEWTON - 1", {"max_newton": 19}), ("STIFF_MAX_NEWTON + 1", {"max_newton": 21})):
+    moved = sum(1 for ins, outs in stiff_rows if not toks_equal(outs, out_toks(rd_rule_stiff(ins, **kw))))
+    check(moved > 0, f"reaction_dynamics: {what} changes no golden simulate_stiff row")
+    print(f"  {what}: {moved} simulate_stiff rows change")
+check(any(u64(ins[-1][1]) == RD_MAX_STEPS and outs[0][0] == "v" for ins, outs in stiff_rows)
+      and any(u64(ins[-1][1]) == RD_MAX_STEPS + 1 and outs[0][0] == "E" for ins, outs in stiff_rows),
+      "reaction_dynamics: MAX_STEPS is not pinned by an Ok row at 10⁷ and an Err row at 10⁷ + 1")
+
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
-             "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy", "stoichiometry"}
+             "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy", "stoichiometry",
+             "numerics", "reaction_dynamics"}
 check(set(tsvs) == VALIDATED, f"golden modules with no section here: {sorted(set(tsvs) - VALIDATED)}; "
       f"sections with no module: {sorted(VALIDATED - set(tsvs))}")
 

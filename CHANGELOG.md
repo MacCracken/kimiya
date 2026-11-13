@@ -881,6 +881,48 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   - tests: `tests/mathx.tcyr` `cyrius_b10a_exp_ux`, `cyrius_b10a_expm1_ux`, `cyrius_b10a_exp10_ux` (96 MPFR rows as bit
     patterns, the specials, 4,000 seeded arguments each)
   - benches: `bench_audit_b10a`, fifteen benches beside the binary64 functions, in `tests/audit2.bcyr`
+- **M5a numerics, reaction_dynamics** (port plan §4, §6.2–§6.4; [ADR 0003](docs/adr/0003-transcribe-missing-hisab-routines.md)'s
+  M5a amendment). The overflow audit is paused after B10a (the user's decision of 2026-11-12: it resumes after M5 / M7
+  over the whole library, M5's modules included), so M5a is ported at the plan's parity classes; the roadmap lists its
+  candidate spots for the audit:
+  - **numerics** — `src/numerics.cyr`, private: hisab 1.4.0's `rk4_trajectory` (`_km_rk4_trajectory`, with `rk4_step`'s
+    Neumaier compensation), `dopri45` (`_km_dopri45`: the Dormand–Prince tableau as Rust's const quotients, the step
+    factor 0.9·err^(−0.2) on `_km_cr_pow`, 100 000 attempted steps), `gaussian_elimination` (`_km_gaussian_elimination`:
+    partial pivoting, the 10⁻¹² pivot threshold) and `euler_maruyama` (`_km_euler_maruyama_system`), operation for
+    operation; PCG32 from hisab 3.4.1 (`pcg32_new` / `pcg32_next`, equal to 1.4.0's `Pcg32::new(seed, 1)` bit for bit),
+    1.4.0's `next_f64` and Box–Muller `next_normal` (`_km_cr_ln`, `_km_cr_cos`) transcribed on it. Closures are a function
+    pointer and a context pointer (`f(ctx, t, y, dy, n)`, through `callptr`); a trajectory is a flat buffer of (t, y[n])
+    points, stored while k < cap, with the final state in `fin`; work tables of up to 96 words on the stack
+  - **reaction_dynamics** — `src/reaction_dynamics.cyr`: `simulate_first_order`, `simulate_second_order`,
+    `simulate_consecutive`, `simulate_reversible`, `simulate_michaelis_menten` (RK4), `simulate_adaptive` (Dormand–Prince),
+    `simulate_stiff` (kimiya's backward-Euler Newton loop on the elimination, its 20 iterations and 10⁻¹⁰ / 10⁻⁶
+    tolerances) and `simulate_stochastic` (Euler–Maruyama, PCG32 stream 1), with Rust's checks, Err codes and order and
+    finish_trajectory's final-state test. The trajectory goes to the caller's buffer `out` of `cap` points of 1 + n f64
+    (Err(KM_ERR_INVALID_INPUT) when it doesn't fit, after Rust's own errors); the Jacobian is a flat n × n buffer, zeroed
+    once and reused as Rust's; a null function pointer or a bad state slice is Err(KM_ERR_INVALID_INPUT) (port plan §6.4)
+  - generator: golden modules `numerics` (243 rows: hisab 1.4.0's routines called directly, the crate's new direct `hisab`
+    dependency, the oracle's own locked version) and `reaction_dynamics` (954 rows: every `simulate_*` on the mechanism
+    presets at 10, 100 and 1000 steps, the Robertson stiff problem at 1 … 4000 steps, seeded SDE runs on seeds 0 …
+    u64::MAX, a linearly converging Newton across the 20-iteration limit and both tolerances, every Err the 1.2 tests pin
+    and the steps / time / state edges); the test systems in `scripts/oracle/src/systems.rs` (the README's table);
+    `Module::row_summarised` (a trajectory row's note is its point count and last point)
+  - corpus: every row bit-identical — RK4, backward Euler and the elimination class B, dopri45, Euler–Maruyama and the
+    normal draws class C at bound 0, PCG32's u32 class A; `tests/golden/numerics.cr.tsv` (3 rows) and
+    `reaction_dynamics.cr.tsv` (1 row: two glibc pows in a 1,766-point Dormand–Prince run) are the corrected oracle where
+    glibc's misrounding changes a trajectory; parity line 339,944 ok, 0 failed, 0 measured, 0 pending, 46,407 accepted
+    (ADR 6: 810), 0 glibc-matching on x86_64 ELF, x86_64 PE and aarch64; `numerics` 240 ok, 3 accepted (ADR 6)
+  - `validate.py` §26: every row recomputed with its own transcription of hisab 1.4.0 and `reaction_dynamics.rs` (the
+    corrected oracle re-runs a trajectory with pow, ln and cos correctly rounded); `simulate_stiff`'s six Newton exits
+    each covered, the 100 000-step limit reached, each typed stiff constant pinned (2–30 rows move when it is perturbed),
+    MAX_STEPS pinned at 10⁷ / 10⁷ + 1
+  - tests: `tests/numerics.tcyr` (the `numerics` rows through `tests/parity_core.cyr`, `tests/parity.tcyr` skipping the
+    module, then 5 Cyrius-only groups: heap work tables, capacity, scratch reuse, the pivot edge, the PCG32 handle);
+    `tests/reaction_dynamics.tcyr` (the 26 Rust tests, `stiff_resized_jacobian_is_error_not_panic` adapted, and the 2
+    integration tests, plus 5 Cyrius-only groups; 74 assertions); `tests/rd_systems.cyr` and `tests/rd_rows.cyr`, the
+    systems as callbacks and the trajectory rows
+  - benches: `tests/numerics.bcyr` (a new bench file)
+  - `[lib]` gains `src/numerics.cyr` and `src/reaction_dynamics.cyr` (after spectroscopy); `dist/kimiya.cyr` regenerated;
+    surface parity 410/410 (`reaction_dynamics::type TrajectoryPoint` mapped to the flat point)
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -1431,6 +1473,12 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   unscaled) 84 ns; e^(−10⁴), e^(10¹²), e^(10⁴) − 1 and 10^(10⁴) 158–165 ns (the double-double reduction); e^(10¹⁵) 614 ns
   (the integer reduction); the accurate path alone 1.86 µs at −20.05, 2.14 µs at −10⁴ and 2.17 µs for 10^(−10¹²);
   `tests/audit2.bcyr` 66 s (49 s before)
+- M5a, first measurement (Rust 1.2.0 → Cyrius, `tests/numerics.bcyr`): `dynamics/first_order_100steps` 4.41 → 11.2 µs
+  (2.5×), `dynamics/consecutive_100steps` 5.04 → 21.4 µs (4.3×); Cyrius-only against an ad hoc Rust timing of the same
+  bodies: `dynamics/adaptive_first_order` 1.80 → 6.19 µs, `dynamics/stiff_robertson_400steps` 121 → 498 µs,
+  `dynamics/stochastic_100steps` 4.85 → 24.8 µs, `numerics/gaussian_elimination_8x8` 353 ns → 2.48 µs (the row-pointer addressing
+  took it from 3.15 to 2.56 µs in one side-by-side run), `numerics/pcg32_next_normal` 22.6 → 200 ns (the correctly rounded ln and cos)
+  ([`docs/benchmarks-rust-v-cyrius.md`](docs/benchmarks-rust-v-cyrius.md))
 
 ## [1.2.0] - 2026-11-08
 
