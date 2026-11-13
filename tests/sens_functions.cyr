@@ -1,0 +1,241 @@
+# sens_functions.cyr — the test functions of the M5b compute_gradient golden rows and tests, as the port's callbacks:
+# f(ctx, tape, v, n) builds the function on hisab 3.4.1's reverse-mode tape from the n parameter nodes whose indices
+# are at v, with its constants at ctx (f64), and returns the output node. Included by tests/parity.tcyr,
+# tests/sensitivity.tcyr and tests/numerics.bcyr.
+#
+# scripts/oracle/src/m_sensitivity.rs (`build`) defines each function on hisab 1.4.0's tape; this file records the same
+# operations in the same order (hisab 3.4.1's `ad_*`: `tape.powf(q, n)` is ad_pow, `tape.constant(c)` ad_const), and
+# validate.py has a third copy on its replica of 1.4.0's tape. The formulas are in scripts/oracle/README.md.
+
+# Parameter node k.
+#must_use
+fn _sf_v(v, k): i64 { return load64(v + 8 * k); }
+
+# Constant k of the function, as a tape constant.
+#must_use
+fn _sf_c(t, ctx, k): i64 { return ad_const(t, load64(ctx + 8 * k)); }
+
+# x² + 3y (the Rust test custom_gradient).
+fn _sf_quad(ctx, t, v, n): i64 {
+    var x2 = ad_mul(t, _sf_v(v, 0), _sf_v(v, 0));
+    var three: f64 = 3.0;
+    var c = ad_const(t, three);
+    var ty = ad_mul(t, c, _sf_v(v, 1));
+    return ad_add(t, x2, ty);
+}
+
+# K = exp(−ΔG/(R·T)), [ΔG, T], ctx = [R].
+fn _sf_keq(ctx, t, v, n): i64 {
+    var r = _sf_c(t, ctx, 0);
+    var ng = ad_neg(t, _sf_v(v, 0));
+    var rt = ad_mul(t, r, _sf_v(v, 1));
+    var e = ad_div(t, ng, rt);
+    return ad_exp(t, e);
+}
+
+# k = A·exp(−Ea/(R·T)), [A, Ea, T], ctx = [R].
+fn _sf_arrhenius(ctx, t, v, n): i64 {
+    var r = _sf_c(t, ctx, 0);
+    var ng = ad_neg(t, _sf_v(v, 1));
+    var rt = ad_mul(t, r, _sf_v(v, 2));
+    var e = ad_div(t, ng, rt);
+    var b = ad_exp(t, e);
+    return ad_mul(t, _sf_v(v, 0), b);
+}
+
+# E = E° − (R·T/nF)·ln Q, [E°, T, Q], ctx = [R, nF].
+fn _sf_nernst(ctx, t, v, n): i64 {
+    var r = _sf_c(t, ctx, 0);
+    var nf = _sf_c(t, ctx, 1);
+    var rt = ad_mul(t, r, _sf_v(v, 1));
+    var lq = ad_ln(t, _sf_v(v, 2));
+    var q = ad_div(t, rt, nf);
+    var c = ad_mul(t, q, lq);
+    return ad_sub(t, _sf_v(v, 0), c);
+}
+
+# ΔG = ΔH − T·ΔS, [ΔH, T, ΔS].
+fn _sf_gibbs(ctx, t, v, n): i64 {
+    var ts = ad_mul(t, _sf_v(v, 1), _sf_v(v, 2));
+    return ad_sub(t, _sf_v(v, 0), ts);
+}
+
+# K = exp(−(ΔH − T·ΔS)/(R·T)), [ΔH, ΔS, T], ctx = [R].
+fn _sf_vant_hoff(ctx, t, v, n): i64 {
+    var ts = ad_mul(t, _sf_v(v, 2), _sf_v(v, 1));
+    var dg = ad_sub(t, _sf_v(v, 0), ts);
+    var ng = ad_neg(t, dg);
+    var r = _sf_c(t, ctx, 0);
+    var rt = ad_mul(t, r, _sf_v(v, 2));
+    var e = ad_div(t, ng, rt);
+    return ad_exp(t, e);
+}
+
+# k = (k_B·T/h)·exp(−ΔG‡/(R·T)), [ΔG‡, T], ctx = [k_B, h, R].
+fn _sf_eyring(ctx, t, v, n): i64 {
+    var kb = _sf_c(t, ctx, 0);
+    var h = _sf_c(t, ctx, 1);
+    var kbt = ad_mul(t, kb, _sf_v(v, 1));
+    var pre = ad_div(t, kbt, h);
+    var r = _sf_c(t, ctx, 2);
+    var rt = ad_mul(t, r, _sf_v(v, 1));
+    var ng = ad_neg(t, _sf_v(v, 0));
+    var e = ad_div(t, ng, rt);
+    var b = ad_exp(t, e);
+    return ad_mul(t, pre, b);
+}
+
+# P = n·R·T/V, [n, T, V], ctx = [R].
+fn _sf_ideal_gas(ctx, t, v, n): i64 {
+    var r = _sf_c(t, ctx, 0);
+    var nr = ad_mul(t, _sf_v(v, 0), r);
+    var nrt = ad_mul(t, nr, _sf_v(v, 1));
+    return ad_div(t, nrt, _sf_v(v, 2));
+}
+
+# p₂ = p₁·exp(−(ΔH/R)·(1/T₂ − 1/T₁)), [p₁, ΔH, T₁, T₂], ctx = [R].
+fn _sf_clausius(ctx, t, v, n): i64 {
+    var one: f64 = 1.0;
+    var c1 = ad_const(t, one);
+    var i2 = ad_div(t, c1, _sf_v(v, 3));
+    var i1 = ad_div(t, c1, _sf_v(v, 2));
+    var d = ad_sub(t, i2, i1);
+    var hd = ad_mul(t, _sf_v(v, 1), d);
+    var r = _sf_c(t, ctx, 0);
+    var x = ad_div(t, hd, r);
+    var nx = ad_neg(t, x);
+    var e = ad_exp(t, nx);
+    return ad_mul(t, _sf_v(v, 0), e);
+}
+
+# V = 4ε((σ/r)¹² − (σ/r)⁶), [ε, σ, r].
+fn _sf_lj(ctx, t, v, n): i64 {
+    var q = ad_div(t, _sf_v(v, 1), _sf_v(v, 2));
+    var p12: f64 = 12.0;
+    var p6: f64 = 6.0;
+    var q12 = ad_pow(t, q, p12);
+    var q6 = ad_pow(t, q, p6);
+    var d = ad_sub(t, q12, q6);
+    var four: f64 = 4.0;
+    var c4 = ad_const(t, four);
+    var fe = ad_mul(t, c4, _sf_v(v, 0));
+    return ad_mul(t, fe, d);
+}
+
+# V = D_e·(1 − exp(−a·(r − r_e)))², [D_e, a, r, r_e].
+fn _sf_morse(ctx, t, v, n): i64 {
+    var dr = ad_sub(t, _sf_v(v, 2), _sf_v(v, 3));
+    var adr = ad_mul(t, _sf_v(v, 1), dr);
+    var ng = ad_neg(t, adr);
+    var e = ad_exp(t, ng);
+    var one: f64 = 1.0;
+    var c1 = ad_const(t, one);
+    var om = ad_sub(t, c1, e);
+    var sq = ad_mul(t, om, om);
+    return ad_mul(t, _sf_v(v, 0), sq);
+}
+
+# (1 − x)² + 100·(y − x²)², [x, y].
+fn _sf_rosenbrock(ctx, t, v, n): i64 {
+    var one: f64 = 1.0;
+    var c1 = ad_const(t, one);
+    var a = ad_sub(t, c1, _sf_v(v, 0));
+    var a2 = ad_mul(t, a, a);
+    var x2 = ad_mul(t, _sf_v(v, 0), _sf_v(v, 0));
+    var b = ad_sub(t, _sf_v(v, 1), x2);
+    var b2 = ad_mul(t, b, b);
+    var hundred: f64 = 100.0;
+    var h = ad_const(t, hundred);
+    var hb = ad_mul(t, h, b2);
+    return ad_add(t, a2, hb);
+}
+
+# sin(x)·cos(y) + x/y, [x, y].
+fn _sf_trig(ctx, t, v, n): i64 {
+    var s = ad_sin(t, _sf_v(v, 0));
+    var c = ad_cos(t, _sf_v(v, 1));
+    var sc = ad_mul(t, s, c);
+    var q = ad_div(t, _sf_v(v, 0), _sf_v(v, 1));
+    return ad_add(t, sc, q);
+}
+
+# ln x + z·ln y, [x, y, z].
+fn _sf_logs(ctx, t, v, n): i64 {
+    var lx = ad_ln(t, _sf_v(v, 0));
+    var ly = ad_ln(t, _sf_v(v, 1));
+    var zl = ad_mul(t, _sf_v(v, 2), ly);
+    return ad_add(t, lx, zl);
+}
+
+# Σ x_k², n ≥ 1.
+fn _sf_sum_squares(ctx, t, v, n): i64 {
+    var acc = ad_mul(t, _sf_v(v, 0), _sf_v(v, 0));
+    var k = 1;
+    while (k < n) {
+        var sq = ad_mul(t, _sf_v(v, k), _sf_v(v, k));
+        acc = ad_add(t, acc, sq);
+        k = k + 1;
+    }
+    return acc;
+}
+
+# Π x_k, n ≥ 1.
+fn _sf_product(ctx, t, v, n): i64 {
+    var acc = _sf_v(v, 0);
+    var k = 1;
+    while (k < n) {
+        acc = ad_mul(t, acc, _sf_v(v, k));
+        k = k + 1;
+    }
+    return acc;
+}
+
+# (x² + x)·x² − x: x reached along several paths, [x].
+fn _sf_shared(ctx, t, v, n): i64 {
+    var a = ad_mul(t, _sf_v(v, 0), _sf_v(v, 0));
+    var b = ad_add(t, a, _sf_v(v, 0));
+    var c = ad_mul(t, b, a);
+    return ad_sub(t, c, _sf_v(v, 0));
+}
+
+# x², [x, y]: y unused.
+fn _sf_unused(ctx, t, v, n): i64 { return ad_mul(t, _sf_v(v, 0), _sf_v(v, 0)); }
+
+# x, [x].
+fn _sf_ident(ctx, t, v, n): i64 { return _sf_v(v, 0); }
+
+# The constant ctx[0], no parameters.
+fn _sf_const(ctx, t, v, n): i64 { return _sf_c(t, ctx, 0); }
+
+# The function named [p, p + l), or 0 for an unknown name.
+#must_use
+fn _sf_function(p, l): i64 {
+    if (_sf_eq(p, l, "quad") == 1) { return &_sf_quad; }
+    if (_sf_eq(p, l, "keq") == 1) { return &_sf_keq; }
+    if (_sf_eq(p, l, "arrhenius") == 1) { return &_sf_arrhenius; }
+    if (_sf_eq(p, l, "nernst") == 1) { return &_sf_nernst; }
+    if (_sf_eq(p, l, "gibbs") == 1) { return &_sf_gibbs; }
+    if (_sf_eq(p, l, "vant_hoff") == 1) { return &_sf_vant_hoff; }
+    if (_sf_eq(p, l, "eyring") == 1) { return &_sf_eyring; }
+    if (_sf_eq(p, l, "ideal_gas") == 1) { return &_sf_ideal_gas; }
+    if (_sf_eq(p, l, "clausius") == 1) { return &_sf_clausius; }
+    if (_sf_eq(p, l, "lj") == 1) { return &_sf_lj; }
+    if (_sf_eq(p, l, "morse") == 1) { return &_sf_morse; }
+    if (_sf_eq(p, l, "rosenbrock") == 1) { return &_sf_rosenbrock; }
+    if (_sf_eq(p, l, "trig") == 1) { return &_sf_trig; }
+    if (_sf_eq(p, l, "logs") == 1) { return &_sf_logs; }
+    if (_sf_eq(p, l, "sum_squares") == 1) { return &_sf_sum_squares; }
+    if (_sf_eq(p, l, "product") == 1) { return &_sf_product; }
+    if (_sf_eq(p, l, "shared") == 1) { return &_sf_shared; }
+    if (_sf_eq(p, l, "unused") == 1) { return &_sf_unused; }
+    if (_sf_eq(p, l, "ident") == 1) { return &_sf_ident; }
+    if (_sf_eq(p, l, "const") == 1) { return &_sf_const; }
+    return 0;
+}
+
+# 1 if text [p, p + l) equals the C string s.
+#must_use
+fn _sf_eq(p, l, s): i64 {
+    if (strlen(s) != l) { return 0; }
+    return memeq(p, s, l);
+}

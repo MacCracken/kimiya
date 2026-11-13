@@ -18,7 +18,9 @@ oxidation states, ADR 0002 #7) and M4f-2 (stoichiometry's yields, limiting reage
 #24–#26). The library-wide overflow audit ran B1–B7 and B10a after M4, then was **paused** by the user's decision of
 2026-11-12: it is post-port work and resumes after M5 / M7 over the whole library, M5's modules included. **M5a** (numerics,
 reaction_dynamics: hisab 1.4.0's RK4, Dormand–Prince, Gaussian elimination and Euler–Maruyama transcribed, every golden
-row bit-identical) is done; M5b (network, fitting, sensitivity) next — live status in [`state.md`](state.md).
+row bit-identical) and **M5b** (network, fitting, sensitivity: hisab 1.4.0's least squares, Jacobi rank and CSR
+compression transcribed, `compute_gradient` on hisab 3.4.1's tape, ADR 0002 #2 realised) are done, so M5 is; M7 (release
+2.0.0) next — live status in [`state.md`](state.md).
 
 ---
 
@@ -154,6 +156,21 @@ type for average oxidation states, no separate extrapolating Antoine function. I
     - `simulate_stiff`'s Newton tolerances 10⁻¹⁰·‖y₊‖∞ and 10⁻⁶·‖y₊‖∞ underflow for ‖y₊‖∞ below about 10⁻²⁹⁸ (a state
       that small then needs an exact zero correction to converge), and its h·J and h·f products
     - Euler–Maruyama's a·dt + b·dW, and the Gaussian elimination's factor·a products (hisab 1.4.0's, as transcribed)
+    - M5b (ported the same way, listed, not fixed): the least squares' Vandermonde powers x^j and the QR's unscaled dot
+      products and norms Σ q² over- or underflow (NaN coefficients, or the 10⁻¹² test failing, where the fit of a
+      rescaled x is representable), and fit_arrhenius' 1/T of a subnormal T is ∞
+    - the Jacobi rank's sums app, aqq, apq, its app·aqq and 1 + τ² (τ past 1.3·10¹⁵⁴) and the singular values' Σ b²
+      over- or underflow (a huge matrix counts +∞ singular values, a tiny one none: the 10⁻¹⁰ threshold is absolute)
+    - `rate_from_stoichiometry`'s Σ S·v (a sum with cancellation, #33's kind) and `stoichiometric_matrix`'s repeated
+      coefficient sums
+    - the gradients' K/(R·T), (K·(−ΔG))/((R·T)·(R·T)), A·e and −RT/(nFQ): (R·T)² or a product over- or underflows where
+      the derivative is representable (the port's ComputationError, or a 0)
+- [ ] *oracle defect (M5b), for a decision after the port* — `network::reaction_network_rank`: hisab 1.4.0's one-sided
+  Jacobi tests |a_pq| ≤ EPSILON_F64²·√(a_pp·a_qq) (10⁻²⁴ relative), below the rounding of a rotated pair's dot product,
+  so most dense matrices end in NoConvergence after 100·max(m, n) sweeps and kimiya 1.2.0's rank is Err(ComputationError)
+  for Chapman's ozone cycle, Robertson's kinetics, the H₂ + Br₂ chain and 159 of the 563 golden matrices (all finite ones). The port
+  reproduces it (ADR 0003's M5b amendment); a fix (a reachable test, Rust's answer wherever it converges) is a Cyrius
+  API change for ADR 0002
 - [ ] *additive* — `fitting::fit_beer_lambert` → also return the intercept
 - [ ] *additive* — `spectroscopy::rydberg_wavelength` → nuclear-mass parameter for the reduced-mass correction
 - [ ] `integration::soorat::MolecularStructure::from_molecule` → `Result`

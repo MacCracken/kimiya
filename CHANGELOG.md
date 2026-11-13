@@ -923,6 +923,51 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   - benches: `tests/numerics.bcyr` (a new bench file)
   - `[lib]` gains `src/numerics.cyr` and `src/reaction_dynamics.cyr` (after spectroscopy); `dist/kimiya.cyr` regenerated;
     surface parity 410/410 (`reaction_dynamics::type TrajectoryPoint` mapped to the flat point)
+- **M5b network, fitting, sensitivity** (port plan §4, §6.2–§6.4; [ADR 0003](docs/adr/0003-transcribe-missing-hisab-routines.md)'s
+  M5b amendment, [ADR 0002](docs/adr/0002-port-api-divergences.md)'s M5b addition). Ported at the plan's parity classes
+  (the overflow audit stays paused); the roadmap lists the candidate spots for the audit, and the oracle defect below:
+  - **numerics** — `src/numerics.cyr` gains hisab 1.4.0's `least_squares_poly` (`_km_least_squares_poly`: the Vandermonde
+    by `powi`, `qr_decompose`'s modified Gram–Schmidt with its 10⁻¹² threshold, back substitution), `matrix_rank` on
+    `svd`'s one-sided Jacobi (`_km_matrix_rank`, the singular values only) and `CsrMatrix::from_dense`
+    (`_km_csr_from_dense`, |v| > 10⁻¹² into a hisab 3.4.1 `csr_new` handle), operation for operation. hisab 3.4.1's
+    `svd_compute_checked` disagrees with 1.4.0 on 191 of the 563 golden rank rows and its `csr_from_dense` keeps the
+    entries 1.4.0 drops, so both are transcribed, as ADR 0003 provides
+  - **network** — `src/network.cyr`: `stoichiometric_matrix`, `sparse_stoichiometric_matrix`, `reaction_network_rank`,
+    `conservation_law_count`, `rate_from_stoichiometry`, with Rust's checks, Err codes and order. A matrix is a flat
+    row-major buffer and its dimensions; a reaction a 32-byte record (the reactants' and the products' term lists, each
+    term a 16-byte species / coefficient record); the dense results go to the caller's buffer (Err(KM_ERR_INVALID_INPUT)
+    when they don't fit, after Rust's errors); the CSR form is hisab 3.4.1's handle; the counts are usize words
+  - **fitting** — `src/fitting.cyr`: `fit_arrhenius` (into a `struct KmArrheniusFit`, through a pointer), `fit_polynomial`
+    (the coefficients to the caller's buffer), `fit_beer_lambert`, and `struct KmPolynomialFit` (a view of a coefficient
+    buffer) with `evaluate` and `degree`; the ln per point and the exp of the intercept correctly rounded
+  - **sensitivity** — `src/sensitivity.cyr`: the four gradients (ADR 0002 #2, below) as closed forms — each fixed tape's
+    reverse sweep unrolled, with hisab 1.4.0's zero-adjoint skip and the correctly rounded exp and ln — and
+    `compute_gradient(f, ctx, tape, parameters, n, out)` on hisab 3.4.1's reverse-mode tape (`ad_tape_new`, `ad_*`,
+    `ad_grad`), the callback f(ctx, tape, vars, n) returning the output node through `callptr`
+  - generator: golden modules `network` (1,296 rows: the mechanism presets — the Rust tests', the rate laws,
+    Michaelis–Menten, Chapman, the H₂ + Br₂ chain, Robertson, Lotka–Volterra, the Brusselator, the Oregonator, H₂/O₂ —
+    their transposes and scalings, rank-deficient, noisy, Hilbert, empty and non-finite matrices, the CSR and rank
+    thresholds to the ulp, every Err), `fitting` (578: exact synthetic Arrhenius data from k = 2^e, seeded noise, the
+    QR's threshold swept, exact integer polynomials of degree 0 … 7, ill-conditioned and degenerate Vandermonde systems,
+    every Err) and `sensitivity` (894: the four gradients over each argument's edges and exp's ends, `compute_gradient`
+    on 20 test functions built on hisab 1.4.0's `Tape` directly, the crate's `hisab` dependency gaining `autodiff`,
+    kimiya's own feature); the test functions in `scripts/oracle/src/m_sensitivity.rs` (the README's table)
+  - corpus: every row 0 ulp but `compute_gradient`'s (≤ 40 ulp, class D: hisab 3.4.1's tape against 1.4.0's) — the
+    builders and the rank class A, the rates, fits and `evaluate` class B, `fit_arrhenius` class C at bound 0, the four
+    gradients class D at 0 ulp; no ADR 0006 correction (glibc 2.44 rounds every call of these rows correctly); parity line
+    342,485 ok, 0 failed, 0 measured, 0 pending, 46,634 accepted (ADR 6: 810), 0 glibc-matching on x86_64 ELF, x86_64 PE
+    and aarch64 (22 modules)
+  - `validate.py` §27: every row recomputed with its own transcription of hisab 1.4.0 (`from_dense`, the Jacobi SVD,
+    the QR least squares, the reverse-mode tape) and the three Rust modules; ADR 0002 #2's notes checked against the
+    validation rule; the rank's and the CSR's thresholds (one ulp down) and the QR's (halved, doubled) each pinned by
+    golden rows
+  - tests: `tests/network.tcyr`, `tests/fitting.tcyr`, `tests/sensitivity.tcyr` (the 34 Rust tests, two adapted, and
+    fitting's 2 integration tests, plus 11 Cyrius-only groups; 155 assertions); `tests/sens_functions.cyr`, the test
+    functions as callbacks
+  - benches: 7 in `tests/numerics.bcyr` — `fitting/arrhenius_6pts` 233.40 ns → 1.01 µs, `fitting/polynomial_deg2_20pts`
+    500.05 ns → 2.32 µs (Rust's benches), and 5 Cyrius-only ([benchmarks](docs/benchmarks-rust-v-cyrius.md))
+  - `[lib]` gains `src/network.cyr`, `src/fitting.cyr` and `src/sensitivity.cyr` (after reaction_dynamics);
+    `dist/kimiya.cyr` regenerated; surface parity 431/431 (`network::type ReactionDef` mapped to the record)
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -932,6 +977,21 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   `adiabatic_flame_temperature(dh_kj * 1000.0, …)` becomes `adiabatic_flame_temperature(dh_j, products, n, t0)` with
   `var t, dh_j = reaction_enthalpy(p, np, r, nr);`; code that displays or compares the result in kJ/mol divides by
   1000; in ΔG = ΔH − TΔS with `reaction_entropy`, the `/ 1000.0` on TΔS goes away.
+
+### Breaking (relative to Rust 1.2.0, ADR 0002 #2)
+- **sensitivity** — `equilibrium_constant_gradient`, `arrhenius_gradient`, `nernst_gradient` and
+  `gibbs_temperature_sensitivity` return a `Result` instead of a bare vector or value: the gradient goes to the caller's
+  buffer (two or three f64), `gibbs_temperature_sensitivity` is `Ok(−ΔS)`. They validate as `equilibrium_constant`,
+  `arrhenius_rate`, `nernst_potential` and `gibbs_free_energy` do — `Err(KM_ERR_INVALID_TEMPERATURE)` for T not positive
+  and finite, `Err(KM_ERR_INVALID_INPUT)` for a non-finite energy, A, E° or ΔS, n outside 1 ..= 255 or Q not positive
+  and finite — and return `Err(KM_ERR_COMPUTATION_ERROR)` where an entry is not finite, where 1.2 returned NaN, ±∞ or
+  a finite but meaningless entry (T ≤ 0). Every valid input gives 1.2's values (0 ulp on the corpus).
+  `compute_gradient` takes the closure as a function pointer and a context, the caller's hisab tape and the output
+  buffer, and its `Result` is `Err` only for a null pointer, a negative count or a tape too small (1.2 never failed).
+  *Migration:* `let g = arrhenius_gradient(a, ea, t);` becomes `var gr: f64[3]; var t, v = arrhenius_gradient(a, ea, t,
+  &gr);` and a check of `is_ok(t)`; code that tested `g[i].is_finite()` tests the `Result`; a `compute_gradient`
+  closure becomes `fn f(ctx, tape, vars, n)` building on hisab 3.4.1's `ad_*` operations, called as
+  `compute_gradient(&f, ctx, ad_tape_new(cap), params, n, out)` (reuse one tape across calls).
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #4)
 - **phase** — `antoine_pressure_mmhg` / `antoine_pressure_pa` return a `Result` instead of a bare value, and

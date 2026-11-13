@@ -22,7 +22,7 @@ are compared through the stated mapping:
 | # | Rust 1.2.0 | Cyrius 2.0.0 | Golden comparison |
 |---|---|---|---|
 | 1 | `thermochem::reaction_enthalpy`, `reaction_gibbs_energy` return kJ/mol | return **J/mol** | oracle × 1000, computed as `(Σ kJ) × 1000.0` on both sides — class B, expected 0 ulp |
-| 2 | `sensitivity::{equilibrium_constant_gradient, arrhenius_gradient, nernst_gradient, gibbs_temperature_sensitivity}` unvalidated; `compute_gradient` → `Result` never `Err` | the four return `Result`, computed from closed-form derivatives; `compute_gradient` returns its vector directly | finite oracle rows class D; oracle non-finite ↔ Cyrius `Err` |
+| 2 *(realised 2026-11-12, M5b)* | `sensitivity::{equilibrium_constant_gradient, arrhenius_gradient, nernst_gradient, gibbs_temperature_sensitivity}` unvalidated; `compute_gradient` → `Result` never `Err` | the four return `Result`, validated as `equilibrium_constant`, `arrhenius_rate`, `nernst_potential` and `gibbs_free_energy` (codes and order), Err(ComputationError) for a non-finite entry, computed from closed-form derivatives (each tape's sweep unrolled); `compute_gradient` keeps a `Result` for the Cyrius-only failures of a caller's tape (the M5b addition) | finite oracle rows class D (0 ulp); oracle non-finite, or an input the port refuses ↔ the port's noted Err (227 rows, mapped, counted) |
 | 3 | `nuclear::semi_empirical_binding_energy` → NaN for z > a or a = 0 | `Result` | finite rows class B; oracle NaN ↔ `Err` |
 | 4 | `phase::antoine_pressure_mmhg`, `antoine_pressure_pa` → NaN at the pole, silent extrapolation | `Result`; `Err` outside the coefficient set's `t_min_c..t_max_c`. No extrapolating variant | in-range rows class C; oracle NaN or out-of-range input ↔ `Err` |
 | 6 | `FunctionalGroup::hydrogen_bonding`; `Geometry::TShapedThreeLonePairs` | `functional_group_is_hydrogen_bond_donor` and a new `functional_group_is_hydrogen_bond_acceptor`; `KM_GEOMETRY_T_SHAPED` | donor and geometry rows class A under the new names; acceptor checked by reference tests only |
@@ -1789,6 +1789,39 @@ against the accurate path and the binary64 function).
 tier (e^-720.5) 84 ns; the double-double reduction (e^∓10⁴, e^(10¹²), e^(10⁴) − 1, 10^(10⁴)) 158–165 ns; the integer
 reduction's fast path (e^(10¹⁵)) 614 ns; the accurate path alone 1.86 µs (−20.05), 2.14 µs (−10⁴) and 2.17 µs
 (10^(−10¹²)). The consumers call these only on their slow paths.
+
+## Addition, 2026-11-12 (M5b): #2 realised
+
+**The four fixed-formula gradients** (`src/sensitivity.cyr`) return a `Result`, validated as the module's own Rust
+functions validate — the codes and the order of `reaction::equilibrium_constant` (T, then ΔG), `kinetics::arrhenius_rate`
+(T, then A, then Ea), `electrochemistry::nernst_potential` (T, then n, Q and E°; n a u8 word, outside 1 ..= 255
+InvalidInput, M3a's rule) and `reaction::gibbs_free_energy` (T, then ΔH and ΔS) — and Err(ComputationError) where an
+entry is not finite (as `equilibrium_constant` refuses an overflowing K). The vectors go to the caller's buffer of two
+or three f64 (`lineweaver_burk`'s form), written only on Ok; `gibbs_temperature_sensitivity` is Ok(−ΔS).
+
+**The closed forms** are each fixed tape's reverse sweep, unrolled: every adjoint from +0.0, each contribution added in
+the sweep's node order (`grads[b] -= g·v_a/(v_b·v_b)` for a quotient's divisor, `grads[a] -= g` for a negation), and a
+node whose adjoint is 0 skipped, as hisab 1.4.0's `backward` skips it (`if g == 0.0 { continue; }`): so A = 0 or an
+underflowing K contributes nothing and never meets a partial that is ±∞ (0·∞ = NaN where (R·T)² underflows), and
+∂E/∂T at Q = 1 is +0 (the textbook −R·ln 1/(nF) is −0). The tape's exp and ln are the correctly rounded `_km_cr_exp` /
+`_km_cr_ln` (ADR 0006). Every Ok golden row is then the oracle's vector bit for bit (543 rows, 0 ulp; glibc rounds all
+their calls correctly), compared at class D as decided.
+
+**The mapping**, "oracle non-finite ↔ Cyrius Err" made exact: a golden row is noted with the port's Err, `[ADR 0002 #2:
+the port's Err(V) (E:V)]`, wherever the validating Rust function refuses the input or an entry is not finite; the
+harness requires that Err (mapped, accepted under ADR 2, counted) and compares every other row, whose entries are all
+finite, at class D. 227 rows: 170 whose oracle output is not finite (107 ComputationError, 63 refused inputs) and 57
+whose oracle output is finite at an input the port refuses (a negative or zero T, an infinite ΔG that makes K = 0,
+n = 0 …) — equilibrium_constant_gradient 76, arrhenius_gradient 65,
+nernst_gradient 66, gibbs_temperature_sensitivity 20. `validate.py` §27 checks every note against the validation rule.
+
+**compute_gradient** keeps a `Result` (Ok(n), the n partials in the caller's buffer). #2's "returns its vector directly"
+assumed Rust's failure-free call; in Cyrius the tape is the caller's (hisab 3.4.1's `ad_tape_new(cap)`, reused since the
+bump allocator never frees), so a null pointer or negative count, a tape too small for the parameters, and an output
+that is not a node of the tape (every hisab op returns AD_FULL once the tape is full) are Err(KM_ERR_INVALID_INPUT), and
+an index table that can't be allocated (past 64 parameters) Err(KM_ERR_COMPUTATION_ERROR). Nothing Rust can return is
+an Err: every input Rust accepts gives Ok. Its rows compare hisab 3.4.1's tape with 1.4.0's at class D (ADR 0003's M5b
+amendment).
 
 ## Consequences
 

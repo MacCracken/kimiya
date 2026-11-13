@@ -60,12 +60,16 @@ include "src/spectroscopy_data.cyr"
 include "src/spectroscopy.cyr"
 include "src/numerics.cyr"
 include "src/reaction_dynamics.cyr"
+include "src/network.cyr"
+include "src/fitting.cyr"
+include "src/sensitivity.cyr"
 
 alloc_init();
 
 include "tests/parity_core.cyr"
 include "tests/rd_systems.cyr"
 include "tests/rd_rows.cyr"
+include "tests/sens_functions.cyr"
 
 # ── dispatch ────────────────────────────────────────────────────────────────────────
 # Each module's dispatcher fills the got list for one row. It returns 1 when it handled
@@ -2621,6 +2625,286 @@ fn _par_reaction_dynamics(fp, fl): i64 {
     return 0;
 }
 
+# ── network, fitting, sensitivity (M5b) ─────────────────────────────────────────────
+
+# The M5b rows' work buffers, allocated once: the matrix or the reaction terms (_PAR_MAX words each), the reaction
+# records, a second slice and the output.
+var _par_m5_a = 0;
+var _par_m5_b = 0;
+var _par_m5_c = 0;
+var _par_m5_out = 0;
+var _par_m5_tape = 0;
+fn _par_m5_alloc(): i64 {
+    if (_par_m5_a == 0) { _par_m5_a = _par_words(_PAR_MAX); }
+    if (_par_m5_b == 0) { _par_m5_b = _par_words(_PAR_MAX); }
+    if (_par_m5_c == 0) { _par_m5_c = _par_words(_PAR_MAX); }
+    if (_par_m5_out == 0) { _par_m5_out = _par_words(_PAR_MAX); }
+    if (_par_m5_tape == 0) { _par_m5_tape = ad_tape_new(4096); }
+    if (_par_m5_a == 0 || _par_m5_b == 0 || _par_m5_c == 0 || _par_m5_out == 0 || _par_m5_tape == 0) { return 0; }
+    return 1;
+}
+
+# The reaction network at input token 0, `i:n_species v:n_reactions` then each reaction's reactants and products
+# (`v:k` + k pairs `i:species f:coefficient` each), as the port's records (src/network.cyr): the 32-byte reaction
+# records into recs, the 16-byte terms into terms. Returns (n_species, n_reactions), or (-1, -1) for malformed tokens.
+fn _par_in_net(recs, terms): (i64, i64) {
+    if (_par_in_n < 2 || load64(_par_in_k + 8) != 118) { return (0 - 1, 0 - 1); }
+    var ns = _par_in(0);
+    var nr = _par_in(1);
+    var t = 2;
+    var w = 0;
+    var j = 0;
+    while (j < nr) {
+        var side = 0;
+        while (side < 2) {
+            if (t >= _par_in_n || load64(_par_in_k + 8 * t) != 118) { return (0 - 1, 0 - 1); }
+            var k = _par_in(t);
+            store64(recs + 32 * j + 16 * side, terms + 8 * w);
+            store64(recs + 32 * j + 16 * side + 8, k);
+            var q = 0;
+            while (q < k) {
+                store64(terms + 8 * w, _par_in(t + 1 + 2 * q));
+                store64(terms + 8 * w + 8, _par_in(t + 2 + 2 * q));
+                w = w + 2;
+                q = q + 1;
+            }
+            t = t + 1 + 2 * k;
+            side = side + 1;
+        }
+        j = j + 1;
+    }
+    if (t != _par_in_n) { return (0 - 1, 0 - 1); }
+    return (ns, nr);
+}
+
+# The matrix at input token k, Rust's `&[Vec<f64>]` (`v:m`, each row `v:len` + its entries), flat row-major into buf.
+# Returns (the token after it, m, n); (-1, 0, 0) for malformed tokens or ragged rows (the generator emits none: a flat
+# matrix has one row length, port plan §6.3).
+fn _par_in_flat(k, buf): (i64, i64, i64) {
+    if (k >= _par_in_n || load64(_par_in_k + 8 * k) != 118) { return (0 - 1, 0, 0); }
+    var m = _par_in(k);
+    var t = k + 1;
+    var n = 0;
+    var w = 0;
+    var i = 0;
+    while (i < m) {
+        if (t >= _par_in_n || load64(_par_in_k + 8 * t) != 118) { return (0 - 1, 0, 0); }
+        var len = _par_in(t);
+        if (i == 0) { n = len; }
+        if (len != n) { return (0 - 1, 0, 0); }
+        var j = 0;
+        while (j < len) {
+            store64(buf + 8 * w, _par_in(t + 1 + j));
+            w = w + 1;
+            j = j + 1;
+        }
+        t = t + 1 + len;
+        i = i + 1;
+    }
+    return (t, m, n);
+}
+
+# `network` rows: src/network.cyr. The builders' Ok output is Rust's Vec<Vec<f64>> (`v:rows`, each row `v:len` +
+# entries) from the flat buffer, or hisab 1.4.0's CsrMatrix read from the hisab 3.4.1 handle (`i:nrows i:ncols
+# v:nnz`, each entry `i:col f:value`, then `v:nrows+1` + the offsets); the rank and the count are `i:` words.
+fn _par_network(fp, fl): i64 {
+    if (_par_m5_alloc() != 1) { return 0 - 1; }
+    if (_par_eq(fp, fl, "network::stoichiometric_matrix") == 1) {
+        var ns, nr = _par_in_net(_par_m5_b, _par_m5_a);
+        if (nr < 0) { return 0 - 1; }
+        var t, v = stoichiometric_matrix(ns, _par_m5_b, nr, _par_m5_out, _PAR_MAX);
+        if (is_err_result(t) == 1) { _par_got_err(v); return 1; }
+        if (v != ns * nr) { _par_got_err(0 - 1); return 1; }
+        _par_got_seq(ns);
+        var i = 0;
+        while (i < ns) {
+            _par_got_seq(nr);
+            var j = 0;
+            while (j < nr) {
+                _par_got_f(load64(_par_m5_out + 8 * (i * nr + j)));
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "network::sparse_stoichiometric_matrix") == 1) {
+        var ns2, nr2 = _par_in_net(_par_m5_b, _par_m5_a);
+        if (nr2 < 0) { return 0 - 1; }
+        var t2, csr = sparse_stoichiometric_matrix(ns2, _par_m5_b, nr2);
+        if (is_err_result(t2) == 1) { _par_got_err(csr); return 1; }
+        var rows = csr_nrows(csr);
+        var nnz = csr_nnz(csr);
+        var rp = csr_row_ptr(csr);
+        var ci = csr_col_idx(csr);
+        var cv = csr_values(csr);
+        _par_got_i(rows);
+        _par_got_i(csr_ncols(csr));
+        _par_got_seq(nnz);
+        var k = 0;
+        while (k < nnz) {
+            _par_got_i(load64(ci + 8 * k));
+            _par_got_f(load64(cv + 8 * k));
+            k = k + 1;
+        }
+        _par_got_seq(rows + 1);
+        var r = 0;
+        while (r <= rows) {
+            _par_got_i(load64(rp + 8 * r));
+            r = r + 1;
+        }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "network::reaction_network_rank") == 1) {
+        var e3, m3, n3 = _par_in_flat(0, _par_m5_a);
+        if (e3 != _par_in_n) { return 0 - 1; }
+        var t3, v3 = reaction_network_rank(_par_m5_a, m3, n3);
+        if (is_err_result(t3) == 1) { _par_got_err(v3); } else { _par_got_i(v3); }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "network::conservation_law_count") == 1) {
+        _par_got_i(conservation_law_count(_par_in(0), _par_in(1)));
+        return 1;
+    }
+    if (_par_eq(fp, fl, "network::rate_from_stoichiometry") == 1) {
+        var e5, m5, n5 = _par_in_flat(0, _par_m5_a);
+        if (e5 < 0 || e5 >= _par_in_n) { return 0 - 1; }
+        var nv = _par_in_f64s(e5, _par_m5_b);
+        if (e5 + 1 + nv != _par_in_n) { return 0 - 1; }
+        var t5, v5 = rate_from_stoichiometry(_par_m5_a, m5, n5, _par_m5_b, nv, _par_m5_out, _PAR_MAX);
+        _par_got_f64s(t5, v5, _par_m5_out);
+        return 1;
+    }
+    return 0;
+}
+
+# `fitting` rows: src/fitting.cyr. The slices are `v:n` + floats; fit_arrhenius's Ok output is ArrheniusFit's two fields
+# (the KmArrheniusFit it writes), fit_polynomial's the coefficients (`v:n` + floats), PolynomialFit's methods run on a
+# KmPolynomialFit over the input coefficients. fit_arrhenius is class C at bound 0 (its ln and exp are correctly
+# rounded).
+fn _par_fitting(fp, fl): i64 {
+    if (_par_m5_alloc() != 1) { return 0 - 1; }
+    if (_par_eq(fp, fl, "fitting::fit_arrhenius") == 1) {
+        var nt = _par_in_f64s(0, _par_m5_a);
+        var nk = _par_in_f64s(nt + 1, _par_m5_b);
+        if (nt + nk + 2 != _par_in_n) { return 0 - 1; }
+        var fit: KmArrheniusFit;
+        var t, v = fit_arrhenius(_par_m5_a, nt, _par_m5_b, nk, &fit);
+        if (is_err_result(t) == 1) { _par_got_err(v); return 1; }
+        if (v != 2) { _par_got_err(0 - 1); return 1; }
+        _par_got_f(fit.pre_exponential);
+        _par_got_f(fit.activation_energy_j);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "fitting::fit_polynomial") == 1) {
+        var nx = _par_in_f64s(0, _par_m5_a);
+        var ny = _par_in_f64s(nx + 1, _par_m5_b);
+        if (nx + ny + 3 != _par_in_n) { return 0 - 1; }
+        var t2, v2 = fit_polynomial(_par_m5_a, nx, _par_m5_b, ny, _par_in(nx + ny + 2), _par_m5_out, _PAR_MAX);
+        _par_got_f64s(t2, v2, _par_m5_out);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "fitting::fit_beer_lambert") == 1) {
+        var nc = _par_in_f64s(0, _par_m5_a);
+        var na = _par_in_f64s(nc + 1, _par_m5_b);
+        if (nc + na + 3 != _par_in_n) { return 0 - 1; }
+        var l: f64 = _par_in(nc + na + 2);
+        var t3, v3 = fit_beer_lambert(_par_m5_a, nc, _par_m5_b, na, l);
+        _par_got_res(t3, v3);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "fitting::PolynomialFit::evaluate") == 1) {
+        var n4 = _par_in_f64s(0, _par_m5_a);
+        if (n4 + 2 != _par_in_n) { return 0 - 1; }
+        var p: KmPolynomialFit;
+        p.coefficients = _par_m5_a;
+        p.len = n4;
+        var x: f64 = _par_in(n4 + 1);
+        var y: f64 = p.evaluate(x);
+        _par_got_f(y);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "fitting::PolynomialFit::degree") == 1) {
+        var n5 = _par_in_f64s(0, _par_m5_a);
+        if (n5 + 1 != _par_in_n) { return 0 - 1; }
+        var p5: KmPolynomialFit;
+        p5.coefficients = _par_m5_a;
+        p5.len = n5;
+        _par_got_i(p5.degree());
+        return 1;
+    }
+    return 0;
+}
+
+# ADR 0002 #2 (M5b): a fixed-formula gradient row noted `[ADR 0002 #2: the port's Err(V) (E:V)]` (the oracle's output
+# non-finite, or at an input the port's validation refuses) must be that Err (_par_map_toks; _par_mapped = 102, since
+# _par_mapped 2 is ADR 0002 #4's Antoine mapping), counted per function; an unnoted row is Ok, compared class D with the
+# oracle's finite vector.
+var _par_adr2_keq = 0;
+var _par_adr2_arr = 0;
+var _par_adr2_nernst = 0;
+var _par_adr2_gibbs = 0;
+
+# The got list for a Result whose Ok payload is a count of f64 values at buf, then the #2 mapping; returns 1 if mapped.
+fn _par_got_adr2(t, v, buf): i64 {
+    _par_got_f64s(t, v, buf);
+    _par_map_toks(102, "[ADR 0002 #2:");
+    if (_par_mapped == 102) { return 1; }
+    return 0;
+}
+
+# `sensitivity` rows: src/sensitivity.cyr, class D. The four gradients' outputs are the oracle's Vec (`v:n` + floats)
+# or f64; compute_gradient's input names a test function (tests/sens_functions.cyr) and its constants, `s:name v:k
+# f:… v:n f:…`, built on one reused hisab 3.4.1 tape.
+fn _par_sensitivity(fp, fl): i64 {
+    if (_par_m5_alloc() != 1) { return 0 - 1; }
+    if (_par_eq(fp, fl, "sensitivity::equilibrium_constant_gradient") == 1) {
+        var dg: f64 = _par_in(0);
+        var t1: f64 = _par_in(1);
+        var r1, v1 = equilibrium_constant_gradient(dg, t1, _par_m5_out);
+        _par_adr2_keq = _par_adr2_keq + _par_got_adr2(r1, v1, _par_m5_out);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "sensitivity::arrhenius_gradient") == 1) {
+        var a: f64 = _par_in(0);
+        var ea: f64 = _par_in(1);
+        var t2: f64 = _par_in(2);
+        var r2, v2 = arrhenius_gradient(a, ea, t2, _par_m5_out);
+        _par_adr2_arr = _par_adr2_arr + _par_got_adr2(r2, v2, _par_m5_out);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "sensitivity::nernst_gradient") == 1) {
+        var e0: f64 = _par_in(0);
+        var t3: f64 = _par_in(2);
+        var q: f64 = _par_in(3);
+        var r3, v3 = nernst_gradient(e0, _par_in(1), t3, q, _par_m5_out);
+        _par_adr2_nernst = _par_adr2_nernst + _par_got_adr2(r3, v3, _par_m5_out);
+        return 1;
+    }
+    if (_par_eq(fp, fl, "sensitivity::gibbs_temperature_sensitivity") == 1) {
+        var h: f64 = _par_in(0);
+        var t4: f64 = _par_in(1);
+        var s: f64 = _par_in(2);
+        var r4, v4 = gibbs_temperature_sensitivity(h, t4, s);
+        _par_got_res(r4, v4);
+        _par_map_toks(102, "[ADR 0002 #2:");
+        if (_par_mapped == 102) { _par_adr2_gibbs = _par_adr2_gibbs + 1; }
+        return 1;
+    }
+    if (_par_eq(fp, fl, "sensitivity::compute_gradient") == 1) {
+        var k5 = _rd_in_sys(0, _par_m5_a);
+        if (k5 < 0) { return 0 - 1; }
+        var f5 = _sf_function(_rd_name_p, _rd_name_l);
+        if (f5 == 0 || k5 >= _par_in_n) { return 0 - 1; }
+        var n5 = _par_in_f64s(k5, _par_m5_b);
+        if (k5 + 1 + n5 != _par_in_n) { return 0 - 1; }
+        var r5, v5 = compute_gradient(f5, _par_m5_a, _par_m5_tape, _par_m5_b, n5, _par_m5_out);
+        _par_got_f64s(r5, v5, _par_m5_out);
+        return 1;
+    }
+    return 0;
+}
+
 # Routes a row to its module's dispatcher. 0 (pending) for a module with none yet.
 fn _par_dispatch(mp, ml, fp, fl): i64 {
     _par_got_n = 0;
@@ -2645,6 +2929,9 @@ fn _par_dispatch(mp, ml, fp, fl): i64 {
     if (_par_eq(mp, ml, "spectroscopy") == 1) { return _par_spectroscopy(fp, fl); }
     if (_par_eq(mp, ml, "stoichiometry") == 1) { return _par_stoichiometry(fp, fl); }
     if (_par_eq(mp, ml, "reaction_dynamics") == 1) { return _par_reaction_dynamics(fp, fl); }
+    if (_par_eq(mp, ml, "network") == 1) { return _par_network(fp, fl); }
+    if (_par_eq(mp, ml, "fitting") == 1) { return _par_fitting(fp, fl); }
+    if (_par_eq(mp, ml, "sensitivity") == 1) { return _par_sensitivity(fp, fl); }
     return 0;
 }
 
@@ -2823,6 +3110,7 @@ fn _par_c_bound(fp, fl): i64 {
     if (_par_eq(fp, fl, "spectroscopy::fft_spectrum") == 1) { return 0; }             # M4e: sincos (the twiddles)
     if (_par_eq(fp, fl, "reaction_dynamics::simulate_adaptive") == 1) { return 0; }   # M5a: pow (dopri45's factor)
     if (_par_eq(fp, fl, "reaction_dynamics::simulate_stochastic") == 1) { return 0; } # M5a: ln, cos (Box–Muller)
+    if (_par_eq(fp, fl, "fitting::fit_arrhenius") == 1) { return 0; }                 # M5b: ln per point, exp
     return 0 - 1;
 }
 
@@ -2850,6 +3138,9 @@ fn _par_accepted(fp, fl, ip, il): i64 {
     # ADR 0002 #7 (M4f): an oxidation-state row whose note names the port's exact rational states, or a balancing row
     # whose f64 matrix has no integer counterpart (the oracle's Err(InvalidInput)).
     if (_par_mapped == 7) { return 2; }
+    # ADR 0002 #2 (M5b): a fixed-formula gradient row whose note names the port's Err (the oracle's non-finite output,
+    # or an input the port's validation refuses); 102, since 2 is #4's.
+    if (_par_mapped == 102) { return 2; }
     return 0;
 }
 
@@ -2864,6 +3155,7 @@ fn _par_accepted_quiet(adr): i64 {
     if (adr == 2 && _par_mapped == 2) { return 1; }
     if (adr == 2 && _par_mapped >= 13 && _par_mapped <= 39) { return 1; }
     if (adr == 2 && _par_mapped == 7) { return 1; }
+    if (adr == 2 && _par_mapped == 102) { return 1; }
     return 0;
 }
 
@@ -2886,6 +3178,20 @@ fn _par_accepted_bits(adr): i64 {
 # after reaction and solution (per function); B6: #36's and #37's after spectroscopy, #38's after thermochem; B7: #39's
 # after stoichiometry.
 fn _par_module_done(mp, ml) {
+    if (_par_eq(mp, ml, "sensitivity") == 1) {
+        _par_puts("  ADR 0002 #2 the validated gradients: ");
+        fmt_int(_par_adr2_keq + _par_adr2_arr + _par_adr2_nernst + _par_adr2_gibbs);
+        _par_puts(" rows where the port returns the noted Err (equilibrium_constant_gradient ");
+        fmt_int(_par_adr2_keq);
+        _par_puts(", arrhenius_gradient ");
+        fmt_int(_par_adr2_arr);
+        _par_puts(", nernst_gradient ");
+        fmt_int(_par_adr2_nernst);
+        _par_puts(", gibbs_temperature_sensitivity ");
+        fmt_int(_par_adr2_gibbs);
+        println("): the oracle's non-finite or refused-input rows (accepted, ADR 2, counted, not listed)");
+        return 0;
+    }
     if (_par_eq(mp, ml, "reaction") == 1) {
         _par_b4_line(33, _par_adr33_gibbs, "gibbs_free_energy");
         _par_puts("  ADR 0002 #35 the exp argument unbounded: ");

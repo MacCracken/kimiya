@@ -1,0 +1,318 @@
+# sensitivity.tcyr — the tests of rust-old/src/sensitivity.rs, ported one for one (each test_group is the Rust test's
+# name; all 8), and Cyrius-only groups for ADR 0002 #2's validation and the reverse sweep's zero rule, and for
+# compute_gradient on hisab 3.4.1's tape. Adaptations: a gradient is the caller's buffer of two or three f64 behind a
+# Result (ADR 0002 #2); `invalid_input_gives_non_finite_gradients` asserts the port's Err for those inputs (with its
+# code) where Rust asserts a non-finite entry; the closure of `custom_gradient` is tests/sens_functions.cyr's `quad`
+# on a caller's tape. The golden corpus separately checks every function over its grid (tests/parity.tcyr).
+
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/sensitivity.cyr"
+
+include "tests/sens_functions.cyr"
+
+alloc_init();
+
+# 1 if the Result (t, v) is Err(code).
+#must_use
+fn is_err_code(t, v, code): i64 {
+    if (is_err_result(t) == 1 && v == code) { return 1; }
+    return 0;
+}
+
+# A quiet NaN (Rust's f64::NAN).
+#must_use
+fn nan(): f64 {
+    var x: f64 = 0x7FF8000000000000;
+    return x;
+}
+
+# 1 if |actual − expected| ≤ tol·|expected| (the Rust tests' relative bound).
+#must_use
+fn rel_le(actual: f64, expected: f64, tol: f64): i64 {
+    var d: f64 = actual - expected;
+    var a: f64 = f64_abs(d);
+    var e: f64 = f64_abs(expected);
+    var lim: f64 = tol * e;
+    if (a <= lim) { return 1; }
+    return 0;
+}
+
+# Entry k of the gradient buffer g.
+#must_use
+fn g_at(g, k): f64 {
+    var v: f64 = load64(g + 8 * k);
+    return v;
+}
+
+# The tape the compute_gradient tests reuse.
+var tape = 0;
+
+fn _t_equilibrium_k_gradient_signs() {
+    test_group("equilibrium_k_gradient_signs");
+    var g: f64[2];
+    var t, v = equilibrium_constant_gradient(-5000.0, 298.0, &g);
+    var g0: f64 = g[0];
+    var g1: f64 = g[1];
+    assert(is_ok(t) == 1 && v == 2, "Ok");
+    assert(g0 < 0.0, "∂K/∂(ΔG) should be negative");
+    assert(g1 < 0.0, "(∂K/∂T)_ΔG should be negative for ΔG < 0");
+}
+
+fn _t_equilibrium_k_gradient_is_constant_delta_g_derivative() {
+    test_group("equilibrium_k_gradient_is_constant_delta_g_derivative");
+    var dg: f64 = -5000.0;
+    var tk: f64 = 298.0;
+    var rt: f64 = KM_GAS_CONSTANT * tk;
+    var nd: f64 = -dg;
+    var x: f64 = nd / rt;
+    var k: f64 = _km_cr_exp(x);
+    var g: f64[2];
+    var t, v = equilibrium_constant_gradient(dg, tk, &g);
+    var g0: f64 = g[0];
+    var g1: f64 = g[1];
+    var q: f64 = k / rt;
+    var mq: f64 = -q;
+    assert(is_ok(t) == 1 && rel_le(g0, mq, 0.000000000001) == 1, "−K/(RT)");
+    var num: f64 = k * dg;
+    var den: f64 = rt * tk;
+    var expected: f64 = num / den;
+    assert(rel_le(g1, expected, 0.000000000001) == 1, "K·ΔG/(RT²)");
+}
+
+# Adapted (ADR 0002 #2): where Rust returns a non-finite entry the port returns its Err.
+fn _t_invalid_input_gives_non_finite_gradients() {
+    test_group("invalid_input_gives_non_finite_gradients");
+    var g: f64[3];
+    var t, v = equilibrium_constant_gradient(-5000.0, 0.0, &g);
+    assert(is_err_code(t, v, KM_ERR_INVALID_TEMPERATURE) == 1, "T = 0");
+    var t1, v1 = equilibrium_constant_gradient(nan(), 298.0, &g);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "ΔG NaN");
+    var t2, v2 = arrhenius_gradient(10000000000000.0, 80000.0, nan(), &g);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_TEMPERATURE) == 1, "T NaN");
+    var t3, v3 = nernst_gradient(0.342, 0, 298.0, 0.1, &g);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT) == 1, "n = 0");
+    var t4, v4 = nernst_gradient(0.342, 2, 298.0, 0.0, &g);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "Q = 0");
+    var t5, v5 = nernst_gradient(0.342, 2, 298.0, -1.0, &g);
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_INPUT) == 1, "Q < 0");
+}
+
+fn _t_arrhenius_gradient_signs() {
+    test_group("arrhenius_gradient_signs");
+    var g: f64[3];
+    var t, v = arrhenius_gradient(10000000000000.0, 80000.0, 300.0, &g);
+    var g0: f64 = g[0];
+    var g1: f64 = g[1];
+    var g2: f64 = g[2];
+    var rt: f64 = KM_GAS_CONSTANT * 300.0;
+    var x: f64 = -80000.0 / rt;
+    var e: f64 = _km_cr_exp(x);
+    var k: f64 = 10000000000000.0 * e;
+    var ka: f64 = k / 10000000000000.0;
+    assert(is_ok(t) == 1 && v == 3 && rel_le(g0, ka, 0.000000000001) == 1, "∂k/∂A = k/A");
+    var kr: f64 = k / rt;
+    var mkr: f64 = -kr;
+    assert(rel_le(g1, mkr, 0.000000000001) == 1, "∂k/∂Ea = −k/(RT)");
+    var num: f64 = k * 80000.0;
+    var den: f64 = rt * 300.0;
+    var dk: f64 = num / den;
+    assert(rel_le(g2, dk, 0.000000000001) == 1, "∂k/∂T = k·Ea/(RT²)");
+    assert(g0 > 0.0, "∂k/∂A should be positive");
+    assert(g1 < 0.0, "∂k/∂Ea should be negative");
+    assert(g2 > 0.0, "∂k/∂T should be positive");
+}
+
+fn _t_gibbs_temperature_sensitivity_equals_neg_entropy() {
+    test_group("gibbs_temperature_sensitivity_equals_neg_entropy");
+    var t, v = gibbs_temperature_sensitivity(-100000.0, 298.0, -200.0);
+    var g: f64 = v;
+    var d: f64 = g - 200.0;
+    var a: f64 = f64_abs(d);
+    assert(is_ok(t) == 1 && a < 0.000000000001, "∂(ΔG)/∂T should equal −ΔS = 200");
+}
+
+fn _t_nernst_gradient_e0_is_unity() {
+    test_group("nernst_gradient_e0_is_unity");
+    var g: f64[3];
+    var t, v = nernst_gradient(0.342, 2, 298.0, 1.0, &g);
+    var g0: f64 = g[0];
+    var d: f64 = g0 - 1.0;
+    var a: f64 = f64_abs(d);
+    assert(is_ok(t) == 1 && a < 0.000000000000001, "∂E/∂E° should be 1.0");
+}
+
+fn _t_nernst_gradient_q_negative() {
+    test_group("nernst_gradient_q_negative");
+    var g: f64[3];
+    var t, v = nernst_gradient(0.342, 2, 298.0, 0.1, &g);
+    var g1: f64 = g[1];
+    var g2: f64 = g[2];
+    assert(is_ok(t) == 1 && g2 < 0.0, "∂E/∂Q should be negative");
+    var nf: f64 = 2.0 * KM_FARADAY;
+    var l: f64 = _km_cr_ln(0.1);
+    var mr: f64 = -KM_GAS_CONSTANT;
+    var rl: f64 = mr * l;
+    var de_dt: f64 = rl / nf;
+    assert(rel_le(g1, de_dt, 0.000000000001) == 1, "∂E/∂T = −R·ln(Q)/(nF)");
+    var rtq: f64 = mr * 298.0;
+    var nfq: f64 = nf * 0.1;
+    var de_dq: f64 = rtq / nfq;
+    assert(rel_le(g2, de_dq, 0.000000000001) == 1, "∂E/∂Q = −RT/(nFQ)");
+}
+
+fn _t_custom_gradient() {
+    test_group("custom_gradient");
+    var p: f64[2];
+    p[0] = 2.0;
+    p[1] = 5.0;
+    var g: f64[2];
+    var t, v = compute_gradient(&_sf_quad, 0, tape, &p, 2, &g);
+    var g0: f64 = g[0];
+    var g1: f64 = g[1];
+    var d0: f64 = g0 - 4.0;
+    var d1: f64 = g1 - 3.0;
+    var a0: f64 = f64_abs(d0);
+    var a1: f64 = f64_abs(d1);
+    assert(is_ok(t) == 1 && v == 2, "two partials");
+    assert(a0 < 0.0000000001, "∂f/∂x should be 4.0");
+    assert(a1 < 0.0000000001, "∂f/∂y should be 3.0");
+}
+
+# ── Cyrius-only ─────────────────────────────────────────────────────────────────────
+
+# ADR 0002 #2's validation: the codes of equilibrium_constant, arrhenius_rate, nernst_potential and gibbs_free_energy
+# in their order, an out-of-u8 electron count, and Err(ComputationError) where an entry overflows; the buffer is
+# written only on Ok.
+fn _t_cyrius_adr2_validation() {
+    test_group("cyrius_adr2_validation");
+    var g: f64[3];
+    g[0] = 777.0;
+    var t, v = equilibrium_constant_gradient(nan(), 0.0, &g);
+    assert(is_err_code(t, v, KM_ERR_INVALID_TEMPERATURE) == 1, "the temperature first");
+    var t1, v1 = equilibrium_constant_gradient(-1000000.0, 1.0, &g);
+    var g0: f64 = g[0];
+    assert(is_err_code(t1, v1, KM_ERR_COMPUTATION_ERROR) == 1 && g0 == 777.0, "K = e^120000 overflows; untouched");
+    var t2, v2 = arrhenius_gradient(nan(), nan(), 300.0, &g);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "A, then Ea");
+    var big: f64 = 0x7FEFFFFFFFFFFFFF;
+    var t3, v3 = arrhenius_gradient(big, -100000.0, 300.0, &g);
+    assert(is_err_code(t3, v3, KM_ERR_COMPUTATION_ERROR) == 1, "A·e past DBL_MAX");
+    var t4, v4 = nernst_gradient(nan(), 256, 298.0, 0.1, &g);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "n = 256 is no u8");
+    var t5, v5 = nernst_gradient(0.342, 0 - 1, 298.0, 0.1, &g);
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_INPUT) == 1, "n = −1 is no u8");
+    var tiny: f64 = 0.0;
+    store64(&tiny, 1);                      # the smallest subnormal, 5e-324
+    var huge: f64 = 0x7E37E43C8800759C;    # 1e300
+    var t6, v6 = nernst_gradient(0.342, 1, huge, tiny, &g);
+    assert(is_err_code(t6, v6, KM_ERR_COMPUTATION_ERROR) == 1, "−RT/(nFQ) past DBL_MAX");
+    var t7, v7 = nernst_gradient(0.342, 255, 298.15, 0.1, &g);
+    assert(is_ok(t7) == 1 && v7 == 3, "n = 255");
+    var t8, v8 = gibbs_temperature_sensitivity(nan(), -1.0, 1.0);
+    assert(is_err_code(t8, v8, KM_ERR_INVALID_TEMPERATURE) == 1, "gibbs: the temperature first");
+    var t9, v9 = gibbs_temperature_sensitivity(1.0, 298.0, nan());
+    assert(is_err_code(t9, v9, KM_ERR_INVALID_INPUT) == 1, "gibbs: ΔS NaN");
+    var t10, v10 = gibbs_temperature_sensitivity(1.0, 298.0, 0.0);
+    assert(is_ok(t10) == 1 && v10 == 0, "−ΔS at ΔS = +0 is +0 (0 + (−1)·0)");
+    var t11, v11 = gibbs_temperature_sensitivity(1.0, 298.0, -0.0);
+    assert(is_ok(t11) == 1 && v11 == 0, "and at ΔS = −0, +0");
+}
+
+# The reverse sweep's zero rule (hisab 1.4.0's `if g == 0.0 { continue; }`): a node whose adjoint is 0 contributes
+# nothing, so a vanishing A or K never meets a partial that is ∞ or NaN (0·∞): [0, 0, 0], not NaN; and ∂E/∂T at Q = 1
+# is +0, where the textbook −R·ln(1)/(nF) is −0.
+fn _t_cyrius_adr2_zero_rule() {
+    test_group("cyrius_adr2_zero_rule");
+    var g: f64[3];
+    var tt: f64 = 0x1CA3529BA7D19EAF;      # 1e-170: (R·T)² underflows to 0
+    var t, v = arrhenius_gradient(0.0, 100000.0, tt, &g);
+    var g0: f64 = g[0];
+    var g1: f64 = g[1];
+    var g2: f64 = g[2];
+    assert(is_ok(t) == 1 && g0 == 0.0 && _km_bits(g1) == 0 && _km_bits(g2) == 0, "A = 0, T tiny: [0, +0, +0]");
+    var t1, v1 = equilibrium_constant_gradient(1000000.0, tt, &g);
+    var h0: f64 = g[0];
+    var h1: f64 = g[1];
+    assert(is_ok(t1) == 1 && _km_bits(h0) == 0 && _km_bits(h1) == 0, "K underflows to 0: [+0, +0]");
+    var t2, v2 = nernst_gradient(0.342, 2, 298.15, 1.0, &g);
+    var n1: f64 = g[1];
+    assert(is_ok(t2) == 1 && _km_bits(n1) == 0, "∂E/∂T at Q = 1 is +0");
+}
+
+# compute_gradient on hisab 3.4.1's tape: the Cyrius-only Errs (null pointers, a negative count, a tape too small for
+# the parameters, one that fills while f builds), no parameters, an unused parameter's 0, the heap index table past 64
+# parameters, and the tape reused across calls.
+fn _t_cyrius_compute_gradient_tape() {
+    test_group("cyrius_compute_gradient_tape");
+    var p: f64[70];
+    var g: f64[70];
+    p[0] = 3.0;
+    p[1] = 7.0;
+    var t, v = compute_gradient(0, 0, tape, &p, 2, &g);
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT) == 1, "f null");
+    var t1, v1 = compute_gradient(&_sf_quad, 0, 0, &p, 2, &g);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "tape null");
+    var t2, v2 = compute_gradient(&_sf_quad, 0, tape, &p, 0 - 1, &g);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "a negative count");
+    var t3, v3 = compute_gradient(&_sf_quad, 0, tape, 0, 2, &g);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT) == 1, "null parameters");
+    var one = ad_tape_new(1);
+    var t4, v4 = compute_gradient(&_sf_quad, 0, one, &p, 2, &g);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "two parameters on a tape of 1");
+    var four = ad_tape_new(4);
+    var t5, v5 = compute_gradient(&_sf_quad, 0, four, &p, 2, &g);
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_INPUT) == 1, "x² + 3y needs 6 nodes: the output is AD_FULL");
+    var c: f64[1];
+    c[0] = 5.0;
+    var t6, v6 = compute_gradient(&_sf_const, &c, tape, 0, 0, 0);
+    assert(is_ok(t6) == 1 && v6 == 0, "no parameters: Ok(0)");
+    var t7, v7 = compute_gradient(&_sf_unused, 0, tape, &p, 2, &g);
+    var u0: f64 = g[0];
+    var u1: f64 = g[1];
+    assert(is_ok(t7) == 1 && u0 == 6.0 && _km_bits(u1) == 0, "x² at (3, 7): [6, +0]");
+    var k = 0;
+    while (k < 70) {
+        var x: f64 = f64_from(k);
+        p[k] = x;
+        k = k + 1;
+    }
+    var t8, v8 = compute_gradient(&_sf_sum_squares, 0, tape, &p, 70, &g);
+    var ok = 1;
+    k = 0;
+    while (k < 70) {
+        var gk: f64 = g[k];
+        var w: f64 = f64_from(2 * k);
+        if (gk != w) { ok = 0; }
+        k = k + 1;
+    }
+    assert(is_ok(t8) == 1 && v8 == 70 && ok == 1, "Σ x² over 70 parameters: 2x");
+    var t9, v9 = compute_gradient(&_sf_quad, 0, tape, &p, 2, &g);
+    var q0: f64 = g[0];
+    var q1: f64 = g[1];
+    assert(is_ok(t9) == 1 && q0 == 0.0 && q1 == 3.0, "the tape reset: x² + 3y at (0, 1)");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main(): i64 {
+    tape = ad_tape_new(4096);
+    _t_equilibrium_k_gradient_signs();
+    _t_equilibrium_k_gradient_is_constant_delta_g_derivative();
+    _t_invalid_input_gives_non_finite_gradients();
+    _t_arrhenius_gradient_signs();
+    _t_gibbs_temperature_sensitivity_equals_neg_entropy();
+    _t_nernst_gradient_e0_is_unity();
+    _t_nernst_gradient_q_negative();
+    _t_custom_gradient();
+    _t_cyrius_adr2_validation();
+    _t_cyrius_adr2_zero_rule();
+    _t_cyrius_compute_gradient_tape();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

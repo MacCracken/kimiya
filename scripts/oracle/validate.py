@@ -111,6 +111,13 @@ and no Python packages. Usage, from the repo root:
    some dopri45 row must reach the 100 000-step limit, and each of Rust's typed stiff constants (STIFF_NEWTON_RTOL,
    STIFF_ACCEPT_RTOL halved and doubled; STIFF_MAX_NEWTON ± 1) must change some golden row; MAX_STEPS is pinned by an Ok
    row at 10⁷ and an Err row at 10⁷ + 1.
+27. network.tsv, fitting.tsv and sensitivity.tsv (M5b), every row recomputed from rust-old/src/{network,fitting,
+   sensitivity}.rs with hisab 1.4.0's CsrMatrix::from_dense, matrix_rank on svd's one-sided Jacobi (the singular values
+   only; the oracle's NoConvergence rows included), qr_decompose / least_squares_poly and the reverse-mode Tape (its
+   zero-adjoint skip) transcribed; fit_arrhenius' ln and exp and the tapes' primitives logged for the corrected oracle.
+   ADR 0002 #2: a fixed-formula gradient row is noted with the port's Err exactly where the validating Rust function
+   refuses or an entry is not finite. The rank's 10⁻¹⁰ and the CSR's 10⁻¹² (one ulp down) and the QR's 10⁻¹² (halved and
+   doubled) must each change some golden row.
 Every function in every .tsv must have a rule here: a new one fails until it gets one.
 
     python3 -I scripts/oracle/validate.py . --write-corrections
@@ -6159,9 +6166,431 @@ check(any(u64(ins[-1][1]) == RD_MAX_STEPS and outs[0][0] == "v" for ins, outs in
       and any(u64(ins[-1][1]) == RD_MAX_STEPS + 1 and outs[0][0] == "E" for ins, outs in stiff_rows),
       "reaction_dynamics: MAX_STEPS is not pinned by an Ok row at 10⁷ and an Err row at 10⁷ + 1")
 
+# ── 27. M5b: network.tsv, fitting.tsv and sensitivity.tsv ─────────────────────────────────────────────────────────────
+# rust-old/src/network.rs, fitting.rs and sensitivity.rs with the hisab 1.4.0 routines they call transcribed from
+# ~/.cargo/registry/src/*/hisab-1.4.0/src/: CsrMatrix::from_dense (num/sparse.rs), matrix_rank and svd's one-sided
+# Jacobi (num/linalg.rs, num/svd.rs: only the singular values, which the rank reads), qr_decompose and
+# least_squares_poly (num/linalg.rs), and the reverse-mode Tape (autodiff.rs: its `if g == 0.0 { continue; }` sweep).
+# fit_arrhenius' ln and exp and the tapes' exp, ln, sin, cos and powf are logged primitives, so the corrected oracle
+# re-runs those rows with them correctly rounded. ADR 0002 #2: each fixed-formula gradient row's note must be the
+# port's Err exactly where the validating Rust function refuses or an entry is not finite.
+class Matrix(list):
+    """A Vec<Vec<f64>> (M5b): `v:rows`, then each row `v:len` and its floats."""
+class Raw(list):
+    """Golden tokens built by hand (M5b: the CSR form)."""
+def m5b_toks(x):
+    if isinstance(x, Matrix):
+        toks = [("v", len(x), None)]
+        for r_ in x: toks += [("v", len(r_), None)] + [("f", z, f2b(z)) for z in r_]
+        return toks
+    if isinstance(x, Raw): return list(x)
+    return out_toks(x)
+def u64w(x): return x & M64
+def i64w(x):
+    x &= M64
+    return x - (1 << 64) if x >> 63 else x
+
+# network.rs
+def net_in(ins):
+    ns, nr, k, rx = u64w(ins[0][1]), ins[1][1], 2, []
+    for _ in range(nr):
+        sides = []
+        for _ in range(2):
+            n = ins[k][1]
+            sides.append([(u64w(ins[k + 1 + 2 * q][1]), ins[k + 2 + 2 * q][1]) for q in range(n)])
+            k += 1 + 2 * n
+        rx.append(tuple(sides))
+    check(k == len(ins), "network: reaction tokens")
+    return ns, rx
+def h_stoich(ns, rx):
+    if ns == 0: return Err("InvalidInput")
+    if not rx: return Err("InvalidInput")
+    m = [[0.0] * len(rx) for _ in range(ns)]
+    for j_, (re_, pr_) in enumerate(rx):
+        for s_, c in re_:
+            if s_ >= ns: return Err("InvalidInput")
+            m[s_][j_] -= c
+        for s_, c in pr_:
+            if s_ >= ns: return Err("InvalidInput")
+            m[s_][j_] += c
+    return Matrix(m)
+CSR_EPS = [HISAB_EPS]
+def h_from_dense(m):
+    vals, cols, offs = [], [], [0]
+    for r_ in m:
+        for j_, v in enumerate(r_):
+            if abs(v) > CSR_EPS[0]: vals.append(v); cols.append(j_)
+        offs.append(len(vals))
+    toks = [("i", len(m), None), ("i", len(m[0]) if m else 0, None), ("v", len(vals), None)]
+    for c, v in zip(cols, vals): toks += [("i", c, None), ("f", v, f2b(v))]
+    return Raw(toks + [("v", len(offs), None)] + [("i", o, None) for o in offs])
+def h_sparse(ns, rx):
+    m = h_stoich(ns, rx)
+    return m if isinstance(m, Err) else h_from_dense(m)
+def mat_in(ins, k=0):
+    m, k = ins[k][1], k + 1
+    rows = []
+    for _ in range(m):
+        n = ins[k][1]
+        rows.append([t_[1] for t_ in ins[k + 1:k + 1 + n]])
+        k += 1 + n
+    return rows, k
+RANK_TOL = [1e-10]
+SVD_SWEEPS = [100]
+def h_matrix_rank(a, tol):
+    """hisab 1.4.0's matrix_rank(a, Some(tol)): svd (transposed for m < n), svd_tall's Jacobi sweeps on the vectors b
+    (A's columns, or its rows), each singular value the norm of its vector."""
+    m = len(a)
+    if m == 0: return Err("InvalidInput")
+    n = len(a[0])
+    if n == 0: return Err("InvalidInput")
+    if any(len(r_) != n for r_ in a): return Err("InvalidInput")
+    b = [list(r_) for r_ in a] if m < n else [[a[i_][j_] for i_ in range(m)] for j_ in range(n)]
+    w, l = len(b), len(b[0])
+    tol2 = HISAB_EPS * HISAB_EPS
+    max_sweeps = SVD_SWEEPS[0] * max(w, l)
+    for sweep in range(max_sweeps):
+        converged = True
+        for p_ in range(w):
+            for q_ in range(p_ + 1, w):
+                bp, bq = b[p_], b[q_]
+                app = aqq = apq = 0.0
+                for x, y in zip(bp, bq):
+                    app += x * x; aqq += y * y; apq += x * y
+                if abs(apq) <= tol2 * math.sqrt(app * aqq): continue
+                converged = False
+                tau = dv(aqq - app, 2.0 * apq)
+                if tau >= 0.0: t_ = dv(1.0, tau + math.sqrt(1.0 + tau * tau))
+                else: t_ = dv(-1.0, -tau + math.sqrt(1.0 + tau * tau))
+                c = dv(1.0, math.sqrt(1.0 + t_ * t_))
+                sn = t_ * c
+                b[p_] = [c * x - sn * y for x, y in zip(bp, bq)]
+                b[q_] = [sn * x + c * y for x, y in zip(bp, bq)]
+        if converged: break
+        if sweep == max_sweeps - 1: return Err("NoConvergence")
+    count = 0
+    for v in b:
+        sm = -0.0
+        for x in v: sm += x * x
+        if math.sqrt(sm) > tol: count += 1
+    return count
+def h_rank_rule(ins):
+    a, k = mat_in(ins)
+    check(k == len(ins), "rank: tokens")
+    r_ = h_matrix_rank(a, RANK_TOL[0])
+    return Err("ComputationError") if isinstance(r_, Err) else r_
+def h_rate(ins):
+    a, k = mat_in(ins)
+    rates = [t_[1] for t_ in ins[k + 1:]]
+    if not a: return Err("InvalidInput")
+    if any(len(r_) != len(rates) for r_ in a): return Err("InvalidInput")
+    out = []
+    for r_ in a:
+        sm = -0.0
+        for s_, v in zip(r_, rates): sm += s_ * v
+        out.append(sm)
+    return out
+def h_claws(ins):
+    n, r_ = u64w(ins[0][1]), u64w(ins[1][1])
+    return i64w(max(n - r_, 0))
+
+# fitting.rs, on hisab 1.4.0's least_squares_poly (qr_decompose's modified Gram–Schmidt)
+QR_EPS = [HISAB_EPS]
+def h_least_squares(x, y, degree):
+    m = len(x)
+    if m != len(y) or m == 0: return Err("InvalidInput")
+    n = degree + 1
+    if m < n: return Err("InvalidInput")
+    q = [[r_powi(xi, j_) for xi in x] for j_ in range(n)]
+    r = [[0.0] * n for _ in range(n)]
+    for j_ in range(n):
+        for i_ in range(j_):
+            dot = -0.0
+            for k in range(m): dot += q[i_][k] * q[j_][k]
+            r[j_][i_] = dot
+            q[j_] = [a_ - dot * b_ for a_, b_ in zip(q[j_], q[i_])]
+        sm = -0.0
+        for k in range(m): sm += q[j_][k] * q[j_][k]
+        norm = math.sqrt(sm)
+        if norm < QR_EPS[0]: return Err("InvalidInput")
+        r[j_][j_] = norm
+        q[j_] = [dv(a_, norm) for a_ in q[j_]]
+    qty = []
+    for j_ in range(n):
+        sm = -0.0
+        for k in range(m): sm += q[j_][k] * y[k]
+        qty.append(sm)
+    co = [0.0] * n
+    for i_ in reversed(range(n)):
+        sm = qty[i_]
+        for j_ in range(i_ + 1, n): sm -= r[j_][i_] * co[j_]
+        co[i_] = dv(sm, r[i_][i_])
+    return co
+def h_fit_arrhenius(temps, rates):
+    if len(temps) != len(rates): return Err("InvalidInput")
+    if len(temps) < 2: return Err("InvalidInput")
+    x, y = [], []
+    for t_, k in zip(temps, rates):
+        if not is_positive(t_): return Err("InvalidTemperature")
+        if not is_positive(k): return Err("InvalidInput")
+        x.append(dv(1.0, t_))
+        y.append(p_ln(k))
+    co = h_least_squares(x, y, 1)
+    if isinstance(co, Err): return Err("ComputationError")
+    return (p_exp(co[0]), -co[1] * R_GAS)
+def h_fit_polynomial(x, y, degree):
+    if len(x) != len(y): return Err("InvalidInput")
+    if len(x) <= degree: return Err("InvalidInput")
+    if not all(math.isfinite(v) for v in x + y): return Err("InvalidInput")
+    co = h_least_squares(x, y, degree)
+    return Err("ComputationError") if isinstance(co, Err) else co
+def h_beer(c, a, l):
+    if not is_positive(l): return Err("InvalidInput")
+    co = h_fit_polynomial(c, a, 1)
+    return co if isinstance(co, Err) else dv(co[1], l)
+def h_evaluate(co, x):
+    res, xp = 0.0, 1.0
+    for c in co:
+        res += c * xp
+        xp *= x
+    return res
+def fit_vecs(ins):
+    out, k = [], 0
+    while k < len(ins) and ins[k][0] == "v":
+        n = ins[k][1]
+        out.append([t_[1] for t_ in ins[k + 1:k + 1 + n]])
+        k += 1 + n
+    return out, k
+def h_rule_arr(ins):
+    (t_, r_), k = fit_vecs(ins)
+    return h_fit_arrhenius(t_, r_)
+def h_rule_poly(ins):
+    (x, y), k = fit_vecs(ins)
+    return h_fit_polynomial(x, y, u64w(ins[k][1]))
+def h_rule_beer(ins):
+    (c, a), k = fit_vecs(ins)
+    return h_beer(c, a, ins[k][1])
+def h_rule_eval(ins):
+    (co,), k = fit_vecs(ins)
+    return h_evaluate(co, ins[k][1])
+def h_rule_degree(ins):
+    (co,), k = fit_vecs(ins)
+    return max(len(co) - 1, 0)
+
+# sensitivity.rs, on hisab 1.4.0's reverse-mode Tape (autodiff.rs)
+class Tape:
+    """hisab 1.4.0's autodiff::Tape: one (op, inputs) node per variable, constant or operation, its value beside it;
+    `backward` sweeps from the output down, skipping a node whose adjoint is 0 (as Rust's `continue`)."""
+    def __init__(self): self.ops, self.vals = [], []
+    def push(self, op, v):
+        self.ops.append(op); self.vals.append(v)
+        return len(self.vals) - 1
+    def var(self, v): return self.push(("const",), v)
+    def constant(self, v): return self.push(("const",), v)
+    def add(self, a, b): return self.push(("add", a, b), self.vals[a] + self.vals[b])
+    def sub(self, a, b): return self.push(("sub", a, b), self.vals[a] - self.vals[b])
+    def mul(self, a, b): return self.push(("mul", a, b), self.vals[a] * self.vals[b])
+    def div(self, a, b): return self.push(("div", a, b), dv(self.vals[a], self.vals[b]))
+    def neg(self, a): return self.push(("neg", a), -self.vals[a])
+    def sin(self, a): return self.push(("sin", a), p_sin(self.vals[a]))
+    def cos(self, a): return self.push(("cos", a), p_cos(self.vals[a]))
+    def exp(self, a): return self.push(("exp", a), p_exp(self.vals[a]))
+    def ln(self, a): return self.push(("ln", a), p_ln(self.vals[a]))
+    def powf(self, a, n): return self.push(("pow", a, n), p_pow(self.vals[a], n))
+    def backward(self, out):
+        g = [0.0] * len(self.vals)
+        g[out] = 1.0
+        v = self.vals
+        for i_ in reversed(range(len(self.vals))):
+            gi = g[i_]
+            if gi == 0.0: continue
+            op = self.ops[i_]
+            if op[0] == "add": g[op[1]] += gi; g[op[2]] += gi
+            elif op[0] == "sub": g[op[1]] += gi; g[op[2]] -= gi
+            elif op[0] == "mul": g[op[1]] += gi * v[op[2]]; g[op[2]] += gi * v[op[1]]
+            elif op[0] == "div":
+                g[op[1]] += dv(gi, v[op[2]])
+                g[op[2]] -= dv(gi * v[op[1]], v[op[2]] * v[op[2]])
+            elif op[0] == "neg": g[op[1]] -= gi
+            elif op[0] == "sin": g[op[1]] += gi * p_cos(v[op[1]])
+            elif op[0] == "cos": g[op[1]] -= gi * p_sin(v[op[1]])
+            elif op[0] == "exp": g[op[1]] += gi * v[i_]
+            elif op[0] == "ln": g[op[1]] += dv(gi, v[op[1]])
+            elif op[0] == "pow": g[op[1]] += gi * op[2] * p_pow(v[op[1]], op[2] - 1.0)
+        return g
+def reverse_gradient(f, x):
+    tape = Tape()
+    vs = [tape.var(z) for z in x]
+    out = f(tape, vs)
+    g = tape.backward(out)
+    return [g[i_] for i_ in vs]
+def sens_build(name, p, t, v):
+    """scripts/oracle/src/m_sensitivity.rs's `build`, the same operations in the same order."""
+    if name == "quad": return t.add(t.mul(v[0], v[0]), t.mul(t.constant(3.0), v[1]))
+    if name == "keq":
+        r = t.constant(p[0]); n = t.neg(v[0]); rt = t.mul(r, v[1]); return t.exp(t.div(n, rt))
+    if name == "arrhenius":
+        r = t.constant(p[0]); n = t.neg(v[1]); rt = t.mul(r, v[2]); e = t.div(n, rt); b = t.exp(e)
+        return t.mul(v[0], b)
+    if name == "nernst":
+        r = t.constant(p[0]); nf = t.constant(p[1]); rt = t.mul(r, v[1]); lq = t.ln(v[2]); q = t.div(rt, nf)
+        return t.sub(v[0], t.mul(q, lq))
+    if name == "gibbs": return t.sub(v[0], t.mul(v[1], v[2]))
+    if name == "vant_hoff":
+        ts = t.mul(v[2], v[1]); dg = t.sub(v[0], ts); n = t.neg(dg); r = t.constant(p[0]); rt = t.mul(r, v[2])
+        return t.exp(t.div(n, rt))
+    if name == "eyring":
+        kb = t.constant(p[0]); h = t.constant(p[1]); kbt = t.mul(kb, v[1]); pre = t.div(kbt, h)
+        r = t.constant(p[2]); rt = t.mul(r, v[1]); n = t.neg(v[0]); e = t.div(n, rt); b = t.exp(e)
+        return t.mul(pre, b)
+    if name == "ideal_gas":
+        r = t.constant(p[0]); nr = t.mul(v[0], r); nrt = t.mul(nr, v[1]); return t.div(nrt, v[2])
+    if name == "clausius":
+        one = t.constant(1.0); i2 = t.div(one, v[3]); i1 = t.div(one, v[2]); d = t.sub(i2, i1); hd = t.mul(v[1], d)
+        r = t.constant(p[0]); x = t.div(hd, r); nx = t.neg(x); e = t.exp(nx); return t.mul(v[0], e)
+    if name == "lj":
+        q = t.div(v[1], v[2]); q12 = t.powf(q, 12.0); q6 = t.powf(q, 6.0); d = t.sub(q12, q6)
+        four = t.constant(4.0); fe = t.mul(four, v[0]); return t.mul(fe, d)
+    if name == "morse":
+        dr = t.sub(v[2], v[3]); adr = t.mul(v[1], dr); n = t.neg(adr); e = t.exp(n); one = t.constant(1.0)
+        om = t.sub(one, e); sq = t.mul(om, om); return t.mul(v[0], sq)
+    if name == "rosenbrock":
+        one = t.constant(1.0); a = t.sub(one, v[0]); a2 = t.mul(a, a); x2 = t.mul(v[0], v[0]); b = t.sub(v[1], x2)
+        b2 = t.mul(b, b); h = t.constant(100.0); hb = t.mul(h, b2); return t.add(a2, hb)
+    if name == "trig":
+        s_ = t.sin(v[0]); c = t.cos(v[1]); sc = t.mul(s_, c); q = t.div(v[0], v[1]); return t.add(sc, q)
+    if name == "logs":
+        lx = t.ln(v[0]); ly = t.ln(v[1]); zl = t.mul(v[2], ly); return t.add(lx, zl)
+    if name == "sum_squares":
+        acc = t.mul(v[0], v[0])
+        for x in v[1:]: acc = t.add(acc, t.mul(x, x))
+        return acc
+    if name == "product":
+        acc = v[0]
+        for x in v[1:]: acc = t.mul(acc, x)
+        return acc
+    if name == "shared":
+        a = t.mul(v[0], v[0]); b = t.add(a, v[0]); c = t.mul(b, a); return t.sub(c, v[0])
+    if name == "unused": return t.mul(v[0], v[0])
+    if name == "ident": return v[0]
+    if name == "const": return t.constant(p[0])
+    raise KeyError(name)
+FARADAY = b2f(golden_consts["electrochemistry::FARADAY"])
+def s_keq(dg, t_): return reverse_gradient(lambda tp, v: sens_build("keq", [R_GAS], tp, v), [dg, t_])
+def s_arr(a, ea, t_): return reverse_gradient(lambda tp, v: sens_build("arrhenius", [R_GAS], tp, v), [a, ea, t_])
+def s_nernst(e0, n, t_, q):
+    nf = float(n) * FARADAY
+    return reverse_gradient(lambda tp, v: sens_build("nernst", [R_GAS, nf], tp, v), [e0, t_, q])
+def s_gibbs(h, t_, s_): return reverse_gradient(lambda tp, v: sens_build("gibbs", [], tp, v), [h, t_, s_])[1]
+def s_rule_grad(ins):
+    name, p, k = rd_sys(ins, 0)
+    x, k = rd_vec(ins, k)
+    return reverse_gradient(lambda tp, v: sens_build(name, p, tp, v), x)
+def s_port(fn, ins, g):
+    """ADR 0002 #2: the port's Err for a fixed-formula row, or None (src/sensitivity.cyr's validation: the codes of
+    equilibrium_constant, arrhenius_rate, nernst_potential and gibbs_free_energy in their order, then ComputationError
+    for an entry that is not finite)."""
+    a = fl(ins)
+    if fn.endswith("equilibrium_constant_gradient"):
+        if not is_positive(a[1]): return "InvalidTemperature"
+        if not is_finite(a[0]): return "InvalidInput"
+    elif fn.endswith("arrhenius_gradient"):
+        if not is_positive(a[2]): return "InvalidTemperature"
+        if not is_finite(a[0]) or not is_finite(a[1]): return "InvalidInput"
+    elif fn.endswith("nernst_gradient"):
+        if not is_positive(a[2]): return "InvalidTemperature"
+        if a[1] == 0 or not is_positive(a[3]) or not is_finite(a[0]): return "InvalidInput"
+    else:
+        if not is_positive(a[1]): return "InvalidTemperature"
+        if not is_finite(a[0]) or not is_finite(a[2]): return "InvalidInput"
+    gs = g if isinstance(g, list) else [g]
+    return None if all(math.isfinite(z) for z in gs) else "ComputationError"
+
+M5B_RULES = {
+    "network::stoichiometric_matrix": ("A", lambda a: h_stoich(*net_in(a))),
+    "network::sparse_stoichiometric_matrix": ("A", lambda a: h_sparse(*net_in(a))),
+    "network::reaction_network_rank": ("A", h_rank_rule),
+    "network::conservation_law_count": ("A", h_claws),
+    "network::rate_from_stoichiometry": ("B", h_rate),
+    "fitting::fit_arrhenius": ("C", h_rule_arr),
+    "fitting::fit_polynomial": ("B", h_rule_poly),
+    "fitting::fit_beer_lambert": ("B", h_rule_beer),
+    "fitting::PolynomialFit::evaluate": ("B", h_rule_eval),
+    "fitting::PolynomialFit::degree": ("A", h_rule_degree),
+    "sensitivity::equilibrium_constant_gradient": ("D", lambda a: s_keq(*fl(a))),
+    "sensitivity::arrhenius_gradient": ("D", lambda a: s_arr(*fl(a))),
+    "sensitivity::nernst_gradient": ("D", lambda a: s_nernst(*fl(a))),
+    "sensitivity::gibbs_temperature_sensitivity": ("D", lambda a: s_gibbs(*fl(a))),
+    "sensitivity::compute_gradient": ("D", s_rule_grad),
+}
+ADR2_TAIL = re.compile(r" \[ADR 0002 #2: the port's Err\((\w+)\) \(E:(\w+)\)\]$")
+m5b_counts, m5b_out, m5b_adr2, m5b_shape = {}, {"Ok": 0, "Err": 0}, {}, 0
+for mod in ("network", "fitting", "sensitivity"):
+    for fn, cls, ins, outs, where in R.get(mod, []):
+        m5b_counts[fn] = m5b_counts.get(fn, 0) + 1
+        if fn not in M5B_RULES:
+            check(False, f"{where}: {mod}.tsv function {fn} has no rule here")
+            continue
+        want_cls, rule = M5B_RULES[fn]
+        check(cls == want_cls, f"{where}: {fn} class {cls}")
+        CALLS[0] = 0
+        NUDGE[0] = None
+        CALL_LOG.clear()
+        base = rule(ins)
+        log = list(CALL_LOG)
+        want = m5b_toks(base)
+        m5b_out["Err" if isinstance(base, Err) else "Ok"] += 1
+        if cls == "C" and not LIBM_EXACT:
+            check(toks_shape(outs, want), f"{where}: {fn} shape differs from the recomputation")
+            m5b_shape += 1
+        else:
+            check(toks_equal(outs, want), f"{where}: {fn}: the golden outputs are not the recomputation's")
+        if mod == "sensitivity" and fn != "sensitivity::compute_gradient":
+            port = s_port(fn, ins, base)
+            m_ = ADR2_TAIL.search(NOTES[where])
+            got = m_.group(2) if m_ and m_.group(1) == m_.group(2) else None
+            check(got == port, f"{where}: {fn}: noted {got!r}, the port's validation gives {port!r}")
+            if port: m5b_adr2[fn] = m5b_adr2.get(fn, 0) + 1
+            if port is None:
+                gs = base if isinstance(base, list) else [base]
+                check(all(math.isfinite(z) for z in gs), f"{where}: an unnoted row with a non-finite entry")
+        else:
+            check("[ADR 0002 #2:" not in NOTES[where], f"{where}: an ADR 0002 #2 note on {fn}")
+        if log:
+            corrected_row(mod, fn, rule, ins, outs, where, log)
+for fn in sorted(M5B_RULES):
+    check(fn in m5b_counts, f"M5b: no golden rows for {fn}")
+print("M5b rows checked:", sum(m5b_counts.values()), "over", len(m5b_counts), "functions"
+      + (f" ({m5b_shape} class-C rows by shape only)" if m5b_shape else "")
+      + f": {m5b_out['Ok']} Ok, {m5b_out['Err']} Err; ADR 0002 #2's noted Err rows: {dict(sorted(m5b_adr2.items()))}")
+# hisab 1.4.0's thresholds the transcriptions type (src/numerics.cyr) must each change some golden row when perturbed
+# by an ulp: the rank's 10⁻¹⁰ (RANK_TOL) and the CSR's 10⁻¹² (CSR_EPS) downwards, onto rows at the threshold; the QR's
+# 10⁻¹² (QR_EPS) halved and doubled, across the temperature sweep; and the Jacobi's sweep limit 100·max(m, n) at 99.
+def m5b_moved(fns, setter, value):
+    old = setter(value)
+    try:
+        return sum(1 for mod in ("network", "fitting") for fn, cls, ins, outs, where in R.get(mod, [])
+                   if fn in fns and not toks_equal(outs, m5b_toks(M5B_RULES[fn][1](ins))))
+    finally:
+        setter(old)
+def _set(cell):
+    def setter(v):
+        old = cell[0]; cell[0] = v
+        return old
+    return setter
+for what, fns, cell, value in (
+        ("the rank threshold 1e-10 one ulp down", {"network::reaction_network_rank"}, RANK_TOL, nextdown(1e-10)),
+        ("the CSR threshold 1e-12 one ulp down", {"network::sparse_stoichiometric_matrix"}, CSR_EPS, nextdown(HISAB_EPS)),
+        ("the QR threshold 1e-12 halved", {"fitting::fit_arrhenius", "fitting::fit_polynomial"}, QR_EPS, HISAB_EPS / 2),
+        ("the QR threshold 1e-12 doubled", {"fitting::fit_arrhenius", "fitting::fit_polynomial"}, QR_EPS, HISAB_EPS * 2)):
+    CORRECT[0] = False
+    moved = m5b_moved(fns, _set(cell), value)
+    check(moved > 0, f"M5b: {what} changes no golden row")
+    print(f"  {what}: {moved} rows change")
+
 VALIDATED = {"constants", "math", "element", "molecule", "reaction", "thermo", "phase", "gas", "thermochem", "solution",
              "electrochemistry", "kinetics", "organic", "inorganic", "nuclear", "potential", "spectroscopy", "stoichiometry",
-             "numerics", "reaction_dynamics"}
+             "numerics", "reaction_dynamics", "network", "fitting", "sensitivity"}
 check(set(tsvs) == VALIDATED, f"golden modules with no section here: {sorted(set(tsvs) - VALIDATED)}; "
       f"sections with no module: {sorted(VALIDATED - set(tsvs))}")
 

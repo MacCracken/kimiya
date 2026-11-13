@@ -1,0 +1,168 @@
+# fitting.cyr — parameter estimation from experimental measurements: Arrhenius parameters, polynomial least squares,
+# Beer–Lambert calibration lines (port of rust-old/src/fitting.rs; M5b).
+#
+# - **The least squares** is hisab 1.4.0's `num::least_squares_poly` (Vandermonde columns by powi, modified
+#   Gram–Schmidt QR with its 10⁻¹² rank threshold, back substitution), transcribed into src/numerics.cyr (ADR 0003): a
+#   fit is the oracle's bit for bit (class B), and fit_arrhenius, which takes a ln per point and the exp of the
+#   intercept, the corrected oracle's (class C, bound 0: src/mathx.cyr's correctly rounded _km_cr_ln and _km_cr_exp,
+#   ADR 0006).
+# - **Slices.** Each Rust `&[f64]` is a pointer and a count, so the "arrays must have equal length" checks keep their
+#   meaning; a negative count or a null pointer with values is Err(KM_ERR_INVALID_INPUT), checked first (an
+#   out-of-type input, port plan §6.4; Rust's first errors are InvalidInput too). `degree` is Rust's usize: a negative
+#   word is past every length.
+# - **Structs.** `ArrheniusFit` is struct KmArrheniusFit, which fit_arrhenius writes through a pointer (`var fit:
+#   KmArrheniusFit; fit_arrhenius(t, n, k, n, &fit)`: its two f64 fields in declaration order, 16 bytes);
+#   `PolynomialFit { coefficients: Vec<f64> }` is struct KmPolynomialFit, a view of a coefficient buffer (its pointer
+#   and length), with Rust's two methods. fit_polynomial writes the coefficients to the caller's buffer `out` of `cap`
+#   f64 (Err(KM_ERR_INVALID_INPUT) when they don't fit, after Rust's errors, `out` untouched).
+# - Work tables (the linearised data, the QR's Q and R) are on the stack while small and come from the bump allocator
+#   otherwise (never freed); a table that can't be allocated is Err(KM_ERR_COMPUTATION_ERROR).
+
+include "lib/alloc.cyr"
+
+# The result of an Arrhenius fit, ln k = ln A − Ea/(R·T).
+struct KmArrheniusFit {
+    pre_exponential: f64;       # pre-exponential factor A (s⁻¹, or the rate constants' unit)
+    activation_energy_j: f64;   # activation energy Ea (J/mol)
+}
+
+# A fitted polynomial f(x) = a₀ + a₁·x + a₂·x² + …: a view of the caller's coefficient buffer.
+struct KmPolynomialFit {
+    coefficients;   # pointer to the coefficients a₀, a₁, … (f64), constant term first
+    len;            # their count (Rust's coefficients.len())
+}
+
+impl KmPolynomialFit {
+    # The polynomial at x, Σ aₖ·xᵏ with the powers by repeated multiplication from 1 (result += c·x_pow, then
+    # x_pow *= x, in coefficient order), so a power that overflows against a zero coefficient gives ∞·0 = NaN, as in
+    # Rust; 0.0 for no coefficients. Mirrors `PolynomialFit::evaluate`.
+    #must_use
+    fn evaluate(self, x: f64): f64 {
+        var result: f64 = 0.0;
+        var x_pow: f64 = 1.0;
+        var k = 0;
+        while (k < self.len) {
+            var c: f64 = load64(self.coefficients + 8 * k);
+            var t: f64 = c * x_pow;
+            result = result + t;
+            x_pow = x_pow * x;
+            k = k + 1;
+        }
+        return result;
+    }
+
+    # The degree, len − 1, or 0 for no coefficients. Mirrors `PolynomialFit::degree`.
+    #must_use
+    fn degree(self): i64 {
+        if (self.len <= 0) { return 0; }
+        return self.len - 1;
+    }
+}
+
+# 1 if (p, n) is a slice of f64: n ≥ 0, and p not null when n > 0.
+#must_use
+fn _km_fit_slice(p, n): i64 {
+    if (n < 0 || (n > 0 && p == 0)) { return 0; }
+    return 1;
+}
+
+# Fits the Arrhenius parameters (A, Ea) to n (temperature, rate constant) pairs: x = 1/T, y = ln k (correctly
+# rounded), then hisab 1.4.0's degree-1 least squares y = a₀ + a₁·x, so A = exp(a₀) (correctly rounded) and
+# Ea = −a₁·R. The temperatures are in K, the rate constants in any unit (A has the same). The fit goes to `out`, a
+# KmArrheniusFit (16 bytes: A, then Ea): Ok(2). Err(KM_ERR_INVALID_INPUT) if the arrays differ in length or hold fewer
+# than 2 points; then, pair by pair, Err(KM_ERR_INVALID_TEMPERATURE) for a temperature that is not positive and finite
+# and Err(KM_ERR_INVALID_INPUT) for a rate constant that is not; Err(KM_ERR_COMPUTATION_ERROR) if the least squares
+# fails (equal temperatures, or 1/T so close that the QR's second column falls below 10⁻¹²) or a table can't be
+# allocated. A or Ea may come out ±∞ or NaN where 1/T or exp overflows (a subnormal T), as in Rust. Mirrors
+# `fitting::fit_arrhenius`, whose ArrheniusFit `out` receives.
+#must_use
+fn fit_arrhenius(temperatures_k, nt, rate_constants, nk, out): Result {
+    if (_km_fit_slice(temperatures_k, nt) != 1 || _km_fit_slice(rate_constants, nk) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (nt != nk) { return Err(KM_ERR_INVALID_INPUT); }
+    if (nt < 2) { return Err(KM_ERR_INVALID_INPUT); }
+    var st: f64[64];
+    var w = _km_num_table(&st, 64, 2 * nt);
+    if (w == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var x = w;
+    var y = w + 8 * nt;
+    var k = 0;
+    while (k < nt) {
+        var t: f64 = load64(temperatures_k + 8 * k);
+        var kr: f64 = load64(rate_constants + 8 * k);
+        if (_km_is_positive(t) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+        if (_km_is_positive(kr) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        var xi: f64 = 1.0 / t;
+        var yi: f64 = _km_cr_ln(kr);
+        store64(x + 8 * k, xi);
+        store64(y + 8 * k, yi);
+        k = k + 1;
+    }
+    var c: f64[2];
+    var r, v = _km_least_squares_poly(x, y, nt, 1, &c);
+    if (is_err_result(r) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var ln_a: f64 = load64(&c);
+    var slope: f64 = load64(&c + 8);
+    var a: f64 = _km_cr_exp(ln_a);
+    var ns: f64 = -slope;
+    var ea: f64 = ns * KM_GAS_CONSTANT;
+    store64(out, a);
+    store64(out + 8, ea);
+    return Ok(2);
+}
+
+# Fits a polynomial of degree `degree` to the n points (x[k], y[k]) by hisab 1.4.0's QR least squares: the degree + 1
+# coefficients, constant term first, go to the caller's buffer `out` of `cap` f64: Ok(degree + 1).
+# Err(KM_ERR_INVALID_INPUT) if the arrays differ in length, hold degree points or fewer (degree past usize::MAX − 1
+# included), or hold a NaN or ±∞; Err(KM_ERR_COMPUTATION_ERROR) if the solve fails (fewer distinct x values than
+# coefficients, columns that vanish below 10⁻¹²) or a table can't be allocated; Err(KM_ERR_INVALID_INPUT) if the
+# coefficients don't fit in cap. Huge x can overflow the Vandermonde powers to ±∞, and the coefficients are then NaN,
+# as in Rust. Mirrors `fitting::fit_polynomial`, whose PolynomialFit `out` (with the count) becomes.
+#must_use
+fn fit_polynomial(x, nx, y, ny, degree, out, cap): Result {
+    if (_km_fit_slice(x, nx) != 1 || _km_fit_slice(y, ny) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (nx != ny) { return Err(KM_ERR_INVALID_INPUT); }
+    if (degree < 0 || nx <= degree) { return Err(KM_ERR_INVALID_INPUT); }
+    var k = 0;
+    while (k < nx) {
+        var a: f64 = load64(x + 8 * k);
+        if (_km_is_finite(a) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        k = k + 1;
+    }
+    k = 0;
+    while (k < ny) {
+        var b: f64 = load64(y + 8 * k);
+        if (_km_is_finite(b) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        k = k + 1;
+    }
+    var n = degree + 1;
+    var st: f64[16];
+    var c = _km_num_table(&st, 16, n);
+    if (c == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var r, v = _km_least_squares_poly(x, y, nx, degree, c);
+    if (is_err_result(r) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (out == 0 || cap < n) { return Err(KM_ERR_INVALID_INPUT); }
+    _km_num_copy(out, c, n);
+    return Ok(n);
+}
+
+# The molar absorptivity ε of a Beer–Lambert calibration line: A = A₀ + (ε·l)·c fitted by least squares with an
+# intercept A₀ (the blank's baseline, not returned: use fit_polynomial of degree 1 for it), then ε = slope/l in
+# L/(mol·cm). `concentrations` in mol/L, `absorbances` dimensionless, `path_length` l in cm. Ok(ε);
+# Err(KM_ERR_INVALID_INPUT) if the path length is not positive and finite, then fit_polynomial's errors at degree 1
+# (mismatched, fewer than 2 or non-finite data; all concentrations equal is Err(KM_ERR_COMPUTATION_ERROR)). Mirrors
+# `fitting::fit_beer_lambert`.
+#must_use
+fn fit_beer_lambert(concentrations, nc, absorbances, na, path_length: f64): Result {
+    if (_km_fit_slice(concentrations, nc) != 1 || _km_fit_slice(absorbances, na) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (_km_is_positive(path_length) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var c: f64[2];
+    var r, v = fit_polynomial(concentrations, nc, absorbances, na, 1, &c, 2);
+    if (is_err_result(r) == 1) { return Err(v); }
+    var slope: f64 = load64(&c + 8);
+    var e: f64 = slope / path_length;
+    return Ok(e);
+}

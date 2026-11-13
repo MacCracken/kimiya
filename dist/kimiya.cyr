@@ -21552,7 +21552,13 @@ fn find_peaks(data, n, threshold: f64, out, cap): Result {
 # where a work table can't be allocated (Rust would abort). Work tables of up to _KM_NUM_STACK f64 are on the stack;
 # larger ones come from the bump allocator (which never frees), zeroed as Rust's `vec![0.0; n]`.
 #
-# hisab 1.4.0's `num::least_squares_poly` (fitting) and `num::matrix_rank` (network) join this file in M5b.
+# M5b adds hisab 1.4.0's `num::least_squares_poly` (fitting: the Vandermonde system by `powi`, modified Gram–Schmidt QR
+# with its 10⁻¹² rank threshold, back substitution), `num::matrix_rank` with `num::svd` (network: one-sided Jacobi
+# rotations to its EPSILON_F64² test, the column norms counted above the threshold) and `CsrMatrix::from_dense`
+# (network: entries with |v| > 10⁻¹² kept, into a hisab 3.4.1 CSR). hisab 3.4.1's svd_compute_checked answers where
+# 1.4.0's Jacobi does not converge (most dense matrices: the network golden rows) and refuses the non-finite entries
+# 1.4.0 counts, and its csr_from_dense keeps every nonzero entry, so all three are transcribed (ADR 0003's M5b
+# amendment); only + − × ÷, √ and powi are on their paths, so every result is the oracle's bit for bit.
 
 include "lib/alloc.cyr"
 include "lib/hisab.cyr"
@@ -22143,6 +22149,306 @@ fn _km_euler_maruyama_system(drift, dctx, diff, gctx, t0: f64, y0, n, t_end: f64
     return Ok(steps + 1);
 }
 
+# ── polynomial least squares (num::least_squares_poly) ───────────────────────────────
+
+# hisab 1.4.0's `num::least_squares_poly`: the degree-`degree` polynomial a0 + a1·x + … fitting the m points (x[k],
+# y[k]) in least squares. Its Vandermonde columns x^j (`f64::powi`, `_km_powi`) are decomposed by `qr_decompose`'s
+# modified Gram–Schmidt — for each column j, against each earlier unit column i: the dot product (Rust's `.sum()`,
+# folded from −0.0) to R, the projection subtracted; then the norm √Σ (from −0.0) to R's diagonal, Err below
+# EPSILON_F64 (10⁻¹²; a NaN norm passes), the column divided by it — then Qᵀy, and back substitution from the
+# last coefficient, each sum from Qᵀy down the row. The n = degree + 1 coefficients go to `out`. Ok(n);
+# Err(_KM_NUM_ERR_INVALID_INPUT) for m = 0, fewer than n points or a degree past usize::MAX − 1 (as an unsigned
+# word), or the dependent-columns case; Err(_KM_NUM_ERR_ALLOC). Work: Q (n·m f64) and R (n·n), on the stack up to
+# _KM_NUM_LS_STACK words.
+const _KM_NUM_LS_STACK = 384;
+#must_use
+fn _km_least_squares_poly(x, y, m, degree, out): Result {
+    if (m == 0) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
+    if (degree < 0 || degree >= m) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
+    var n = degree + 1;
+    var st: f64[384];
+    var w = _km_num_table(&st, _KM_NUM_LS_STACK, n * m + n * n);
+    if (w == 0) { return Err(_KM_NUM_ERR_ALLOC); }
+    var q = w;                              # column j at q + 8·j·m (column-major, as Rust's Vec<Vec<f64>> of columns)
+    var r = w + 8 * n * m;                  # R[i][j] stored as r[j][i], at r + 8·(j·n + i)
+    var j = 0;
+    while (j < n) {
+        var k = 0;
+        while (k < m) {
+            var xk: f64 = load64(x + 8 * k);
+            var pw: f64 = _km_powi(xk, j);
+            store64(q + 8 * (j * m + k), pw);
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+    var eps: f64 = EPSILON_F64;
+    j = 0;
+    while (j < n) {
+        var qj = q + 8 * j * m;
+        var i = 0;
+        while (i < j) {
+            var qi = q + 8 * i * m;
+            var dot: f64 = -0.0;
+            var k2 = 0;
+            while (k2 < m) {
+                var a: f64 = load64(qi + 8 * k2);
+                var b: f64 = load64(qj + 8 * k2);
+                var p: f64 = a * b;
+                dot = dot + p;
+                k2 = k2 + 1;
+            }
+            store64(r + 8 * (j * n + i), dot);
+            k2 = 0;
+            while (k2 < m) {
+                var c: f64 = load64(qj + 8 * k2);
+                var d: f64 = load64(qi + 8 * k2);
+                var pd: f64 = dot * d;
+                var nc: f64 = c - pd;
+                store64(qj + 8 * k2, nc);
+                k2 = k2 + 1;
+            }
+            i = i + 1;
+        }
+        var ss: f64 = -0.0;
+        var k3 = 0;
+        while (k3 < m) {
+            var e: f64 = load64(qj + 8 * k3);
+            var e2: f64 = e * e;
+            ss = ss + e2;
+            k3 = k3 + 1;
+        }
+        var norm: f64 = f64_sqrt(ss);
+        if (norm < eps) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
+        store64(r + 8 * (j * n + j), norm);
+        k3 = 0;
+        while (k3 < m) {
+            var g: f64 = load64(qj + 8 * k3);
+            var gn: f64 = g / norm;
+            store64(qj + 8 * k3, gn);
+            k3 = k3 + 1;
+        }
+        j = j + 1;
+    }
+    # Qᵀy into out (each coefficient's slot), then back substitution in place: out[i] is read as Qᵀy[i] before it is
+    # overwritten, and only the coefficients above i are read from it.
+    j = 0;
+    while (j < n) {
+        var qj2 = q + 8 * j * m;
+        var t: f64 = -0.0;
+        var k4 = 0;
+        while (k4 < m) {
+            var qv: f64 = load64(qj2 + 8 * k4);
+            var yv: f64 = load64(y + 8 * k4);
+            var py: f64 = qv * yv;
+            t = t + py;
+            k4 = k4 + 1;
+        }
+        store64(out + 8 * j, t);
+        j = j + 1;
+    }
+    var i2 = n - 1;
+    while (i2 >= 0) {
+        var sum: f64 = load64(out + 8 * i2);
+        var j2 = i2 + 1;
+        while (j2 < n) {
+            var rv: f64 = load64(r + 8 * (j2 * n + i2));
+            var cv: f64 = load64(out + 8 * j2);
+            var pr: f64 = rv * cv;
+            sum = sum - pr;
+            j2 = j2 + 1;
+        }
+        var diag: f64 = load64(r + 8 * (i2 * n + i2));
+        var co: f64 = sum / diag;
+        store64(out + 8 * i2, co);
+        i2 = i2 - 1;
+    }
+    return Ok(n);
+}
+
+# ── the rank by one-sided Jacobi SVD (num::matrix_rank, num::svd) ────────────────────
+
+# hisab 1.4.0's `num::matrix_rank(a, Some(tol))` of the m × n row-major matrix at `a`: the number of singular values
+# above `tol` from `num::svd`. `svd` works on Aᵀ when m < n; `svd_tall` then rotates the vectors b — A's columns (m
+# ≥ n) or rows (m < n), w vectors of length l — in one-sided Jacobi sweeps: for each pair p < q the sums app, aqq,
+# apq (from +0.0, in one pass), skipped when |apq| ≤ EPSILON_F64²·√(app·aqq), else the rotation with τ = (aqq
+# − app)/(2·apq), t = 1/(τ + √(1 + τ²)) (or −1/(−τ + √(1 + τ²)) for τ < 0 or NaN), c = 1/√(1 +
+# t²), s = t·c, (b_p, b_q) ← (c·b_p − s·b_q, s·b_p + c·b_q); a sweep with no rotation ends the loop, and
+# 100·max(m, n) sweeps without one are Err(NoConvergence). Each singular value is its vector's norm √Σ b² (from
+# −0.0); 1.4.0's V, U, its basis extension and its descending sort feed nothing the count reads, so they are left
+# out. The test 10⁻²⁴·√(app·aqq) lies below the rounding of a rotated pair's dot product, so many matrices
+# never pass it (port plan §6.4, M5b): that is the oracle's NoConvergence, reproduced. Ok(rank);
+# Err(_KM_NUM_ERR_INVALID_INPUT) for m = 0 or n = 0; Err(_KM_NUM_ERR_NO_CONVERGENCE); Err(_KM_NUM_ERR_ALLOC). The
+# vectors: on the stack up to _KM_NUM_SVD_STACK words.
+const _KM_NUM_SVD_STACK = 256;
+#must_use
+fn _km_matrix_rank(a, m, n, tol: f64): Result {
+    if (m == 0 || n == 0) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
+    var w = n;                              # the vectors b_0 … b_{w−1}, each of length l
+    var l = m;
+    if (m < n) {
+        w = m;
+        l = n;
+    }
+    var st: f64[256];
+    var b = _km_num_table(&st, _KM_NUM_SVD_STACK, w * l);
+    if (b == 0) { return Err(_KM_NUM_ERR_ALLOC); }
+    var i = 0;
+    while (i < m) {
+        var j = 0;
+        while (j < n) {
+            var v = load64(a + 8 * (i * n + j));
+            if (m < n) { store64(b + 8 * (i * l + j), v); } else { store64(b + 8 * (j * l + i), v); }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    var e: f64 = EPSILON_F64;
+    var tol2: f64 = e * e;
+    var max_sweeps = 100 * l;
+    var one: f64 = 1.0;
+    var sweep = 0;
+    while (sweep < max_sweeps) {
+        var converged = 1;
+        var p = 0;
+        while (p < w) {
+            var bp = b + 8 * p * l;
+            var q = p + 1;
+            while (q < w) {
+                var bq = b + 8 * q * l;
+                var app: f64 = 0.0;
+                var aqq: f64 = 0.0;
+                var apq: f64 = 0.0;
+                var k = 0;
+                while (k < l) {
+                    var x: f64 = load64(bp + 8 * k);
+                    var y: f64 = load64(bq + 8 * k);
+                    var xx: f64 = x * x;
+                    var yy: f64 = y * y;
+                    var xy: f64 = x * y;
+                    app = app + xx;
+                    aqq = aqq + yy;
+                    apq = apq + xy;
+                    k = k + 1;
+                }
+                var pp: f64 = app * aqq;
+                var sq: f64 = f64_sqrt(pp);
+                var lim: f64 = tol2 * sq;
+                var aa: f64 = f64_abs(apq);
+                if (aa <= lim) {
+                    q = q + 1;
+                    continue;
+                }
+                converged = 0;
+                var dif: f64 = aqq - app;
+                var den: f64 = 2.0 * apq;
+                var tau: f64 = dif / den;
+                var tt: f64 = tau * tau;
+                var u: f64 = one + tt;
+                var su: f64 = f64_sqrt(u);
+                var t: f64 = 0.0;
+                if (tau >= 0.0) {
+                    var d1: f64 = tau + su;
+                    t = one / d1;
+                } else {
+                    var mt: f64 = -tau;
+                    var d2: f64 = mt + su;
+                    var mone: f64 = -1.0;
+                    t = mone / d2;
+                }
+                var t2: f64 = t * t;
+                var u2: f64 = one + t2;
+                var s2: f64 = f64_sqrt(u2);
+                var c: f64 = one / s2;
+                var s: f64 = t * c;
+                k = 0;
+                while (k < l) {
+                    var vp: f64 = load64(bp + 8 * k);
+                    var vq: f64 = load64(bq + 8 * k);
+                    var cp: f64 = c * vp;
+                    var sq2: f64 = s * vq;
+                    var np: f64 = cp - sq2;
+                    var sp: f64 = s * vp;
+                    var cq: f64 = c * vq;
+                    var nq: f64 = sp + cq;
+                    store64(bp + 8 * k, np);
+                    store64(bq + 8 * k, nq);
+                    k = k + 1;
+                }
+                q = q + 1;
+            }
+            p = p + 1;
+        }
+        if (converged == 1) { break; }
+        if (sweep == max_sweeps - 1) { return Err(_KM_NUM_ERR_NO_CONVERGENCE); }
+        sweep = sweep + 1;
+    }
+    var rank = 0;
+    var j2 = 0;
+    while (j2 < w) {
+        var bj = b + 8 * j2 * l;
+        var ss: f64 = -0.0;
+        var k5 = 0;
+        while (k5 < l) {
+            var z: f64 = load64(bj + 8 * k5);
+            var zz: f64 = z * z;
+            ss = ss + zz;
+            k5 = k5 + 1;
+        }
+        var sigma: f64 = f64_sqrt(ss);
+        if (sigma > tol) { rank = rank + 1; }
+        j2 = j2 + 1;
+    }
+    return Ok(rank);
+}
+
+# ── CSR (hisab 1.4.0's CsrMatrix::from_dense) ────────────────────────────────────────
+
+# hisab 1.4.0's `CsrMatrix::from_dense` of the m × n row-major matrix at `a`, as a hisab 3.4.1 CSR handle (csr_new):
+# the entries with |v| > EPSILON_F64 (10⁻¹²: never a zero or a NaN), row by row, their column indices, and the m + 1
+# row offsets. hisab 3.4.1's csr_from_dense keeps every nonzero entry (a structural test since its 2.15.0), so it would
+# store 10⁻¹³ and NaN where 1.4.0 drops them. The three arrays and the header come from the bump allocator (never
+# freed); an empty matrix's two data arrays are 0, as csr_from_dense's. The handle, or 0 when an allocation fails.
+#must_use
+fn _km_csr_from_dense(a, m, n): i64 {
+    var eps: f64 = EPSILON_F64;
+    var count = 0;
+    var k = 0;
+    while (k < m * n) {
+        var v: f64 = load64(a + 8 * k);
+        var av: f64 = f64_abs(v);
+        if (av > eps) { count = count + 1; }
+        k = k + 1;
+    }
+    var row_ptr = alloc(8 * (m + 1));
+    var col_idx = 0;
+    var values = 0;
+    if (count > 0) {
+        col_idx = alloc(8 * count);
+        values = alloc(8 * count);
+    }
+    if (row_ptr == 0 || (count > 0 && (col_idx == 0 || values == 0))) { return 0; }
+    store64(row_ptr, 0);
+    var pos = 0;
+    var i = 0;
+    while (i < m) {
+        var j = 0;
+        while (j < n) {
+            var x: f64 = load64(a + 8 * (i * n + j));
+            var ax: f64 = f64_abs(x);
+            if (ax > eps) {
+                store64(col_idx + 8 * pos, j);
+                store64(values + 8 * pos, x);
+                pos = pos + 1;
+            }
+            j = j + 1;
+        }
+        store64(row_ptr + 8 * (i + 1), pos);
+        i = i + 1;
+    }
+    return csr_new(m, n, count, row_ptr, col_idx, values);
+}
+
 # --- reaction_dynamics.cyr ---
 
 # reaction_dynamics.cyr — the time evolution of chemical systems by ODE integration (port of
@@ -22600,4 +22906,586 @@ fn simulate_stochastic(drift, dctx, diffusion, gctx, y0, n, t_end: f64, steps, s
     if (_km_rd_all_finite(fin, n) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
     if (o == 0) { return Err(KM_ERR_INVALID_INPUT); }
     return Ok(count);
+}
+
+# --- network.cyr ---
+
+# network.cyr — reaction network analysis: stoichiometric matrices, their rank and conservation laws, species rates of
+# change (port of rust-old/src/network.rs; M5b).
+#
+# - **Matrices** (port plan §6.3). Rust's dense `Vec<Vec<f64>>` (rows = species, columns = reactions) is a flat
+#   row-major buffer and its dimensions: entry (i, j) of an m × n matrix at p + 8·(i·n + j). A flat matrix has one row
+#   length, so Rust's ragged-matrix Errs have no counterpart. A builder writes to the caller's buffer `out` of `cap`
+#   f64: Ok(the count written); Err(KM_ERR_INVALID_INPUT) when it doesn't fit, after Rust's own errors (`out`
+#   untouched). A matrix argument whose (pointer, m·n) is no buffer (a negative dimension, m·n past the address space,
+#   a null pointer with entries) is Err(KM_ERR_INVALID_INPUT), checked first (an out-of-type input, port plan §6.4).
+# - **Reactions.** Rust's `ReactionDef = (Vec<(usize, f64)>, Vec<(usize, f64)>)` is a 32-byte record: the reactants'
+#   pointer and count, then the products' pointer and count; each term a 16-byte record, the species index as a usize
+#   word (a negative word is past every n_species) and the coefficient's f64 bits — Rust's tuple order. `reactions`
+#   points to n_reactions such records. A negative count, or a null pointer with entries, is Err(KM_ERR_INVALID_INPUT)
+#   (Rust's own errors here are InvalidInput too, so where it is checked is not observable).
+# - **The CSR form** is a hisab 3.4.1 CSR handle (`csr_nrows`, `csr_ncols`, `csr_nnz`, `csr_row_ptr`, `csr_col_idx`,
+#   `csr_values`), built by src/numerics.cyr's transcription of hisab 1.4.0's `CsrMatrix::from_dense`: entries with
+#   |v| ≤ 10⁻¹² (and NaN) dropped, as Rust; hisab 3.4.1's own csr_from_dense keeps every nonzero entry.
+# - **The rank** is hisab 1.4.0's `matrix_rank` with its one-sided Jacobi SVD, transcribed (src/numerics.cyr, ADR 0003's
+#   M5b amendment): its convergence test (EPSILON_F64² = 10⁻²⁴, below the rounding of a rotated pair's dot product)
+#   is rarely met by a dense matrix, which is then Rust's Err(KM_ERR_COMPUTATION_ERROR), "SVD rank computation
+#   failed", after 100·max(m, n) sweeps: Chapman's ozone cycle, Robertson's kinetics and the H₂ + Br₂ chain among them
+#   (scripts/oracle/README.md; the roadmap's backlog). The port reproduces it bit for bit.
+# - Every expression keeps Rust's operation order: the matrices and rates are bit-identical to the oracle's (class B
+#   and A), the rank class A.
+
+include "lib/alloc.cyr"
+include "lib/hisab.cyr"
+
+# Matrix words kept on the stack by sparse_stoichiometric_matrix (its dense intermediate).
+const _KM_NET_STACK = 256;
+
+# 1 if (p, m·n) is a buffer of f64: m, n ≥ 0, m·n words addressable, p not null when m·n > 0.
+#must_use
+fn _km_net_buffer(p, m, n): i64 {
+    if (m < 0 || n < 0) { return 0; }
+    if (n > 0 && m > 0x0FFFFFFFFFFFFFFF / n) { return 0; }
+    if (m * n > 0 && p == 0) { return 0; }
+    return 1;
+}
+
+# 1 if the n_reactions records at `reactions` are well formed (each term list a slice) and every species index is
+# below n_species (both as usize words); 0 otherwise. Rust's index check, in its order: reaction by reaction, the
+# reactants before the products.
+#must_use
+fn _km_net_reactions_ok(n_species, reactions, n_reactions): i64 {
+    if (n_reactions < 0 || (n_reactions > 0 && reactions == 0)) { return 0; }
+    var bias = 1 << 63;                     # an unsigned compare: x <u y is (x ^ 2⁶³) < (y ^ 2⁶³)
+    var lim = n_species ^ bias;
+    var j = 0;
+    while (j < n_reactions) {
+        var rec = reactions + 32 * j;
+        var side = 0;
+        while (side < 2) {
+            var tp = load64(rec + 16 * side);
+            var tn = load64(rec + 16 * side + 8);
+            if (tn < 0 || (tn > 0 && tp == 0)) { return 0; }
+            var k = 0;
+            while (k < tn) {
+                var s = load64(tp + 16 * k);
+                if ((s ^ bias) >= lim) { return 0; }
+                k = k + 1;
+            }
+            side = side + 1;
+        }
+        j = j + 1;
+    }
+    return 1;
+}
+
+# Fills the n_species × n_reactions matrix at m (zeroed first): for reaction j, each reactant's coefficient subtracted
+# from (species, j) and each product's added, in list order (a species listed twice is summed). The records are valid.
+fn _km_net_fill(m, n_species, reactions, n_reactions) {
+    var k = 0;
+    while (k < n_species * n_reactions) {
+        store64(m + 8 * k, 0);
+        k = k + 1;
+    }
+    var j = 0;
+    while (j < n_reactions) {
+        var rec = reactions + 32 * j;
+        var side = 0;
+        while (side < 2) {
+            var tp = load64(rec + 16 * side);
+            var tn = load64(rec + 16 * side + 8);
+            var t = 0;
+            while (t < tn) {
+                var s = load64(tp + 16 * t);
+                var c: f64 = load64(tp + 16 * t + 8);
+                var at = m + 8 * (s * n_reactions + j);
+                var v: f64 = load64(at);
+                if (side == 0) { v = v - c; } else { v = v + c; }
+                store64(at, v);
+                t = t + 1;
+            }
+            side = side + 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+# The dense stoichiometric matrix of n_reactions reactions over n_species species: rows = species, columns =
+# reactions, entry (i, j) the net coefficient of species i in reaction j — positive for a product, negative for a
+# reactant, a species listed more than once summed, a catalyst on both sides +0. The n_species × n_reactions entries
+# go row-major to the caller's buffer `out` of `cap` f64: Ok(n_species·n_reactions). Err(KM_ERR_INVALID_INPUT) if the
+# records are malformed (above), there are no species or no reactions, or a species index is n_species or more;
+# Err(KM_ERR_INVALID_INPUT) if the matrix does not fit in cap (`out` untouched). Coefficients are not validated (NaN
+# and ±∞ propagate). Mirrors `network::stoichiometric_matrix`, whose Vec<Vec<f64>> the buffer replaces.
+#must_use
+fn stoichiometric_matrix(n_species, reactions, n_reactions, out, cap): Result {
+    if (_km_net_reactions_ok(n_species, reactions, n_reactions) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_species == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_reactions == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_species < 0 || cap < 0 || out == 0 || n_species > cap / n_reactions) { return Err(KM_ERR_INVALID_INPUT); }
+    _km_net_fill(out, n_species, reactions, n_reactions);
+    return Ok(n_species * n_reactions);
+}
+
+# The stoichiometric matrix of stoichiometric_matrix in CSR (compressed sparse row) form, as a hisab 3.4.1 CSR handle
+# (`csr_nrows` … `csr_values`): the dense matrix is built first (on the stack up to 256 entries, else from the bump
+# allocator, never freed) and compressed as hisab 1.4.0's CsrMatrix::from_dense does, entries with |v| ≤ 10⁻¹² (and
+# NaN) dropped. Ok(handle); the errors of stoichiometric_matrix (but no capacity); Err(KM_ERR_COMPUTATION_ERROR) if a
+# table can't be allocated. Mirrors `network::sparse_stoichiometric_matrix`.
+#must_use
+fn sparse_stoichiometric_matrix(n_species, reactions, n_reactions): Result {
+    if (_km_net_reactions_ok(n_species, reactions, n_reactions) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_species == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_reactions == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_species < 0 || n_species > 0x0FFFFFFFFFFFFFFF / n_reactions) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var st: f64[256];
+    var dense = _km_num_table(&st, _KM_NET_STACK, n_species * n_reactions);
+    if (dense == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    _km_net_fill(dense, n_species, reactions, n_reactions);
+    var csr = _km_csr_from_dense(dense, n_species, n_reactions);
+    if (csr == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    return Ok(csr);
+}
+
+# The rank of the m × n matrix at `matrix` (row-major): the number of independent reactions of a stoichiometric
+# matrix, the singular values above 10⁻¹⁰ counted (hisab 1.4.0's matrix_rank, transcribed with its one-sided Jacobi
+# SVD: src/numerics.cyr). Ok(rank); Err(KM_ERR_INVALID_INPUT) if (matrix, m·n) is no buffer;
+# Err(KM_ERR_COMPUTATION_ERROR) if the matrix is empty (m = 0 or n = 0), the SVD does not converge in 100·max(m, n)
+# sweeps (most dense matrices: the module comment), or a work table can't be allocated. Mirrors
+# `network::reaction_network_rank`.
+#must_use
+fn reaction_network_rank(matrix, m, n): Result {
+    if (_km_net_buffer(matrix, m, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var thr: f64 = 0.0000000001;            # 1e-10, Rust's threshold
+    var r, v = _km_matrix_rank(matrix, m, n, thr);
+    if (is_err_result(r) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    return Ok(v);
+}
+
+# The null-space dimension, the number of conservation laws: n_species − rank, saturating at 0. Both are Rust's usize
+# (an unsigned word: a negative one is past 2⁶³). Mirrors `network::conservation_law_count`.
+#must_use
+#pure
+fn conservation_law_count(n_species, rank): i64 {
+    var bias = 1 << 63;
+    if ((rank ^ bias) >= (n_species ^ bias)) { return 0; }
+    return n_species - rank;
+}
+
+# The species rates of change dx/dt = S·v: S the m × n stoichiometric matrix at `matrix` (rows = species, columns =
+# reactions), v the n_rates reaction rates at `rates` (e.g. mol·L⁻¹·s⁻¹); each species' rate Σⱼ Sᵢⱼ·vⱼ summed in
+# column order from −0.0 (Rust's `.sum()`: a row of zero length gives −0.0), in the unit of the rates. The m rates go
+# to the caller's buffer `out` of `cap` f64: Ok(m). Err(KM_ERR_INVALID_INPUT) if (matrix, m·n) is no buffer or (rates,
+# n_rates) no slice, the matrix is empty (m = 0) or its row length n differs from n_rates; Err(KM_ERR_INVALID_INPUT)
+# if m does not fit in cap (`out` untouched). Mirrors `network::rate_from_stoichiometry`.
+#must_use
+fn rate_from_stoichiometry(matrix, m, n, rates, n_rates, out, cap): Result {
+    if (_km_net_buffer(matrix, m, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_rates < 0 || (n_rates > 0 && rates == 0)) { return Err(KM_ERR_INVALID_INPUT); }
+    if (m == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n != n_rates) { return Err(KM_ERR_INVALID_INPUT); }
+    if (out == 0 || cap < m) { return Err(KM_ERR_INVALID_INPUT); }
+    var i = 0;
+    while (i < m) {
+        var row = matrix + 8 * i * n;
+        var s: f64 = -0.0;
+        var j = 0;
+        while (j < n) {
+            var a: f64 = load64(row + 8 * j);
+            var r: f64 = load64(rates + 8 * j);
+            var p: f64 = a * r;
+            s = s + p;
+            j = j + 1;
+        }
+        store64(out + 8 * i, s);
+        i = i + 1;
+    }
+    return Ok(m);
+}
+
+# --- fitting.cyr ---
+
+# fitting.cyr — parameter estimation from experimental measurements: Arrhenius parameters, polynomial least squares,
+# Beer–Lambert calibration lines (port of rust-old/src/fitting.rs; M5b).
+#
+# - **The least squares** is hisab 1.4.0's `num::least_squares_poly` (Vandermonde columns by powi, modified
+#   Gram–Schmidt QR with its 10⁻¹² rank threshold, back substitution), transcribed into src/numerics.cyr (ADR 0003): a
+#   fit is the oracle's bit for bit (class B), and fit_arrhenius, which takes a ln per point and the exp of the
+#   intercept, the corrected oracle's (class C, bound 0: src/mathx.cyr's correctly rounded _km_cr_ln and _km_cr_exp,
+#   ADR 0006).
+# - **Slices.** Each Rust `&[f64]` is a pointer and a count, so the "arrays must have equal length" checks keep their
+#   meaning; a negative count or a null pointer with values is Err(KM_ERR_INVALID_INPUT), checked first (an
+#   out-of-type input, port plan §6.4; Rust's first errors are InvalidInput too). `degree` is Rust's usize: a negative
+#   word is past every length.
+# - **Structs.** `ArrheniusFit` is struct KmArrheniusFit, which fit_arrhenius writes through a pointer (`var fit:
+#   KmArrheniusFit; fit_arrhenius(t, n, k, n, &fit)`: its two f64 fields in declaration order, 16 bytes);
+#   `PolynomialFit { coefficients: Vec<f64> }` is struct KmPolynomialFit, a view of a coefficient buffer (its pointer
+#   and length), with Rust's two methods. fit_polynomial writes the coefficients to the caller's buffer `out` of `cap`
+#   f64 (Err(KM_ERR_INVALID_INPUT) when they don't fit, after Rust's errors, `out` untouched).
+# - Work tables (the linearised data, the QR's Q and R) are on the stack while small and come from the bump allocator
+#   otherwise (never freed); a table that can't be allocated is Err(KM_ERR_COMPUTATION_ERROR).
+
+include "lib/alloc.cyr"
+
+# The result of an Arrhenius fit, ln k = ln A − Ea/(R·T).
+struct KmArrheniusFit {
+    pre_exponential: f64;       # pre-exponential factor A (s⁻¹, or the rate constants' unit)
+    activation_energy_j: f64;   # activation energy Ea (J/mol)
+}
+
+# A fitted polynomial f(x) = a₀ + a₁·x + a₂·x² + …: a view of the caller's coefficient buffer.
+struct KmPolynomialFit {
+    coefficients;   # pointer to the coefficients a₀, a₁, … (f64), constant term first
+    len;            # their count (Rust's coefficients.len())
+}
+
+impl KmPolynomialFit {
+    # The polynomial at x, Σ aₖ·xᵏ with the powers by repeated multiplication from 1 (result += c·x_pow, then
+    # x_pow *= x, in coefficient order), so a power that overflows against a zero coefficient gives ∞·0 = NaN, as in
+    # Rust; 0.0 for no coefficients. Mirrors `PolynomialFit::evaluate`.
+    #must_use
+    fn evaluate(self, x: f64): f64 {
+        var result: f64 = 0.0;
+        var x_pow: f64 = 1.0;
+        var k = 0;
+        while (k < self.len) {
+            var c: f64 = load64(self.coefficients + 8 * k);
+            var t: f64 = c * x_pow;
+            result = result + t;
+            x_pow = x_pow * x;
+            k = k + 1;
+        }
+        return result;
+    }
+
+    # The degree, len − 1, or 0 for no coefficients. Mirrors `PolynomialFit::degree`.
+    #must_use
+    fn degree(self): i64 {
+        if (self.len <= 0) { return 0; }
+        return self.len - 1;
+    }
+}
+
+# 1 if (p, n) is a slice of f64: n ≥ 0, and p not null when n > 0.
+#must_use
+fn _km_fit_slice(p, n): i64 {
+    if (n < 0 || (n > 0 && p == 0)) { return 0; }
+    return 1;
+}
+
+# Fits the Arrhenius parameters (A, Ea) to n (temperature, rate constant) pairs: x = 1/T, y = ln k (correctly
+# rounded), then hisab 1.4.0's degree-1 least squares y = a₀ + a₁·x, so A = exp(a₀) (correctly rounded) and
+# Ea = −a₁·R. The temperatures are in K, the rate constants in any unit (A has the same). The fit goes to `out`, a
+# KmArrheniusFit (16 bytes: A, then Ea): Ok(2). Err(KM_ERR_INVALID_INPUT) if the arrays differ in length or hold fewer
+# than 2 points; then, pair by pair, Err(KM_ERR_INVALID_TEMPERATURE) for a temperature that is not positive and finite
+# and Err(KM_ERR_INVALID_INPUT) for a rate constant that is not; Err(KM_ERR_COMPUTATION_ERROR) if the least squares
+# fails (equal temperatures, or 1/T so close that the QR's second column falls below 10⁻¹²) or a table can't be
+# allocated. A or Ea may come out ±∞ or NaN where 1/T or exp overflows (a subnormal T), as in Rust. Mirrors
+# `fitting::fit_arrhenius`, whose ArrheniusFit `out` receives.
+#must_use
+fn fit_arrhenius(temperatures_k, nt, rate_constants, nk, out): Result {
+    if (_km_fit_slice(temperatures_k, nt) != 1 || _km_fit_slice(rate_constants, nk) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (nt != nk) { return Err(KM_ERR_INVALID_INPUT); }
+    if (nt < 2) { return Err(KM_ERR_INVALID_INPUT); }
+    var st: f64[64];
+    var w = _km_num_table(&st, 64, 2 * nt);
+    if (w == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var x = w;
+    var y = w + 8 * nt;
+    var k = 0;
+    while (k < nt) {
+        var t: f64 = load64(temperatures_k + 8 * k);
+        var kr: f64 = load64(rate_constants + 8 * k);
+        if (_km_is_positive(t) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+        if (_km_is_positive(kr) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        var xi: f64 = 1.0 / t;
+        var yi: f64 = _km_cr_ln(kr);
+        store64(x + 8 * k, xi);
+        store64(y + 8 * k, yi);
+        k = k + 1;
+    }
+    var c: f64[2];
+    var r, v = _km_least_squares_poly(x, y, nt, 1, &c);
+    if (is_err_result(r) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var ln_a: f64 = load64(&c);
+    var slope: f64 = load64(&c + 8);
+    var a: f64 = _km_cr_exp(ln_a);
+    var ns: f64 = -slope;
+    var ea: f64 = ns * KM_GAS_CONSTANT;
+    store64(out, a);
+    store64(out + 8, ea);
+    return Ok(2);
+}
+
+# Fits a polynomial of degree `degree` to the n points (x[k], y[k]) by hisab 1.4.0's QR least squares: the degree + 1
+# coefficients, constant term first, go to the caller's buffer `out` of `cap` f64: Ok(degree + 1).
+# Err(KM_ERR_INVALID_INPUT) if the arrays differ in length, hold degree points or fewer (degree past usize::MAX − 1
+# included), or hold a NaN or ±∞; Err(KM_ERR_COMPUTATION_ERROR) if the solve fails (fewer distinct x values than
+# coefficients, columns that vanish below 10⁻¹²) or a table can't be allocated; Err(KM_ERR_INVALID_INPUT) if the
+# coefficients don't fit in cap. Huge x can overflow the Vandermonde powers to ±∞, and the coefficients are then NaN,
+# as in Rust. Mirrors `fitting::fit_polynomial`, whose PolynomialFit `out` (with the count) becomes.
+#must_use
+fn fit_polynomial(x, nx, y, ny, degree, out, cap): Result {
+    if (_km_fit_slice(x, nx) != 1 || _km_fit_slice(y, ny) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (nx != ny) { return Err(KM_ERR_INVALID_INPUT); }
+    if (degree < 0 || nx <= degree) { return Err(KM_ERR_INVALID_INPUT); }
+    var k = 0;
+    while (k < nx) {
+        var a: f64 = load64(x + 8 * k);
+        if (_km_is_finite(a) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        k = k + 1;
+    }
+    k = 0;
+    while (k < ny) {
+        var b: f64 = load64(y + 8 * k);
+        if (_km_is_finite(b) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        k = k + 1;
+    }
+    var n = degree + 1;
+    var st: f64[16];
+    var c = _km_num_table(&st, 16, n);
+    if (c == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var r, v = _km_least_squares_poly(x, y, nx, degree, c);
+    if (is_err_result(r) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (out == 0 || cap < n) { return Err(KM_ERR_INVALID_INPUT); }
+    _km_num_copy(out, c, n);
+    return Ok(n);
+}
+
+# The molar absorptivity ε of a Beer–Lambert calibration line: A = A₀ + (ε·l)·c fitted by least squares with an
+# intercept A₀ (the blank's baseline, not returned: use fit_polynomial of degree 1 for it), then ε = slope/l in
+# L/(mol·cm). `concentrations` in mol/L, `absorbances` dimensionless, `path_length` l in cm. Ok(ε);
+# Err(KM_ERR_INVALID_INPUT) if the path length is not positive and finite, then fit_polynomial's errors at degree 1
+# (mismatched, fewer than 2 or non-finite data; all concentrations equal is Err(KM_ERR_COMPUTATION_ERROR)). Mirrors
+# `fitting::fit_beer_lambert`.
+#must_use
+fn fit_beer_lambert(concentrations, nc, absorbances, na, path_length: f64): Result {
+    if (_km_fit_slice(concentrations, nc) != 1 || _km_fit_slice(absorbances, na) != 1) {
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (_km_is_positive(path_length) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var c: f64[2];
+    var r, v = fit_polynomial(concentrations, nc, absorbances, na, 1, &c, 2);
+    if (is_err_result(r) == 1) { return Err(v); }
+    var slope: f64 = load64(&c + 8);
+    var e: f64 = slope / path_length;
+    return Ok(e);
+}
+
+# --- sensitivity.cyr ---
+
+# sensitivity.cyr — sensitivity analysis: gradients of chemical quantities (port of rust-old/src/sensitivity.rs; M5b).
+#
+# - **ADR 0002 #2.** Rust's four fixed-formula gradients run hisab 1.4.0's reverse-mode tape and return bare values for
+#   any input, NaN and ±∞ included. Here they return a `Result`, validated as the module's own Rust functions validate
+#   (equilibrium_constant, arrhenius_rate, nernst_potential, gibbs_free_energy: the same codes in the same order), and
+#   Err(KM_ERR_COMPUTATION_ERROR) where an entry is not finite. The derivatives are closed forms: the tape's reverse
+#   sweep for each fixed expression, unrolled — every adjoint from +0.0, each contribution added in the sweep's node
+#   order, a node with a zero adjoint skipped as hisab 1.4.0's `backward` skips it (so 0 · ∞ never appears) — with the
+#   correctly rounded exp and ln (src/mathx.cyr, ADR 0006) where the tape calls glibc's. So every Ok is the oracle's
+#   vector to within its exp / ln rounding, and the golden rows compare it at class D (relative 10⁻¹²); a non-finite
+#   oracle row, or one at an input the port refuses, is the port's noted Err.
+# - **compute_gradient** keeps Rust's generic form on hisab 3.4.1's reverse-mode tape (ad_tape_new, ad_var, ad_add, …,
+#   ad_grad): the closure `impl Fn(&mut Tape, &[Var]) -> Var` is a function pointer and a context pointer (port plan
+#   §6.3), f(ctx, tape, vars, n), which builds on `tape` from the n parameter nodes whose indices `vars` holds (Rust's
+#   `&[Var]`) and returns the output node; it is called through `callptr`. The tape is the caller's (`ad_tape_new(cap)`,
+#   reused: the bump allocator never frees), reset by each call. Rust's Result was never Err; here it carries the
+#   failures Cyrius adds (ADR 0002's M5b addition): a null pointer or negative count, a tape too small for the
+#   parameters, an output that is not a node of the tape (a tape that filled up while f built on it).
+# - Outputs: the gradient vectors go to the caller's buffer `out` (two or three f64; n for compute_gradient), written
+#   only on Ok.
+
+include "lib/alloc.cyr"
+include "lib/hisab.cyr"
+
+# The gradient of the equilibrium constant K = exp(−ΔG/(R·T)) with ΔG and T as independent variables: [∂K/∂ΔG in
+# mol/J, (∂K/∂T)_ΔG in K⁻¹] = [−K/(RT), K·ΔG/(RT²)], evaluated as hisab 1.4.0's sweep of the tape −ΔG, R·T, ÷, exp:
+# ∂K/∂ΔG = −(K/(R·T)) and (∂K/∂T)_ΔG = (−(K·(−ΔG))/((R·T)·(R·T)))·R, both 0 where K underflows to 0. The temperature
+# entry holds ΔG fixed: it is not the van 't Hoff dK/dT = K·ΔH°/(RT²), since ΔG° changes with T (∂ΔG°/∂T = −ΔS°);
+# for that, differentiate ΔG° = ΔH° − TΔS° explicitly with compute_gradient. `delta_g_j` in J/mol, `temperature_k` in
+# K; the two entries go to `out` (two f64): Ok(2). Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite;
+# Err(KM_ERR_INVALID_INPUT) if ΔG is not finite; Err(KM_ERR_COMPUTATION_ERROR) if an entry is not finite (K or its
+# derivatives overflow). Mirrors `sensitivity::equilibrium_constant_gradient`, with ADR 0002 #2.
+#must_use
+fn equilibrium_constant_gradient(delta_g_j: f64, temperature_k: f64, out): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(delta_g_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var r: f64 = KM_GAS_CONSTANT;
+    var neg: f64 = -delta_g_j;
+    var rt: f64 = r * temperature_k;
+    var ex: f64 = neg / rt;
+    var k: f64 = _km_cr_exp(ex);
+    # The sweep: exp, then the quotient's two inputs, R·T, then the negation.
+    var g_e: f64 = 0.0 + k;
+    var g_neg: f64 = 0.0;
+    var g_rt: f64 = 0.0;
+    if (g_e != 0.0) {
+        var q: f64 = g_e / rt;
+        g_neg = g_neg + q;
+        var num: f64 = g_e * neg;
+        var den: f64 = rt * rt;
+        var d: f64 = num / den;
+        g_rt = g_rt - d;
+    }
+    var g_t: f64 = 0.0;
+    if (g_rt != 0.0) {
+        var p: f64 = g_rt * r;
+        g_t = g_t + p;
+    }
+    var g_dg: f64 = 0.0;
+    if (g_neg != 0.0) { g_dg = g_dg - g_neg; }
+    if (_km_is_finite(g_dg) != 1 || _km_is_finite(g_t) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    store64(out, g_dg);
+    store64(out + 8, g_t);
+    return Ok(2);
+}
+
+# The gradient of the Arrhenius rate constant k = A·exp(−Ea/(R·T)) with respect to [A, Ea, T]: [∂k/∂A
+# (dimensionless), ∂k/∂Ea (k-units·mol/J), ∂k/∂T (k-units/K)] = [k/A, −k/(RT), k·Ea/(RT²)], evaluated as hisab 1.4.0's
+# sweep of the tape −Ea, R·T, ÷, exp, A·: ∂k/∂A = exp(−Ea/(RT)), ∂k/∂Ea = −((A·e)/(R·T)) and ∂k/∂T =
+# (−((A·e)·(−Ea))/((R·T)·(R·T)))·R with e = exp(−Ea/(RT)), the last two 0 where A or A·e is 0. `pre_exponential` A in
+# the units of k, `activation_energy_j` Ea in J/mol, `temperature_k` T in K; the three entries go to `out` (three f64):
+# Ok(3). Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite; Err(KM_ERR_INVALID_INPUT) if A, then Ea, is
+# not finite; Err(KM_ERR_COMPUTATION_ERROR) if an entry is not finite. Mirrors `sensitivity::arrhenius_gradient`, with
+# ADR 0002 #2.
+#must_use
+fn arrhenius_gradient(pre_exponential: f64, activation_energy_j: f64, temperature_k: f64, out): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(pre_exponential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(activation_energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var r: f64 = KM_GAS_CONSTANT;
+    var neg: f64 = -activation_energy_j;
+    var rt: f64 = r * temperature_k;
+    var ex: f64 = neg / rt;
+    var b: f64 = _km_cr_exp(ex);
+    # The sweep: A·e, exp, the quotient, R·T, the negation.
+    var g_a: f64 = 0.0 + b;
+    var g_b: f64 = 0.0 + pre_exponential;
+    var g_e: f64 = 0.0;
+    if (g_b != 0.0) {
+        var p0: f64 = g_b * b;
+        g_e = g_e + p0;
+    }
+    var g_neg: f64 = 0.0;
+    var g_rt: f64 = 0.0;
+    if (g_e != 0.0) {
+        var q: f64 = g_e / rt;
+        g_neg = g_neg + q;
+        var num: f64 = g_e * neg;
+        var den: f64 = rt * rt;
+        var d: f64 = num / den;
+        g_rt = g_rt - d;
+    }
+    var g_t: f64 = 0.0;
+    if (g_rt != 0.0) {
+        var p1: f64 = g_rt * r;
+        g_t = g_t + p1;
+    }
+    var g_ea: f64 = 0.0;
+    if (g_neg != 0.0) { g_ea = g_ea - g_neg; }
+    if (_km_is_finite(g_a) != 1 || _km_is_finite(g_ea) != 1 || _km_is_finite(g_t) != 1) {
+        return Err(KM_ERR_COMPUTATION_ERROR);
+    }
+    store64(out, g_a);
+    store64(out + 8, g_ea);
+    store64(out + 16, g_t);
+    return Ok(3);
+}
+
+# The gradient of the Nernst potential E = E° − (R·T/(n·F))·ln Q with respect to [E°, T, Q]: [∂E/∂E°
+# (dimensionless), ∂E/∂T (V/K), ∂E/∂Q (V)] = [1, −R·ln Q/(nF), −RT/(nFQ)], evaluated as hisab 1.4.0's sweep of the
+# tape R·T, ln Q, ÷ nF, ·, E° −: ∂E/∂T = (−ln Q/(nF))·R and ∂E/∂Q = −(R·T/(nF))/Q, with nF = n·F. `standard_potential`
+# E° in V, `n_electrons` the electrons transferred (Rust's u8, a word), `temperature_k` T in K, `reaction_quotient` Q
+# (dimensionless); the three entries go to `out` (three f64): Ok(3). Err(KM_ERR_INVALID_TEMPERATURE) if T is not
+# positive and finite; Err(KM_ERR_INVALID_INPUT) if n is outside 1 ..= 255, then if Q is not positive and finite, then
+# if E° is not finite; Err(KM_ERR_COMPUTATION_ERROR) if an entry is not finite (−RT/(nFQ) past DBL_MAX). Mirrors
+# `sensitivity::nernst_gradient`, with ADR 0002 #2.
+#must_use
+fn nernst_gradient(standard_potential: f64, n_electrons, temperature_k: f64, reaction_quotient: f64, out): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (n_electrons < 1 || n_electrons > 255) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(reaction_quotient) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(standard_potential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var fn_: f64 = f64_from(n_electrons);
+    var nf: f64 = fn_ * KM_FARADAY;
+    var r: f64 = KM_GAS_CONSTANT;
+    var rt: f64 = r * temperature_k;
+    var lq: f64 = _km_cr_ln(reaction_quotient);
+    var rtnf: f64 = rt / nf;
+    # The sweep: E° − c (∂E/∂E° = 1, the product's adjoint −1), c = (RT/nF)·ln Q, the quotient, ln Q, R·T.
+    var g_q1: f64 = 0.0 - lq;               # 0 + (−1)·ln Q: +0 at Q = 1, which then contributes nothing
+    var g_lq: f64 = 0.0 - rtnf;
+    var g_rt: f64 = 0.0;
+    if (g_q1 != 0.0) {
+        var d: f64 = g_q1 / nf;
+        g_rt = g_rt + d;
+    }
+    var g_q: f64 = 0.0;
+    if (g_lq != 0.0) {
+        var e: f64 = g_lq / reaction_quotient;
+        g_q = g_q + e;
+    }
+    var g_t: f64 = 0.0;
+    if (g_rt != 0.0) {
+        var p: f64 = g_rt * r;
+        g_t = g_t + p;
+    }
+    if (_km_is_finite(g_t) != 1 || _km_is_finite(g_q) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var one: f64 = 1.0;
+    store64(out, one);
+    store64(out + 8, g_t);
+    store64(out + 16, g_q);
+    return Ok(3);
+}
+
+# The sensitivity of the Gibbs free energy ΔG = ΔH − T·ΔS to temperature: ∂(ΔG)/∂T = −ΔS in J/(mol·K), a
+# thermodynamic identity that Rust computes by its tape (0 + (−1)·ΔS: +0 for ΔS = ±0). `enthalpy_j` ΔH in J/mol,
+# `temperature_k` T in K, `entropy_j_per_k` ΔS in J/(mol·K). Ok(−ΔS); Err(KM_ERR_INVALID_TEMPERATURE) if T is not
+# positive and finite; Err(KM_ERR_INVALID_INPUT) if ΔH or ΔS is not finite. Mirrors
+# `sensitivity::gibbs_temperature_sensitivity`, with ADR 0002 #2.
+#must_use
+fn gibbs_temperature_sensitivity(enthalpy_j: f64, temperature_k: f64, entropy_j_per_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(enthalpy_j) != 1 || _km_is_finite(entropy_j_per_k) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var g: f64 = 0.0 - entropy_j_per_k;
+    return Ok(g);
+}
+
+# Every partial derivative of a scalar function, by reverse-mode autodiff on hisab 3.4.1's tape: `tape` (the caller's,
+# from ad_tape_new) is reset, one variable node is recorded per parameter (n f64 at `parameters`), and f(ctx, tape,
+# vars, n) builds the function on the tape from those nodes (their indices: n i64 at `vars`) and returns its output
+# node; one reverse sweep then gives ∂f/∂pₖ for each k, in order, to the caller's buffer `out` (n f64). Ok(n);
+# Err(KM_ERR_INVALID_INPUT) if f or tape is 0, n is negative, parameters or out is null with n > 0, the tape cannot
+# hold the n variables, or the output is not a node of the tape (the tape filled up while f built on it: every hisab
+# op then returns AD_FULL); Err(KM_ERR_COMPUTATION_ERROR) if the index table (past 64 parameters, from the bump
+# allocator) can't be allocated. Non-finite values f produces appear in the gradient as they are. Mirrors
+# `sensitivity::compute_gradient` (ADR 0002 #2: Rust's Result was never Err).
+#must_use
+fn compute_gradient(f, ctx, tape, parameters, n, out): Result {
+    if (f == 0 || tape == 0 || n < 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n > 0 && (parameters == 0 || out == 0)) { return Err(KM_ERR_INVALID_INPUT); }
+    var st: i64[64];
+    var vars = &st;
+    if (n > 64) {
+        if (n > 0x0080000000000000) { return Err(KM_ERR_INVALID_INPUT); }
+        vars = alloc(8 * n);
+        if (vars == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    }
+    ad_tape_reset(tape);
+    var k = 0;
+    while (k < n) {
+        var id = ad_var(tape, load64(parameters + 8 * k));
+        if (id < 0) { return Err(KM_ERR_INVALID_INPUT); }
+        store64(vars + 8 * k, id);
+        k = k + 1;
+    }
+    var root = callptr(f, ctx, tape, vars, n);
+    var gt, gv = ad_grad(tape, root);
+    if (is_err_result(gt) == 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var wt, wv = ad_grad_write(tape, vars, n, out);
+    if (is_err_result(wt) == 1) { return Err(KM_ERR_INVALID_INPUT); }
+    return Ok(n);
 }

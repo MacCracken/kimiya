@@ -2,11 +2,13 @@
 constants
 electrochemistry
 element
+fitting
 gas
 inorganic
 kinetics
 math
 molecule
+network
 nuclear
 numerics
 organic
@@ -14,6 +16,7 @@ phase
 potential
 reaction
 reaction_dynamics
+sensitivity
 solution
 spectroscopy
 stoichiometry

@@ -4,7 +4,8 @@
 # It includes dist/kimiya.cyr (written by `cyrius distlib --all`; `cyrius distlib --check` proves it
 # current), not src/, so the bundle compiles warning-free as one unit and its modules work
 # together. The reference tests are tests/{error,validate,element,molecule,reaction,thermo,thermochem,
-# phase,gas,solution,electrochemistry,kinetics,stoichiometry,organic,inorganic,potential,nuclear,spectroscopy}.tcyr;
+# phase,gas,solution,electrochemistry,kinetics,stoichiometry,organic,inorganic,potential,nuclear,spectroscopy,
+# reaction_dynamics,network,fitting,sensitivity}.tcyr;
 # the golden corpus is tests/parity.tcyr.
 
 include "dist/kimiya.cyr"
@@ -210,6 +211,24 @@ fn main() {
     var s0: f64 = spec[0];
     var s2: f64 = spec[2];
     assert(is_ok(tff) == 1 && vff == 3 && s0 == 1.0 && s2 == 1.0, "spectroscopy (FFT of an impulse: flat)");
+    var trd, vrd = simulate_first_order(1.0, 0.1, 10.0, 10, 0, 0);
+    assert(is_err_result(trd) == 1 && vrd == KM_ERR_INVALID_INPUT, "reaction_dynamics (no buffer for the 11 points)");
+    var mab: f64[2];
+    mab[0] = -1.0;
+    mab[1] = 1.0;
+    var trk, vrk = reaction_network_rank(&mab, 2, 1);
+    assert(is_ok(trk) == 1 && vrk == 1, "network (the rank of A → B)");
+    var px: f64[3];
+    px[0] = 0.0;
+    px[1] = 1.0;
+    px[2] = 2.0;
+    var pc: f64[2];
+    var tpf, vpf = fit_polynomial(&px, 3, &px, 3, 1, &pc, 2);
+    assert(is_ok(tpf) == 1 && vpf == 2, "fitting (y = x)");
+    var gg: f64[3];
+    var tgr, vgr = arrhenius_gradient(10000000000000.0, 80000.0, 300.0, &gg);
+    var g0: f64 = gg[0];
+    assert(is_ok(tgr) == 1 && vgr == 3 && g0 > 0.0, "sensitivity (the closed-form Arrhenius gradient)");
     return assert_summary();
 }
 

@@ -1,0 +1,193 @@
+# network.cyr — reaction network analysis: stoichiometric matrices, their rank and conservation laws, species rates of
+# change (port of rust-old/src/network.rs; M5b).
+#
+# - **Matrices** (port plan §6.3). Rust's dense `Vec<Vec<f64>>` (rows = species, columns = reactions) is a flat
+#   row-major buffer and its dimensions: entry (i, j) of an m × n matrix at p + 8·(i·n + j). A flat matrix has one row
+#   length, so Rust's ragged-matrix Errs have no counterpart. A builder writes to the caller's buffer `out` of `cap`
+#   f64: Ok(the count written); Err(KM_ERR_INVALID_INPUT) when it doesn't fit, after Rust's own errors (`out`
+#   untouched). A matrix argument whose (pointer, m·n) is no buffer (a negative dimension, m·n past the address space,
+#   a null pointer with entries) is Err(KM_ERR_INVALID_INPUT), checked first (an out-of-type input, port plan §6.4).
+# - **Reactions.** Rust's `ReactionDef = (Vec<(usize, f64)>, Vec<(usize, f64)>)` is a 32-byte record: the reactants'
+#   pointer and count, then the products' pointer and count; each term a 16-byte record, the species index as a usize
+#   word (a negative word is past every n_species) and the coefficient's f64 bits — Rust's tuple order. `reactions`
+#   points to n_reactions such records. A negative count, or a null pointer with entries, is Err(KM_ERR_INVALID_INPUT)
+#   (Rust's own errors here are InvalidInput too, so where it is checked is not observable).
+# - **The CSR form** is a hisab 3.4.1 CSR handle (`csr_nrows`, `csr_ncols`, `csr_nnz`, `csr_row_ptr`, `csr_col_idx`,
+#   `csr_values`), built by src/numerics.cyr's transcription of hisab 1.4.0's `CsrMatrix::from_dense`: entries with
+#   |v| ≤ 10⁻¹² (and NaN) dropped, as Rust; hisab 3.4.1's own csr_from_dense keeps every nonzero entry.
+# - **The rank** is hisab 1.4.0's `matrix_rank` with its one-sided Jacobi SVD, transcribed (src/numerics.cyr, ADR 0003's
+#   M5b amendment): its convergence test (EPSILON_F64² = 10⁻²⁴, below the rounding of a rotated pair's dot product)
+#   is rarely met by a dense matrix, which is then Rust's Err(KM_ERR_COMPUTATION_ERROR), "SVD rank computation
+#   failed", after 100·max(m, n) sweeps: Chapman's ozone cycle, Robertson's kinetics and the H₂ + Br₂ chain among them
+#   (scripts/oracle/README.md; the roadmap's backlog). The port reproduces it bit for bit.
+# - Every expression keeps Rust's operation order: the matrices and rates are bit-identical to the oracle's (class B
+#   and A), the rank class A.
+
+include "lib/alloc.cyr"
+include "lib/hisab.cyr"
+
+# Matrix words kept on the stack by sparse_stoichiometric_matrix (its dense intermediate).
+const _KM_NET_STACK = 256;
+
+# 1 if (p, m·n) is a buffer of f64: m, n ≥ 0, m·n words addressable, p not null when m·n > 0.
+#must_use
+fn _km_net_buffer(p, m, n): i64 {
+    if (m < 0 || n < 0) { return 0; }
+    if (n > 0 && m > 0x0FFFFFFFFFFFFFFF / n) { return 0; }
+    if (m * n > 0 && p == 0) { return 0; }
+    return 1;
+}
+
+# 1 if the n_reactions records at `reactions` are well formed (each term list a slice) and every species index is
+# below n_species (both as usize words); 0 otherwise. Rust's index check, in its order: reaction by reaction, the
+# reactants before the products.
+#must_use
+fn _km_net_reactions_ok(n_species, reactions, n_reactions): i64 {
+    if (n_reactions < 0 || (n_reactions > 0 && reactions == 0)) { return 0; }
+    var bias = 1 << 63;                     # an unsigned compare: x <u y is (x ^ 2⁶³) < (y ^ 2⁶³)
+    var lim = n_species ^ bias;
+    var j = 0;
+    while (j < n_reactions) {
+        var rec = reactions + 32 * j;
+        var side = 0;
+        while (side < 2) {
+            var tp = load64(rec + 16 * side);
+            var tn = load64(rec + 16 * side + 8);
+            if (tn < 0 || (tn > 0 && tp == 0)) { return 0; }
+            var k = 0;
+            while (k < tn) {
+                var s = load64(tp + 16 * k);
+                if ((s ^ bias) >= lim) { return 0; }
+                k = k + 1;
+            }
+            side = side + 1;
+        }
+        j = j + 1;
+    }
+    return 1;
+}
+
+# Fills the n_species × n_reactions matrix at m (zeroed first): for reaction j, each reactant's coefficient subtracted
+# from (species, j) and each product's added, in list order (a species listed twice is summed). The records are valid.
+fn _km_net_fill(m, n_species, reactions, n_reactions) {
+    var k = 0;
+    while (k < n_species * n_reactions) {
+        store64(m + 8 * k, 0);
+        k = k + 1;
+    }
+    var j = 0;
+    while (j < n_reactions) {
+        var rec = reactions + 32 * j;
+        var side = 0;
+        while (side < 2) {
+            var tp = load64(rec + 16 * side);
+            var tn = load64(rec + 16 * side + 8);
+            var t = 0;
+            while (t < tn) {
+                var s = load64(tp + 16 * t);
+                var c: f64 = load64(tp + 16 * t + 8);
+                var at = m + 8 * (s * n_reactions + j);
+                var v: f64 = load64(at);
+                if (side == 0) { v = v - c; } else { v = v + c; }
+                store64(at, v);
+                t = t + 1;
+            }
+            side = side + 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+# The dense stoichiometric matrix of n_reactions reactions over n_species species: rows = species, columns =
+# reactions, entry (i, j) the net coefficient of species i in reaction j — positive for a product, negative for a
+# reactant, a species listed more than once summed, a catalyst on both sides +0. The n_species × n_reactions entries
+# go row-major to the caller's buffer `out` of `cap` f64: Ok(n_species·n_reactions). Err(KM_ERR_INVALID_INPUT) if the
+# records are malformed (above), there are no species or no reactions, or a species index is n_species or more;
+# Err(KM_ERR_INVALID_INPUT) if the matrix does not fit in cap (`out` untouched). Coefficients are not validated (NaN
+# and ±∞ propagate). Mirrors `network::stoichiometric_matrix`, whose Vec<Vec<f64>> the buffer replaces.
+#must_use
+fn stoichiometric_matrix(n_species, reactions, n_reactions, out, cap): Result {
+    if (_km_net_reactions_ok(n_species, reactions, n_reactions) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_species == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_reactions == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_species < 0 || cap < 0 || out == 0 || n_species > cap / n_reactions) { return Err(KM_ERR_INVALID_INPUT); }
+    _km_net_fill(out, n_species, reactions, n_reactions);
+    return Ok(n_species * n_reactions);
+}
+
+# The stoichiometric matrix of stoichiometric_matrix in CSR (compressed sparse row) form, as a hisab 3.4.1 CSR handle
+# (`csr_nrows` … `csr_values`): the dense matrix is built first (on the stack up to 256 entries, else from the bump
+# allocator, never freed) and compressed as hisab 1.4.0's CsrMatrix::from_dense does, entries with |v| ≤ 10⁻¹² (and
+# NaN) dropped. Ok(handle); the errors of stoichiometric_matrix (but no capacity); Err(KM_ERR_COMPUTATION_ERROR) if a
+# table can't be allocated. Mirrors `network::sparse_stoichiometric_matrix`.
+#must_use
+fn sparse_stoichiometric_matrix(n_species, reactions, n_reactions): Result {
+    if (_km_net_reactions_ok(n_species, reactions, n_reactions) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_species == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_reactions == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_species < 0 || n_species > 0x0FFFFFFFFFFFFFFF / n_reactions) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var st: f64[256];
+    var dense = _km_num_table(&st, _KM_NET_STACK, n_species * n_reactions);
+    if (dense == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    _km_net_fill(dense, n_species, reactions, n_reactions);
+    var csr = _km_csr_from_dense(dense, n_species, n_reactions);
+    if (csr == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    return Ok(csr);
+}
+
+# The rank of the m × n matrix at `matrix` (row-major): the number of independent reactions of a stoichiometric
+# matrix, the singular values above 10⁻¹⁰ counted (hisab 1.4.0's matrix_rank, transcribed with its one-sided Jacobi
+# SVD: src/numerics.cyr). Ok(rank); Err(KM_ERR_INVALID_INPUT) if (matrix, m·n) is no buffer;
+# Err(KM_ERR_COMPUTATION_ERROR) if the matrix is empty (m = 0 or n = 0), the SVD does not converge in 100·max(m, n)
+# sweeps (most dense matrices: the module comment), or a work table can't be allocated. Mirrors
+# `network::reaction_network_rank`.
+#must_use
+fn reaction_network_rank(matrix, m, n): Result {
+    if (_km_net_buffer(matrix, m, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var thr: f64 = 0.0000000001;            # 1e-10, Rust's threshold
+    var r, v = _km_matrix_rank(matrix, m, n, thr);
+    if (is_err_result(r) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    return Ok(v);
+}
+
+# The null-space dimension, the number of conservation laws: n_species − rank, saturating at 0. Both are Rust's usize
+# (an unsigned word: a negative one is past 2⁶³). Mirrors `network::conservation_law_count`.
+#must_use
+#pure
+fn conservation_law_count(n_species, rank): i64 {
+    var bias = 1 << 63;
+    if ((rank ^ bias) >= (n_species ^ bias)) { return 0; }
+    return n_species - rank;
+}
+
+# The species rates of change dx/dt = S·v: S the m × n stoichiometric matrix at `matrix` (rows = species, columns =
+# reactions), v the n_rates reaction rates at `rates` (e.g. mol·L⁻¹·s⁻¹); each species' rate Σⱼ Sᵢⱼ·vⱼ summed in
+# column order from −0.0 (Rust's `.sum()`: a row of zero length gives −0.0), in the unit of the rates. The m rates go
+# to the caller's buffer `out` of `cap` f64: Ok(m). Err(KM_ERR_INVALID_INPUT) if (matrix, m·n) is no buffer or (rates,
+# n_rates) no slice, the matrix is empty (m = 0) or its row length n differs from n_rates; Err(KM_ERR_INVALID_INPUT)
+# if m does not fit in cap (`out` untouched). Mirrors `network::rate_from_stoichiometry`.
+#must_use
+fn rate_from_stoichiometry(matrix, m, n, rates, n_rates, out, cap): Result {
+    if (_km_net_buffer(matrix, m, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n_rates < 0 || (n_rates > 0 && rates == 0)) { return Err(KM_ERR_INVALID_INPUT); }
+    if (m == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n != n_rates) { return Err(KM_ERR_INVALID_INPUT); }
+    if (out == 0 || cap < m) { return Err(KM_ERR_INVALID_INPUT); }
+    var i = 0;
+    while (i < m) {
+        var row = matrix + 8 * i * n;
+        var s: f64 = -0.0;
+        var j = 0;
+        while (j < n) {
+            var a: f64 = load64(row + 8 * j);
+            var r: f64 = load64(rates + 8 * j);
+            var p: f64 = a * r;
+            s = s + p;
+            j = j + 1;
+        }
+        store64(out + 8 * i, s);
+        i = i + 1;
+    }
+    return Ok(m);
+}

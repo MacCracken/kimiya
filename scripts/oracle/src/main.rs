@@ -26,7 +26,8 @@
 //! `nuclear`, with `src/nuclear_data.cyr` (M4c); `potential` (M4d: no data file); `spectroscopy`, with
 //! `src/spectroscopy_data.cyr` (M4e; since M4e-4 its isotope table from the cited `isotopes.tsv`, ADR 0002 #23, checked
 //! against the oracle); `stoichiometry` (M4f: no data file); `numerics` (hisab 1.4.0's routines called directly, the
-//! crate's one direct dependency besides the oracle) and `reaction_dynamics` (M5a: no data file); …
+//! crate's one direct dependency besides the oracle) and `reaction_dynamics` (M5a: no data file); `network`, `fitting` and
+//! `sensitivity` (M5b: no data files; sensitivity's compute_gradient rows build on hisab 1.4.0's tape directly).
 
 mod audit;
 mod cyr;
@@ -36,11 +37,13 @@ mod grids;
 mod m_constants;
 mod m_electrochemistry;
 mod m_element;
+mod m_fitting;
 mod m_gas;
 mod m_inorganic;
 mod m_kinetics;
 mod m_math;
 mod m_molecule;
+mod m_network;
 mod m_nuclear;
 mod m_numerics;
 mod m_organic;
@@ -48,6 +51,7 @@ mod m_phase;
 mod m_potential;
 mod m_reaction;
 mod m_reaction_dynamics;
+mod m_sensitivity;
 mod m_solution;
 mod m_spectroscopy;
 mod m_stoichiometry;
@@ -78,11 +82,13 @@ fn golden_modules(isos: &[t_spectroscopy::Iso]) -> Vec<tsv::Module> {
         m_constants::emit(),
         m_electrochemistry::emit(),
         m_element::emit(),
+        m_fitting::emit(),
         m_gas::emit(),
         m_inorganic::emit(),
         m_kinetics::emit(),
         m_math::emit(),
         m_molecule::emit(),
+        m_network::emit(),
         m_nuclear::emit(),
         m_numerics::emit(),
         m_organic::emit(),
@@ -90,6 +96,7 @@ fn golden_modules(isos: &[t_spectroscopy::Iso]) -> Vec<tsv::Module> {
         m_potential::emit(),
         m_reaction::emit(),
         m_reaction_dynamics::emit(),
+        m_sensitivity::emit(),
         m_solution::emit(),
         m_spectroscopy::emit(isos),
         m_stoichiometry::emit(),

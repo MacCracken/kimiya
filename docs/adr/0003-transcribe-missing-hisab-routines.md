@@ -177,3 +177,46 @@ buffer of (t, y[n]) points (port plan §4, M5). `backward_euler` is not transcri
   (`tests/parity.tcyr` skips the module); `validate.py` §26 recomputes every row with its own transcription.
 - `num::least_squares_poly` (fitting) and `matrix_rank` (network) join `src/numerics.cyr` in M5b. The hisab feature
   request (system integrators, a dense solver, …) stands. The status stays **Accepted**.
+
+## Amendment (M5b, 2026-11-12)
+
+**The least squares is transcribed as decided; the rank and the CSR compression are transcribed too, because hisab 3.4.1
+disagrees with 1.4.0 on the golden rows; `compute_gradient` runs on hisab 3.4.1's tape, as decided.** `src/numerics.cyr`
+gains three private routines, hisab 1.4.0's code operation for operation:
+
+- **`_km_least_squares_poly`** — `num::least_squares_poly` (`src/num/linalg.rs`): the Vandermonde columns by `powi`
+  (`_km_powi`, compiler-builtins' loop), `qr_decompose`'s modified Gram–Schmidt (each dot product and norm a `.sum()`
+  folded from −0.0, the 10⁻¹² test on the norm, a NaN norm passing), Qᵀy and back substitution. fit_polynomial and
+  fit_beer_lambert are class B, fit_arrhenius (a ln per point, an exp of the intercept, `_km_cr_ln` / `_km_cr_exp`)
+  class C at bound 0; every golden row is 0 ulp, and glibc 2.44 rounds every one of those calls correctly, so no row
+  needs an ADR 0006 correction.
+- **`_km_matrix_rank`** — `num::matrix_rank(a, Some(tol))` on `num::svd` (`src/num/svd.rs`): Aᵀ for a wide matrix,
+  `svd_tall`'s one-sided Jacobi sweeps on the vectors, each singular value its vector's norm, counted above 10⁻¹⁰ (V, U,
+  the basis extension and the sort feed nothing the count reads and are left out). The decision above sent the rank to
+  hisab 3.4.1's `svd_compute_checked`, transcribing only if a golden row disagreed. Measured on the 563 golden rank rows
+  (a scratch probe through `svd_compute_checked`, the wide ones transposed, since 3.4.1 refuses m < n): it disagrees on
+  **191** — on 159 hisab 1.4.0's Jacobi ends in NoConvergence and 3.4.1 answers, on 16 1.4.0 answers and 3.4.1 refuses
+  (a non-finite entry, which 1.4.0 counts in a single column's or row's norm, or a singular value past DBL_MAX), and on
+  16 both answer with different ranks (presets scaled by 10¹⁰⁰ … 10²⁰⁰, whose unscaled sums of squares overflow in
+  1.4.0, which then counts a full rank).
+  The NoConvergence rows are 1.4.0's own behaviour: its test |a_pq| ≤ EPSILON_F64²·√(a_pp·a_qq), 10⁻²⁴ relative, lies
+  below the rounding of a rotated pair's dot product, so a dense matrix rarely passes it in 100·max(m, n) sweeps —
+  Chapman's ozone cycle, Robertson's kinetics, the H₂ + Br₂ chain and about six in ten seeded matrices are kimiya
+  1.2.0's ComputationError. The transcription reproduces every row (class A); the defect is the oracle's, recorded in
+  the roadmap's backlog for a decision after the port.
+- **`_km_csr_from_dense`** — `CsrMatrix::from_dense` (`src/num/sparse.rs`): the entries with |v| > EPSILON_F64 (10⁻¹²),
+  row by row, into a hisab 3.4.1 CSR handle (`csr_new`), so `sparse_stoichiometric_matrix` still returns hisab's type.
+  The decision above sent it to `csr_from_dense`, which keeps every nonzero entry (a structural test since hisab
+  2.15.0): it would store a 10⁻¹³ coefficient and a NaN that 1.4.0 drops (golden rows at the threshold to the ulp).
+
+**autodiff.** `compute_gradient` builds on hisab 3.4.1's tape (`ad_tape_new` / `ad_var` / `ad_add` … / `ad_grad`), the
+callback f(ctx, tape, vars, n) recording its function from the parameter nodes. Its 124 golden rows (20 test functions
+at physical and seeded points: the fixed formulas' tapes, van 't Hoff, Eyring, Lennard-Jones, Morse, Rosenbrock, …)
+agree with 1.4.0's gradients at class D (relative ≤ 10⁻¹², at most 40 ulp), so nothing was transcribed. The two tapes do
+differ by design — 3.4.1 folds constants, compensates the sweep's sums (TwoSum), gives a domain miss (ln of x ≤ 0, a
+divisor below DBL_MIN) a NaN partial and a 0 value where 1.4.0 has ±∞ or NaN, and takes its exp, ln, sin, cos and pow
+from the stdlib — so the rows sit inside every function's domain; the four fixed-formula gradients are closed forms
+(ADR 0002 #2's M5b addition), not tapes.
+
+The hisab feature request stands, extended: a Jacobi SVD (or `matrix_rank`) with a reachable convergence test, polynomial
+least squares, and a `from_dense` with a threshold. The status stays **Accepted**.

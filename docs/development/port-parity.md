@@ -1960,6 +1960,57 @@ Over the two modules 1,197 rows: 880 Ok (72,658 trajectory points, 191,293 float
 Summary, every target (19 modules; numerics apart): **339,944 ok, 0 failed, 0 measured, 0 pending, 46,407 accepted (ADR
 6: 810), 0 glibc-matching** — §27's 338,991 ok plus 953, and one more accepted under ADR 6 (the `simulate_adaptive` row).
 
+## 30. M5b: network, fitting and sensitivity (2026-11-12)
+
+`src/numerics.cyr` gains hisab 1.4.0's `least_squares_poly` (with `qr_decompose`), `matrix_rank` on `svd`'s one-sided
+Jacobi and `CsrMatrix::from_dense` (ADR 0003's M5b amendment); `src/network.cyr`, `src/fitting.cyr` and
+`src/sensitivity.cyr` port the three modules on them, the four gradients as ADR 0002 #2's validated closed forms and
+`compute_gradient` on hisab 3.4.1's tape. Ported at §5's classes without the paused audit's rework. Three new golden
+modules (`scripts/oracle/src/m_network.rs`, `m_fitting.rs`, `m_sensitivity.rs`):
+
+| Function | Class | Rows | Ok | Err | Floats | ulp |
+|---|---|---|---|---|---|---|
+| `network::stoichiometric_matrix` | A | 210 | 189 | 21 | 6,589 | equal |
+| `network::sparse_stoichiometric_matrix` | A | 210 | 189 | 21 | 2,270 | equal |
+| `network::reaction_network_rank` | A | 563 | 396 | 167 (the oracle's NoConvergence among them) | — | equal |
+| `network::conservation_law_count` | A | 100 | 100 | — | — | equal |
+| `network::rate_from_stoichiometry` | B | 213 | 171 | 42 | 516 | 0 |
+| `fitting::fit_arrhenius` | C, bound 0 | 174 | 119 | 55 | 238 | 0 |
+| `fitting::fit_polynomial` | B | 176 | 144 | 32 | 569 | 0 |
+| `fitting::fit_beer_lambert` | B | 50 | 38 | 12 | 38 | 0 |
+| `fitting::PolynomialFit::evaluate` | B | 168 | 168 | — | 168 | 0 |
+| `fitting::PolynomialFit::degree` | A | 10 | 10 | — | — | equal |
+| `sensitivity::equilibrium_constant_gradient` | D | 213 | 137 | 76 (ADR 0002 #2) | 274 compared | 0 |
+| `sensitivity::arrhenius_gradient` | D | 228 | 163 | 65 (#2) | 489 | 0 |
+| `sensitivity::nernst_gradient` | D | 210 | 144 | 66 (#2) | 432 | 0 |
+| `sensitivity::gibbs_temperature_sensitivity` | D | 119 | 99 | 20 (#2) | 99 | 0 |
+| `sensitivity::compute_gradient` | D | 124 | 124 | — | 324 | ≤ 40 (relative ≤ 10⁻¹²) |
+
+(The sensitivity Ok and Err columns are the port's: the oracle's output is always a vector, and its 227 noted rows are
+the port's Err.) Over the three modules 2,768 rows: 2,418 Ok and 350 Err as the oracle gives them (`validate.py` §27's
+count).
+
+- **Bit equality.** Every float of every row but `compute_gradient`'s is the oracle's: the transcriptions keep hisab's
+  operation order (the `.sum()`s from −0.0, the Jacobi sums from +0.0 in one pass, the QR's projections and norms, the
+  CSR's |v| > 10⁻¹²), and the only transcendentals (fit_arrhenius' ln and exp, the gradients' exp and ln) are correctly
+  rounded. glibc 2.44 rounds every primitive call of these rows correctly, so no row needs an ADR 0006 correction and the
+  corrected oracle is the oracle. The four gradients' Ok rows are class D (ADR 0002 #2) and measure 0 ulp.
+- **The rank.** hisab 1.4.0's Jacobi does not converge on 159 of the rank rows' finite matrices (the module rows' 167 Err
+  include the empty matrices and non-finite ones), among them Chapman's ozone cycle, Robertson's kinetics and the H₂ +
+  Br₂ chain: its test 10⁻²⁴·√(a_pp·a_qq) is below a rotated dot product's rounding. The port reproduces each Err
+  (class A). hisab 3.4.1's `svd_compute_checked` would disagree on 191 rows (ADR 0003's M5b amendment).
+- **compute_gradient.** hisab 3.4.1's tape against 1.4.0's on 20 test functions (scripts/oracle/README.md): 273 of 324
+  floats equal, 46 one ulp, 3 two ulp, 2 above 16 (40 at most) — its compensated sweep and stdlib exp / ln / sin / cos
+  / pow against Rust's plain sweep and glibc — all within 10⁻¹² relative.
+- **ADR 0002 #2.** 227 rows noted with the port's Err (170 where the oracle's output is not finite, 57 where it is finite
+  at an input the port's validation refuses), each required by the harness and checked by `validate.py` §27 against the
+  validation rule; every unnoted row's oracle output is finite.
+- **The pinning** (`validate.py` §27): the rank's 10⁻¹⁰ one ulp down changes 8 rows, the CSR's 10⁻¹² one ulp down 4, the
+  QR's 10⁻¹² halved 4 and doubled 6.
+
+Summary, every target (22 modules; numerics apart): **342,485 ok, 0 failed, 0 measured, 0 pending, 46,634 accepted
+(ADR 6: 810), 0 glibc-matching** — §29's 339,944 ok plus 2,541, and 227 more accepted under ADR 2 (#2).
+
 ## How to reproduce
 
 ```sh

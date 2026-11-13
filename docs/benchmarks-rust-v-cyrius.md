@@ -743,3 +743,32 @@ Newton iteration.
 five arguments, each component's update a few loads and stores through the work tables, where Rust inlines the closure);
 the normal draw is mostly the correctly rounded ln and cos (`mathx/cr_ln` 49 ns, `mathx/cr_cos` 82 ns);
 dopri45's correctly rounded pow is one call per step. Parity, not speed, is the bar.
+
+## M5b network, fitting, sensitivity (2026-11-12)
+
+Seven benches appended to `tests/numerics.bcyr` (now 32 s with them). `fitting/arrhenius_6pts` and
+`fitting/polynomial_deg2_20pts` are `rust-old/benches/benchmarks.rs`'s bodies, Rust's criterion medians from
+`rust-old/benchmarks.md`; the five others are Cyrius-only, compared with M5a's ad hoc Rust timing of the same bodies
+(the median of 20 batches; it reads 256 and 537 ns for the two criterion benches, 7–10 % above criterion's medians).
+Rust returns fresh `Vec`s (the matrix rows, the coefficients, the gradient, the tape); the port fills the caller's
+buffers.
+
+| Bench | Body | Rust | Cyrius | Cyrius / Rust |
+|---|---|---|---|---|
+| `fitting/arrhenius_6pts` | `fit_arrhenius` of 6 points, T = 300 … 400 K, k = 10¹⁰·exp(−50 000/(R·T)): 6 correctly rounded ln, the degree-1 QR, one exp | 233.40 ns | 1.01 µs | 4.3× |
+| `fitting/polynomial_deg2_20pts` | `fit_polynomial` of y = 1 + 2x + 0.5x² at 20 points, degree 2: 60 powi, the 3-column modified Gram–Schmidt, back substitution | 500.05 ns | 2.32 µs | 4.6× |
+| `network/stoichiometric_matrix_h2_br2` | `stoichiometric_matrix` of the H₂ + Br₂ chain, 5 species × 5 reactions: the record checks, 25 zeroed entries, 16 terms | 88.2 ns (ad hoc) | 282 ns | 3.2× |
+| `network/rank_michaelis_menten` | `reaction_network_rank` of E + S ⇌ ES → E + P's 4 × 3 matrix: hisab 1.4.0's Jacobi converges in a few sweeps | 594 ns (ad hoc) | 984 ns | 1.7× |
+| `network/rank_chapman` | `reaction_network_rank` of Chapman's 3 × 4 cycle: 400 sweeps without convergence, Rust's ComputationError | 35.6 µs (ad hoc) | 147 µs | 4.1× |
+| `sensitivity/arrhenius_gradient` | `arrhenius_gradient(1e13, 80 000, 300)`: Rust builds and sweeps a 9-node tape, the port runs the unrolled sweep (ADR 0002 #2), one correctly rounded exp | 213 ns (ad hoc) | 108 ns | 0.51× |
+| `sensitivity/compute_gradient_arrhenius` | `compute_gradient` of the same function, a closure on the tape (Rust: a fresh `Tape`; the port: hisab 3.4.1's reused tape, its compensated sweep) | 202 ns (ad hoc) | 522 ns | 2.6× |
+
+Every body but `compute_gradient` is bit-identical to Rust's on the golden rows (`network` 1,296, `fitting` 578, the four
+gradients' 543 Ok rows, 0 ulp); `compute_gradient` agrees at class D.
+
+**Reading the gap.** The least squares and the Jacobi are the port's typical 4× (each inner product a loop of loads and
+f64 locals, where Rust's iterators vectorise the bounds checks away; the 3-column QR runs 9 such loops over the 20
+points); `fit_arrhenius` adds six correctly rounded ln (`mathx/cr_ln` 49 ns each). The Michaelis–Menten rank is closest
+because it is mostly Rust's allocation of the transposed copy, V and U. The closed-form gradient is the one body faster
+than Rust: Rust allocates a tape of 9 nodes and a gradient vector per call, the port evaluates the sweep's 12
+operations directly. Parity, not speed, is the bar.

@@ -74,6 +74,9 @@ oracle and writes it into `src/spectroscopy_data.cyr`.
 | `element` | M1 | 975 | `src/m_element.rs`: `lookup_by_number` and `lookup_properties` over every u8 (0..=255), `lookup_by_symbol` over every symbol, its lower- and upper-case forms, every name, and `""`, `"Xx"`, `"FE"`, `"Fe "`, `" Fe"`, a 300-byte string | `src/element_data.cyr` (`src/t_element.rs`): `enum KmElementCategory`, the 118 `ELEMENTS` rows (atomic number, symbol and name blobs, mass, electronegativity flag + value, category) and the 32 `ELEMENT_PROPERTIES` rows (oxidation states flattened over an `i8` table) |
 | `math` | M0 step 8 (M2a: +7,500) | 26,147 | `src/m_math.rs`; M2a added dense cos / acos / ln / powf(·, 2.5) sweeps over the Peng–Robinson and Redlich–Kwong argument ranges | — |
 | `molecule` | M1 | 2,472 | `src/m_molecule.rs`: the four presets, the cases the 1.2 tests pin, 600 seeded compositions (1–8 atoms, counts 0..=200, repeats, invalid Z 0/119/255, u32::MAX counts); `new`, `molecular_weight` (B), `formula`, `total_atoms` on each | — |
+| `network` | M5b | 1,296 | `src/m_network.rs`: `stoichiometric_matrix` and `sparse_stoichiometric_matrix` (A; input `i:n_species v:n_reactions`, then per reaction its reactants and products, each `v:k` + k pairs `i:species f:coefficient`; output Rust's `Vec<Vec<f64>>`, `v:rows` + each row `v:len` + `f:`, or hisab 1.4.0's `CsrMatrix` as `i:nrows i:ncols v:nnz`, each stored entry `i:col f:value`, then `v:nrows+1` + `i:` offsets, read back through `to_dense` and proven by rebuilding it with `CsrMatrix::new`) on the mechanism presets (the Rust tests', the rate laws, Michaelis–Menten, Chapman, the H₂ + Br₂ chain, Robertson, Lotka–Volterra, the Brusselator, the Oregonator, H₂/O₂, a catalyst, sources and sinks), coefficients on the 10⁻¹² CSR threshold to the ulp, ±0, NaN, ±∞, every Err, seeded networks; `reaction_network_rank` (A; input Rust's `&[Vec<f64>]`, output `i:rank` or `E:`) on the presets' matrices, their transposes and scalings across the 10⁻¹⁰ threshold and the sums of squares' over- and underflow, rank-deficient, noisy, Hilbert, empty, non-finite and seeded matrices — 167 of the 563 are the oracle's ComputationError, 159 of them hisab 1.4.0's Jacobi SVD not converging on a finite matrix (its `EPSILON_F64²` test); `conservation_law_count` (A; usize words); `rate_from_stoichiometry` (B; the matrix, then `v:n` + rates) with the −0.0 empty sum, overflow and every Err. Rust's ragged matrices have no flat counterpart in the port (port plan §6.3) and are not emitted | — |
+| `fitting` | M5b | 578 | `src/m_fitting.rs`: `fit_arrhenius` (C: ln per point, exp; input two `v:n` slices; output `ArrheniusFit`'s fields `f:A f:Ea`) on exact synthetic data (k = 2^e exactly, 1/T linear in e), seeded multiplicative noise, temperatures δ apart across the QR's 10⁻¹² rank threshold, equal, subnormal and huge temperatures, rate constants from 5·10⁻³²⁴ to DBL_MAX, every Err in Rust's order; `fit_polynomial` (B; `v:n` x, `v:n` y, `i:degree`; output `v:degree+1` + `f:`) on the Rust tests' lines, exact integer polynomials of degree 0 … 7 fitted at, above and below their degree, seeded noise, ill-conditioned and degenerate Vandermonde systems, every Err (usize::MAX among them); `fit_beer_lambert` (B; the two slices, then `f:path_length`); `PolynomialFit::evaluate` (B; `v:n` coefficients, `f:x`) and `::degree` (A) | — |
+| `sensitivity` | M5b | 894 | `src/m_sensitivity.rs`, all class D: `equilibrium_constant_gradient` (`f:ΔG f:T`), `arrhenius_gradient` (`f:A f:Ea f:T`), `nernst_gradient` (`f:E° i:n f:T f:Q`), `gibbs_temperature_sensitivity` (`f:ΔH f:T f:ΔS`) over each argument's edges, exp's overflow and underflow ends, every u8 class of n, the Rust tests' points, seeded ones; **ADR 0002 #2**: 227 rows where the port returns Err (the oracle's output non-finite, or an input the port's validation refuses) noted `[ADR 0002 #2: the port's Err(V) (E:V)]`; `compute_gradient` (input `s:function v:k f:constants… v:n f:parameters…`, output `v:n` + `f:`) on the test functions below, built on hisab 1.4.0's `Tape` directly (the crate's `autodiff` feature, kimiya's own) | — |
 | `nuclear` | M4c (B3, B4) | 54,312 | `src/m_nuclear.rs`: `ISOTOPES` / `ISOTOPES[]` (output `s:symbol i:z i:a f:half_life_s s:decay_mode`), `lookup_isotope` (every label, case / space / prefix variants, near misses), `is_secular_equilibrium` (the edges against each other, λ_p at 0.01·λ_d ± 1–2 ulp, at RN(λ_d/100) ± 1 ulp over 300 signed magnitudes, the underflow and overflow ends; **ADR 0002 #14**: 208 rows noted with the exact λ_p < λ_d/100) (A); `decay_constant` (every decade, t½ = 1 giving LN_2, +∞ → 0), `activity`, `mass_defect` and `binding_energy_per_nucleon` (u32 probes 0 … u32::MAX on each side, the checked-add overflow), `binding_energy_mev`, `semi_empirical_binding_energy` (every Z ≤ A ≤ 3Z with A ≤ 300, Z = 0, the u32 extremes; **ADR 0002 #3**: the 23 NaN rows, z > a or a = 0, noted with the port's `Err(InvalidInput)`), `q_value` (`v:n` + floats twice; the −0.0 folds, ∞ − ∞, seeded) (B); `atoms_remaining`, `atoms_after_half_lives` (`2.0.powf(−n)`: integers −1100 … 1100, 2⁻ⁿ subnormal × N₀ up to DBL_MAX, the tie at n = 1075, N₀ = ±2^j, ±0, ±∞, NaN and 900 seeded n past both ends; **ADR 0002 #13**: 1,812 rows noted with the port's N₀/2ⁿ), `time_for_fraction`, `decay_chain_two_step` (output `f:N_A f:N_B f:N_C`: wide λ × λ × t grids, λ₁ = λ₂ exactly, λ₁ ≈ λ₂ either side of 10⁻¹², **pairs on the threshold to the ulp of 10⁻¹²**, e^(−λ_min·t) subnormal × N₀·λ₁, every isotope pair) (C); **ADR 0002 #32** (the overflow audit's B3, `audit::emit_nuclear`, appended with its own seed: 167 rows): `binding_energy_per_nucleon`'s Δm·931.494… past DBL_MAX with A bringing it back and not, 156 rows noted with the port's unbounded-exponent value; **ADR 0002 #33** (the overflow audit's B4, `audit::emit_nuclear_b4`, appended with its own seed: 88 rows): `q_value`'s two sums past DBL_MAX that cancel, 58 rows noted with the port's unbounded-exponent value | `src/nuclear_data.cyr` (`src/t_nuclear.rs`): the 18 `ISOTOPES` rows (label blob, `u8` Z, `u16` A, half-life, a **UTF-8** decay-mode blob) and `KM_ISOTOPES_COUNT`, with `Isotope`'s docs and the literal's three NUBASE2020 notes; the four nuclear constants are `src/constants.cyr`'s |
 | `numerics` | M5a | 243 | `src/m_numerics.rs`: hisab 1.4.0's routines that `src/numerics.cyr` transcribes, called directly (the crate's `hisab` dependency, the oracle's own locked version): `num::Pcg32::next_u32` (A; `Pcg32::new(seed, 1)`, input `i:seed i:count`, output `v:count` + `i:`) and `next_normal` (C), `num::rk4_trajectory` and `num::gaussian_elimination` (B; input `v:n` then n rows `v:n+1 f:…`, output the solution `v:n f:…` then the eliminated matrix `v:n(n+1) f:…`), `num::dopri45` and `num::euler_maruyama` (C) on the test systems below: t₀ ≠ 0, backward integration, t_end = t₀, the empty state, h_init 0 / negative / NaN / past the span, the 100 000-step limit, pivots at 10⁻¹² ± 1 ulp, NaN and ±∞ pivots, ties, Hilbert and seeded matrices; errors as hisab's variants (`E:ZeroSteps`, …). Replayed by `tests/numerics.tcyr`, not `tests/parity.tcyr`; 3 rows corrected (ADR 0006) | — |
 | `reaction` | M2a (B4, B5) | 2,406 | `src/m_reaction.rs`: `gibbs_free_energy` (B) and `equilibrium_constant` (C) over each argument's edges, ΔG from target exponents across exp's underflow/overflow ends, the Rust tests' values, seeded sweeps; `is_spontaneous` (A); **ADR 0002 #33** (the overflow audit's B4, `audit::emit_reaction`, appended with its own seed: 172 rows): `gibbs_free_energy`'s T·ΔS past DBL_MAX with ΔH bringing it back, T·ΔS subnormal; 57 rows noted with the port's unbounded-exponent value; **ADR 0002 #35** (B5, `audit::emit_reaction_b5`, appended with its own seed: 676 rows): `equilibrium_constant`'s R·T past DBL_MAX and subnormal, R·T at 2⁻¹⁰²² from below and the boundaries T = DBL_MAX/R and 2⁻¹⁰²¹/R, x past ±DBL_MAX and subnormal, ΔG between the two ends' thresholds at a short subnormal T (the ComputationError flips); 326 rows noted with the port's K or its ComputationError | — |
@@ -612,6 +615,37 @@ the same operation order, and the four copies (with this list) must stay in step
 
 The diffusions: `const` gᵢ = p₀, `zero` gᵢ = 0, `mult` gᵢ = p₀·yᵢ, `none` writes nothing.
 
+### The M5b test functions (`src/m_sensitivity.rs`)
+
+`compute_gradient` takes a closure over hisab's reverse-mode tape, so a golden row names its function with an `s:` token,
+its constants `p` with `v:k` + `f:` tokens and its parameters x with `v:n` + `f:` tokens. `src/m_sensitivity.rs`'s `build`
+records each on hisab 1.4.0's `Tape`; `tests/sens_functions.cyr` (the port's callbacks, on hisab 3.4.1's `ad_*` tape) and
+`validate.py` §27 (on its replica of 1.4.0's tape) record the same operations in the same order, and the four copies
+(with this list) must stay in step:
+
+| Function | Parameters x | Constants p | f |
+|---|---|---|---|
+| `quad` | x, y | — | x·x + 3·y (the Rust test `custom_gradient`) |
+| `keq` | ΔG, T | R | exp(−ΔG/(R·T)) (`equilibrium_constant_gradient`'s tape) |
+| `arrhenius` | A, Ea, T | R | A·exp(−Ea/(R·T)) (`arrhenius_gradient`'s) |
+| `nernst` | E°, T, Q | R, nF | E° − ((R·T)/nF)·ln Q (`nernst_gradient`'s) |
+| `gibbs` | ΔH, T, ΔS | — | ΔH − T·ΔS (`gibbs_temperature_sensitivity`'s) |
+| `vant_hoff` | ΔH, ΔS, T | R | exp(−(ΔH − T·ΔS)/(R·T)) |
+| `eyring` | ΔG‡, T | k_B, h, R | ((k_B·T)/h)·exp(−ΔG‡/(R·T)) |
+| `ideal_gas` | n, T, V | R | ((n·R)·T)/V |
+| `clausius` | p₁, ΔH, T₁, T₂ | R | p₁·exp(−(ΔH·(1/T₂ − 1/T₁))/R), one constant 1 shared |
+| `lj` | ε, σ, r | — | (4·ε)·((σ/r)^12 − (σ/r)^6), `powf` |
+| `morse` | D_e, a, r, r_e | — | D_e·((1 − exp(−(a·(r − r_e))))·(1 − exp(…))) |
+| `rosenbrock` | x, y | — | (1 − x)·(1 − x) + 100·((y − x·x)·(y − x·x)) |
+| `trig` | x, y | — | sin x·cos y + x/y |
+| `logs` | x, y, z | — | ln x + z·ln y |
+| `sum_squares` | x₀ … | — | ((x₀·x₀ + x₁·x₁) + …) |
+| `product` | x₀ … | — | ((x₀·x₁)·x₂)·… |
+| `shared` | x | — | (x·x + x)·(x·x) − x, the node x·x used twice |
+| `unused` | x, y | — | x·x |
+| `ident` | x | — | x |
+| `const` | — | c | the constant c |
+
 ### The weak acid / base Newton's path (M3a)
 
 `solution::weak_acid_ph` / `weak_base_ph` rows that reach the iteration carry its exit in their note:
@@ -905,6 +939,15 @@ needs only Python 3, with no packages (run it with `-I`), and the system MPFR li
   the hard rows counted (percent_yield's ties, subnormal ones included, and range ends; the yield's over- and underflowing
   m/c and its midpoints; limiting_reagent's exact and rounded ties, both overflowing, both underflowing; the rows exactly
   1/10 off); the exact 1/10 pinned (1/10 − 2⁻⁸⁰ and the nearest larger tolerance a row needs each change some row).
+- **network, fitting, sensitivity** (M5b, §27): every row recomputed from Rust 1.2.0's `network.rs`, `fitting.rs` and
+  `sensitivity.rs` with the hisab 1.4.0 routines they call transcribed — `CsrMatrix::from_dense`, `matrix_rank` on
+  `svd`'s one-sided Jacobi (its singular values; the 100·max(m, n) sweeps and the EPSILON_F64² test that most dense
+  matrices never pass), `qr_decompose` and `least_squares_poly`, and the reverse-mode `Tape` with its zero-adjoint skip
+  (the test functions as above). fit_arrhenius' ln and exp and the tapes' primitives are logged for the corrected oracle
+  (no row needs a correction on glibc 2.44). ADR 0002 #2: each fixed-formula gradient row is noted with the port's Err
+  exactly where `equilibrium_constant`, `arrhenius_rate`, `nernst_potential` or `gibbs_free_energy` refuses its input or
+  an entry is not finite, and an unnoted row's entries are finite. The rank's 10⁻¹⁰ and the CSR's 10⁻¹² thresholds (one
+  ulp down) and the QR's 10⁻¹² (halved, doubled) each change some golden row (4–8).
 - **The corrected oracle** (M3c-1, ADR 0006): every row whose replica calls a primitive is evaluated again with each
   primitive result correctly rounded (the `math` rows of the primitives are their MPFR values), and the corrections
   are checked against `tests/golden/<module>.cr.tsv` as [above](#the-corrected-oracle-modulecrtsv-adr-0006).

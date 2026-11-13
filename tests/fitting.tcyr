@@ -1,0 +1,548 @@
+# fitting.tcyr — the tests of rust-old/src/fitting.rs, ported one for one (each test_group is the Rust test's name; all
+# 16), its two integration tests (rust-old/tests/integration.rs), and Cyrius-only groups for the slices and the
+# caller's buffer, the order of the checks, the structs and hisab 1.4.0's transcribed least squares. Adaptations: a
+# slice is a pointer and a count, the PolynomialFit a KmPolynomialFit over the caller's coefficient buffer, the
+# ArrheniusFit the KmArrheniusFit fit_arrhenius writes; usize::MAX is the word −1; a value Rust writes with an exponent
+# is written positionally. The synthetic data take the correctly rounded exp (Rust: glibc's). The golden corpus
+# separately checks every function over its grid (tests/parity.tcyr).
+
+include "src/error.cyr"
+include "src/constants.cyr"
+include "src/mathx_data.cyr"
+include "src/mathx.cyr"
+include "src/validate.cyr"
+include "src/numerics.cyr"
+include "src/fitting.cyr"
+
+alloc_init();
+
+# 1 if the Result (t, v) is Err(code).
+#must_use
+fn is_err_code(t, v, code): i64 {
+    if (is_err_result(t) == 1 && v == code) { return 1; }
+    return 0;
+}
+
+# A quiet NaN (Rust's f64::NAN).
+#must_use
+fn nan(): f64 {
+    var x: f64 = 0x7FF8000000000000;
+    return x;
+}
+
+# +∞.
+#must_use
+fn inf(): f64 {
+    var x: f64 = 0x7FF0000000000000;
+    return x;
+}
+
+# 1 if |actual − expected| / |expected| < tol.
+#must_use
+fn rel_close(actual: f64, expected: f64, tol: f64): i64 {
+    var d: f64 = actual - expected;
+    var a: f64 = f64_abs(d);
+    var e: f64 = f64_abs(expected);
+    var lim: f64 = tol * e;
+    if (a < lim) { return 1; }
+    return 0;
+}
+
+# 1 if |actual − expected| < tol.
+#must_use
+fn abs_close(actual: f64, expected: f64, tol: f64): i64 {
+    var d: f64 = actual - expected;
+    var a: f64 = f64_abs(d);
+    if (a < tol) { return 1; }
+    return 0;
+}
+
+# k = A·exp(−Ea/(R·T)) for each of the n temperatures at temps, into rates.
+fn arrhenius_data(a: f64, ea: f64, temps, n, rates) {
+    var k = 0;
+    while (k < n) {
+        var t: f64 = load64(temps + 8 * k);
+        var rt: f64 = KM_GAS_CONSTANT * t;
+        var neg: f64 = -ea;
+        var x: f64 = neg / rt;
+        var e: f64 = _km_cr_exp(x);
+        var r: f64 = a * e;
+        store64(rates + 8 * k, r);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# ── Arrhenius fitting ───────────────────────────────────────────────────────────────
+
+fn _t_fit_arrhenius_known_data() {
+    test_group("fit_arrhenius_known_data");
+    var temps: f64[5];
+    temps[0] = 300.0;
+    temps[1] = 350.0;
+    temps[2] = 400.0;
+    temps[3] = 450.0;
+    temps[4] = 500.0;
+    var rates: f64[5];
+    arrhenius_data(10000000000000.0, 80000.0, &temps, 5, &rates);
+    var fit: KmArrheniusFit;
+    var t, v = fit_arrhenius(&temps, 5, &rates, 5, &fit);
+    assert(is_ok(t) == 1 && v == 2, "Ok");
+    assert(rel_close(fit.activation_energy_j, 80000.0, 0.00000001) == 1, "Ea should be 80 kJ/mol");
+    assert(rel_close(fit.pre_exponential, 10000000000000.0, 0.00000001) == 1, "A should be 1e13");
+}
+
+fn _t_fit_arrhenius_insufficient_data() {
+    test_group("fit_arrhenius_insufficient_data");
+    var temps: f64[1];
+    temps[0] = 300.0;
+    var rates: f64[1];
+    rates[0] = 1.0;
+    var fit: KmArrheniusFit;
+    var t, v = fit_arrhenius(&temps, 1, &rates, 1, &fit);
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT) == 1, "one point");
+}
+
+fn _t_fit_arrhenius_negative_temp_is_error() {
+    test_group("fit_arrhenius_negative_temp_is_error");
+    var temps: f64[2];
+    temps[0] = 300.0;
+    temps[1] = -100.0;
+    var rates: f64[2];
+    rates[0] = 1.0;
+    rates[1] = 2.0;
+    var fit: KmArrheniusFit;
+    var t, v = fit_arrhenius(&temps, 2, &rates, 2, &fit);
+    assert(is_err_code(t, v, KM_ERR_INVALID_TEMPERATURE) == 1, "-100 K");
+}
+
+fn _t_fit_arrhenius_zero_rate_is_error() {
+    test_group("fit_arrhenius_zero_rate_is_error");
+    var temps: f64[2];
+    temps[0] = 300.0;
+    temps[1] = 400.0;
+    var rates: f64[2];
+    rates[0] = 1.0;
+    rates[1] = 0.0;
+    var fit: KmArrheniusFit;
+    var t, v = fit_arrhenius(&temps, 2, &rates, 2, &fit);
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT) == 1, "k = 0");
+}
+
+fn _t_fit_arrhenius_non_finite_is_error() {
+    test_group("fit_arrhenius_non_finite_is_error");
+    var temps: f64[2];
+    var rates: f64[2];
+    var fit: KmArrheniusFit;
+    temps[0] = 300.0;
+    temps[1] = nan();
+    rates[0] = 1.0;
+    rates[1] = 2.0;
+    var t, v = fit_arrhenius(&temps, 2, &rates, 2, &fit);
+    assert(is_err_result(t) == 1, "T NaN");
+    temps[1] = inf();
+    var t1, v1 = fit_arrhenius(&temps, 2, &rates, 2, &fit);
+    assert(is_err_result(t1) == 1, "T inf");
+    temps[1] = 400.0;
+    rates[1] = nan();
+    var t2, v2 = fit_arrhenius(&temps, 2, &rates, 2, &fit);
+    assert(is_err_result(t2) == 1, "k NaN");
+    rates[1] = inf();
+    var t3, v3 = fit_arrhenius(&temps, 2, &rates, 2, &fit);
+    assert(is_err_result(t3) == 1, "k inf");
+}
+
+# ── Polynomial fitting ──────────────────────────────────────────────────────────────
+
+fn _t_fit_linear() {
+    test_group("fit_linear");
+    var x: f64[5];
+    var y: f64[5];
+    var k = 0;
+    while (k < 5) {
+        var xi: f64 = f64_from(k + 1);
+        x[k] = xi;
+        var p: f64 = 3.0 * xi;
+        y[k] = 2.0 + p;
+        k = k + 1;
+    }
+    var c: f64[2];
+    var t, v = fit_polynomial(&x, 5, &y, 5, 1, &c, 2);
+    var c0: f64 = c[0];
+    var c1: f64 = c[1];
+    assert(is_ok(t) == 1 && v == 2, "two coefficients");
+    assert(abs_close(c0, 2.0, 0.0000000001) == 1, "a0 = 2");
+    assert(abs_close(c1, 3.0, 0.0000000001) == 1, "a1 = 3");
+}
+
+fn _t_fit_quadratic() {
+    test_group("fit_quadratic");
+    var x: f64[10];
+    var y: f64[10];
+    var k = 0;
+    while (k < 10) {
+        var xi: f64 = f64_from(k);
+        x[k] = xi;
+        var a: f64 = 2.0 * xi;
+        var b: f64 = 0.5 * xi;
+        b = b * xi;
+        var s: f64 = 1.0 + a;
+        y[k] = s + b;
+        k = k + 1;
+    }
+    var c: f64[3];
+    var t, v = fit_polynomial(&x, 10, &y, 10, 2, &c, 3);
+    var c0: f64 = c[0];
+    var c1: f64 = c[1];
+    var c2: f64 = c[2];
+    assert(is_ok(t) == 1 && v == 3, "three coefficients");
+    assert(abs_close(c0, 1.0, 0.0000000001) == 1, "a0 = 1");
+    assert(abs_close(c1, 2.0, 0.0000000001) == 1, "a1 = 2");
+    assert(abs_close(c2, 0.5, 0.0000000001) == 1, "a2 = 0.5");
+}
+
+fn _t_polynomial_evaluate() {
+    test_group("polynomial_evaluate");
+    var c: f64[3];
+    c[0] = 1.0;
+    c[1] = 2.0;
+    c[2] = 3.0;
+    var fit: KmPolynomialFit;
+    fit.coefficients = &c;
+    fit.len = 3;
+    var e0: f64 = fit.evaluate(0.0);
+    var e1: f64 = fit.evaluate(1.0);
+    var e2: f64 = fit.evaluate(2.0);
+    assert(e0 == 1.0, "f(0) = 1");
+    assert(e1 == 6.0, "f(1) = 6");
+    assert(e2 == 17.0, "f(2) = 17");
+}
+
+fn _t_fit_polynomial_insufficient_data() {
+    test_group("fit_polynomial_insufficient_data");
+    var x: f64[2];
+    x[0] = 1.0;
+    x[1] = 2.0;
+    var c: f64[3];
+    var t, v = fit_polynomial(&x, 2, &x, 2, 2, &c, 3);
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT) == 1, "2 points, degree 2");
+}
+
+fn _t_fit_polynomial_max_degree_is_error_not_overflow() {
+    test_group("fit_polynomial_max_degree_is_error_not_overflow");
+    var x: f64[2];
+    x[0] = 1.0;
+    x[1] = 2.0;
+    var c: f64[3];
+    var t, v = fit_polynomial(&x, 2, &x, 2, 0 - 1, &c, 3);
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT) == 1, "degree usize::MAX: InvalidInput");
+}
+
+fn _t_fit_polynomial_non_finite_is_error() {
+    test_group("fit_polynomial_non_finite_is_error");
+    var x: f64[3];
+    var y: f64[3];
+    var c: f64[2];
+    x[0] = 0.0;
+    x[1] = 1.0;
+    x[2] = 2.0;
+    y[0] = 1.0;
+    y[1] = nan();
+    y[2] = 3.0;
+    var t, v = fit_polynomial(&x, 3, &y, 3, 1, &c, 2);
+    assert(is_err_result(t) == 1, "y NaN");
+    y[1] = 2.0;
+    x[1] = inf();
+    var t1, v1 = fit_polynomial(&x, 3, &y, 3, 1, &c, 2);
+    assert(is_err_result(t1) == 1, "x inf");
+    x[1] = 1.0;
+    x[0] = nan();
+    var t2, v2 = fit_polynomial(&x, 3, &y, 3, 1, &c, 2);
+    assert(is_err_result(t2) == 1, "x NaN");
+}
+
+# ── Beer–Lambert fitting ────────────────────────────────────────────────────────────
+
+fn _t_fit_beer_lambert_known() {
+    test_group("fit_beer_lambert_known");
+    var c: f64[5];
+    var a: f64[5];
+    c[0] = 0.01;
+    c[1] = 0.02;
+    c[2] = 0.03;
+    c[3] = 0.04;
+    c[4] = 0.05;
+    var k = 0;
+    while (k < 5) {
+        var ck: f64 = c[k];
+        a[k] = 100.0 * ck;
+        k = k + 1;
+    }
+    var t, e = fit_beer_lambert(&c, 5, &a, 5, 1.0);
+    assert(is_ok(t) == 1 && rel_close(e, 100.0, 0.00000001) == 1, "ε should be 100");
+}
+
+fn _t_fit_beer_lambert_different_path() {
+    test_group("fit_beer_lambert_different_path");
+    var c: f64[4];
+    var a: f64[4];
+    c[0] = 0.001;
+    c[1] = 0.002;
+    c[2] = 0.003;
+    c[3] = 0.004;
+    var k = 0;
+    while (k < 4) {
+        var ck: f64 = c[k];
+        var p: f64 = 200.0 * 2.0;
+        a[k] = p * ck;
+        k = k + 1;
+    }
+    var t, e = fit_beer_lambert(&c, 4, &a, 4, 2.0);
+    assert(is_ok(t) == 1 && rel_close(e, 200.0, 0.00000001) == 1, "ε should be 200");
+}
+
+fn _t_fit_beer_lambert_zero_path_is_error() {
+    test_group("fit_beer_lambert_zero_path_is_error");
+    var c: f64[1];
+    c[0] = 0.01;
+    var a: f64[1];
+    a[0] = 1.0;
+    var t, v = fit_beer_lambert(&c, 1, &a, 1, 0.0);
+    assert(is_err_result(t) == 1, "l = 0");
+}
+
+fn _t_fit_beer_lambert_intercept_does_not_bias_epsilon() {
+    test_group("fit_beer_lambert_intercept_does_not_bias_epsilon");
+    var c: f64[6];
+    var a: f64[6];
+    c[0] = 0.0;
+    c[1] = 0.01;
+    c[2] = 0.02;
+    c[3] = 0.03;
+    c[4] = 0.04;
+    c[5] = 0.05;
+    var k = 0;
+    while (k < 6) {
+        var cc: f64 = c[k];
+        var p: f64 = 150.0 * cc;
+        a[k] = p + 0.005;
+        k = k + 1;
+    }
+    var t, e = fit_beer_lambert(&c, 6, &a, 6, 1.0);
+    assert(is_ok(t) == 1 && rel_close(e, 150.0, 0.00000001) == 1, "the blank's offset is the intercept's");
+}
+
+fn _t_fit_beer_lambert_non_finite_is_error() {
+    test_group("fit_beer_lambert_non_finite_is_error");
+    var c: f64[3];
+    var a: f64[3];
+    c[0] = 0.01;
+    c[1] = 0.02;
+    c[2] = 0.03;
+    a[0] = 1.0;
+    a[1] = 2.0;
+    a[2] = 3.0;
+    var t, v = fit_beer_lambert(&c, 3, &a, 3, nan());
+    assert(is_err_result(t) == 1, "l NaN");
+    var t1, v1 = fit_beer_lambert(&c, 3, &a, 3, inf());
+    assert(is_err_result(t1) == 1, "l inf");
+    a[1] = nan();
+    var t2, v2 = fit_beer_lambert(&c, 3, &a, 3, 1.0);
+    assert(is_err_result(t2) == 1, "A NaN");
+}
+
+# ── the integration tests (rust-old/tests/integration.rs) ───────────────────────────
+
+fn _t_fitting_arrhenius_roundtrip() {
+    test_group("fitting_arrhenius_roundtrip");
+    var temps: f64[7];
+    var k = 0;
+    while (k < 7) {
+        var tk: f64 = f64_from(280 + 20 * k);
+        temps[k] = tk;
+        k = k + 1;
+    }
+    var rates: f64[7];
+    arrhenius_data(10000000000.0, 50000.0, &temps, 7, &rates);
+    var fit: KmArrheniusFit;
+    var t, v = fit_arrhenius(&temps, 7, &rates, 7, &fit);
+    assert(is_ok(t) == 1 && rel_close(fit.activation_energy_j, 50000.0, 0.00000001) == 1, "Ea recovered to 1e-8");
+}
+
+fn _t_fitting_calibration_curve() {
+    test_group("fitting_calibration_curve");
+    var c: f64[6];
+    var a: f64[6];
+    c[0] = 0.0;
+    c[1] = 0.01;
+    c[2] = 0.02;
+    c[3] = 0.03;
+    c[4] = 0.04;
+    c[5] = 0.05;
+    var k = 0;
+    while (k < 6) {
+        var cc: f64 = c[k];
+        var p: f64 = 150.0 * cc;
+        a[k] = p + 0.005;
+        k = k + 1;
+    }
+    var t, e = fit_beer_lambert(&c, 6, &a, 6, 1.0);
+    assert(is_ok(t) == 1 && abs_close(e, 150.0, 0.00000001) == 1, "ε ≈ 150");
+}
+
+# ── Cyrius-only ─────────────────────────────────────────────────────────────────────
+
+# The slices and the caller's buffer: a null pointer with values or a negative count is InvalidInput; Rust's errors
+# come before the capacity check; coefficients that do not fit leave `out` alone.
+fn _t_cyrius_slices_and_buffers() {
+    test_group("cyrius_slices_and_buffers");
+    var x: f64[4];
+    x[0] = 1.0;
+    x[1] = 2.0;
+    x[2] = 3.0;
+    x[3] = 4.0;
+    var c: f64[3];
+    c[0] = 777.0;
+    var t, v = fit_polynomial(&x, 4, &x, 4, 2, &c, 2);
+    var c0: f64 = c[0];
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT) == 1 && c0 == 777.0, "3 coefficients in 2: untouched");
+    var t1, v1 = fit_polynomial(&x, 4, &x, 4, 2, 0, 3);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "a null out");
+    var t2, v2 = fit_polynomial(0, 4, &x, 4, 1, &c, 3);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "a null x with values");
+    var t3, v3 = fit_polynomial(&x, 0 - 1, &x, 4, 1, &c, 3);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT) == 1, "a negative count");
+    var fit: KmArrheniusFit;
+    var t4, v4 = fit_arrhenius(&x, 4, 0, 4, &fit);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "a null rate list");
+    var t5, v5 = fit_beer_lambert(0, 2, &x, 2, 1.0);
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_INPUT) == 1, "a null concentration list");
+    var t6, v6 = fit_polynomial(&x, 3, &x, 3, 2, &c, 3);
+    assert(is_ok(t6) == 1 && v6 == 3, "the interpolating degree");
+}
+
+# The order of the checks: the lengths, then the count, then per pair the temperature before the rate constant (pair
+# by pair), as Rust; equal temperatures are the least squares' ComputationError.
+fn _t_cyrius_check_order() {
+    test_group("cyrius_check_order");
+    var temps: f64[3];
+    var rates: f64[3];
+    temps[0] = 300.0;
+    temps[1] = -1.0;
+    temps[2] = 500.0;
+    rates[0] = 0.0;
+    rates[1] = 2.0;
+    rates[2] = 3.0;
+    var fit: KmArrheniusFit;
+    var t, v = fit_arrhenius(&temps, 3, &rates, 3, &fit);
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT) == 1, "pair 0's rate constant before pair 1's temperature");
+    rates[0] = 1.0;
+    var t1, v1 = fit_arrhenius(&temps, 3, &rates, 3, &fit);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_TEMPERATURE) == 1, "then pair 1's temperature");
+    var t2, v2 = fit_arrhenius(&temps, 3, &rates, 2, &fit);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "the lengths first");
+    temps[1] = 300.0;
+    temps[2] = 300.0;
+    var t3, v3 = fit_arrhenius(&temps, 3, &rates, 3, &fit);
+    assert(is_err_code(t3, v3, KM_ERR_COMPUTATION_ERROR) == 1, "equal temperatures: the QR's dependent columns");
+    var x: f64[3];
+    x[0] = nan();
+    x[1] = 1.0;
+    x[2] = 2.0;
+    var c: f64[4];
+    var t4, v4 = fit_polynomial(&x, 3, &x, 3, 3, &c, 4);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "too few points before the NaN");
+}
+
+# The structs: fit_arrhenius writes KmArrheniusFit's fields in declaration order (A at +0, Ea at +8); a KmPolynomialFit
+# is a view of a buffer, its degree 0 for no coefficients and its value at x 0.0, and a power that overflows against a
+# zero coefficient is ∞·0 = NaN, as in Rust.
+fn _t_cyrius_structs() {
+    test_group("cyrius_structs");
+    var temps: f64[2];
+    temps[0] = 300.0;
+    temps[1] = 400.0;
+    var rates: f64[2];
+    rates[0] = 1.0;
+    rates[1] = 1.0;
+    var fit: KmArrheniusFit;
+    var t, v = fit_arrhenius(&temps, 2, &rates, 2, &fit);
+    var raw: f64 = load64(&fit + 8);
+    assert(is_ok(t) == 1 && fit.pre_exponential == 1.0 && fit.activation_energy_j == raw, "Ea = 0 at +8");
+    var p: KmPolynomialFit;
+    p.coefficients = 0;
+    p.len = 0;
+    var z: f64 = p.evaluate(5.0);
+    assert(p.degree() == 0 && z == 0.0, "no coefficients: degree 0, value 0.0");
+    var c: f64[2];
+    c[0] = 1.0;
+    c[1] = 0.0;
+    p.coefficients = &c;
+    p.len = 2;
+    var big: f64 = p.evaluate(inf());
+    assert(p.degree() == 1 && _km_is_nan(big) == 1, "[1, 0] at +∞: 1 + 0·∞ = NaN");
+}
+
+# hisab 1.4.0's least squares, transcribed: its own guards (no points, too few for the degree) and the dependent
+# columns are its InvalidInput, which kimiya's callers map to their errors; a NaN x (which fit_polynomial refuses
+# first) gives a NaN norm, which passes the 10⁻¹² test, and NaN coefficients, as 1.4.0's.
+fn _t_cyrius_least_squares_helper() {
+    test_group("cyrius_least_squares_helper");
+    var x: f64[3];
+    var y: f64[3];
+    x[0] = 1.0;
+    x[1] = 2.0;
+    x[2] = 3.0;
+    y[0] = 2.0;
+    y[1] = 4.0;
+    y[2] = 6.0;
+    var c: f64[3];
+    var t, v = _km_least_squares_poly(&x, &y, 0, 0, &c);
+    assert(is_err_code(t, v, _KM_NUM_ERR_INVALID_INPUT) == 1, "no points");
+    var t1, v1 = _km_least_squares_poly(&x, &y, 3, 3, &c);
+    assert(is_err_code(t1, v1, _KM_NUM_ERR_INVALID_INPUT) == 1, "3 points, degree 3");
+    var t2, v2 = _km_least_squares_poly(&x, &y, 3, 1, &c);
+    var c0: f64 = c[0];
+    var c1: f64 = c[1];
+    assert(is_ok(t2) == 1 && v2 == 2, "y = 2x: two coefficients");
+    assert(abs_close(c0, 0.0, 0.000000000001) == 1 && abs_close(c1, 2.0, 0.000000000001) == 1, "y = 2x");
+    x[1] = 1.0;
+    x[2] = 1.0;
+    var t3, v3 = _km_least_squares_poly(&x, &y, 3, 1, &c);
+    assert(is_err_code(t3, v3, _KM_NUM_ERR_INVALID_INPUT) == 1, "equal x: dependent columns");
+    x[0] = nan();
+    var t4, v4 = _km_least_squares_poly(&x, &y, 3, 1, &c);
+    var n0: f64 = c[0];
+    assert(is_ok(t4) == 1 && _km_is_nan(n0) == 1, "a NaN x: Ok with NaN coefficients");
+}
+
+# Runs every test group; returns the failure count from assert_summary().
+fn main(): i64 {
+    _t_fit_arrhenius_known_data();
+    _t_fit_arrhenius_insufficient_data();
+    _t_fit_arrhenius_negative_temp_is_error();
+    _t_fit_arrhenius_zero_rate_is_error();
+    _t_fit_arrhenius_non_finite_is_error();
+    _t_fit_linear();
+    _t_fit_quadratic();
+    _t_polynomial_evaluate();
+    _t_fit_polynomial_insufficient_data();
+    _t_fit_polynomial_max_degree_is_error_not_overflow();
+    _t_fit_polynomial_non_finite_is_error();
+    _t_fit_beer_lambert_known();
+    _t_fit_beer_lambert_different_path();
+    _t_fit_beer_lambert_zero_path_is_error();
+    _t_fit_beer_lambert_intercept_does_not_bias_epsilon();
+    _t_fit_beer_lambert_non_finite_is_error();
+    _t_fitting_arrhenius_roundtrip();
+    _t_fitting_calibration_curve();
+    _t_cyrius_slices_and_buffers();
+    _t_cyrius_check_order();
+    _t_cyrius_structs();
+    _t_cyrius_least_squares_helper();
+    return assert_summary();
+}
+
+var exit_code = main();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

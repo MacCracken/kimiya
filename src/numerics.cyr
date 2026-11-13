@@ -21,7 +21,13 @@
 # where a work table can't be allocated (Rust would abort). Work tables of up to _KM_NUM_STACK f64 are on the stack;
 # larger ones come from the bump allocator (which never frees), zeroed as Rust's `vec![0.0; n]`.
 #
-# hisab 1.4.0's `num::least_squares_poly` (fitting) and `num::matrix_rank` (network) join this file in M5b.
+# M5b adds hisab 1.4.0's `num::least_squares_poly` (fitting: the Vandermonde system by `powi`, modified Gram–Schmidt QR
+# with its 10⁻¹² rank threshold, back substitution), `num::matrix_rank` with `num::svd` (network: one-sided Jacobi
+# rotations to its EPSILON_F64² test, the column norms counted above the threshold) and `CsrMatrix::from_dense`
+# (network: entries with |v| > 10⁻¹² kept, into a hisab 3.4.1 CSR). hisab 3.4.1's svd_compute_checked answers where
+# 1.4.0's Jacobi does not converge (most dense matrices: the network golden rows) and refuses the non-finite entries
+# 1.4.0 counts, and its csr_from_dense keeps every nonzero entry, so all three are transcribed (ADR 0003's M5b
+# amendment); only + − × ÷, √ and powi are on their paths, so every result is the oracle's bit for bit.
 
 include "lib/alloc.cyr"
 include "lib/hisab.cyr"
@@ -610,4 +616,304 @@ fn _km_euler_maruyama_system(drift, dctx, diff, gctx, t0: f64, y0, n, t_end: f64
     }
     if (fin != 0) { _km_num_copy(fin, y, n); }
     return Ok(steps + 1);
+}
+
+# ── polynomial least squares (num::least_squares_poly) ───────────────────────────────
+
+# hisab 1.4.0's `num::least_squares_poly`: the degree-`degree` polynomial a0 + a1·x + … fitting the m points (x[k],
+# y[k]) in least squares. Its Vandermonde columns x^j (`f64::powi`, `_km_powi`) are decomposed by `qr_decompose`'s
+# modified Gram–Schmidt — for each column j, against each earlier unit column i: the dot product (Rust's `.sum()`,
+# folded from −0.0) to R, the projection subtracted; then the norm √Σ (from −0.0) to R's diagonal, Err below
+# EPSILON_F64 (10⁻¹²; a NaN norm passes), the column divided by it — then Qᵀy, and back substitution from the
+# last coefficient, each sum from Qᵀy down the row. The n = degree + 1 coefficients go to `out`. Ok(n);
+# Err(_KM_NUM_ERR_INVALID_INPUT) for m = 0, fewer than n points or a degree past usize::MAX − 1 (as an unsigned
+# word), or the dependent-columns case; Err(_KM_NUM_ERR_ALLOC). Work: Q (n·m f64) and R (n·n), on the stack up to
+# _KM_NUM_LS_STACK words.
+const _KM_NUM_LS_STACK = 384;
+#must_use
+fn _km_least_squares_poly(x, y, m, degree, out): Result {
+    if (m == 0) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
+    if (degree < 0 || degree >= m) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
+    var n = degree + 1;
+    var st: f64[384];
+    var w = _km_num_table(&st, _KM_NUM_LS_STACK, n * m + n * n);
+    if (w == 0) { return Err(_KM_NUM_ERR_ALLOC); }
+    var q = w;                              # column j at q + 8·j·m (column-major, as Rust's Vec<Vec<f64>> of columns)
+    var r = w + 8 * n * m;                  # R[i][j] stored as r[j][i], at r + 8·(j·n + i)
+    var j = 0;
+    while (j < n) {
+        var k = 0;
+        while (k < m) {
+            var xk: f64 = load64(x + 8 * k);
+            var pw: f64 = _km_powi(xk, j);
+            store64(q + 8 * (j * m + k), pw);
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+    var eps: f64 = EPSILON_F64;
+    j = 0;
+    while (j < n) {
+        var qj = q + 8 * j * m;
+        var i = 0;
+        while (i < j) {
+            var qi = q + 8 * i * m;
+            var dot: f64 = -0.0;
+            var k2 = 0;
+            while (k2 < m) {
+                var a: f64 = load64(qi + 8 * k2);
+                var b: f64 = load64(qj + 8 * k2);
+                var p: f64 = a * b;
+                dot = dot + p;
+                k2 = k2 + 1;
+            }
+            store64(r + 8 * (j * n + i), dot);
+            k2 = 0;
+            while (k2 < m) {
+                var c: f64 = load64(qj + 8 * k2);
+                var d: f64 = load64(qi + 8 * k2);
+                var pd: f64 = dot * d;
+                var nc: f64 = c - pd;
+                store64(qj + 8 * k2, nc);
+                k2 = k2 + 1;
+            }
+            i = i + 1;
+        }
+        var ss: f64 = -0.0;
+        var k3 = 0;
+        while (k3 < m) {
+            var e: f64 = load64(qj + 8 * k3);
+            var e2: f64 = e * e;
+            ss = ss + e2;
+            k3 = k3 + 1;
+        }
+        var norm: f64 = f64_sqrt(ss);
+        if (norm < eps) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
+        store64(r + 8 * (j * n + j), norm);
+        k3 = 0;
+        while (k3 < m) {
+            var g: f64 = load64(qj + 8 * k3);
+            var gn: f64 = g / norm;
+            store64(qj + 8 * k3, gn);
+            k3 = k3 + 1;
+        }
+        j = j + 1;
+    }
+    # Qᵀy into out (each coefficient's slot), then back substitution in place: out[i] is read as Qᵀy[i] before it is
+    # overwritten, and only the coefficients above i are read from it.
+    j = 0;
+    while (j < n) {
+        var qj2 = q + 8 * j * m;
+        var t: f64 = -0.0;
+        var k4 = 0;
+        while (k4 < m) {
+            var qv: f64 = load64(qj2 + 8 * k4);
+            var yv: f64 = load64(y + 8 * k4);
+            var py: f64 = qv * yv;
+            t = t + py;
+            k4 = k4 + 1;
+        }
+        store64(out + 8 * j, t);
+        j = j + 1;
+    }
+    var i2 = n - 1;
+    while (i2 >= 0) {
+        var sum: f64 = load64(out + 8 * i2);
+        var j2 = i2 + 1;
+        while (j2 < n) {
+            var rv: f64 = load64(r + 8 * (j2 * n + i2));
+            var cv: f64 = load64(out + 8 * j2);
+            var pr: f64 = rv * cv;
+            sum = sum - pr;
+            j2 = j2 + 1;
+        }
+        var diag: f64 = load64(r + 8 * (i2 * n + i2));
+        var co: f64 = sum / diag;
+        store64(out + 8 * i2, co);
+        i2 = i2 - 1;
+    }
+    return Ok(n);
+}
+
+# ── the rank by one-sided Jacobi SVD (num::matrix_rank, num::svd) ────────────────────
+
+# hisab 1.4.0's `num::matrix_rank(a, Some(tol))` of the m × n row-major matrix at `a`: the number of singular values
+# above `tol` from `num::svd`. `svd` works on Aᵀ when m < n; `svd_tall` then rotates the vectors b — A's columns (m
+# ≥ n) or rows (m < n), w vectors of length l — in one-sided Jacobi sweeps: for each pair p < q the sums app, aqq,
+# apq (from +0.0, in one pass), skipped when |apq| ≤ EPSILON_F64²·√(app·aqq), else the rotation with τ = (aqq
+# − app)/(2·apq), t = 1/(τ + √(1 + τ²)) (or −1/(−τ + √(1 + τ²)) for τ < 0 or NaN), c = 1/√(1 +
+# t²), s = t·c, (b_p, b_q) ← (c·b_p − s·b_q, s·b_p + c·b_q); a sweep with no rotation ends the loop, and
+# 100·max(m, n) sweeps without one are Err(NoConvergence). Each singular value is its vector's norm √Σ b² (from
+# −0.0); 1.4.0's V, U, its basis extension and its descending sort feed nothing the count reads, so they are left
+# out. The test 10⁻²⁴·√(app·aqq) lies below the rounding of a rotated pair's dot product, so many matrices
+# never pass it (port plan §6.4, M5b): that is the oracle's NoConvergence, reproduced. Ok(rank);
+# Err(_KM_NUM_ERR_INVALID_INPUT) for m = 0 or n = 0; Err(_KM_NUM_ERR_NO_CONVERGENCE); Err(_KM_NUM_ERR_ALLOC). The
+# vectors: on the stack up to _KM_NUM_SVD_STACK words.
+const _KM_NUM_SVD_STACK = 256;
+#must_use
+fn _km_matrix_rank(a, m, n, tol: f64): Result {
+    if (m == 0 || n == 0) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
+    var w = n;                              # the vectors b_0 … b_{w−1}, each of length l
+    var l = m;
+    if (m < n) {
+        w = m;
+        l = n;
+    }
+    var st: f64[256];
+    var b = _km_num_table(&st, _KM_NUM_SVD_STACK, w * l);
+    if (b == 0) { return Err(_KM_NUM_ERR_ALLOC); }
+    var i = 0;
+    while (i < m) {
+        var j = 0;
+        while (j < n) {
+            var v = load64(a + 8 * (i * n + j));
+            if (m < n) { store64(b + 8 * (i * l + j), v); } else { store64(b + 8 * (j * l + i), v); }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    var e: f64 = EPSILON_F64;
+    var tol2: f64 = e * e;
+    var max_sweeps = 100 * l;
+    var one: f64 = 1.0;
+    var sweep = 0;
+    while (sweep < max_sweeps) {
+        var converged = 1;
+        var p = 0;
+        while (p < w) {
+            var bp = b + 8 * p * l;
+            var q = p + 1;
+            while (q < w) {
+                var bq = b + 8 * q * l;
+                var app: f64 = 0.0;
+                var aqq: f64 = 0.0;
+                var apq: f64 = 0.0;
+                var k = 0;
+                while (k < l) {
+                    var x: f64 = load64(bp + 8 * k);
+                    var y: f64 = load64(bq + 8 * k);
+                    var xx: f64 = x * x;
+                    var yy: f64 = y * y;
+                    var xy: f64 = x * y;
+                    app = app + xx;
+                    aqq = aqq + yy;
+                    apq = apq + xy;
+                    k = k + 1;
+                }
+                var pp: f64 = app * aqq;
+                var sq: f64 = f64_sqrt(pp);
+                var lim: f64 = tol2 * sq;
+                var aa: f64 = f64_abs(apq);
+                if (aa <= lim) {
+                    q = q + 1;
+                    continue;
+                }
+                converged = 0;
+                var dif: f64 = aqq - app;
+                var den: f64 = 2.0 * apq;
+                var tau: f64 = dif / den;
+                var tt: f64 = tau * tau;
+                var u: f64 = one + tt;
+                var su: f64 = f64_sqrt(u);
+                var t: f64 = 0.0;
+                if (tau >= 0.0) {
+                    var d1: f64 = tau + su;
+                    t = one / d1;
+                } else {
+                    var mt: f64 = -tau;
+                    var d2: f64 = mt + su;
+                    var mone: f64 = -1.0;
+                    t = mone / d2;
+                }
+                var t2: f64 = t * t;
+                var u2: f64 = one + t2;
+                var s2: f64 = f64_sqrt(u2);
+                var c: f64 = one / s2;
+                var s: f64 = t * c;
+                k = 0;
+                while (k < l) {
+                    var vp: f64 = load64(bp + 8 * k);
+                    var vq: f64 = load64(bq + 8 * k);
+                    var cp: f64 = c * vp;
+                    var sq2: f64 = s * vq;
+                    var np: f64 = cp - sq2;
+                    var sp: f64 = s * vp;
+                    var cq: f64 = c * vq;
+                    var nq: f64 = sp + cq;
+                    store64(bp + 8 * k, np);
+                    store64(bq + 8 * k, nq);
+                    k = k + 1;
+                }
+                q = q + 1;
+            }
+            p = p + 1;
+        }
+        if (converged == 1) { break; }
+        if (sweep == max_sweeps - 1) { return Err(_KM_NUM_ERR_NO_CONVERGENCE); }
+        sweep = sweep + 1;
+    }
+    var rank = 0;
+    var j2 = 0;
+    while (j2 < w) {
+        var bj = b + 8 * j2 * l;
+        var ss: f64 = -0.0;
+        var k5 = 0;
+        while (k5 < l) {
+            var z: f64 = load64(bj + 8 * k5);
+            var zz: f64 = z * z;
+            ss = ss + zz;
+            k5 = k5 + 1;
+        }
+        var sigma: f64 = f64_sqrt(ss);
+        if (sigma > tol) { rank = rank + 1; }
+        j2 = j2 + 1;
+    }
+    return Ok(rank);
+}
+
+# ── CSR (hisab 1.4.0's CsrMatrix::from_dense) ────────────────────────────────────────
+
+# hisab 1.4.0's `CsrMatrix::from_dense` of the m × n row-major matrix at `a`, as a hisab 3.4.1 CSR handle (csr_new):
+# the entries with |v| > EPSILON_F64 (10⁻¹²: never a zero or a NaN), row by row, their column indices, and the m + 1
+# row offsets. hisab 3.4.1's csr_from_dense keeps every nonzero entry (a structural test since its 2.15.0), so it would
+# store 10⁻¹³ and NaN where 1.4.0 drops them. The three arrays and the header come from the bump allocator (never
+# freed); an empty matrix's two data arrays are 0, as csr_from_dense's. The handle, or 0 when an allocation fails.
+#must_use
+fn _km_csr_from_dense(a, m, n): i64 {
+    var eps: f64 = EPSILON_F64;
+    var count = 0;
+    var k = 0;
+    while (k < m * n) {
+        var v: f64 = load64(a + 8 * k);
+        var av: f64 = f64_abs(v);
+        if (av > eps) { count = count + 1; }
+        k = k + 1;
+    }
+    var row_ptr = alloc(8 * (m + 1));
+    var col_idx = 0;
+    var values = 0;
+    if (count > 0) {
+        col_idx = alloc(8 * count);
+        values = alloc(8 * count);
+    }
+    if (row_ptr == 0 || (count > 0 && (col_idx == 0 || values == 0))) { return 0; }
+    store64(row_ptr, 0);
+    var pos = 0;
+    var i = 0;
+    while (i < m) {
+        var j = 0;
+        while (j < n) {
+            var x: f64 = load64(a + 8 * (i * n + j));
+            var ax: f64 = f64_abs(x);
+            if (ax > eps) {
+                store64(col_idx + 8 * pos, j);
+                store64(values + 8 * pos, x);
+                pos = pos + 1;
+            }
+            j = j + 1;
+        }
+        store64(row_ptr + 8 * (i + 1), pos);
+        i = i + 1;
+    }
+    return csr_new(m, n, count, row_ptr, col_idx, values);
 }

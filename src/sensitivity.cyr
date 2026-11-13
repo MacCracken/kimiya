@@ -1,0 +1,212 @@
+# sensitivity.cyr — sensitivity analysis: gradients of chemical quantities (port of rust-old/src/sensitivity.rs; M5b).
+#
+# - **ADR 0002 #2.** Rust's four fixed-formula gradients run hisab 1.4.0's reverse-mode tape and return bare values for
+#   any input, NaN and ±∞ included. Here they return a `Result`, validated as the module's own Rust functions validate
+#   (equilibrium_constant, arrhenius_rate, nernst_potential, gibbs_free_energy: the same codes in the same order), and
+#   Err(KM_ERR_COMPUTATION_ERROR) where an entry is not finite. The derivatives are closed forms: the tape's reverse
+#   sweep for each fixed expression, unrolled — every adjoint from +0.0, each contribution added in the sweep's node
+#   order, a node with a zero adjoint skipped as hisab 1.4.0's `backward` skips it (so 0 · ∞ never appears) — with the
+#   correctly rounded exp and ln (src/mathx.cyr, ADR 0006) where the tape calls glibc's. So every Ok is the oracle's
+#   vector to within its exp / ln rounding, and the golden rows compare it at class D (relative 10⁻¹²); a non-finite
+#   oracle row, or one at an input the port refuses, is the port's noted Err.
+# - **compute_gradient** keeps Rust's generic form on hisab 3.4.1's reverse-mode tape (ad_tape_new, ad_var, ad_add, …,
+#   ad_grad): the closure `impl Fn(&mut Tape, &[Var]) -> Var` is a function pointer and a context pointer (port plan
+#   §6.3), f(ctx, tape, vars, n), which builds on `tape` from the n parameter nodes whose indices `vars` holds (Rust's
+#   `&[Var]`) and returns the output node; it is called through `callptr`. The tape is the caller's (`ad_tape_new(cap)`,
+#   reused: the bump allocator never frees), reset by each call. Rust's Result was never Err; here it carries the
+#   failures Cyrius adds (ADR 0002's M5b addition): a null pointer or negative count, a tape too small for the
+#   parameters, an output that is not a node of the tape (a tape that filled up while f built on it).
+# - Outputs: the gradient vectors go to the caller's buffer `out` (two or three f64; n for compute_gradient), written
+#   only on Ok.
+
+include "lib/alloc.cyr"
+include "lib/hisab.cyr"
+
+# The gradient of the equilibrium constant K = exp(−ΔG/(R·T)) with ΔG and T as independent variables: [∂K/∂ΔG in
+# mol/J, (∂K/∂T)_ΔG in K⁻¹] = [−K/(RT), K·ΔG/(RT²)], evaluated as hisab 1.4.0's sweep of the tape −ΔG, R·T, ÷, exp:
+# ∂K/∂ΔG = −(K/(R·T)) and (∂K/∂T)_ΔG = (−(K·(−ΔG))/((R·T)·(R·T)))·R, both 0 where K underflows to 0. The temperature
+# entry holds ΔG fixed: it is not the van 't Hoff dK/dT = K·ΔH°/(RT²), since ΔG° changes with T (∂ΔG°/∂T = −ΔS°);
+# for that, differentiate ΔG° = ΔH° − TΔS° explicitly with compute_gradient. `delta_g_j` in J/mol, `temperature_k` in
+# K; the two entries go to `out` (two f64): Ok(2). Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite;
+# Err(KM_ERR_INVALID_INPUT) if ΔG is not finite; Err(KM_ERR_COMPUTATION_ERROR) if an entry is not finite (K or its
+# derivatives overflow). Mirrors `sensitivity::equilibrium_constant_gradient`, with ADR 0002 #2.
+#must_use
+fn equilibrium_constant_gradient(delta_g_j: f64, temperature_k: f64, out): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(delta_g_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var r: f64 = KM_GAS_CONSTANT;
+    var neg: f64 = -delta_g_j;
+    var rt: f64 = r * temperature_k;
+    var ex: f64 = neg / rt;
+    var k: f64 = _km_cr_exp(ex);
+    # The sweep: exp, then the quotient's two inputs, R·T, then the negation.
+    var g_e: f64 = 0.0 + k;
+    var g_neg: f64 = 0.0;
+    var g_rt: f64 = 0.0;
+    if (g_e != 0.0) {
+        var q: f64 = g_e / rt;
+        g_neg = g_neg + q;
+        var num: f64 = g_e * neg;
+        var den: f64 = rt * rt;
+        var d: f64 = num / den;
+        g_rt = g_rt - d;
+    }
+    var g_t: f64 = 0.0;
+    if (g_rt != 0.0) {
+        var p: f64 = g_rt * r;
+        g_t = g_t + p;
+    }
+    var g_dg: f64 = 0.0;
+    if (g_neg != 0.0) { g_dg = g_dg - g_neg; }
+    if (_km_is_finite(g_dg) != 1 || _km_is_finite(g_t) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    store64(out, g_dg);
+    store64(out + 8, g_t);
+    return Ok(2);
+}
+
+# The gradient of the Arrhenius rate constant k = A·exp(−Ea/(R·T)) with respect to [A, Ea, T]: [∂k/∂A
+# (dimensionless), ∂k/∂Ea (k-units·mol/J), ∂k/∂T (k-units/K)] = [k/A, −k/(RT), k·Ea/(RT²)], evaluated as hisab 1.4.0's
+# sweep of the tape −Ea, R·T, ÷, exp, A·: ∂k/∂A = exp(−Ea/(RT)), ∂k/∂Ea = −((A·e)/(R·T)) and ∂k/∂T =
+# (−((A·e)·(−Ea))/((R·T)·(R·T)))·R with e = exp(−Ea/(RT)), the last two 0 where A or A·e is 0. `pre_exponential` A in
+# the units of k, `activation_energy_j` Ea in J/mol, `temperature_k` T in K; the three entries go to `out` (three f64):
+# Ok(3). Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite; Err(KM_ERR_INVALID_INPUT) if A, then Ea, is
+# not finite; Err(KM_ERR_COMPUTATION_ERROR) if an entry is not finite. Mirrors `sensitivity::arrhenius_gradient`, with
+# ADR 0002 #2.
+#must_use
+fn arrhenius_gradient(pre_exponential: f64, activation_energy_j: f64, temperature_k: f64, out): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(pre_exponential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(activation_energy_j) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var r: f64 = KM_GAS_CONSTANT;
+    var neg: f64 = -activation_energy_j;
+    var rt: f64 = r * temperature_k;
+    var ex: f64 = neg / rt;
+    var b: f64 = _km_cr_exp(ex);
+    # The sweep: A·e, exp, the quotient, R·T, the negation.
+    var g_a: f64 = 0.0 + b;
+    var g_b: f64 = 0.0 + pre_exponential;
+    var g_e: f64 = 0.0;
+    if (g_b != 0.0) {
+        var p0: f64 = g_b * b;
+        g_e = g_e + p0;
+    }
+    var g_neg: f64 = 0.0;
+    var g_rt: f64 = 0.0;
+    if (g_e != 0.0) {
+        var q: f64 = g_e / rt;
+        g_neg = g_neg + q;
+        var num: f64 = g_e * neg;
+        var den: f64 = rt * rt;
+        var d: f64 = num / den;
+        g_rt = g_rt - d;
+    }
+    var g_t: f64 = 0.0;
+    if (g_rt != 0.0) {
+        var p1: f64 = g_rt * r;
+        g_t = g_t + p1;
+    }
+    var g_ea: f64 = 0.0;
+    if (g_neg != 0.0) { g_ea = g_ea - g_neg; }
+    if (_km_is_finite(g_a) != 1 || _km_is_finite(g_ea) != 1 || _km_is_finite(g_t) != 1) {
+        return Err(KM_ERR_COMPUTATION_ERROR);
+    }
+    store64(out, g_a);
+    store64(out + 8, g_ea);
+    store64(out + 16, g_t);
+    return Ok(3);
+}
+
+# The gradient of the Nernst potential E = E° − (R·T/(n·F))·ln Q with respect to [E°, T, Q]: [∂E/∂E°
+# (dimensionless), ∂E/∂T (V/K), ∂E/∂Q (V)] = [1, −R·ln Q/(nF), −RT/(nFQ)], evaluated as hisab 1.4.0's sweep of the
+# tape R·T, ln Q, ÷ nF, ·, E° −: ∂E/∂T = (−ln Q/(nF))·R and ∂E/∂Q = −(R·T/(nF))/Q, with nF = n·F. `standard_potential`
+# E° in V, `n_electrons` the electrons transferred (Rust's u8, a word), `temperature_k` T in K, `reaction_quotient` Q
+# (dimensionless); the three entries go to `out` (three f64): Ok(3). Err(KM_ERR_INVALID_TEMPERATURE) if T is not
+# positive and finite; Err(KM_ERR_INVALID_INPUT) if n is outside 1 ..= 255, then if Q is not positive and finite, then
+# if E° is not finite; Err(KM_ERR_COMPUTATION_ERROR) if an entry is not finite (−RT/(nFQ) past DBL_MAX). Mirrors
+# `sensitivity::nernst_gradient`, with ADR 0002 #2.
+#must_use
+fn nernst_gradient(standard_potential: f64, n_electrons, temperature_k: f64, reaction_quotient: f64, out): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (n_electrons < 1 || n_electrons > 255) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_positive(reaction_quotient) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_finite(standard_potential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var fn_: f64 = f64_from(n_electrons);
+    var nf: f64 = fn_ * KM_FARADAY;
+    var r: f64 = KM_GAS_CONSTANT;
+    var rt: f64 = r * temperature_k;
+    var lq: f64 = _km_cr_ln(reaction_quotient);
+    var rtnf: f64 = rt / nf;
+    # The sweep: E° − c (∂E/∂E° = 1, the product's adjoint −1), c = (RT/nF)·ln Q, the quotient, ln Q, R·T.
+    var g_q1: f64 = 0.0 - lq;               # 0 + (−1)·ln Q: +0 at Q = 1, which then contributes nothing
+    var g_lq: f64 = 0.0 - rtnf;
+    var g_rt: f64 = 0.0;
+    if (g_q1 != 0.0) {
+        var d: f64 = g_q1 / nf;
+        g_rt = g_rt + d;
+    }
+    var g_q: f64 = 0.0;
+    if (g_lq != 0.0) {
+        var e: f64 = g_lq / reaction_quotient;
+        g_q = g_q + e;
+    }
+    var g_t: f64 = 0.0;
+    if (g_rt != 0.0) {
+        var p: f64 = g_rt * r;
+        g_t = g_t + p;
+    }
+    if (_km_is_finite(g_t) != 1 || _km_is_finite(g_q) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var one: f64 = 1.0;
+    store64(out, one);
+    store64(out + 8, g_t);
+    store64(out + 16, g_q);
+    return Ok(3);
+}
+
+# The sensitivity of the Gibbs free energy ΔG = ΔH − T·ΔS to temperature: ∂(ΔG)/∂T = −ΔS in J/(mol·K), a
+# thermodynamic identity that Rust computes by its tape (0 + (−1)·ΔS: +0 for ΔS = ±0). `enthalpy_j` ΔH in J/mol,
+# `temperature_k` T in K, `entropy_j_per_k` ΔS in J/(mol·K). Ok(−ΔS); Err(KM_ERR_INVALID_TEMPERATURE) if T is not
+# positive and finite; Err(KM_ERR_INVALID_INPUT) if ΔH or ΔS is not finite. Mirrors
+# `sensitivity::gibbs_temperature_sensitivity`, with ADR 0002 #2.
+#must_use
+fn gibbs_temperature_sensitivity(enthalpy_j: f64, temperature_k: f64, entropy_j_per_k: f64): Result {
+    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (_km_is_finite(enthalpy_j) != 1 || _km_is_finite(entropy_j_per_k) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var g: f64 = 0.0 - entropy_j_per_k;
+    return Ok(g);
+}
+
+# Every partial derivative of a scalar function, by reverse-mode autodiff on hisab 3.4.1's tape: `tape` (the caller's,
+# from ad_tape_new) is reset, one variable node is recorded per parameter (n f64 at `parameters`), and f(ctx, tape,
+# vars, n) builds the function on the tape from those nodes (their indices: n i64 at `vars`) and returns its output
+# node; one reverse sweep then gives ∂f/∂pₖ for each k, in order, to the caller's buffer `out` (n f64). Ok(n);
+# Err(KM_ERR_INVALID_INPUT) if f or tape is 0, n is negative, parameters or out is null with n > 0, the tape cannot
+# hold the n variables, or the output is not a node of the tape (the tape filled up while f built on it: every hisab
+# op then returns AD_FULL); Err(KM_ERR_COMPUTATION_ERROR) if the index table (past 64 parameters, from the bump
+# allocator) can't be allocated. Non-finite values f produces appear in the gradient as they are. Mirrors
+# `sensitivity::compute_gradient` (ADR 0002 #2: Rust's Result was never Err).
+#must_use
+fn compute_gradient(f, ctx, tape, parameters, n, out): Result {
+    if (f == 0 || tape == 0 || n < 0) { return Err(KM_ERR_INVALID_INPUT); }
+    if (n > 0 && (parameters == 0 || out == 0)) { return Err(KM_ERR_INVALID_INPUT); }
+    var st: i64[64];
+    var vars = &st;
+    if (n > 64) {
+        if (n > 0x0080000000000000) { return Err(KM_ERR_INVALID_INPUT); }
+        vars = alloc(8 * n);
+        if (vars == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    }
+    ad_tape_reset(tape);
+    var k = 0;
+    while (k < n) {
+        var id = ad_var(tape, load64(parameters + 8 * k));
+        if (id < 0) { return Err(KM_ERR_INVALID_INPUT); }
+        store64(vars + 8 * k, id);
+        k = k + 1;
+    }
+    var root = callptr(f, ctx, tape, vars, n);
+    var gt, gv = ad_grad(tape, root);
+    if (is_err_result(gt) == 1) { return Err(KM_ERR_INVALID_INPUT); }
+    var wt, wv = ad_grad_write(tape, vars, n, out);
+    if (is_err_result(wt) == 1) { return Err(KM_ERR_INVALID_INPUT); }
+    return Ok(n);
+}

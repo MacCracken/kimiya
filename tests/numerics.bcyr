@@ -6,7 +6,9 @@
 # `dynamics/first_order_100steps` and `dynamics/consecutive_100steps` are rust-old/benches/benchmarks.rs's bodies; Rust
 # returns a fresh Vec of trajectory points (101 heap vectors), the port fills the caller's buffer. The others are
 # Cyrius-only: the adaptive, stiff and stochastic solvers on the Rust tests' systems, the dense solve and the normal
-# draw.
+# draw. M5b (src/network.cyr, src/fitting.cyr, src/sensitivity.cyr): `fitting/arrhenius_6pts` and
+# `fitting/polynomial_deg2_20pts` are the Rust benches' bodies; the network builder and rank, the closed-form gradient
+# and compute_gradient on hisab 3.4.1's tape are Cyrius-only.
 
 include "src/error.cyr"
 include "src/constants.cyr"
@@ -15,7 +17,11 @@ include "src/mathx.cyr"
 include "src/validate.cyr"
 include "src/numerics.cyr"
 include "src/reaction_dynamics.cyr"
+include "src/network.cyr"
+include "src/fitting.cyr"
+include "src/sensitivity.cyr"
 include "tests/rd_systems.cyr"
+include "tests/sens_functions.cyr"
 
 var _bench_sink = 0;
 var _bench_in = 0;          # 8 f64 input slots, filled by main()
@@ -24,6 +30,9 @@ var _bench_p = 0;           # system parameters
 var _bench_y = 0;           # initial states
 var _bench_m = 0;           # an 8 × 9 augmented matrix and its work copy
 var _bench_x = 0;
+var _bench_fit = 0;         # M5b: the Arrhenius data (6 T, 6 k), the polynomial data (20 x, 20 y), the coefficients
+var _bench_net = 0;         # M5b: the H₂ + Br₂ reaction records and terms, a matrix buffer
+var _bench_tape = 0;        # M5b: compute_gradient's tape
 
 # dynamics/first_order_100steps: `simulate_first_order(black_box(1.0), black_box(0.1), black_box(10.0),
 # black_box(100)).unwrap()`.
@@ -131,6 +140,146 @@ fn bench_kernel(name, which, per_batch, batches) {
     bench_report(b);
 }
 
+# M5b. fitting/arrhenius_6pts: `fit_arrhenius(black_box(&temps), black_box(&rates)).unwrap()` with T = 300 … 400 K in
+# steps of 20 and k = 10¹⁰·exp(−50 000/(R·T)); fitting/polynomial_deg2_20pts: `fit_polynomial(black_box(&x),
+# black_box(&y), black_box(2)).unwrap()` with x = 0.0 … 1.9 and y = 1 + 2x + 0.5x² (the Rust benches). Cyrius-only:
+# network/stoichiometric_matrix_h2_br2 (the 5 × 5 chain mechanism), network/rank_michaelis_menten (its 4 × 3 matrix,
+# which hisab 1.4.0's Jacobi diagonalises in a few sweeps), network/rank_chapman (the 3 × 4 ozone cycle: 400 sweeps
+# without convergence, Rust's ComputationError), sensitivity/arrhenius_gradient (the Rust test's point, the closed
+# form), sensitivity/compute_gradient_arrhenius (the same function on hisab 3.4.1's tape).
+fn bench_m5b(name, which, per_batch, batches) {
+    var b = bench_new(name);
+    var fit: KmArrheniusFit;
+    var g: f64[3];
+    var p: f64[3];
+    p[0] = 10000000000000.0;
+    p[1] = 80000.0;
+    p[2] = 300.0;
+    var rc: f64[1];
+    rc[0] = KM_GAS_CONSTANT;
+    var j = 0;
+    while (j < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        while (i < per_batch) {
+            if (which == 0) {
+                var r0, v0 = fit_arrhenius(_bench_fit, 6, _bench_fit + 48, 6, &fit);
+                _bench_sink = v0;
+            } elif (which == 1) {
+                var r1, v1 = fit_polynomial(_bench_fit + 96, 20, _bench_fit + 256, 20, 2, _bench_fit + 416, 3);
+                _bench_sink = v1;
+            } elif (which == 2) {
+                var r2, v2 = stoichiometric_matrix(5, _bench_net, 5, _bench_net + 416, 25);
+                _bench_sink = v2;
+            } elif (which == 3) {
+                var r3, v3 = reaction_network_rank(_bench_net + 616, 4, 3);
+                _bench_sink = v3;
+            } elif (which == 4) {
+                var r4, v4 = reaction_network_rank(_bench_net + 712, 3, 4);
+                _bench_sink = v4;
+            } elif (which == 5) {
+                var a: f64 = p[0];
+                var ea: f64 = p[1];
+                var t: f64 = p[2];
+                var r5, v5 = arrhenius_gradient(a, ea, t, &g);
+                _bench_sink = v5;
+            } else {
+                var r6, v6 = compute_gradient(&_sf_arrhenius, &rc, _bench_tape, &p, 3, &g);
+                _bench_sink = v6;
+            }
+            i = i + 1;
+        }
+        bench_batch_stop(b, per_batch);
+        j = j + 1;
+    }
+    bench_report(b);
+}
+
+# The H₂ + Br₂ chain's terms (H₂ 0, Br₂ 1, HBr 2, H 3, Br 4), reaction by reaction, reactants then products: Br₂ →
+# 2Br, Br + H₂ → HBr + H, H + Br₂ → HBr + Br, H + HBr → H₂ + Br, 2Br → Br₂; and each reaction's (start, count) of its
+# reactants, then of its products, in that list.
+var _BENCH_HBR_SPECIES: i64[16] = { 1, 4, 4, 0, 2, 3, 3, 1, 2, 4, 3, 2, 0, 4, 4, 1 };
+var _BENCH_HBR_RANGES: i64[20] = { 0, 1, 1, 1, 2, 2, 4, 2, 6, 2, 8, 2, 10, 2, 12, 2, 14, 1, 15, 1 };
+
+# The M5b inputs: the fitting data, the H₂ + Br₂ records (H₂, Br₂, HBr, H, Br), the Michaelis–Menten and Chapman
+# matrices (rows = species).
+fn bench_m5b_setup() {
+    _bench_fit = alloc(8 * 64);
+    var k = 0;
+    while (k < 6) {
+        var t: f64 = f64_from(300 + 20 * k);
+        store64(_bench_fit + 8 * k, t);
+        var rt: f64 = KM_GAS_CONSTANT * t;
+        var x: f64 = -50000.0 / rt;
+        var e: f64 = _km_cr_exp(x);
+        var kr: f64 = 10000000000.0 * e;
+        store64(_bench_fit + 48 + 8 * k, kr);
+        k = k + 1;
+    }
+    k = 0;
+    while (k < 20) {
+        var xi: f64 = f64_from(k);
+        xi = xi * 0.1;
+        var a: f64 = 2.0 * xi;
+        var q: f64 = 0.5 * xi;
+        q = q * xi;
+        var yi: f64 = 1.0 + a;
+        yi = yi + q;
+        store64(_bench_fit + 96 + 8 * k, xi);
+        store64(_bench_fit + 256 + 8 * k, yi);
+        k = k + 1;
+    }
+    _bench_net = alloc(8 * 128);
+    var tm = _bench_net + 160;              # the 16 terms, 16 bytes each
+    var k2 = 0;
+    while (k2 < 16) {
+        store64(tm + 16 * k2, _BENCH_HBR_SPECIES[k2]);
+        var c: f64 = 1.0;
+        if (k2 == 1 || k2 == 14) { c = 2.0; }   # Br₂ → 2Br, 2Br → Br₂
+        store64(tm + 16 * k2 + 8, c);
+        k2 = k2 + 1;
+    }
+    k2 = 0;
+    while (k2 < 5) {
+        var rec = _bench_net + 32 * k2;
+        store64(rec, tm + 16 * _BENCH_HBR_RANGES[4 * k2]);
+        store64(rec + 8, _BENCH_HBR_RANGES[4 * k2 + 1]);
+        store64(rec + 16, tm + 16 * _BENCH_HBR_RANGES[4 * k2 + 2]);
+        store64(rec + 24, _BENCH_HBR_RANGES[4 * k2 + 3]);
+        k2 = k2 + 1;
+    }
+    var mm: f64[12];                        # E, S, ES, P × E + S → ES, ES → E + S, ES → E + P
+    mm[0] = -1.0;
+    mm[1] = 1.0;
+    mm[2] = 1.0;
+    mm[3] = -1.0;
+    mm[4] = 1.0;
+    mm[5] = 0.0;
+    mm[6] = 1.0;
+    mm[7] = -1.0;
+    mm[8] = -1.0;
+    mm[9] = 0.0;
+    mm[10] = 0.0;
+    mm[11] = 1.0;
+    memcpy(_bench_net + 616, &mm, 96);
+    var ch: f64[12];                        # O, O₂, O₃ × the four reactions of Chapman's cycle
+    ch[0] = 2.0;
+    ch[1] = -1.0;
+    ch[2] = 1.0;
+    ch[3] = -1.0;
+    ch[4] = -1.0;
+    ch[5] = -1.0;
+    ch[6] = 1.0;
+    ch[7] = 2.0;
+    ch[8] = 0.0;
+    ch[9] = 1.0;
+    ch[10] = -1.0;
+    ch[11] = -1.0;
+    memcpy(_bench_net + 712, &ch, 96);
+    _bench_tape = ad_tape_new(64);
+    return 0;
+}
+
 # Runs every bench.
 fn main(): i64 {
     alloc_init();
@@ -179,6 +328,14 @@ fn main(): i64 {
     bench_custom("dynamics/stochastic_100steps", 2, 5000, 20);
     bench_kernel("numerics/gaussian_elimination_8x8", 0, 100000, 20);
     bench_kernel("numerics/pcg32_next_normal", 1, 1000000, 20);
+    bench_m5b_setup();
+    bench_m5b("fitting/arrhenius_6pts", 0, 100000, 20);
+    bench_m5b("fitting/polynomial_deg2_20pts", 1, 50000, 20);
+    bench_m5b("network/stoichiometric_matrix_h2_br2", 2, 200000, 20);
+    bench_m5b("network/rank_michaelis_menten", 3, 50000, 20);
+    bench_m5b("network/rank_chapman", 4, 500, 20);
+    bench_m5b("sensitivity/arrhenius_gradient", 5, 500000, 20);
+    bench_m5b("sensitivity/compute_gradient_arrhenius", 6, 200000, 20);
     return 0;
 }
 
