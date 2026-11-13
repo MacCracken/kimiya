@@ -29,6 +29,10 @@ Besides writing the values, the generator checks the properties the code's error
   continued-fraction bound that makes the triple-double product x·(H + M + L) round correctly once.
 - 1/100 (M4e, ADR 0002 #19): H + L to 2^-116 from the exact rational, H Rust's 0.01 (the wavenumber conversions'
   correctly rounded 1/(100·x), _km_cr_hundredth_div).
+- The unbounded e^x, e^x − 1 and 10^x (the overflow audit's B10a, for ADR 0002 #40): 384 bits of (512/ln 2)·2^-75 and
+  (512·log2 10)·2^-75 (64 zero bits first, so the reduction's window always holds the whole integer part), checked
+  against integer series of ln 2 and ln 10; ln2/512 as a normalised triple-double; and the saturation edges at MPFR's
+  widest exponent range, with the assertion that no argument underflows to MPFR's smallest number instead of +0.
 """
 from fractions import Fraction
 import ctypes
@@ -608,6 +612,144 @@ def hundredth():
     return {"H": h, "L": l_}
 
 
+# ── the unbounded exponentials (the overflow audit's B10a): the reduction of a 53-bit x at any exponent ─────────
+
+N_UXC = 12          # 32-bit words of C·2^-75 for C = 512/ln 2 and 512·log2 10: bits 1 … 384 (64 zero bits first)
+UXC_PREC = 1600
+
+
+def _ln2_int(nbits):
+    """⌊2^nbits·ln 2⌋ within one unit, from ln 2 = Σ 1/(k·2^k) in integers (a check of MPFR's)."""
+    guard = 64
+    one = 1 << (nbits + guard)
+    total, k = 0, 1
+    while one >> k:
+        total += (one >> k) // k
+        k += 1
+    return total >> guard
+
+
+def _ln10_int(nbits):
+    """⌊2^nbits·ln 10⌋ within one unit: ln 10 = 3·ln 2 + ln(5/4), ln(5/4) = 2·atanh(1/9) = 2·Σ 9^-(2k+1)/(2k + 1)."""
+    guard = 64
+    one = 1 << (nbits + guard)
+    total, term, k = 0, one // 9, 1
+    while term:
+        total += term // k
+        term //= 81
+        k += 2
+    return (3 * _ln2_int(nbits + guard) + 2 * total) >> guard
+
+
+def uxc_words(sel):
+    """C·2^-75 for C = 512/ln 2 (sel 0) or 512·log2 10 = 512·ln 10/ln 2 (sel 1), in 32-bit words: word w holds bits
+    32w + 1 … 32w + 32 (bit j weighs 2^-j), most significant first; C < 2^11, so words 0 and 1 are 0 (64 zero bits).
+    From MPFR at 1600 bits, checked against the integer series of ln 2 and ln 10."""
+    ln2 = _V(UXC_PREC)
+    _m.mpfr_const_log2(ln2.p, _RNDN)
+    v = _V(UXC_PREC)
+    if sel == 0:
+        _m.mpfr_ui_div(v.p, 512, ln2.p, _RNDN)
+    else:
+        ten = _V(UXC_PREC)
+        _m.mpfr_set_d(ten.p, 10.0, _RNDN)
+        l10 = _V(UXC_PREC)
+        _m.mpfr_log(l10.p, ten.p, _RNDN)
+        _m.mpfr_div(v.p, l10.p, ln2.p, _RNDN)
+        _m.mpfr_mul_2ui(v.p, v.p, 9, _RNDN)
+    c = _get(v)
+    assert 2.0 ** 9 < c < 2.0 ** 11                    # C·2^-75 < 2^-64: the window's top 64 bits are 0
+    _m.mpfr_div_2ui(v.p, v.p, 75, _RNDN)
+    words = []
+    fl = _V(UXC_PREC)
+    for _ in range(N_UXC):
+        _m.mpfr_mul_2ui(v.p, v.p, 32, _RNDN)
+        _m.mpfr_floor(fl.p, v.p)
+        w = int(_get(fl))
+        assert 0 <= w < 2 ** 32 and float(w) == _get(fl)
+        words.append(w)
+        _m.mpfr_sub(v.p, v.p, fl.p, _RNDN)
+    assert words[0] == 0 and words[1] == 0 and words[2] != 0
+    assert (52 >> 5) + 9 < N_UXC     # _km_expux_reduce reads words w … w + 9 with w = (xe − 9) >> 5 ≤ 1 (xe ≤ 61)
+    nbits = 32 * N_UXC
+    acc = 0
+    for w in words:
+        acc = (acc << 32) | w
+    l2 = _ln2_int(nbits + 80)
+    if sel == 0:
+        want = (1 << (2 * nbits + 80 + 9 - 75)) // l2                      # ⌊2^nbits·512/ln 2·2^-75⌋, ± 1
+    else:
+        want = (_ln10_int(nbits + 80) << (nbits + 9 - 75)) // l2            # ⌊2^nbits·512·log2 10·2^-75⌋, ± 1
+    assert abs(acc - want) <= 1, f"C ({sel}): MPFR and the integer series disagree"
+    return words
+
+
+def uxln2():
+    """ln 2/512 = H + M + L, a normalised triple-double (each the nearest double to the rest) to 2^-159: r = f·ln2/512
+    from the reduced fraction f in _km_expux_reduce and _km_expux_dd."""
+    v = _op("mpfr_div", _ln2(), _d(512.0))
+    h, m, l_ = _split(v, 3)
+    assert _rel(_exact([h, m, l_]), v) < 2.0 ** -158
+    assert abs(m) <= 2.0 ** -53 * abs(h) and abs(l_) <= 2.0 ** -53 * abs(m)
+    return {"LH": h, "LM": m, "LL": l_}
+
+
+def uxc_td(sel):
+    """C = 512/ln 2 (sel 0) or 512·log2 10 (sel 1) as a normalised triple-double CH + CM + CL to 2^-158: the fast
+    reduction _km_expux_dd, x·C by two TwoProducts and a rounded x·CL. Asserted: |CM| ≤ ulp(CH)/2 (2^-44 for C < 2^10,
+    2^-43 for C < 2^11) and |CL| ≤ 2^-96, the bounds its error analysis uses."""
+    ln2 = _V(UXC_PREC)
+    _m.mpfr_const_log2(ln2.p, _RNDN)
+    v = _V(UXC_PREC)
+    if sel == 0:
+        _m.mpfr_ui_div(v.p, 512, ln2.p, _RNDN)
+    else:
+        ten = _V(UXC_PREC)
+        _m.mpfr_set_d(ten.p, 10.0, _RNDN)
+        l10 = _V(UXC_PREC)
+        _m.mpfr_log(l10.p, ten.p, _RNDN)
+        _m.mpfr_div(v.p, l10.p, ln2.p, _RNDN)
+        _m.mpfr_mul_2ui(v.p, v.p, 9, _RNDN)
+    w = _V()
+    _m.mpfr_set(w.p, v.p, _RNDN)
+    h, m, l_ = _split(w, 3)
+    assert _rel(_exact([h, m, l_]), w) < 2.0 ** -158
+    assert abs(m) <= (2.0 ** -44 if sel == 0 else 2.0 ** -43) and abs(l_) <= 2.0 ** -96
+    return {"CH": h, "CM": m, "CL": l_}
+
+
+def ux_limits():
+    """The saturation edges of e^x and 10^x at MPFR's widest exponent range (emin = 1 − 2^62, emax = 2^62 − 1), as
+    significands s in [1, 2) at x = ±s·2^61 (exp, expm1) and ±s·2^60 (exp10): OVF the largest s with a finite result,
+    UNF the largest s with e^(−s·2^61) > 0. Bisection over the bit patterns with MPFR's correctly rounded exp, exp10 and
+    expm1 (mpfr_ref.UX). Asserted: the edges lie in those binades, expm1 overflows where exp does, and the last nonzero
+    result is a regular number (MPFR exponent above emin), the next one 0 (below 2^(emin − 2), MPFR's round-to-nearest
+    underflow), so +0 is MPFR's value for every argument past UNF: no argument rounds to MPFR's smallest number."""
+    fb = _m_of_bits
+
+    def value(fn, b, sh, sign):
+        return getattr(mpfr_ref.ux_scaled(sign * fb(b), sh), fn)()
+
+    def finite(fn, sh):
+        return lambda b: value(fn, b, sh, 1).parts()[0] < float("inf")
+
+    def nonzero(fn, sh):
+        return lambda b: value(fn, b, sh, -1).parts()[0] != 0.0
+    one, two = bits(1.0), bits(2.0) - 1
+    out = {}
+    for name, fn, sh in (("EXPUX_", "exp", 61), ("EXP10UX_", "exp10", 60)):
+        ovf = _last_true(finite(fn, sh), one, two)
+        unf = _last_true(nonzero(fn, sh), one, two)
+        assert one < ovf < two and one < unf < two
+        out[name + "OVF"] = fb(ovf)
+        out[name + "UNF"] = fb(unf)
+        assert value(fn, unf, sh, -1).mpfr_exp() > mpfr_ref.UX_EMIN, name       # a regular number, not MPFR's least
+        assert value(fn, unf + 1, sh, -1).is_zero(), name
+        if fn == "exp":
+            assert finite("expm1", sh)(ovf) and not finite("expm1", sh)(ovf + 1)
+    return out
+
+
 # ── thresholds, from the correctly rounded MPFR functions ───────────────────────────────────────
 
 def _last_true(pred, lo_b, hi_b):
@@ -775,6 +917,25 @@ def render():
     L += _scalars("HUNDREDTH_", hundredth(), ["H", "L"], [
         "1/100 = H + L to 2^-116 (M4e, ADR 0002 #19: spectroscopy.cyr's wavenumber conversions through",
         "_km_cr_hundredth_div, the correctly rounded 1/(100·x)), from the exact rational; H is Rust's 0.01.",
+    ])
+    uxl = ux_limits()
+    for name, sel, what in (("_KM_CR_EXPUX_C", 0, "512/ln 2"), ("_KM_CR_EXP10UX_C", 1, "512·log2 10")):
+        L += _table(name, [f"0x{w:08X}" for w in uxc_words(sel)], [
+            f"The bits of C·2^-75, C = {what}, for the unbounded e^x and 10^x (the overflow audit's B10a:",
+            "_km_expux_reduce), 32 per word: word w holds bits 32w + 1 … 32w + 32 (bit j weighs 2^-j), the first",
+            "in the word's bit 31; C < 2^11, so words 0 and 1 are 0. 384 bits from MPFR at 1600 bits, checked",
+            "against the integer series of ln 2 and ln 10; |x| < 2^62 reads words up to 10.",
+        ], per_line=4)
+    L += _scalars("EXPUX_", {**uxln2(), **uxc_td(0), "OVF": uxl["EXPUX_OVF"], "UNF": uxl["EXPUX_UNF"]},
+                  ["LH", "LM", "LL", "CH", "CM", "CL", "OVF", "UNF"], [
+        "ln2/512 = LH + LM + LL and 512/ln 2 = CH + CM + CL, normalised triple-doubles to 2^-158 (the reductions",
+        "_km_expux_reduce and _km_expux_dd). OVF: the largest s in [1, 2) with e^(s·2^61) finite at MPFR's widest",
+        "exponent range (emax = 2^62 − 1), UNF the largest with e^(−s·2^61) nonzero (emin = 1 − 2^62); bisection",
+        "with MPFR (mpfr_ref.UX).",
+    ])
+    L += _scalars("EXP10UX_", {**uxc_td(1), "OVF": uxl["EXP10UX_OVF"], "UNF": uxl["EXP10UX_UNF"]},
+                  ["CH", "CM", "CL", "OVF", "UNF"], [
+        "512·log2 10 = CH + CM + CL (to 2^-158), and the same edges of 10^(±s·2^60).",
     ])
     return "\n".join(L).rstrip("\n") + "\n"
 

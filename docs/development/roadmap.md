@@ -127,6 +127,11 @@ type for average oxidation states, no separate extrapolating Antoine function. I
     Cyrius API (ADR 0002 #39; the signed multi-word `_km_sb_*` with Lehmer's gcd, the tables from a proven Hadamard
     bound), the audit's B7
   - [ ] B10 — F10's unbounded exponentials and the exponential × prefactor functions
+    - [x] B10a — the primitives: e^x, e^x − 1 and 10^x correctly rounded to 53 bits with an unbounded exponent
+      (`_km_cr_exp_ux`, `_km_cr_expm1_ux`, `_km_cr_exp10_ux`), exact up to MPFR's widest exponent range and verified
+      against it on every target — done (ADR 0002's "Addition, 2026-11-12 (audit B10a)", for #40), the audit's B8
+    - [ ] #40's functions in three sub-batches: kinetics (Arrhenius, collision, Eyring ×2, first-order); nuclear
+      (`atoms_remaining`, the decay chain); van 't Hoff, Clausius–Clapeyron, Antoine, Morse and `fugacity_pr`
   - [ ] B11 — F11 and F12 (`nth_order_half_life`'s pow, `henderson_hasselbalch`'s log10)
   - [ ] B12 — the iterative functions, by the user's answer "Fix all three": the weak acid/base pH Newton with an
     unbounded exponent on a slow path only; Peng–Robinson's coefficient edges only (Rust's cubic unchanged); the flame's

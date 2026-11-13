@@ -12,7 +12,10 @@ exponent range, the final operation rounded once into binary64 (ux_*_final), and
 the final subtraction (ux_sub_final) and the √ of a quotient (ux_sqrt_div_final), and since B3 the power x^y at 53 bits
 (UX.pow: Redlich–Kwong's Tc^2.5) and w·√(a/b) rounded once (ux_mul_sqrt_div_final: the Morse width), and since B4
 Rust's sums in their order (ux_sum, ux_sum_final: ADR 0002 #33), and since B5 exp and exp10 of a 53-bit value at any
-exponent rounded once (ux_exp_final, ux_exp10_final: ADR 0002 #35's exp / exp10 arguments).
+exponent rounded once (ux_exp_final, ux_exp10_final: ADR 0002 #35's exp / exp10 arguments), and since B10a e^x, e^x − 1
+and 10^x rounded to 53 bits at MPFR's widest exponent range (UX.exp, UX.expm1, UX.exp10) with UX.parts, the port's
+(significand, exponent) pair: the reference of _km_cr_exp_ux, _km_cr_expm1_ux and _km_cr_exp10_ux (ADR 0002 #40's
+primitives).
 
 No Python package is needed: MPFR (libmpfr.so.6, MPFR 4.x) is called through ctypes. Run
 `python3 -I scripts/oracle/mpfr_ref.py` for the self-checks.
@@ -176,8 +179,10 @@ _m.mpfr_signbit.argtypes = [_P]
 _m.mpfr_number_p.argtypes = [_P]
 _m.mpfr_get_exp.argtypes = [_P]
 _m.mpfr_get_exp.restype = ctypes.c_long
+_m.mpfr_nan_p.argtypes = [_P]
 _UX_EMIN = _m.mpfr_get_emin_min()
 _UX_EMAX = _m.mpfr_get_emax_max()
+UX_EMIN, UX_EMAX = _UX_EMIN, _UX_EMAX     # 1 − 2^62 and 2^62 − 1 (MPFR's convention: a value in [2^(E − 1), 2^E))
 
 
 _WIDE = [0]     # the depth of `with unbounded():` (MPFR's exponent range is the widest inside it)
@@ -252,6 +257,46 @@ class UX:
         with unbounded():
             _m.mpfr_pow(r.v, self.v, e.v, _RNDN)
         return r
+
+    def _fn1(self, fn):
+        r = UX()
+        with unbounded():
+            fn(r.v, self.v, _RNDN)
+        return r
+
+    def exp(self):
+        """e^self rounded to 53 bits at MPFR's widest exponent range (the overflow audit's B10a: the port's
+        _km_cr_exp_ux): +∞ past emax, and below emin MPFR's round-to-nearest underflow (+0 below 2^(emin − 2), which is
+        what every argument past the underflow edge gives: mathx_tables.ux_limits asserts it)."""
+        return self._fn1(_m.mpfr_exp)
+
+    def expm1(self):
+        """e^self − 1 rounded to 53 bits at MPFR's widest exponent range (the port's _km_cr_expm1_ux)."""
+        return self._fn1(_m.mpfr_expm1)
+
+    def exp10(self):
+        """10^self rounded to 53 bits at MPFR's widest exponent range (the port's _km_cr_exp10_ux)."""
+        return self._fn1(_m.mpfr_exp10)
+
+    def mpfr_exp(self):
+        """MPFR's exponent E of a regular value (in [2^(E − 1), 2^E)): the port's exponent is E − 1."""
+        return _m.mpfr_get_exp(self.v)
+
+    def parts(self):
+        """(s, e) with self = s·2^e and 1 ≤ |s| < 2 (s a double, e an int): the port's _km_ux_* pair; (±0.0, 0),
+        (±inf, 0) or (nan, 0) for a zero, an infinity or NaN."""
+        if _m.mpfr_nan_p(self.v):
+            return (float("nan"), 0)
+        neg = _m.mpfr_signbit(self.v) != 0
+        if _m.mpfr_zero_p(self.v):
+            return (-0.0 if neg else 0.0, 0)
+        if not _m.mpfr_number_p(self.v):
+            return (-math.inf if neg else math.inf, 0)
+        e = _m.mpfr_get_exp(self.v) - 1
+        t = UX()
+        with unbounded():
+            _m.mpfr_mul_2si(t.v, self.v, -e, _RNDN)            # exact: 53 bits, now in [1, 2)
+        return (_m.mpfr_get_d(t.v, _RNDN), e)
 
     def cmp(self, o):
         """−1, 0 or 1 by exact value (zeros equal)."""
@@ -550,6 +595,17 @@ if __name__ == "__main__":
     assert ux_exp10_final(UX(dm) * UX(2.0)) == math.inf and ux_exp10_final(UX(-dm) * UX(2.0)) == 0.0
     assert ux_exp_final(UX(2.0 ** -1000) * UX(2.0 ** -1000)) == 1.0 and ux_exp10_final(UX(-0.0)) == 1.0
     assert bits(ux_exp_final(UX(dm) / (UX(8.314462618) * UX(dm)))) == 0x3FF20B7C2DBB7559    # e^0.12: R·T past DBL_MAX
+    # The overflow audit's B10a: e^x, e^x − 1 and 10^x at 53 bits past binary64's range, as pairs, and their saturation.
+    s800, e800 = UX(-800.0).exp().parts()
+    assert bits(s800) == 0x3FFCB83C52522378 and e800 == -1155                      # e^-800 = 1.79…·2^-1155
+    assert UX(1000.0).expm1().parts() == UX(1000.0).exp().parts() and UX(-64.0).expm1().parts() == (-1.0, 0)
+    s23, e23 = UX(23.0).exp10().parts()
+    assert bits(s23) == 0x3FF52D02C7E14AF6 and e23 == 76 and bits(s23) & 0xFFFFFFFFFFFFF == bits(1e23) & 0xFFFFFFFFFFFFF
+    s22, e22 = UX(22.0).exp10().parts()                                              # 10^23 above: the tie, to even
+    assert bits(s22) == 0x3FF0F0CF064DD592 and e22 == 73 and bits(UX(-0.0).expm1().parts()[0]) == bits(-0.0)
+    edge = ux_scaled(float.fromhex("0x1.62e42fefa39efp+0"), 61)
+    assert edge.exp().parts()[1] == UX_EMAX - 154 and (edge * UX(1.0000000000000002)).exp().parts()[0] == math.inf
+    assert (UX(-1.0) * edge).exp().parts()[1] == UX_EMIN - 1 + 154 and (UX(-1.0000000000000002) * edge).exp().is_zero()
     rng = __import__("random").Random(20)
     for _ in range(2000):
         a, b = rng.uniform(-1e3, 1e3), rng.uniform(-1e3, 1e3)

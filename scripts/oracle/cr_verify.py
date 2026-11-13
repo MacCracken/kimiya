@@ -5,7 +5,7 @@ src/mathx.cyr against MPFR (ADR 0006), and its unbounded-exponent final operatio
 electrochemistry's and spectroscopy's, and the correctly rounded square root of a quotient) and B3 (#31, #32: gas's,
 potential's, inorganic's and nuclear's, and the correctly rounded w·√(x/y·2^e)), B4 (#33, #34: the sums with
 cancellation and the Shomate polynomials) and B5 (#35: the exp / exp10 arguments) against Fraction, exact integer square
-roots and MPFR.
+roots and MPFR; and B10a's e^x, e^x − 1 and 10^x with an unbounded exponent against MPFR at its widest exponent range.
 
 For each primitive it generates seeded arguments (deterministic: random.Random with fixed seeds), builds
 a probe program that calls the Cyrius function on every argument, runs it on each target, and compares
@@ -131,6 +131,13 @@ The overflow audit's B7 (ADR 0002 #39) adds bal23, bal34, bal56, bal89, bal1213 
 own outcome and the multi-word path forced; reference Rust's algorithm on Python ints with a tracer of its checked i64
 operations, which the fast path's overflow report must match; 54,306 matrices over known x with large and small
 entries, x with a zero, negative or u32-edge entry, random small and large entries, ±2^53 entries and dependent rows).
+The overflow audit's B10a (ADR 0002 #40's primitives) adds exp_ux, expm1_ux and exp10_ux (_km_cr_exp_ux, _km_cr_expm1_ux
+and _km_cr_exp10_ux of (s, e) pairs, the result a pair: the function, its fast path and the accurate path forced, and at
+every normal double x the binary64 function's pair; reference MPFR at its widest exponent range, mpfr_ref.UX.exp, .expm1
+and .exp10, whose own binary64 rounding is checked equal wherever that is normal; 448,188 arguments: specials and extreme
+exponents up to ±2^63, every binade from 2^-1200 to 2^65 of both signs, binary64's range, the tiny end, each tier's edges,
+near multiples of ln2/512 (log10(2)/512) with K up to 2^71, Lefevre–Muller's hard cases, large arguments to 3.2·10^18,
+the saturation edges, expm1's −1 region and exp10's integers −400 … 400 and the tie 10^23).
 Through each function's _km_cr_<f>_fast entry it reports the fast path's fallback rate per region, and
 checks the fast path's result equals the function's wherever its test passes. It checks that the three
 targets give identical bits and flags.
@@ -150,7 +157,8 @@ Usage, from the repo root:
                                                            # hess eff rsum qv ionic haber gibbs kohl lim zoc
                                                            # shcp shh keq dhl dhe dav flame pk3 pk5 pk8
                                                            # pk16 signsc fft1 … fft256 bal23 bal34 bal56
-                                                           # bal89 bal1213 bal2425)
+                                                           # bal89 bal1213 bal2425 exp_ux expm1_ux
+                                                           # exp10_ux)
     python3 -I scripts/oracle/cr_verify.py --work DIR      # probe sources and binaries in DIR
                                                            # (default build/cr-verify, gitignored)
 Exit status 1 on any mismatch or cross-target difference, 2 on a build or run failure.
@@ -4026,6 +4034,190 @@ def bal7_checks(work, targets, which):
     return failed
 
 
+# The overflow audit's B10a (ADR 0002 #40's primitives): e^x, e^x − 1 and 10^x of an unbounded-exponent value x = s·2^e,
+# correctly rounded to 53 bits at any exponent, as (s, e) pairs; the reference is MPFR at its widest exponent range
+# (mpfr_ref.UX.exp, .expm1, .exp10), whose saturation (+∞, and +0 past the underflow edge) the port's matches.
+B10A = [(107, "exp_ux", "exp"), (108, "expm1_ux", "expm1"), (109, "exp10_ux", "exp10")]
+B10A_NAMES = tuple(name for _, name, _ in B10A)
+ARITY.update({107: 2, 108: 2, 109: 2})
+
+
+def _ux_pair(x):
+    """(s, e) of a finite nonzero double, 1 ≤ |s| < 2 (subnormals included)."""
+    m, e = math.frexp(x)
+    return (m * 2.0, e - 1)
+
+
+def _ux_arg(s, e):
+    """The MPFR value of the pair (s, e); a zero, an infinity or NaN as itself."""
+    if s == 0.0 or not math.isfinite(s):
+        u = mpfr_ref.UX()
+        mpfr_ref._m.mpfr_set_d(u.v, s, 0)
+        return u
+    return mpfr_ref.ux_scaled(s, e)
+
+
+def ref_b10a(fn, a):
+    """The expected (s, e) words: MPFR's correctly rounded value at its widest exponent range, as a pair."""
+    s, e = getattr(_ux_arg(*a), fn)().parts()
+    return [bits(s), e & W64]
+
+
+def _rand_sig(rng):
+    return 1.0 + rng.randrange(1 << 52) * 2.0 ** -52
+
+
+def _near_ln2_multiples(rng, n, log10=False):
+    """Doubles at and next to K·ln2/512 and (K + 1/2)·ln2/512 (where K's rounding flips), K of every bit length up to
+    71, both signs; for 10^x the same multiples of log10(2)/512."""
+    import mathx_tables
+    from fractions import Fraction
+    lb = 400
+    l2 = mathx_tables._ln2_int(lb)                          # ⌊2^400·ln 2⌋
+    l10 = mathx_tables._ln10_int(lb) if log10 else 1
+    out = []
+    for _ in range(n):
+        b = rng.randint(1, 71)
+        k = rng.randrange(1 << (b - 1), 1 << b)
+        num = 2 * k + (1 if rng.random() < 0.5 else 0)     # (num/2)·ln2/512
+        q = Fraction(num * l2, 1 << (lb + 10))
+        if log10:
+            q = q * Fraction(1 << lb, l10)
+        x = ulps(float(q), rng.randint(-2, 2))
+        out.append(_ux_pair(rng.choice((1, -1)) * x))
+    return out
+
+
+def args_b10a(rng, name):
+    """Sections of (s, e) arguments: specials and extreme exponents, every binade of both signs, binary64's range,
+    the tiny end, the tier edges, near multiples of ln2/512, the known hard cases, large arguments and the saturation
+    edges (exp and expm1 at s·2^61, exp10 at s·2^60), and each function's own regions."""
+    import mathx_tables
+    lb = mathx_tables.ux_limits()
+    sg = (1, -1)
+    big_e = [62, 63, 64, 100, 1000, 1 << 20, 1 << 40, (1 << 62) - 2, (1 << 62) - 1, 1 << 62]
+    small_e = [-55, -56, -57, -100, -1100, -5000, -(1 << 20), -(1 << 40), -(1 << 62) + 2, -(1 << 62)]
+    if name != "expm1_ux":
+        big_e += [(1 << 63) - 1]
+        small_e += [-(1 << 63), -(1 << 62) - 1]
+    sigs = [1.0, 1.5, 2.0 - 2.0 ** -52, 1.0 + 2.0 ** -52]
+    special = [(0.0, 0), (-0.0, 0), (INF, 0), (-INF, 0), (NAN, 0), (0.0, 77), (-0.0, -5)]
+    special += [(sv * s, e) for e in big_e + small_e for s in sigs for sv in sg]
+    binade = [(rng.choice(sg) * _rand_sig(rng), e) for e in range(-1200, 66) for _ in range(36)]
+    binade += [(sv * _rand_sig(rng), e) for e in (-(1 << 30), -40000, -3000, 3000, 40000, 1 << 30) for sv in sg
+               for _ in range(20)]
+    tiny = [(sv * s, e) for e in range(-60, -48) for s in sigs + [_rand_sig(rng) for _ in range(60)] for sv in sg]
+    if name == "exp10_ux":
+        lo, hi, d1, d2, sh = -323.7, 308.3, 307.0, 512.0, 60
+        ov, un = lb["EXP10UX_OVF"], lb["EXP10UX_UNF"]
+    else:
+        lo, hi, d1, d2, sh = -745.2, 709.8, 708.0, 1024.0, 61
+        ov, un = lb["EXPUX_OVF"], lb["EXPUX_UNF"]
+        if name == "expm1_ux":
+            lo = -40.0
+    b64 = [_ux_pair(rng.uniform(lo, hi)) for _ in range(30_000)]
+    b64 += [_ux_pair(x) for x in SPECIALS if x != 0.0 and math.isfinite(x)]
+    edges = []
+    for c in (d1, d2, 745.1332191019411, 709.782712893384, 323.60724533877976, 308.2547155599167, 64.0,
+              37.42994775023704, 2.0 ** 40, 2.0 ** 41):                # the last two: the fast reduction's end
+        for x in around(c, 150):
+            edges += [_ux_pair(x), _ux_pair(-x)]
+    edges += [_ux_pair(rng.uniform(d1, d2) * rng.choice(sg)) for _ in range(8_000)]
+    red = _near_ln2_multiples(rng, 30_000, name == "exp10_ux")
+    hard = [_ux_pair(h) for h in HARD_EXP] + [_ux_pair(-h) for h in HARD_EXP]
+    large = [_ux_pair(rng.choice(sg) * 10.0 ** rng.uniform(3.0, 18.5)) for _ in range(15_000)]
+    large += [_ux_pair(x * sv) for c in (1e4, 1e12) for x in around(c, 300) for sv in sg]
+    sat = []
+    for c, sv in ((ov, 1), (un, -1)):
+        for d in range(-60, 61):
+            sat.append((sv * ulps(c, d), sh))
+    sat += [(sv * s, e) for e in (sh - 1, sh, sh + 1) for s in sigs + [_rand_sig(rng) for _ in range(30)] for sv in sg]
+    sections = [("special", special), ("every binade", binade), ("binary64 range", b64), ("tiny", tiny),
+                ("tier edges", edges), ("near K·ln2/512", red), ("hard cases", hard), ("large", large),
+                ("saturation", sat)]
+    if name == "expm1_ux":
+        minus1 = [_ux_pair(rng.uniform(-40.0, 40.0)) for _ in range(20_000)]
+        minus1 += [_ux_pair(x) for c in (-37.42994775023704, -0.5, 0.5, 2.0 ** -6, -2.0 ** -6, 83.17766166719343)
+                   for x in around(c, 300)]
+        minus1 += [_ux_pair(rng.uniform(60.0, 100.0)) for _ in range(5_000)]           # E around 120: the −1 at 2^-120
+        sections.append(("the −1 region", minus1))
+    if name == "exp10_ux":
+        ints = [_ux_pair(float(n)) for n in range(-400, 401) if n != 0]
+        ints += [_ux_pair(ulps(float(n), d)) for n in range(-30, 31) if n != 0 for d in (-3, -2, -1, 1, 2, 3)]
+        ints += [_ux_pair(ulps(23.0, d)) for d in range(-40, 41)]
+        ints += [_ux_pair(float(n)) for n in (10 ** 3, 10 ** 6, 2 ** 40, 10 ** 15, 10 ** 18, -10 ** 18)]
+        sections.append(("integers", ints))
+    return sections
+
+
+def b10a_checks(work, targets, which):
+    """Ids 107 … 109 against MPFR at its widest exponent range on every target, the accurate path forced; True if
+    anything failed. The flag's bit 2 marks a normal double x whose binary64 function has a normal result other than
+    the pair (it must never be set)."""
+    failed = False
+    for fid, name, fn in B10A:
+        if name not in which:
+            continue
+        t0 = time.time()
+        rng = random.Random(1040 + fid)
+        sections = args_b10a(rng, name)
+        xs = [x for _, sec in sections for x in sec]
+        want = [ref_b10a(fn, a) for a in xs]
+        # the references' own consistency: MPFR's 53-bit value is its binary64 one wherever that is normal
+        nref = 0
+        for a, w in zip(xs, want):
+            s, e = a
+            if s == 0.0 or not math.isfinite(s) or not -1022 <= e <= 1023:
+                continue
+            y = getattr(mpfr_ref, fn)(math.ldexp(s, e))
+            if math.isfinite(y) and abs(y) >= 2.0 ** -1022:
+                nref += 1
+                if [bits(_ux_pair(y)[0]), _ux_pair(y)[1] & W64] != w:
+                    print(f"  REFERENCE {name}{a!r}: MPFR's binary64 {fn} {y!r} differs from its 53-bit value")
+                    failed = True
+
+        def eq(g, w):
+            return g == w or (math.isnan(fb(g[0])) and math.isnan(fb(w[0])))
+        first = None
+        for t in targets:
+            g0, g1, fl = run_probe_vec(work, t, fid, 0, xs, 2)
+            a0, _, _ = run_probe_vec(work, t, fid, 1, xs, 2)
+            bad = [i for i in range(len(xs)) if not eq(g0[i], want[i])]
+            bad_acc = [i for i in range(len(xs)) if not eq(a0[i], want[i])]
+            bad_fast = [i for i in range(len(xs)) if fl[i] & 1 and not eq(g1[i], g0[i])]
+            bad_d = [i for i in range(len(xs)) if fl[i] & 2]
+            for i in bad[:5]:
+                print(f"  MISMATCH {name}{xs[i]!r} on {t}: got {g0[i]}, want {want[i]}")
+            for i in bad_acc[:5]:
+                print(f"  MISMATCH {name} (accurate path forced){xs[i]!r} on {t}: got {a0[i]}, want {want[i]}")
+            for i in bad_fast[:5]:
+                print(f"  FAST/FULL DIFFER {name}{xs[i]!r} on {t}: {g1[i]} vs {g0[i]}")
+            for i in bad_d[:5]:
+                print(f"  BINARY64 DIFFERS {name}{xs[i]!r} on {t}: the pair {g0[i]}")
+
+            def canon(ws):
+                return [[NANW, 0] if math.isnan(fb(w[0])) else w for w in ws]
+            cur = (canon(g0), canon(g1), list(fl), canon(a0))
+            xdiff = 0 if first is None else sum(1 for u, v in zip(cur, first) for p, q in zip(u, v) if p != q)
+            if first is None:
+                first = cur
+            slow = sum(1 for f in fl if not f & 1)
+            print(f"{name:8} {t:8} {len(xs):9,} args: {len(bad)} mismatches; accurate path forced: {len(bad_acc)} "
+                  f"mismatches; fast path: {len(bad_fast)} differ, fell back {slow:,}; binary64 function differs: "
+                  f"{len(bad_d)}; bits or flags differing from {targets[0]}: {xdiff}")
+            failed |= bool(bad or bad_acc or bad_fast or bad_d or xdiff)
+            if t == targets[0]:
+                rates, i = [], 0
+                for tag, sec in sections:
+                    rates.append(f"{tag} {sum(1 for f in fl[i:i + len(sec)] if not f & 1)}/{len(sec)}")
+                    i += len(sec)
+                print("         fallbacks by region: " + "; ".join(rates))
+                print(f"         MPFR's binary64 {fn} equals its 53-bit value on all {nref:,} arguments with a normal "
+                      f"binary64 result")
+        print(f"       [{time.time() - t0:.0f} s]")
+    return failed
+
+
 def flame6_bisection_check(work, targets, which):
     """Id 87's second slot, the transcribed bisection over [T₀, T_max] with ADR 0002 #38's exact same-sign test, against
     its reference on every target; True if anything failed."""
@@ -4258,6 +4450,7 @@ fn arity(fid): i64 {
         var m7, n7 = bal7_dims(fid);
         return m7 * n7;
     }
+    if (fid >= 107 && fid <= 109) { return 2; }
     return 1;
 }
 
@@ -5435,6 +5628,78 @@ fn run_bal7(fid, mode, a, o0, o1): i64 {
     return 1;
 }
 
+# The overflow audit's B10a (ADR 0002 #40's primitives): ids 107 … 109, _km_cr_exp_ux, _km_cr_expm1_ux and
+# _km_cr_exp10_ux of (s, e) (the significand's bits, then the exponent word), two words a slot, the result pair (s, e).
+# Mode 0: the function (o0), its fast path (o1: (0, 0) where its test fails) and the flag, 1 when the fast test passed,
+# plus 2 when x is a normal double whose binary64 function (_km_cr_exp, _km_cr_expm1, _km_cr_exp10) has a normal result
+# other than o0; mode 1: the accurate path alone in both slots.
+fn run_b10a(fid, mode, a, o0, o1): i64 {
+    var xs: f64 = load64(a);
+    var xe = load64(a + 8);
+    var s: f64 = 0.0;
+    var e = 0;
+    if (mode == 1) {
+        if (fid == 107) { var s1, e1 = _km_cr_exp_ux_acc(xs, xe); s = s1; e = e1; }
+        if (fid == 108) { var s2, e2 = _km_cr_expm1_ux_acc(xs, xe); s = s2; e = e2; }
+        if (fid == 109) { var s3, e3 = _km_cr_exp10_ux_acc(xs, xe); s = s3; e = e3; }
+        store64(o0, s);
+        store64(o0 + 8, e);
+        store64(o1, s);
+        store64(o1 + 8, e);
+        return 0;
+    }
+    var fs: f64 = 0.0;
+    var fe = 0;
+    var ok = 0;
+    if (fid == 107) {
+        var s4, e4 = _km_cr_exp_ux(xs, xe);
+        s = s4;
+        e = e4;
+        var f4, g4, k4 = _km_cr_exp_ux_fast(xs, xe);
+        fs = f4;
+        fe = g4;
+        ok = k4;
+    }
+    if (fid == 108) {
+        var s5, e5 = _km_cr_expm1_ux(xs, xe);
+        s = s5;
+        e = e5;
+        var f5, g5, k5 = _km_cr_expm1_ux_fast(xs, xe);
+        fs = f5;
+        fe = g5;
+        ok = k5;
+    }
+    if (fid == 109) {
+        var s6, e6 = _km_cr_exp10_ux(xs, xe);
+        s = s6;
+        e = e6;
+        var f6, g6, k6 = _km_cr_exp10_ux_fast(xs, xe);
+        fs = f6;
+        fe = g6;
+        ok = k6;
+    }
+    store64(o0, s);
+    store64(o0 + 8, e);
+    store64(o1, fs);
+    store64(o1 + 8, fe);
+    var flag = ok;
+    var dx: f64 = xs - xs;
+    if (dx == 0.0 && xs != 0.0 && xe >= 0 - 1022 && xe <= 1023) {
+        var sc: f64 = _km_cr_pow2(xe);
+        var x: f64 = xs * sc;
+        var y: f64 = 0.0;
+        if (fid == 107) { y = _km_cr_exp(x); }
+        if (fid == 108) { y = _km_cr_expm1(x); }
+        if (fid == 109) { y = _km_cr_exp10(x); }
+        var yb = load64(&y) & 0x7FFFFFFFFFFFFFFF;
+        if (yb >= 0x0010000000000000 && yb < 0x7FF0000000000000) {
+            var ys, ye = _km_ux_norm(y, 0);
+            if (load64(&ys) != load64(&s) || ye != e) { flag = flag | 2; }
+        }
+    }
+    return flag;
+}
+
 # The overflow audit's B1 (ADR 0002 #27, #28): ids 33 … 44 as result words (cr_verify.py's AUDIT): mode 0 the public
 # function (an Err as the NaN word 0x7FF8000000000001), the fast path's result at the function's factors and its flag
 # (the monomial's _km_cr_mono_fast; for second_order_concentration and michaelis_menten their Rust-chain fast path);
@@ -5716,19 +5981,23 @@ fn main(): i64 {
     var n = load64(buf + 16);
     var ar = arity(fid);
     if (got != 8 * (3 + ar * n)) { return 3; }
-    if ((fid >= 92 && fid <= 99) || (fid >= 101 && fid <= 106)) {
-        # the FFT families: n/2 + 1 words per slot and argument, then the flag bytes; the balancing families n7 + 1
+    if ((fid >= 92 && fid <= 99) || (fid >= 101 && fid <= 109)) {
+        # the FFT families: n/2 + 1 words per slot and argument, then the flag bytes; the balancing families n7 + 1;
+        # the unbounded exponentials (B10a) 2
         var vw = ar / 2 + 1;
-        if (fid >= 101) {
+        if (fid >= 101 && fid <= 106) {
             var m7, n7 = bal7_dims(fid);
             vw = n7 + 1;
         }
+        if (fid >= 107) { vw = 2; }
         var outv = alloc(16 * vw * n + n + 8);
         var iv = 0;
         while (iv < n) {
             var av = buf + 24 + 8 * ar * iv;
             var fv = 0;
-            if (fid >= 101) {
+            if (fid >= 107) {
+                fv = run_b10a(fid, mode, av, outv + 8 * vw * iv, outv + 8 * vw * n + 8 * vw * iv);
+            } elif (fid >= 101) {
                 fv = run_bal7(fid, mode, av, outv + 8 * vw * iv, outv + 8 * vw * n + 8 * vw * iv);
             } else {
                 fv = run_fft6(fid, mode, av, outv + 8 * vw * iv, outv + 8 * vw * n + 8 * vw * iv);
@@ -5936,9 +6205,10 @@ def main():
     audit = [name for _, name in AUDIT if only is None or name in only]
     fft6 = [name for _, name, _, _ in FFT6 if only is None or name in only]
     bal7 = [name for _, name, _, _, _ in BAL7 if only is None or name in only]
+    b10a = [name for _, name, _ in B10A if only is None or name in only]
     plan = {}
     wmax = 7 * 600_000 if stoich else 0
-    if audit or fft6 or bal7:
+    if audit or fft6 or bal7 or b10a:
         wmax = max(wmax, 12 * 450_000)
     for fid, name, _, _, ref in funcs:
         xs, acc, spans = gen_args(name, lim)
@@ -6070,6 +6340,7 @@ def main():
     failed |= flame6_bisection_check(work, targets, audit)
     failed |= fft6_checks(work, targets, fft6)
     failed |= bal7_checks(work, targets, bal7)
+    failed |= b10a_checks(work, targets, b10a)
     print("cr_verify: " + ("FAILED" if failed else "all results correctly rounded, identical on every target"))
     sys.exit(1 if failed else 0)
 

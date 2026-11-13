@@ -2,8 +2,8 @@
 # atan2 and acos (M4a), x·2^y (M4d) and 1/(100·x) (M4e) of src/mathx.cyr (ADR 0006), the unbounded-exponent
 # arithmetic (M4e-2, ADR 0002 #20), the multi-word integers, RN(p/q·2^e) and the double-double quotient (M4e-3, ADR
 # 0002 #21, #22), the correctly rounded monomial (the overflow audit's B1, ADR 0002 #27, #28), B2's shapes and the
-# correctly rounded √ of a quotient (ADR 0002 #29, #30), and B3's correctly rounded w·√((x/y)·2^e) and normal-range test
-# (ADR 0002 #31, #32).
+# correctly rounded √ of a quotient (ADR 0002 #29, #30), B3's correctly rounded w·√((x/y)·2^e) and normal-range test
+# (ADR 0002 #31, #32), and B10a's e^x, e^x − 1 and 10^x with an unbounded exponent (ADR 0002 #40's primitives).
 #
 # Special values, the exact and tie cases, the thresholds, subnormal results (rounded once), the known
 # hardest-to-round arguments (Lefèvre–Muller's binary64 worst cases for exp, ln, sin, cos, arctan and arccos),
@@ -2117,6 +2117,288 @@ fn _t_b3_agrees() {
     assert(answered > 10000, "the fast path answers most of them");
 }
 
+# ── e^x, e^x − 1 and 10^x with an unbounded exponent (the overflow audit's B10a): ADR 0002 #40's primitives ─────
+
+# f(x) of the unbounded-exponent x = s·2^e: fid 0 e^x, 1 e^x − 1, 2 10^x; acc = 1 for the accurate path alone.
+#must_use
+fn uxe(fid, acc, s: f64, e): (f64, i64) {
+    if (acc == 1) {
+        if (fid == 0) { var a, ae = _km_cr_exp_ux_acc(s, e); return (a, ae); }
+        if (fid == 1) { var b, be = _km_cr_expm1_ux_acc(s, e); return (b, be); }
+        var c, ce = _km_cr_exp10_ux_acc(s, e);
+        return (c, ce);
+    }
+    if (fid == 0) { var d, de = _km_cr_exp_ux(s, e); return (d, de); }
+    if (fid == 1) { var f, fe = _km_cr_expm1_ux(s, e); return (f, fe); }
+    var g, ge = _km_cr_exp10_ux(s, e);
+    return (g, ge);
+}
+
+# The fast path alone: (s, e, 1), or (0, 0, 0) when its rounding test fails.
+#must_use
+fn uxef(fid, s: f64, e): (f64, i64, i64) {
+    if (fid == 0) { var a, ae, ak = _km_cr_exp_ux_fast(s, e); return (a, ae, ak); }
+    if (fid == 1) { var b, be, bk = _km_cr_expm1_ux_fast(s, e); return (b, be, bk); }
+    var c, ce, ck = _km_cr_exp10_ux_fast(s, e);
+    return (c, ce, ck);
+}
+
+# Checks the `n` rows (s bits, e, expected s bits, expected e) of function fid at t by the function, the accurate path
+# alone and, where its test passes, the fast path; returns how many rows the fast test sends to the accurate path.
+fn check_uxe(fid, t, n, name): i64 {
+    var fell = 0;
+    var k = 0;
+    while (k < n) {
+        var at = t + 32 * k;
+        var s: f64 = from_bits(load64(at));
+        var e = load64(at + 8);
+        var ws = load64(at + 16);
+        var we = load64(at + 24);
+        var a, ae = uxe(fid, 0, s, e);
+        assert(_km_bits(a) == ws && ae == we, name);
+        var b, be = uxe(fid, 1, s, e);
+        assert(_km_bits(b) == ws && be == we, name);
+        var c, ce, ck = uxef(fid, s, e);
+        if (ck == 1) {
+            assert(_km_bits(c) == ws && ce == we, name);
+        } else {
+            fell = fell + 1;
+        }
+        k = k + 1;
+    }
+    return fell;
+}
+
+# The special values of function fid by all three entry points: ±0, ±∞ and NaN, each with e = 0 (and a zero with another
+# e), against (want bits, want e) for +0, −0, +∞, −∞ (NaN gives NaN).
+fn check_uxe_special(fid, pz, nz, pi, ni, name) {
+    var z: f64 = 0.0;
+    var nzero: f64 = from_bits(0x8000000000000000);
+    var inf: f64 = from_bits(0x7FF0000000000000);
+    var ninf: f64 = from_bits(0xFFF0000000000000);
+    var nan: f64 = from_bits(0x7FF8000000000000);
+    var acc = 0;
+    while (acc < 3) {
+        var s0: f64 = 0.0;
+        var e0 = 0;
+        var s1: f64 = 0.0;
+        var e1 = 0;
+        var s2: f64 = 0.0;
+        var e2 = 0;
+        var s3: f64 = 0.0;
+        var e3 = 0;
+        var s4: f64 = 0.0;
+        var e4 = 0;
+        if (acc < 2) {
+            var a0, b0 = uxe(fid, acc, z, 0);
+            var a1, b1 = uxe(fid, acc, nzero, 0);
+            var a2, b2 = uxe(fid, acc, inf, 0);
+            var a3, b3 = uxe(fid, acc, ninf, 0);
+            var a4, b4 = uxe(fid, acc, nan, 0);
+            s0 = a0; e0 = b0; s1 = a1; e1 = b1; s2 = a2; e2 = b2; s3 = a3; e3 = b3; s4 = a4; e4 = b4;
+        } else {
+            var c0, d0, k0 = uxef(fid, z, 0);
+            var c1, d1, k1 = uxef(fid, nzero, 0);
+            var c2, d2, k2 = uxef(fid, inf, 0);
+            var c3, d3, k3 = uxef(fid, ninf, 0);
+            var c4, d4, k4 = uxef(fid, nan, 0);
+            assert(k0 == 1 && k1 == 1 && k2 == 1 && k3 == 1 && k4 == 1, name);
+            s0 = c0; e0 = d0; s1 = c1; e1 = d1; s2 = c2; e2 = d2; s3 = c3; e3 = d3; s4 = c4; e4 = d4;
+        }
+        assert(_km_bits(s0) == pz && e0 == 0, name);
+        assert(_km_bits(s1) == nz && e1 == 0, name);
+        assert(_km_bits(s2) == pi && e2 == 0, name);
+        assert(_km_bits(s3) == ni && e3 == 0, name);
+        assert(s4 != s4 && e4 == 0, name);
+        acc = acc + 1;
+    }
+    var w, we = uxe(fid, 0, z, 77);
+    assert(_km_bits(w) == pz && we == 0, name);
+}
+
+# Seeded arguments of every class in the exponents −60 … 64 (xorshift64, both signs): the accurate path and, where its
+# test passes, the fast path give the function's bits, and at a normal double x whose binary64 function (_km_cr_exp,
+# _km_cr_expm1, _km_cr_exp10) is normal the pair is that double's; returns how many the fast path answered.
+fn uxe_agrees(fid, n, name): i64 {
+    var st = 0x9E3779B97F4A7C15 + fid;
+    var answered = 0;
+    var bad = 0;
+    var k = 0;
+    while (k < n) {
+        st = st ^ (st << 13);
+        st = st ^ (st >> 7);
+        st = st ^ (st << 17);
+        var sb = 0x3FF0000000000000 | ((st >> 3) & 0x000FFFFFFFFFFFFF) | (st & 0x8000000000000000);
+        var s: f64 = from_bits(sb);
+        var e = ((st >> 56) & 127) - 60;
+        if (e > 64) { e = e - 60; }
+        var a, ae = uxe(fid, 0, s, e);
+        var b, be = uxe(fid, 1, s, e);
+        if (_km_bits(a) != _km_bits(b) || ae != be) { bad = bad + 1; }
+        var c, ce, ck = uxef(fid, s, e);
+        if (ck == 1) {
+            answered = answered + 1;
+            if (_km_bits(c) != _km_bits(a) || ce != ae) { bad = bad + 1; }
+        }
+        if (e >= 0 - 1022 && e <= 1023) {
+            var sc: f64 = _km_cr_pow2(e);
+            var x: f64 = s * sc;
+            var y: f64 = 0.0;
+            if (fid == 0) { y = _km_cr_exp(x); }
+            if (fid == 1) { y = _km_cr_expm1(x); }
+            if (fid == 2) { y = _km_cr_exp10(x); }
+            var yb = _km_bits(y) & 0x7FFFFFFFFFFFFFFF;
+            if (yb >= 0x0010000000000000 && yb < 0x7FF0000000000000) {
+                var ys, ye = _km_ux_norm(y, 0);
+                if (_km_bits(ys) != _km_bits(a) || ye != ae) { bad = bad + 1; }
+            }
+        }
+        k = k + 1;
+    }
+    assert_eq(bad, 0, name);
+    return answered;
+}
+
+# e^x: (s bits, e, expected s bits, expected e) from MPFR 4.2.2 at its widest exponent range (mpfr_ref.UX.exp,
+# generated): each tier and its edges (|x| ≤ 708 _km_cr_exp's; up to 1024 the cores unscaled; then the integer
+# reduction), past binary64's ends, MPFR's saturation edges (_KM_CR_EXPUX_OVF and UNF at 2^61) and past them, the tiny
+# end, Lefèvre and Muller's hard cases, and arguments where the fast test fails (found with cr_verify.py's probe).
+var _T_B10A_EXP: i64[160] = {
+    0x3FF0000000000000, 0, 0x3FF5BF0A8B145769, 1,     # e^1
+    0xBFF9000000000000, 9, 0x3FFCB83C52522378, -1155,     # e^-800: 1.4…·2^-1155 (binary64: +0)
+    0x3FFF400000000000, 9, 0x3FF9E72379AED73B, 1442,     # e^1000 (binary64: +∞)
+    0xBFF40BE7E6F806FF, 4, 0x3FF0E68E5107C6AF, -29,     # −50000/(8.314·300), the Arrhenius bench's
+    0xBFF6200000000000, 9, 0x3FF7C8AB2288C9AB, -1022,     # −708: the first tier's end
+    0xBFF6200000000001, 9, 0x3FF7C8AB2288C6B2, -1022,     # past it: the second tier
+    0xBFF749999999999A, 9, 0x3FFDEECC3F328D1B, -1076,     # binary64's +0
+    0xBFF6840000000000, 9, 0x3FF73C23FFC03DB9, -1040,     # a binary64 subnormal, at 53 bits
+    0x3FF62E51EB851EB8, 9, 0x3FF01DF4FE59C551, 1024,     # binary64's +∞
+    0x3FFFFFFFFFFFFFFF, 9, 0x3FF3F82D20E74F23, 1477,     # the second tier's last double
+    0x3FF0000000000000, 10, 0x3FF3F82D20E751A2, 1477,     # the integer reduction's first
+    0xBFF0000000000000, 10, 0x3FF9A3A132EE86BA, -1478,     # and negative
+    0x3FF3880000000000, 13, 0x3FFEEB3183DCD95A, 14426,     # 1e4
+    0xBFF3880000000000, 13, 0x3FF08F3E53F28A86, -14427,     # -1e4
+    0x3FFD1A94A2000000, 39, 0x3FFF32D493F0D590, 1442695040888,     # 1e12
+    0xBFFD1A94A2000000, 39, 0x3FF0693855B39F14, -1442695040889,     # -1e12
+    0x3FF4D1120D7B1600, 61, 0x3FF0E8DE2B406D00, 4328085122666890222,     # 3e18
+    0x3FF62E42FEFA39EF, 61, 0x3FFA22599DF44321, 4611686018427387749,     # OVF·2^61: e = 2^62 − 155
+    0x3FF62E42FEFA39F0, 61, 0x7FF0000000000000, 0,     # the next: +∞ (MPFR's overflow)
+    0xBFF62E42FEFA39EF, 61, 0x3FF3975904A6A031, -4611686018427387750,     # −UNF·2^61: e = −2^62 + 154
+    0xBFF62E42FEFA39F0, 61, 0x0000000000000000, 0,     # the next: +0
+    0x3FF0000000000000, 62, 0x7FF0000000000000, 0,     # 2^62: +∞
+    0xBFF0000000000000, 62, 0x0000000000000000, 0,     # −2^62: +0
+    0x3FF0000000000000, 4611686018427387903, 0x7FF0000000000000, 0,     # 2^(2^62 − 1): +∞
+    0x3FF8000000000000, -55, 0x3FF0000000000000, 0,     # 1.5·2^-55: 1
+    0xBFF0000000000000, -54, 0x3FF0000000000000, 0,     # −2^-54: 1 (its tier's threshold)
+    0x3FF0000000000000, -54, 0x3FF0000000000000, 0,     # 2^-54: 1
+    0xBFFC000000000000, -54, 0x3FFFFFFFFFFFFFFF, -1,     # −1.75·2^-54: 1 − 2^-53
+    0x3FF0000000000000, -1100, 0x3FF0000000000000, 0,     # 2^-1100: 1
+    0x3FF0000000000000, -4611686018427387904, 0x3FF0000000000000, 0,     # 2^(−2^62): 1
+    0xBFFED318EFB627EA, -27, 0x3FFFFFFFF84B39C5, -1,     # Lefèvre–Muller's hard cases
+    0x3FFED318EFB627EA, -27, 0x3FF0000003DA631E, 0,
+    0x3FF83D4BCDEBB3F4, 2, 0x3FFAC50B409C8AEE, 8,
+    0xBFF83D4BCDEBB3F4, 2, 0x3FF320480D311975, -9,
+    0x3FFFFFFFFFFFFF80, -46, 0x3FF0000000000080, 0,
+    0xBFFED4C8B28AF2B0, 9, 0x3FF8EEC0484B5190, -1424,     # the fast test fails: the second tier
+    0x3FFF8FEAEBA10C74, 9, 0x3FF13BC5365B62D3, 1457,
+    0xBFF4757AC15AE0A8, 15, 0x3FF3E4CA074B70B8, -60449,     # and past it (the integer reduction)
+    0x3FFFC47C2D71AB26, 22, 0x3FF7E8545660236D, 12014280,
+    0x3FF900A633D55115, 49, 0x3FF57B8D7F61CF73, 1269136708864324
+};
+
+# e^x − 1, as _T_B10A_EXP (mpfr_ref.UX.expm1): x itself below 2^-53 (xe ≤ −54) at any exponent, the binary64 path from
+# 2^-53, −1 from M1 down (and at once from −64), the −1 near 120·ln 2, e^x − 1 as e^x past 708, the overflow edge.
+var _T_B10A_EXPM1: i64[116] = {
+    0x3FF62E42FEFA39EF, -1, 0x3FF0000000000000, 0,     # ln 2: 1
+    0xBFF0000000000000, -1, 0xBFF92E9A0720D3EC, -2,     # −0.5
+    0x3FF0000000000000, -6, 0x3FF0202AD5778E46, -6,     # 2^-6: the small region's edge
+    0x3FF0000000000000, -55, 0x3FF0000000000000, -55,     # 2^-55: x
+    0x3FF8000000000000, -54, 0x3FF8000000000000, -54,     # 1.5·2^-54: x (|x| < 2^-53)
+    0x3FFFFFFFFFFFFFFF, -54, 0x3FFFFFFFFFFFFFFF, -54,     # (2 − 2^-52)·2^-54: x
+    0xBFF0000000000000, -54, 0xBFF0000000000000, -54,     # −2^-54: x
+    0xBFF0000000000000, -1100, 0xBFF0000000000000, -1100,     # −2^-1100: x
+    0x3FF0000000000000, -53, 0x3FF0000000000000, -53,     # 2^-53: the binary64 path
+    0xBFF0000000000000, -53, 0xBFF0000000000000, -53,     # −2^-53
+    0x3FF0000000000000, -4611686018427387904, 0x3FF0000000000000, -4611686018427387904,     # 2^(−2^62): x
+    0xBFF2B708872320E1, 5, 0xBFFFFFFFFFFFFFFF, -1,     # M1: the last above −1
+    0xBFF2B708872320E2, 5, 0xBFF0000000000000, 0,     # the next: −1
+    0xBFFFFFFFFFFFFFFF, 5, 0xBFF0000000000000, 0,     # just above −64: binary64's expm1
+    0xBFF0000000000000, 6, 0xBFF0000000000000, 0,     # −64: −1 at once
+    0xBFF7E43C8800759C, 996, 0xBFF0000000000000, 0,     # −1e300: −1
+    0xBFF0000000000000, 4611686018427387904, 0xBFF0000000000000, 0,     # −2^(2^62): −1
+    0x3FF4CB5ECF0A9650, 6, 0x3FFFFFFFFFFFFFDF, 119,     # 120·ln 2
+    0x3FF6200000000000, 9, 0x3FF586F6BF260CF1, 1021,     # 708: the first tier's end
+    0x3FF6200000000001, 9, 0x3FF586F6BF260FA2, 1021,     # past it
+    0x3FFF400000000000, 9, 0x3FF9E72379AED73B, 1442,     # e^1000 − 1 = e^1000 at 53 bits
+    0x3FF3880000000000, 13, 0x3FFEEB3183DCD95A, 14426,     # 1e4
+    0x3FFD1A94A2000000, 39, 0x3FFF32D493F0D590, 1442695040888,     # 1e12
+    0x3FF62E42FEFA39EF, 61, 0x3FFA22599DF44321, 4611686018427387749,     # OVF·2^61
+    0x3FF62E42FEFA39F0, 61, 0x7FF0000000000000, 0,     # the next: +∞
+    0x3FF0000000000000, 62, 0x7FF0000000000000, 0,     # 2^62: +∞
+    0x3FF76D78B6AADCF8, 9, 0x3FF7ACDADACC1D6E, 1081,     # the fast test fails: the second tier
+    0x3FFFFE2EAD2A0F83, 23, 0x3FFB26EB1F3F7D67, 24199035,     # and past it
+    0x3FF90558C2711A6D, 54, 0x3FF0A300B0316686, 40642180435792672
+};
+
+# 10^x, as _T_B10A_EXP (mpfr_ref.UX.exp10): the exact 10^22, the tie 10^23 (to even), 10^24 and 10^-1 (neither exact
+# nor a tie), each tier's edges (307, 512), 10^±400, the saturation edges at 2^60 and the tiny end.
+var _T_B10A_EXP10: i64[108] = {
+    0xBFF3000000000000, 2, 0x3FF2A5884E341E83, -16,     # 10^-4.75
+    0x3FF6000000000000, 4, 0x3FF0F0CF064DD592, 73,     # 10^22: exact
+    0x3FF7000000000000, 4, 0x3FF52D02C7E14AF6, 76,     # 10^23: the tie, to even
+    0x3FF8000000000000, 4, 0x3FFA784379D99DB4, 79,     # 10^24
+    0xBFF0000000000000, 0, 0x3FF999999999999A, -4,     # 10^-1
+    0x3FF3300000000000, 8, 0x3FFC7B1F3CAC7433, 1019,     # 307: the first tier's end
+    0x3FF3480000000000, 8, 0x3FFC252C2EB1CAD9, 1024,     # past binary64's +∞: the second tier
+    0xBFF43B3333333333, 8, 0x3FF9D89B2ACC63A7, -1076,     # below binary64's +0
+    0x3FF9000000000000, 8, 0x3FFB4EC7F91973FF, 1328,     # 10^400
+    0xBFF9000000000000, 8, 0x3FF2BFCFC0F923DF, -1329,     # 10^-400
+    0x3FFFFFFFFFFFFFFF, 8, 0x3FFC633415D4BDBC, 1700,     # the second tier's last double
+    0x3FF0000000000000, 9, 0x3FFC633415D4C1D2, 1700,     # the integer reduction's first
+    0x3FF3880000000000, 13, 0x3FF3709D450AAD7E, 33219,     # 1e4
+    0xBFFD1A94A2000000, 39, 0x3FF8E48978E568A5, -3321928094888,     # -1e12
+    0x3FFBC16D674EC800, 59, 0x3FFD3FC3D2CA2671, 3321928094887362347,     # 1e18
+    0x3FF34413509F79FE, 60, 0x3FF73DE872F6EAFD, 4611686018427387096,     # OVF₁₀·2^60: e = 2^62 − 808
+    0x3FF34413509F79FF, 60, 0x7FF0000000000000, 0,     # the next: +∞
+    0xBFF34413509F79FE, 60, 0x3FF6077CCED3C97F, -4611686018427387097,     # −UNF₁₀·2^60: e = −2^62 + 807
+    0xBFF34413509F79FF, 60, 0x0000000000000000, 0,     # the next: +0
+    0x3FF0000000000000, 61, 0x7FF0000000000000, 0,     # 2^61: +∞
+    0xBFF0000000000000, 61, 0x0000000000000000, 0,     # −2^61: +0
+    0x3FF0000000000000, -57, 0x3FF0000000000000, 0,     # 2^-57: 1
+    0xBFF0000000000000, -56, 0x3FF0000000000000, 0,     # −2^-56: the binary64 path
+    0x3FF0000000000000, -1100, 0x3FF0000000000000, 0,     # 2^-1100: 1
+    0x3FFA51927FAB0A8D, 8, 0x3FFD00EDC75E4A98, 1398,     # the fast test fails: the second tier
+    0x3FFCBD48FE3D15C5, 57, 0x3FFAB87C8F163272, 859919148537118767,     # and past it
+    0xBFF5DE1092E50452, 10, 0x3FFE052FD0DEFACD, -4650
+};
+
+fn _t_cyrius_b10a_exp_ux() {
+    test_group("cyrius_b10a_exp_ux (ADR 0002 #40's primitives)");
+    var fell = check_uxe(0, &_T_B10A_EXP, 40, "e^x against MPFR at its widest exponent range");
+    assert_eq(fell, 6, "the fast test fails on −2^-54 (e^x is 2^-109 above a midpoint) and the five chosen rows");
+    check_uxe_special(0, 0x3FF0000000000000, 0x3FF0000000000000, 0x7FF0000000000000, 0, "e^x of ±0, ±∞, NaN");
+    var ans = uxe_agrees(0, 4000, "e^x: full, fast and accurate paths agree, and with _km_cr_exp");
+    assert(ans > 3900, "e^x: the fast path answers almost all");
+}
+
+fn _t_cyrius_b10a_expm1_ux() {
+    test_group("cyrius_b10a_expm1_ux (ADR 0002 #40's primitives)");
+    var fell = check_uxe(1, &_T_B10A_EXPM1, 29, "e^x − 1 against MPFR at its widest exponent range");
+    assert_eq(fell, 4, "the fast test fails on −2^-53 (2^-161.6 below a midpoint) and the three chosen rows");
+    check_uxe_special(1, 0, 0x8000000000000000, 0x7FF0000000000000, 0xBFF0000000000000, "e^x − 1 of ±0, ±∞, NaN");
+    var ans = uxe_agrees(1, 4000, "e^x − 1: full, fast and accurate paths agree, and with _km_cr_expm1");
+    assert(ans > 3900, "e^x − 1: the fast path answers almost all");
+}
+
+fn _t_cyrius_b10a_exp10_ux() {
+    test_group("cyrius_b10a_exp10_ux (ADR 0002 #40's primitives)");
+    var fell = check_uxe(2, &_T_B10A_EXP10, 27, "10^x against MPFR at its widest exponent range");
+    assert_eq(fell, 4, "the fast test fails on the tie 10^23 and the three chosen rows");
+    check_uxe_special(2, 0x3FF0000000000000, 0x3FF0000000000000, 0x7FF0000000000000, 0, "10^x of ±0, ±∞, NaN");
+    var ans = uxe_agrees(2, 4000, "10^x: full, fast and accurate paths agree, and with _km_cr_exp10");
+    assert(ans > 3900, "10^x: the fast path answers almost all");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_special_values();
@@ -2152,6 +2434,9 @@ fn main() {
     _t_b2_agrees();
     _t_b3_values();
     _t_b3_agrees();
+    _t_cyrius_b10a_exp_ux();
+    _t_cyrius_b10a_expm1_ux();
+    _t_cyrius_b10a_exp10_ux();
     return assert_summary();
 }
 

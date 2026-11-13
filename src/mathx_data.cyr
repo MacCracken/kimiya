@@ -1887,3 +1887,43 @@ var _KM_CR_ROOT6_2_L = 0x3905491C0902AFC5;   # 5.124317959154468e-34
 # _km_cr_hundredth_div, the correctly rounded 1/(100·x)), from the exact rational; H is Rust's 0.01.
 var _KM_CR_HUNDREDTH_H = 0x3F847AE147AE147B;   # 0.01
 var _KM_CR_HUNDREDTH_L = 0xBC0EB851EB851EB8;   # -2.0816681711721684e-19
+
+# The bits of C·2^-75, C = 512/ln 2, for the unbounded e^x and 10^x (the overflow audit's B10a:
+# _km_expux_reduce), 32 per word: word w holds bits 32w + 1 … 32w + 32 (bit j weighs 2^-j), the first
+# in the word's bit 31; C < 2^11, so words 0 and 1 are 0. 384 bits from MPFR at 1600 bits, checked
+# against the integer series of ln 2 and ln 10; |x| < 2^62 reads words up to 10.
+var _KM_CR_EXPUX_C: i64[12] = {
+    0x00000000, 0x00000000, 0x5C551D94, 0xAE0BF85D,
+    0xDF43FF68, 0x348E9F44, 0x75ABBD54, 0x6EB4AD2C,
+    0x45928B36, 0x68D09923, 0xEF0E21FB, 0xAA8BB66B
+};
+
+# The bits of C·2^-75, C = 512·log2 10, for the unbounded e^x and 10^x (the overflow audit's B10a:
+# _km_expux_reduce), 32 per word: word w holds bits 32w + 1 … 32w + 32 (bit j weighs 2^-j), the first
+# in the word's bit 31; C < 2^11, so words 0 and 1 are 0. 384 bits from MPFR at 1600 bits, checked
+# against the integer series of ln 2 and ln 10; |x| < 2^62 reads words up to 10.
+var _KM_CR_EXP10UX_C: i64[12] = {
+    0x00000000, 0x00000000, 0xD49A784B, 0xCD1B8AFE,
+    0x492BF6FF, 0x4DAFDB4C, 0xD96C55FE, 0x37B3AD4E,
+    0x91B6AC80, 0x82E7859D, 0x06650FDE, 0x9DD51F3A
+};
+
+# ln2/512 = LH + LM + LL and 512/ln 2 = CH + CM + CL, normalised triple-doubles to 2^-158 (the reductions
+# _km_expux_reduce and _km_expux_dd). OVF: the largest s in [1, 2) with e^(s·2^61) finite at MPFR's widest
+# exponent range (emax = 2^62 − 1), UNF the largest with e^(−s·2^61) nonzero (emin = 1 − 2^62); bisection
+# with MPFR (mpfr_ref.UX).
+var _KM_CR_EXPUX_LH = 0x3F562E42FEFA39EF;   # 0.0013538030870311431
+var _KM_CR_EXPUX_LM = 0x3BEABC9E3B39803F;   # 4.529388308293554e-20
+var _KM_CR_EXPUX_LL = 0x3877B57A079A1934;   # 1.1147868043781664e-36
+var _KM_CR_EXPUX_CH = 0x40871547652B82FE;   # 738.6598609351493
+var _KM_CR_EXPUX_CM = 0x3D0777D0FFDA0D24;   # 1.0421900155356689e-14
+var _KM_CR_EXPUX_CL = 0xB9A60BB8A5442AB9;   # -5.434705897532036e-31
+var _KM_CR_EXPUX_OVF = 0x3FF62E42FEFA39EF;   # 1.3862943611198906
+var _KM_CR_EXPUX_UNF = 0x3FF62E42FEFA39EF;   # 1.3862943611198906
+
+# 512·log2 10 = CH + CM + CL (to 2^-158), and the same edges of 10^(±s·2^60).
+var _KM_CR_EXP10UX_CH = 0x409A934F0979A371;   # 1700.8271845823294
+var _KM_CR_EXP10UX_CM = 0x3D37F2495FB7FA6D;   # 8.507481686904791e-14
+var _KM_CR_EXP10UX_CL = 0x39DFB699B2D8ABFC;   # 6.2543422353705886e-30
+var _KM_CR_EXP10UX_OVF = 0x3FF34413509F79FE;   # 1.2041199826559246
+var _KM_CR_EXP10UX_UNF = 0x3FF34413509F79FE;   # 1.2041199826559246

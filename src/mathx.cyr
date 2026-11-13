@@ -32,7 +32,9 @@
 # audit's B1 added the correctly rounded monomials (_km_cr_mono and one straight-line fast path per shape: ADR 0002 #27,
 # #28) and B2 four more shapes and the correctly rounded √ of a quotient, _km_cr_sqrt_div (ADR 0002 #29, #30). B3 added
 # the correctly rounded w·√((x/y)·2^e), _km_cr_mul_sqrt_ratio (ADR 0002 #32), and _km_ux_normal, the fast paths' range
-# test of its #20-style functions (#31, #32).
+# test of its #20-style functions (#31, #32). B10a added, at the end of this file, e^x, e^x − 1 and 10^x of an
+# unbounded-exponent value correctly rounded to 53 bits at any exponent (_km_cr_exp_ux, _km_cr_expm1_ux and
+# _km_cr_exp10_ux: the primitives of ADR 0002 #40's chains).
 # The coefficients and constants are bit patterns in typed f64 locals (never a hex `const`).
 
 # +∞ (0x7FF0000000000000), a compile-time constant.
@@ -5483,4 +5485,570 @@ fn _km_cr_mul_sqrt_ratio(w: f64, x: f64, y: f64, e): f64 {
     if (ok == 1) { return r; }
     var a: f64 = _km_mul_sqrt_ratio_acc(w, x, y, e);
     return a;
+}
+
+# ── e^x, e^x − 1 and 10^x with an unbounded exponent (the overflow audit's B10a): ADR 0002 #40's primitives ──────
+#
+# RN₅₃(e^x), RN₅₃(e^x − 1) and RN₅₃(10^x) of an unbounded-exponent value x = xs·2^xe (a normalised _km_ux_* pair), as a
+# pair (s, e) = s·2^e, 1 ≤ |s| < 2: the significand correctly rounded to 53 bits, ties to even, at ANY exponent, with no
+# subnormal grid and no overflow at binary64's limits (e^-800 is the normal 53-bit value 1.79…·2^-1155, e^1000 is
+# 1.61…·2^1442). They are the exponentials of ADR 0002 #40's chains (the survey's F10: e^x times a prefactor), where e^x
+# is never the final operation: the chain's last product, or expm1's subtraction, rounds once into binary64 by
+# _km_ux_*_f64 ("Rust's chain with an unbounded exponent, last step rounded once": #20's semantics). The main session
+# settled these semantics under the user's accuracy policy (not asked):
+# - Range: exact wherever the result fits MPFR's widest exponent range (emin = 1 − 2^62, emax = 2^62 − 1; MPFR's value
+#   in [2^(E − 1), 2^E) is the port's e = E − 1), so the exponents returned lie in [−2^62 + 154, 2^62 − 155] for e^x and
+#   e^x − 1 and in [−2^62 + 807, 2^62 − 808] for 10^x. Past it they saturate as MPFR does: (+∞, 0) where e^x or e^x − 1
+#   overflows (x > OVF·2^61) or 10^x does (x > OVF₁₀·2^60); (+0, 0) where e^x (x < −UNF·2^61) or 10^x (x < −UNF₁₀·2^60)
+#   underflows: the result just past the edge is below 2^(emin − 2), which MPFR's round-to-nearest takes to +0 (asserted
+#   by scripts/oracle/mathx_tables.py, which bisects the edges with MPFR: _KM_CR_EXPUX_OVF … _KM_CR_EXP10UX_UNF). e^x −
+#   1 tends to −1 and never underflows. |x| reaches about 3.2·10¹⁸ (e^x) and 1.4·10¹⁸ (10^x).
+# - Specials, as IEEE's exp, expm1 and exp10: ±0 gives 1 (e^x − 1: ±0, the sign kept), +∞ gives +∞, −∞ gives +0 (e^x −
+#   1: −1), NaN gives NaN, each with e = 0. A tiny x gives 1 (e^x: xe < −54, so |x| < 2^-54; 10^x: xe < −56, |x·ln 10| <
+#   2^-54.8), and x itself for e^x − 1 at any exponent below (xe < −54, |x| < 2^-53: x²/2 + … is below half an ulp of x,
+#   and below a quarter of it, the gap to the binade below, where |x| is a power of two).
+# - Tiers (x is a 53-bit number at any exponent):
+#   - binary64's own range (e^x: |x| ≤ 708; 10^x: |x| ≤ 307; e^x − 1: x ≤ 708): x is a double with a normal result, and
+#     the result IS _km_cr_exp(x), _km_cr_exp10(x) or _km_cr_expm1(x) (their two paths and proofs, ADR 0006), its pair
+#     by _km_ux_norm;
+#   - the rest of the cores' range (e^x: 708 < |x| < 1024; 10^x: 307 < |x| < 512; e^x − 1: 708 < x < 1024): the same
+#     cores without the final scaling. exp's fast core (_km_exp_core; 10^x on x·ln 10 = yh + yl as _km_cr_exp10_fast
+#     forms it) and its rounding test on hi + lo with ε = 2^-69, the pair by _km_ux_norm(u, E) (hi + lo is in [0.9993,
+#     1.9987]); when the test fails, the accurate core (_km_exp_acc_core, on exp10's triple-double x·ln 10) and _km_rn3
+#     at the same scale. K = RN(x·512/ln 2) stays below 2^20 (below 756,389, and 870,800 for x·ln 10), which the cores'
+#     reduction needs (K·L1 exact); the fast core's dropped K·L3 grows from 2^-79.2 to 2^-78.8, inside its bound's
+#     margin (0.9·2^-70 against ε = 2^-69);
+#   - beyond, up to the edge (9 ≤ xe ≤ 61): the fast path reduces x by _km_expux_dd while |x·C| < 2^51 (e^x: xe ≤ 40,
+#     |x| < 2^41; 10^x: xe ≤ 39) and by the integer reduction past it, then runs the fast core's tail (_km_exp_core_r)
+#     and the same test; the accurate path always takes the integer reduction and the accurate core's tail
+#     (_km_exp_acc_r).
+#   e^x − 1 past x = 708 (E ≥ 1021) rounds as e^x does: the −1 is below 2^-1021 of e^x, inside the fast test's margin
+#   and far below the accurate path's bound (so its statement below covers it); x ≤ −64 gives −1 (e^x < 2^-92).
+# - Reduction (_km_expux_reduce, 9 ≤ xe ≤ 61): x·C = K + f with C = 512/ln 2 for e^x, 512·log2 10 for 10^x (10^x =
+#   2^(x·log2 10)) and |f| ≤ 1/2, so the result is 2^E·2^(j/512)·e^r with K = 512·E + j and r = f·ln2/512, as in the
+#   cores. |x| = M·2^(xe − 52) (M the 53-bit significand), and the table _KM_CR_EXPUX_C (_KM_CR_EXP10UX_C) holds C·2^-75
+#   with 64 zero bits first: its 288-bit window V from bit xe − 8 on starts above C's leading bit, so x·C = M·V·2^-256 +
+#   δ with the integer part whole, and the bits past the window give |δ| < 2^(xe + 1 + 75 − (xe − 9) − 288) = 2^-203.
+#   M·V (eleven columns of 32-bit halves, as _km_ph_reduce's) gives K's 72 bits (E's 63, j's 9) and the 256-bit
+#   fraction, rounded to nearest (f ≥ 1/2: K + 1, and f − 1 by a two's-complement negation). Its top 192 bits, six exact
+#   32-bit terms summed by _km_td_add_d (below 2^-152.7 relative: all of one sign), times ln2/512 (_KM_CR_EXPUX_LH, LM,
+#   LL, to 2^-158) by _km_td_mul (2^-153), give r to 2^-162 absolute (measured 2^-168.3 over 24,000 arguments against
+#   500-bit MPFR). A negative x takes −K (E' = −E − 1 and j' = 512 − j for j ≠ 0) and −r. K fits its 72 bits: |x·C| <
+#   2^72 below the edge.
+# - Fast reduction (_km_expux_dd, |x·C| < 2^51): x·C = x·CH + x·CM + x·CL (C = 512/ln 2 or 512·log2 10 as a
+#   triple-double, _KM_CR_EXPUX_C* and _KM_CR_EXP10UX_C*; two TwoProducts and x·CL rounded: C's tail and that rounding
+#   are below 2^-107), K = RN(x·CH) by the 1.5·2^52 shift, f = x·C − K as fh + fl (x·CH − K exact, two TwoSums, the
+#   small terms within 2^-103), moved once by ±1 into |fh| ≤ 1/2 (exactly, by Sterbenz), and r = f·ln2/512 as a
+#   double-double (fh·LH by TwoProduct, fh·LM + fl·LH rounded): within 2^-112 in all, so the 1.5·2^52 shift's range is
+#   the limit.
+# - Error: the fast path's is the cores' (|hi + lo − e^r·2^(j/512)| < 0.9·2^-70, the reduction now 2^-112 or 2^-162;
+#   measured 2^-71.07 and 2^-71.09 over 24,000 arguments each against 500-bit MPFR), so the same ε = 2^-69; the accurate
+#   path's is below 2^-150 relative (the reduction's 2^-162, the accurate core's measured 2^-155, _km_rn3 exact;
+#   measured 2^-155.15), as _km_cr_exp2_scaled's. The fast test fails on about 2·10^-5 of the arguments past the first
+#   tier.
+# - Exact and tie cases: e^x and e^x − 1 are exact only at x = 0 (Lindemann–Weierstrass: e^x is transcendental for
+#   algebraic x ≠ 0), whatever the exponent, so never a 53-bit midpoint. 10^x is rational only for integer x and dyadic
+#   only for x ≥ 0: 10^n = 5^n·2^n is a 53-bit number for 0 ≤ n ≤ 22 (5^22 < 2^53), a midpoint for n = 23 (5^23 has 54
+#   bits and is odd: 10^23 ties to even, special-cased in _km_cr_exp10_acc), and neither for n ≥ 24 (5^n is odd with 56
+#   bits or more) or n < 0 (not dyadic). So the unbounded exponent adds no exact or tie case; all of them are in the
+#   first tier.
+# - Proof: in the first tier, the binary64 functions' own (ADR 0006): Lefèvre–Muller's worst cases for e^x, and for 10^x
+#   and e^x − 1, which have no published table, an accurate path 18 bits past their expected hardest case. Elsewhere no
+#   worst-case search exists: as for pow and _km_cr_exp2_scaled, the fast path is proven (a failed test only costs the
+#   accurate path), and the accurate path is proven correct for results not within 2^-150 (relative) of a 53-bit
+#   midpoint. A random argument is that close with probability about 2^-96; the domain past the first tier has fewer
+#   than 2^59 arguments, so the expected number of such cases in all of it is below 2^-37.
+# scripts/oracle/cr_verify.py checks all three against MPFR at its widest exponent range (mpfr_ref.UX.exp, .expm1,
+# .exp10) on x86_64 ELF, x86_64 PE and aarch64, the accurate path forced. Entry points: _km_cr_exp_ux, _km_cr_expm1_ux
+# and _km_cr_exp10_ux; _km_cr_<f>_ux_fast ((s, e, 1), or (0, 0, 0) when the rounding test fails) and _km_cr_<f>_ux_acc
+# (the accurate path alone) for the tests and cr_verify.py.
+
+# The edges of e^x (sel 0) and 10^x (sel 1) of x = xs·2^xe: (s, e, 1) for a special xs, a tiny x (1) and past MPFR's
+# exponent range (+∞, +0), (0, 0, 0) otherwise.
+#must_use
+fn _km_expux_edge(xs: f64, xe, sel): (f64, i64, i64) {
+    var dx: f64 = xs - xs;
+    if (dx != 0.0) {                                # ±∞ or NaN
+        if (xs != xs || xs > 0.0) { return (xs, 0, 1); }
+        return (0.0, 0, 1);
+    }
+    if (xs == 0.0) { return (1.0, 0, 1); }
+    var tiny = 0 - 54;
+    var top = 61;
+    var ovf: f64 = _KM_CR_EXPUX_OVF;
+    var unf: f64 = _KM_CR_EXPUX_UNF;
+    if (sel == 1) {
+        tiny = 0 - 56;
+        top = 60;
+        ovf = _KM_CR_EXP10UX_OVF;
+        unf = _KM_CR_EXP10UX_UNF;
+    }
+    if (xe < tiny) { return (1.0, 0, 1); }
+    if (xe < top) { return (0.0, 0, 0); }
+    var nxs: f64 = -xs;
+    if (xe == top) {
+        if (xs > 0.0 && xs <= ovf) { return (0.0, 0, 0); }
+        if (xs < 0.0 && nxs <= unf) { return (0.0, 0, 0); }
+    }
+    if (xs > 0.0) {
+        var inf: f64 = _KM_INF;
+        return (inf, 0, 1);
+    }
+    return (0.0, 0, 1);
+}
+
+# The tail of _km_exp_core from the reduced argument: (hi, lo) with hi + lo = e^(r + rl)·2^(j/512) within 0.9·2^-70 (its
+# bound), for |r| ≤ 2^-10.52, |rl| ≲ ulp(r)/2 and ti = 32·j.
+#must_use
+fn _km_exp_core_r(r: f64, rl: f64, ti): (f64, f64) {
+    var c: f64 = r + 49152.0;                         # 1.5·2^15: rounds r to a multiple of 2^-37
+    var r1: f64 = c - 49152.0;
+    var r2: f64 = r - r1;
+    var p3: f64 = _KM_CR_EXP_P3;
+    var p4: f64 = _KM_CR_EXP_P4;
+    var p5: f64 = _KM_CR_EXP_P5;
+    var z: f64 = r * r;
+    var q: f64 = (z * (0.5 + (r * p3))) + ((z * z) * (p4 + (r * p5)));
+    var a: f64 = load64(&_KM_CR_EXP_T + ti);
+    var b: f64 = load64(&_KM_CR_EXP_T + ti + 8);
+    var p1: f64 = a * r1;
+    var hi: f64 = a + p1;
+    var e1: f64 = p1 - (hi - a);
+    var rlq: f64 = rl + q;
+    var lo: f64 = (e1 + b) + ((a * (r2 + rlq)) + (b * (r + rlq)));
+    return (hi, lo);
+}
+
+# The tail of _km_exp_acc_core from the reduced triple-double argument: e^(r0 + r1 + r2)·2^(j/512) as (h, m, l) at
+# out[0..2], ti = 32·j (its bound: 2^-155 measured).
+fn _km_exp_acc_r(r0: f64, r1: f64, r2: f64, ti, out) {
+    var sh: f64 = load64(&_KM_CR_EXP_ACC + 216);    # 1/11! (index 3·(11 − 2))
+    var sm: f64 = load64(&_KM_CR_EXP_ACC + 224);
+    var sl: f64 = load64(&_KM_CR_EXP_ACC + 232);
+    var n = 10;
+    while (n >= 2) {
+        var th, tm, tl = _km_td_mul(r0, r1, r2, sh, sm, sl);
+        var off = (n - 2) * 24;
+        var ch: f64 = load64(&_KM_CR_EXP_ACC + off);
+        var cm: f64 = load64(&_KM_CR_EXP_ACC + off + 8);
+        var cl: f64 = load64(&_KM_CR_EXP_ACC + off + 16);
+        var uh, um, ul = _km_td_add(ch, cm, cl, th, tm, tl);
+        sh = uh;
+        sm = um;
+        sl = ul;
+        n = n - 1;
+    }
+    var vh, vm, vl = _km_td_mul(r0, r1, r2, sh, sm, sl);
+    var wh, wm, wl = _km_td_add_d(vh, vm, vl, 1.0);
+    var ph, pm, pl = _km_td_mul(r0, r1, r2, wh, wm, wl);     # e^r − 1
+    var ta: f64 = load64(&_KM_CR_EXP_T + ti);
+    var tb: f64 = load64(&_KM_CR_EXP_T + ti + 8);
+    var tc: f64 = load64(&_KM_CR_EXP_T + ti + 16);
+    var td: f64 = load64(&_KM_CR_EXP_T + ti + 24);
+    var t0, t1a = _km_fast_two_sum(ta, tb);
+    var t1, t2a = _km_fast_two_sum(t1a, tc);
+    var t2: f64 = t2a + td;
+    var qh, qm, ql = _km_td_mul(t0, t1, t2, ph, pm, pl);
+    var zh, zm, zl = _km_td_add(t0, t1, t2, qh, qm, ql);
+    store64(out, zh);
+    store64(out + 8, zm);
+    store64(out + 16, zl);
+    return 0;
+}
+
+# The reduction for 9 ≤ xe ≤ 61 (the section comment): x·C = K + f for x = xs·2^xe and C = 512/ln 2 (sel 0) or
+# 512·log2 10 (sel 1); returns (E, j) with K = 512·E + j (0 ≤ j < 512), and r = f·ln2/512 as a triple-double at
+# out[0..2].
+fn _km_expux_reduce(xs: f64, xe, sel, out): (i64, i64) {
+    var ux = load64(&xs);
+    var m = (ux & 0x000FFFFFFFFFFFFF) | 0x0010000000000000;
+    var m1 = m >> 32;                               # below 2^21
+    var m0 = m & 0xFFFFFFFF;
+    var p = xe - 9;                                 # the window: bits p + 1 … p + 288 of C·2^-75
+    var w = p >> 5;
+    var s = p & 31;
+    var tb = &_KM_CR_EXPUX_C;
+    if (sel == 1) { tb = &_KM_CR_EXP10UX_C; }
+    var col: i64[11];
+    var k = 0;
+    while (k < 11) {
+        col[k] = 0;
+        k = k + 1;
+    }
+    k = 0;
+    while (k < 9) {                                 # limb k (weight 2^(32k)) is window word 8 − k
+        var hw = load64(tb + 8 * (w + 8 - k));
+        var lw = load64(tb + 8 * (w + 9 - k));
+        var v = ((hw << s) | (lw >> (32 - s))) & 0xFFFFFFFF;
+        var a = m0 * v;                             # < 2^64: the exact product, as an unsigned word
+        var b = m1 * v;                             # < 2^53
+        col[k] = col[k] + (a & 0xFFFFFFFF);
+        col[k + 1] = col[k + 1] + (a >> 32) + (b & 0xFFFFFFFF);
+        col[k + 2] = col[k + 2] + (b >> 32);
+        k = k + 1;
+    }
+    k = 0;
+    while (k < 10) {                                # carries; each column is below 2^34
+        col[k + 1] = col[k + 1] + (col[k] >> 32);
+        col[k] = col[k] & 0xFFFFFFFF;
+        k = k + 1;
+    }
+    var j = col[8] & 511;                           # K = col[8] + col[9]·2^32 + col[10]·2^64 < 2^72
+    var e = (col[8] >> 9) | (col[9] << 23) | (col[10] << 55);
+    var rneg = 0;
+    if ((col[7] & 0x80000000) != 0) {               # f ≥ 1/2: K + 1, and f − 1 = −(2^256 − F)·2^-256
+        rneg = 1;
+        j = j + 1;
+        if (j == 512) {
+            j = 0;
+            e = e + 1;
+        }
+        var c = 1;
+        k = 0;
+        while (k < 8) {
+            var t = (0xFFFFFFFF - col[k]) + c;
+            col[k] = t & 0xFFFFFFFF;
+            c = t >> 32;
+            k = k + 1;
+        }
+    }
+    var top: f64 = f64_from(col[7]);
+    var s32: f64 = 0x3DF0000000000000;              # 2^-32
+    var h: f64 = top * s32;
+    var mm: f64 = 0.0;
+    var l: f64 = 0.0;
+    k = 6;
+    while (k >= 2) {                                # the fraction's top 192 bits
+        var lf: f64 = f64_from(col[k]);
+        var sc: f64 = _km_cr_pow2(32 * k - 256);
+        var d: f64 = lf * sc;                       # exact: 32 bits at a normal scale
+        var h2, m2, l2 = _km_td_add_d(h, mm, l, d);
+        h = h2;
+        mm = m2;
+        l = l2;
+        k = k - 1;
+    }
+    var lh: f64 = _KM_CR_EXPUX_LH;
+    var lm: f64 = _KM_CR_EXPUX_LM;
+    var ll: f64 = _KM_CR_EXPUX_LL;
+    var rh, rm, rl = _km_td_mul(h, mm, l, lh, lm, ll);
+    var xneg = 0;
+    if (ux < 0) { xneg = 1; }
+    if (rneg != xneg) {
+        rh = -rh;
+        rm = -rm;
+        rl = -rl;
+    }
+    store64(out, rh);
+    store64(out + 8, rm);
+    store64(out + 16, rl);
+    if (ux < 0) {                                   # x < 0: −K = 512·E' + j'
+        if (j == 0) { return (0 - e, 0); }
+        return (0 - e - 1, 512 - j);
+    }
+    return (e, j);
+}
+
+# The fast reduction for a double x with |x·C| < 2^51 (e^x: 10 ≤ xe ≤ 40, sel 0; 10^x: 9 ≤ xe ≤ 39, sel 1), then the
+# fast core's tail: (hi, lo, E) as _km_exp_core's. x·C = x·CH + x·CM + x·CL (two TwoProducts and a rounded product;
+# C's tail and the rounding are below 2^-107), K = RN(x·CH) by the 1.5·2^52 shift, f = x·C − K as fh + fl (th − K exact,
+# two TwoSums, the small terms within 2^-103), moved once by ±1 into |fh| ≤ 1/2 (exactly, by Sterbenz), and
+# r = f·ln2/512 as a double-double (fh·LH by TwoProduct, then fh·LM + fl·LH: within 2^-112 in all).
+#must_use
+fn _km_expux_dd(x: f64, sel): (f64, f64, i64) {
+    var ch: f64 = _KM_CR_EXPUX_CH;
+    var cm: f64 = _KM_CR_EXPUX_CM;
+    var cl: f64 = _KM_CR_EXPUX_CL;
+    if (sel == 1) {
+        ch = _KM_CR_EXP10UX_CH;
+        cm = _KM_CR_EXP10UX_CM;
+        cl = _KM_CR_EXP10UX_CL;
+    }
+    var th, te = _km_two_prod(x, ch);
+    var mh, me = _km_two_prod(x, cm);
+    var xl: f64 = x * cl;
+    var tt: f64 = th + 6755399441055744.0;          # 1.5·2^52: rounds th to an integer
+    var kd: f64 = tt - 6755399441055744.0;
+    var k = load64(&tt) - 0x4338000000000000;
+    var d0: f64 = th - kd;                          # exact: |th − K| ≤ 1/2
+    var a, b = _km_two_sum(d0, te);
+    var c, d = _km_two_sum(a, mh);
+    var low: f64 = ((b + d) + me) + xl;
+    var fh, fl = _km_two_sum(c, low);
+    if (fh > 0.5) {
+        fh = fh - 1.0;
+        k = k + 1;
+    }
+    if (fh < -0.5) {
+        fh = fh + 1.0;
+        k = k - 1;
+    }
+    var lh: f64 = _KM_CR_EXPUX_LH;
+    var lm: f64 = _KM_CR_EXPUX_LM;
+    var ph, pe = _km_two_prod(fh, lh);
+    var pl: f64 = (pe + (fh * lm)) + (fl * lh);
+    var r, rl = _km_fast_two_sum(ph, pl);
+    var hi, lo = _km_exp_core_r(r, rl, (k & 511) * 32);
+    return (hi, lo, k >>> 9);
+}
+
+# e^x (sel 0) or 10^x (sel 1) for 9 ≤ xe ≤ 61 inside the edge: (mode 0) the fast path, with the accurate one where its
+# test fails, (mode 1) the fast path alone ((0, 0, 0) where its test fails) or (mode 2) the accurate path alone. The
+# fast path reduces by _km_expux_dd up to xe = 40 (10^x: 39), by the integer reduction beyond; the accurate path always
+# by the integer reduction.
+#must_use
+fn _km_expux_big(xs: f64, xe, sel, mode): (f64, i64, i64) {
+    var err: f64 = 0x3BA0000000000000;              # 2^-69
+    var lim = 40;
+    if (sel == 1) { lim = 39; }
+    if (mode != 2 && xe <= lim) {
+        var sc: f64 = _km_cr_pow2(xe);
+        var x: f64 = xs * sc;
+        var hd, ld, ed = _km_expux_dd(x, sel);
+        var ud: f64 = hd + (ld - err);
+        var vd: f64 = hd + (ld + err);
+        if (ud == vd) {
+            var sd, sde = _km_ux_norm(ud, ed);
+            return (sd, sde, 1);
+        }
+        if (mode == 1) { return (0.0, 0, 0); }
+    }
+    var rb: f64[3];
+    var e, j = _km_expux_reduce(xs, xe, sel, &rb);
+    var ti = j * 32;
+    if (mode != 2 && xe > lim) {
+        var hi, lo = _km_exp_core_r(rb[0], rb[1], ti);
+        var u: f64 = hi + (lo - err);
+        var v: f64 = hi + (lo + err);
+        if (u == v) {
+            var s, se = _km_ux_norm(u, e);
+            return (s, se, 1);
+        }
+        if (mode == 1) { return (0.0, 0, 0); }
+    }
+    var zb: f64[3];
+    _km_exp_acc_r(rb[0], rb[1], rb[2], ti, &zb);
+    var z: f64 = _km_rn3(zb[0], zb[1], zb[2]);
+    var s2, e2 = _km_ux_norm(z, e);
+    return (s2, e2, 1);
+}
+
+# e^(y0 + y1 + y2) by the cores without the final scaling (the second tier: y0 = x or x·ln 10 below 1179 in magnitude,
+# y1 + y2 within 2^-42): mode as _km_expux_big's; the fast core sees y0 + y1.
+#must_use
+fn _km_expux_mid(y0: f64, y1: f64, y2: f64, mode): (f64, i64, i64) {
+    if (mode != 2) {
+        var hi, lo, e = _km_exp_core(y0, y1);
+        var err: f64 = 0x3BA0000000000000;          # 2^-69
+        var u: f64 = hi + (lo - err);
+        var v: f64 = hi + (lo + err);
+        if (u == v) {
+            var s, se = _km_ux_norm(u, e);
+            return (s, se, 1);
+        }
+        if (mode == 1) { return (0.0, 0, 0); }
+    }
+    var buf: f64[3];
+    var e2 = _km_exp_acc_core(y0, y1, y2, &buf);
+    var z: f64 = _km_rn3(buf[0], buf[1], buf[2]);
+    var s2, f2 = _km_ux_norm(z, e2);
+    return (s2, f2, 1);
+}
+
+# 10^x for a double 307 < |x| < 512 (the second tier): x·ln 10 as _km_cr_exp10_fast forms it (yh + yl, to 2^-93.5) for
+# the fast core, and as _km_cr_exp10_acc's triple-double for the accurate one.
+#must_use
+fn _km_exp10ux_mid(x: f64, mode): (f64, i64, i64) {
+    if (mode != 2) {
+        var h: f64 = _KM_CR_EXP_LN10H;
+        var hm: f64 = _KM_CR_EXP_LN10M;
+        var h1: f64 = _KM_CR_EXP_LN10H1;
+        var h2: f64 = _KM_CR_EXP_LN10H2;
+        var yh: f64 = x * h;
+        var c: f64 = 134217729.0 * x;
+        var x1: f64 = c - (c - x);
+        var x2: f64 = x - x1;
+        var pe: f64 = ((((x1 * h1) - yh) + (x1 * h2)) + (x2 * h1)) + (x2 * h2);
+        var yl: f64 = pe + (x * hm);
+        var s, e, ok = _km_expux_mid(yh, yl, 0.0, 1);
+        if (ok == 1 || mode == 1) { return (s, e, ok); }
+    }
+    var ah: f64 = _KM_CR_EXP_LN10H;
+    var am: f64 = _KM_CR_EXP_LN10M;
+    var al: f64 = _KM_CR_EXP_LN10L;
+    var p0, q0 = _km_two_prod(x, ah);
+    var p1, q1 = _km_two_prod(x, am);
+    var p2: f64 = x * al;
+    var t, te = _km_two_sum(q0, p1);
+    var tt: f64 = (te + q1) + p2;
+    var y0, u = _km_fast_two_sum(p0, t);
+    var y1, y2 = _km_two_sum(u, tt);
+    var s2, e2, ok2 = _km_expux_mid(y0, y1, y2, 2);
+    return (s2, e2, 1);
+}
+
+# The binary64 function of the first tier (sel 0 exp, 1 exp10, 2 expm1) at the double x by mode (0 the function, 1 its
+# fast path, 2 its accurate path): (s, e, ok) of its normal result.
+#must_use
+fn _km_expux_d(x: f64, sel, mode): (f64, i64, i64) {
+    var y: f64 = 0.0;
+    var ok = 1;
+    if (mode == 0) {
+        if (sel == 0) { y = _km_cr_exp(x); }
+        if (sel == 1) { y = _km_cr_exp10(x); }
+        if (sel == 2) { y = _km_cr_expm1(x); }
+    } elif (mode == 1) {
+        if (sel == 0) { var y0, o0 = _km_cr_exp_fast(x); y = y0; ok = o0; }
+        if (sel == 1) { var y1, o1 = _km_cr_exp10_fast(x); y = y1; ok = o1; }
+        if (sel == 2) { var y2, o2 = _km_cr_expm1_fast(x); y = y2; ok = o2; }
+        if (ok == 0) { return (0.0, 0, 0); }
+    } else {
+        if (sel == 0) { y = _km_cr_exp_acc(x); }
+        if (sel == 1) { y = _km_cr_exp10_acc(x); }
+        if (sel == 2) { y = _km_cr_expm1_acc(x); }
+    }
+    var s, e = _km_ux_norm(y, 0);
+    return (s, e, 1);
+}
+
+# e^x (sel 0), 10^x (sel 1) or e^x − 1 (sel 2) of x = xs·2^xe by mode (0 the function, 1 the fast path alone, 2 the
+# accurate path alone): (s, e, ok), the tiers of the section comment.
+#must_use
+fn _km_expux_any(xs: f64, xe, sel, mode): (f64, i64, i64) {
+    var es = 0;
+    if (sel == 1) { es = 1; }
+    if (sel == 2) {
+        var dx: f64 = xs - xs;
+        if (dx != 0.0) {                            # ±∞ or NaN
+            if (xs != xs || xs > 0.0) { return (xs, 0, 1); }
+            return (-1.0, 0, 1);
+        }
+        if (xs == 0.0) { return (xs, 0, 1); }       # ±0
+        if (xe < 0 - 54) { return (xs, xe, 1); }    # |x| < 2^-53: x
+        if (xs < 0.0 && xe >= 6) { return (-1.0, 0, 1); }   # x ≤ −64: e^x < 2^-92
+    }
+    var gs, ge, gk = _km_expux_edge(xs, xe, es);
+    if (gk == 1) { return (gs, ge, 1); }
+    var mid = 9;
+    if (sel == 1) { mid = 8; }
+    if (xe <= mid) {                                # |x| < 1024 (10^x: 512), a double
+        var sc: f64 = _km_cr_pow2(xe);
+        var x: f64 = xs * sc;
+        var ax: f64 = f64_abs(x);
+        var lim: f64 = 708.0;
+        if (sel == 1) { lim = 307.0; }
+        if (ax <= lim || (sel == 2 && x < 0.0)) {
+            var ds, de, dk = _km_expux_d(x, sel, mode);
+            return (ds, de, dk);
+        }
+        if (sel == 1) {
+            var ts, te, tk = _km_exp10ux_mid(x, mode);
+            return (ts, te, tk);
+        }
+        var ms, me, mk = _km_expux_mid(x, 0.0, 0.0, mode);
+        return (ms, me, mk);
+    }
+    var bs, be, bk = _km_expux_big(xs, xe, es, mode);
+    return (bs, be, bk);
+}
+
+# e^x of x = xs·2^xe, correctly rounded to 53 bits with an unbounded exponent: (s, e) = RN₅₃(e^x) (the section comment).
+#must_use
+fn _km_cr_exp_ux(xs: f64, xe): (f64, i64) {
+    if (xe >= 0 - 54 && xe <= 9) {                  # the first tier inline: _km_expux_any's operations
+        var sb = (xe + 1023) << 52;
+        var sc: f64 = sb;
+        var x: f64 = xs * sc;
+        var ab = load64(&x) & 0x7FFFFFFFFFFFFFFF;
+        if (ab <= 0x4086200000000000) {             # |x| ≤ 708 (±0 too; NaN and ±∞ fail)
+            var y: f64 = _km_cr_exp(x);
+            var yb = load64(&y);
+            var ys = (yb & 0x000FFFFFFFFFFFFF) | 0x3FF0000000000000;
+            var s0: f64 = ys;
+            return (s0, (yb >> 52) - 1023);
+        }
+    }
+    var s, e, ok = _km_expux_any(xs, xe, 0, 0);
+    return (s, e);
+}
+
+# The fast path alone: (s, e, 1), or (0, 0, 0) when its rounding test fails.
+#must_use
+fn _km_cr_exp_ux_fast(xs: f64, xe): (f64, i64, i64) {
+    var s, e, ok = _km_expux_any(xs, xe, 0, 1);
+    return (s, e, ok);
+}
+
+# e^x by the accurate path alone.
+#must_use
+fn _km_cr_exp_ux_acc(xs: f64, xe): (f64, i64) {
+    var s, e, ok = _km_expux_any(xs, xe, 0, 2);
+    return (s, e);
+}
+
+# e^x − 1 of x = xs·2^xe, correctly rounded to 53 bits with an unbounded exponent: (s, e) = RN₅₃(e^x − 1).
+#must_use
+fn _km_cr_expm1_ux(xs: f64, xe): (f64, i64) {
+    if (xe >= 0 - 54 && xe <= 9 && xs != 0.0) {     # the first tier inline: _km_expux_any's operations
+        var sb = (xe + 1023) << 52;
+        var sc: f64 = sb;
+        var x: f64 = xs * sc;
+        if (x <= 708.0) {                           # −∞ too (−1); NaN fails
+            var y: f64 = _km_cr_expm1(x);
+            var yb = load64(&y);
+            var ys = (yb & 0x800FFFFFFFFFFFFF) | 0x3FF0000000000000;
+            var s0: f64 = ys;
+            return (s0, ((yb >> 52) & 0x7FF) - 1023);
+        }
+    }
+    var s, e, ok = _km_expux_any(xs, xe, 2, 0);
+    return (s, e);
+}
+
+# The fast path alone: (s, e, 1), or (0, 0, 0) when its rounding test fails.
+#must_use
+fn _km_cr_expm1_ux_fast(xs: f64, xe): (f64, i64, i64) {
+    var s, e, ok = _km_expux_any(xs, xe, 2, 1);
+    return (s, e, ok);
+}
+
+# e^x − 1 by the accurate path alone.
+#must_use
+fn _km_cr_expm1_ux_acc(xs: f64, xe): (f64, i64) {
+    var s, e, ok = _km_expux_any(xs, xe, 2, 2);
+    return (s, e);
+}
+
+# 10^x of x = xs·2^xe, correctly rounded to 53 bits with an unbounded exponent: (s, e) = RN₅₃(10^x).
+#must_use
+fn _km_cr_exp10_ux(xs: f64, xe): (f64, i64) {
+    if (xe >= 0 - 56 && xe <= 8) {                  # the first tier inline: _km_expux_any's operations
+        var sb = (xe + 1023) << 52;
+        var sc: f64 = sb;
+        var x: f64 = xs * sc;
+        var ab = load64(&x) & 0x7FFFFFFFFFFFFFFF;
+        if (ab <= 0x4073300000000000) {             # |x| ≤ 307 (±0 too; NaN and ±∞ fail)
+            var y: f64 = _km_cr_exp10(x);
+            var yb = load64(&y);
+            var ys = (yb & 0x000FFFFFFFFFFFFF) | 0x3FF0000000000000;
+            var s0: f64 = ys;
+            return (s0, (yb >> 52) - 1023);
+        }
+    }
+    var s, e, ok = _km_expux_any(xs, xe, 1, 0);
+    return (s, e);
+}
+
+# The fast path alone: (s, e, 1), or (0, 0, 0) when its rounding test fails.
+#must_use
+fn _km_cr_exp10_ux_fast(xs: f64, xe): (f64, i64, i64) {
+    var s, e, ok = _km_expux_any(xs, xe, 1, 1);
+    return (s, e, ok);
+}
+
+# 10^x by the accurate path alone.
+#must_use
+fn _km_cr_exp10_ux_acc(xs: f64, xe): (f64, i64) {
+    var s, e, ok = _km_expux_any(xs, xe, 1, 2);
+    return (s, e);
 }

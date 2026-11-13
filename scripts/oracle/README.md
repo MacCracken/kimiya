@@ -275,7 +275,11 @@ a rounding test, an exact 64-bit long division as its fallback). Their numbers a
   table that would break a proof is never written. M4a adds sin/cos(i/256), atan(j/256), the bits of 2/π (checked against
   Machin's formula in integers) and π/2's Cody–Waite parts, with the reduction's continued-fraction bound; M4d adds
   2^(1/6) as a triple-double from an exact integer root, with the continued-fraction bound that lets
-  `_km_cr_sixth_root2_mul` round its product once without a test. The words are bit patterns in typed `var`s with the
+  `_km_cr_sixth_root2_mul` round its product once without a test; the overflow audit's B10a adds the unbounded
+  exponentials' reduction tables (384 bits of (512/ln 2)·2⁻⁷⁵ and (512·log₂ 10)·2⁻⁷⁵ behind 64 zero bits, checked against
+  integer series of ln 2 and ln 10), ln2/512, 512/ln 2 and 512·log₂ 10 as triple-doubles, and the saturation edges at
+  MPFR's widest exponent range (bisected with `mpfr_ref.UX`, asserting that no argument rounds to MPFR's smallest number
+  instead of +0). The words are bit patterns in typed `var`s with the
   decimal value as a comment (never a hex `const`). Deterministic; `--check` regenerates in memory and exits 1 if the
   file is stale.
 - **`cr_verify.py`** builds a probe program that calls each primitive (the full function, its `_km_cr_<f>_fast` entry
@@ -346,8 +350,14 @@ a rounding test, an exact 64-bit long division as its fallback). Their numbers a
   (balance_equation of 2 × 3 … 24 × 25 integer matrices, n + 1 words a result: the public result, the i64 fast path's
   outcome and the multi-word path forced; against Rust's algorithm on Python ints, with a tracer of Rust's checked
   operations that the fast path's overflow report must match; 54,306 matrices: known x with large and small entries, x
-  with a zero, negative or u32-edge entry, random small and large entries, ±2⁵³ entries, dependent rows). Exit 1 on a
-  mismatch or a cross-target difference.
+  with a zero, negative or u32-edge entry, random small and large entries, ±2⁵³ entries, dependent rows); B10a (for
+  ADR 0002 #40) adds `exp_ux`, `expm1_ux` and `exp10_ux` (`_km_cr_exp_ux`, `_km_cr_expm1_ux`, `_km_cr_exp10_ux` of
+  (s, e) pairs, the result a pair: the function, its fast path and the accurate path forced, and at every normal double x
+  the binary64 function's pair; against MPFR at its widest exponent range, `mpfr_ref.UX.exp`, `.expm1`, `.exp10` and
+  `UX.parts`, MPFR's 53-bit value checked equal to its binary64 rounding wherever that is normal; 448,188 arguments:
+  specials and exponents to ±2⁶³, every binade of both signs, binary64's range, the tiny end, each tier's edges, near
+  multiples of ln2/512 with K to 2⁷¹, Lefèvre–Muller's hard cases, large arguments, the saturation edges, expm1's −1
+  region, exp10's integers and 10²³). Exit 1 on a mismatch or a cross-target difference.
   Options:
   `--targets elf`, `--only pow,exp`, `--big` (10,000,000 more per primitive on ELF), `--work DIR` (default
   `build/cr-verify`, gitignored).

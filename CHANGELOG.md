@@ -852,6 +852,35 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
     `cyrius_adr39_multiword`; no Rust test changes (two of them still get the ComputationError, now as past u32 rather
     than by the overflow: their comments say so)
   - benches: `bench_audit_b7`, three edge benches, in `tests/audit2.bcyr`
+- **The library-wide overflow audit, B10a** (the first part of the roadmap's B10; for
+  [ADR 0002 #40](docs/adr/0002-port-api-divergences.md), whose functions change in the later sub-batches: its
+  "Addition, 2026-11-12 (audit B10a)"; the user's "new unbounded-exponent primitives … Rust's chain with an unbounded
+  exponent, last step rounded once", the semantics settled by the main session under the user's policy, not asked;
+  port plan §6.4). No function's result and no golden row changes:
+  - **mathx** — `_km_cr_exp_ux`, `_km_cr_expm1_ux` and `_km_cr_exp10_ux`: e^x, e^x − 1 and 10^x of an unbounded-exponent
+    value (a `_km_ux_*` pair), returned as a pair with the significand correctly rounded to 53 bits at any exponent —
+    no subnormal grid, no overflow at binary64's limits (e^-800 = 1.795…·2⁻¹¹⁵⁵) — exact up to MPFR's widest exponent
+    range (|x| to about 3.2·10¹⁸ for e^x, 1.4·10¹⁸ for 10^x; exponents in [−2⁶² + 154, 2⁶² − 155]) and saturating past it
+    as MPFR does (+∞; +0 for e^x and 10^x); IEEE's specials; with `_fast` and `_acc` entry points. Three tiers: binary64's
+    own range is `_km_cr_exp` / `_km_cr_expm1` / `_km_cr_exp10` itself; up to |x| < 1024 (10^x: 512) the same cores
+    without the final scaling; beyond, a new reduction (a double-double one for the fast path while |x·512/ln 2| < 2⁵¹,
+    and an integer one, Payne–Hanek's technique on 384 bits of 512/ln 2 or 512·log₂ 10, for the accurate path and past
+    it) before the cores' tails (`_km_exp_core_r`, `_km_exp_acc_r`). The fast path is proven (measured 2^-71.07 against
+    its 0.9·2⁻⁷⁰ bound); the accurate path is below 2⁻¹⁵⁰ relative (measured 2^-155.15), correct unless a result lies
+    within 2⁻¹⁵⁰ of a midpoint (probability about 2⁻⁹⁶ per argument outside binary64's range, as for pow and
+    `_km_cr_exp2_scaled`); no new exact or tie case (10²³ stays the only tie)
+  - generator: `scripts/oracle/mathx_tables.py` writes `_KM_CR_EXPUX_C` and `_KM_CR_EXP10UX_C` (the reduction's 384-bit
+    tables, checked against integer series of ln 2 and ln 10), ln2/512, 512/ln 2 and 512·log₂ 10 as triple-doubles, and
+    the saturation edges bisected with MPFR at its widest range (asserting that no argument rounds to MPFR's smallest
+    number instead of +0); `scripts/oracle/mpfr_ref.py`'s `UX.exp`, `UX.expm1`, `UX.exp10` and `UX.parts`
+  - `cr_verify.py`: the families `exp_ux`, `expm1_ux` and `exp10_ux` (448,188 arguments against MPFR at its widest
+    exponent range: specials and exponents to ±2⁶³, every binade of both signs, binary64's range, each tier's edges, near
+    multiples of ln2/512 with K to 2⁷¹, Lefèvre–Muller's hard cases, the saturation edges, expm1's −1 region, exp10's
+    integers and 10²³; the function, its fast path, the accurate path forced, and the binary64 function's significand
+    wherever it is normal), on x86_64 ELF, x86_64 PE and aarch64
+  - tests: `tests/mathx.tcyr` `cyrius_b10a_exp_ux`, `cyrius_b10a_expm1_ux`, `cyrius_b10a_exp10_ux` (96 MPFR rows as bit
+    patterns, the specials, 4,000 seeded arguments each)
+  - benches: `bench_audit_b10a`, fifteen benches beside the binary64 functions, in `tests/audit2.bcyr`
 
 ### Breaking (relative to Rust 1.2.0, ADR 0002 #1)
 - **thermochem** — `reaction_enthalpy` and `reaction_gibbs_energy` return **J/mol**, not kJ/mol: the value is 1.2's
@@ -1396,6 +1425,12 @@ Cyrius port, toward **2.0.0** (plan: `docs/development/kimiya-port-plan.md`). Ru
   ComputationError at its first overflow, then the port's exact result): `balance_survey_2x3` 0.12 → 3.6 µs,
   `balance_overflow_10x9` 6.6 → 57 µs, `balance_dense_30x31` 5.4 µs → 158 ms (products past 3,000 bits; Lehmer's gcd
   took a 39 × 40 matrix from 1.8 to 0.7 s); `tests/audit2.bcyr` 49 s (45 s before)
+- The overflow audit's B10a (Cyrius-only; `bench_audit_b10a`, the binary64 function → the unbounded one at the same
+  argument): e^x at −50000/(8.314·300) `_km_cr_exp` 46 ns → `_km_cr_exp_ux` 54 ns, e^x − 1 at ln 2 54 → 65 ns, 10^x at
+  −4.75 60 → 69 ns (the first tier: the binary64 function and its pair); e^-720.5 (a binary64 subnormal, the cores
+  unscaled) 84 ns; e^(−10⁴), e^(10¹²), e^(10⁴) − 1 and 10^(10⁴) 158–165 ns (the double-double reduction); e^(10¹⁵) 614 ns
+  (the integer reduction); the accurate path alone 1.86 µs at −20.05, 2.14 µs at −10⁴ and 2.17 µs for 10^(−10¹²);
+  `tests/audit2.bcyr` 66 s (49 s before)
 
 ## [1.2.0] - 2026-11-08
 

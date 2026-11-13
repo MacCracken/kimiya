@@ -1683,6 +1683,113 @@ before → after: Rust's ComputationError at its first overflow, then the port's
 `balance_survey_2x3` 0.12 → 3.6 µs, `balance_overflow_10x9` (a golden row) 6.6 → 57 µs, `balance_dense_30x31` (entries
 below 2⁴⁵, products past 3,000 bits) 5.4 µs → 158 ms; `tests/audit2.bcyr` 45 → 49 s.
 
+## Addition, 2026-11-12 (audit B10a): the unbounded exponentials (for #40)
+
+**The decisions.** B1's section above quotes the user's decisions verbatim; they apply unchanged. For the survey's
+family F10 (e^x times a prefactor) the user approved new primitives, recorded as "New unbounded-exponent primitives
+(exp, expm1, exp10, pow, log10) for the e^x × prefactor family … : Rust's chain with an unbounded exponent, last step
+rounded once" — #20's semantics, the survey's remedy (a). B10 is the survey's (and the roadmap's) B10; its first part,
+B10a, builds and verifies only the exponentials, so no function's result and no golden row changes. Row #40 is reserved
+for F10's functions (Arrhenius, collision theory, Eyring ×2, first-order, `atoms_remaining`, the decay chain, van 't
+Hoff, Clausius–Clapeyron, Morse, Antoine and `fugacity_pr`), whose behaviour changes in the three later sub-batches
+(kinetics; nuclear; van 't Hoff, Clausius, Antoine, Morse and `fugacity_pr`). The semantics below were settled by the
+main session under the user's policy (not asked).
+
+**The primitives** (`src/mathx.cyr`, "e^x, e^x − 1 and 10^x with an unbounded exponent"): `_km_cr_exp_ux`,
+`_km_cr_expm1_ux` and `_km_cr_exp10_ux` take an unbounded-exponent value x = xs·2^xe (a normalised `_km_ux_*` pair) and
+return RN₅₃(e^x), RN₅₃(e^x − 1) and RN₅₃(10^x) as a pair (s, e), 1 ≤ |s| < 2: the significand correctly rounded to 53
+bits, ties to even, at any exponent, with no subnormal grid and no overflow at binary64's limits (e^-800 =
+1.795…·2^-1155, e^1000 = 1.619…·2^1442). In each F10 chain the exponential is never the final operation, so the chain's
+last product (or expm1's subtraction) rounds once into binary64 with the existing `_km_ux_*_f64`. Each has `_fast` (the
+fast path alone: (s, e, 1), or (0, 0, 0) where its rounding test fails) and `_acc` (the accurate path alone) entry
+points for the tests and `cr_verify.py`. No binary64-argument wrapper: a consumer's double x is `_km_ux_from(x)` first.
+
+**Range and saturation.** Exact wherever the result fits MPFR's widest exponent range (`mpfr_get_emin_min()` = 1 − 2⁶²,
+`mpfr_get_emax_max()` = 2⁶² − 1; MPFR's value lies in [2^(E − 1), 2^E), the port's exponent is E − 1), the range
+`mpfr_ref.UX` works in, so the references need no special case. The exponents returned lie in [−2⁶² + 154, 2⁶² − 155]
+for e^x and e^x − 1 and [−2⁶² + 807, 2⁶² − 808] for 10^x; |x| reaches about 3.2·10¹⁸ (e^x) and 1.4·10¹⁸ (10^x). Past the
+range they saturate as MPFR does: (+∞, 0) where e^x or e^x − 1 overflows (x > OVF·2⁶¹, OVF = 0x1.62e42fefa39efp0) or
+10^x does (x > OVF₁₀·2⁶⁰, 0x1.34413509f79fep0), and (+0, 0) where e^x (x < −UNF·2⁶¹) or 10^x (x < −UNF₁₀·2⁶⁰)
+underflows, UNF = OVF and UNF₁₀ = OVF₁₀. MPFR's round-to-nearest underflow gives its smallest number rather than 0 for a
+result in [2^(emin − 2), 2^(emin − 1)); none lands there: the last nonzero result is a regular number (e = −2⁶² + 154)
+and the next is far below 2^(emin − 2), which `scripts/oracle/mathx_tables.py` asserts while it bisects the edges with
+MPFR (`_KM_CR_EXPUX_OVF` … `_KM_CR_EXP10UX_UNF`). e^x − 1 tends to −1 and never underflows. The input pair is expected
+inside MPFR's range too (|xe| < 2⁶², as every chain value is); e^x and 10^x give 1 and e^x − 1 gives x itself for any
+exponent below.
+
+**Specials and the tiny end**, as IEEE's exp, expm1 and exp10: ±0 gives 1 (e^x − 1: ±0, the sign kept), +∞ gives +∞, −∞
+gives +0 (e^x − 1: −1), NaN gives NaN, each with e = 0. xe < −54 gives 1 for e^x (|x| < 2⁻⁵⁴) and x for e^x − 1 (|x| <
+2⁻⁵³: x²/2 + … is below half an ulp of x, and below a quarter of it where |x| is a power of two); xe < −56 gives 1 for
+10^x (|x·ln 10| < 2^-54.8). The boundaries are checked exactly: e^(−2⁻⁵⁴) is 2⁻¹⁰⁹ above the midpoint 1 − 2⁻⁵⁴ and e^x −
+1 at −2⁻⁵³ 2^-161.6 below its midpoint, both sent to the accurate path.
+
+**The algorithm**, in three tiers of x (a 53-bit number):
+- binary64's own range (e^x: |x| ≤ 708; 10^x: |x| ≤ 307; e^x − 1: x ≤ 708): x is a double whose result is a normal
+  double, and the result is `_km_cr_exp(x)`, `_km_cr_exp10(x)` or `_km_cr_expm1(x)` itself (their paths and proofs, ADR
+  0006), its pair taken from the bits — so the significand is `_km_cr_exp`'s wherever that is normal, by construction
+  (and checked);
+- the rest of the binary64 cores' range (e^x: 708 < |x| < 1024; 10^x: 307 < |x| < 512; e^x − 1: 708 < x < 1024): the
+  existing cores without their final scaling — exp's fast core (`_km_exp_core`; 10^x on exp10's x·ln 10 = yh + yl) and
+  the rounding test on hi + lo with ε = 2⁻⁶⁹, the pair by `_km_ux_norm(u, E)`; when it fails, the accurate core
+  (`_km_exp_acc_core`) and `_km_rn3` at the same scale. K = RN(x·512/ln 2) stays below 2²⁰ (756,389; 870,800 for x·ln
+  10), which the cores' K·L1 needs; the fast core's dropped K·L3 grows from 2^-79.2 to 2^-78.8, inside its bound's
+  margin (0.9·2⁻⁷⁰ against ε = 2⁻⁶⁹);
+- beyond (9 ≤ xe ≤ 61, to the edge): a new reduction, then the same cores' tails (`_km_exp_core_r`, `_km_exp_acc_r`: the
+  code after K and r, unchanged). x·C = K + f with C = 512/ln 2 (10^x: 512·log₂ 10, as 10^x = 2^(x·log₂ 10)), |f| ≤ ½,
+  the result 2^E·2^(j/512)·e^r with K = 512·E + j and r = f·ln2/512. The fast path reduces in double-double while |x·C|
+  < 2⁵¹ (`_km_expux_dd`: x·C by two TwoProducts and a rounded third term of C as a triple-double, K by the 1.5·2⁵²
+  shift, f = x·C − K moved once by ±1 into |f| ≤ ½, r = f·ln2/512 by TwoProduct: within 2⁻¹¹²), and past it, and always
+  on the accurate path, in integers (`_km_expux_reduce`, Payne–Hanek's technique without the dropped high bits): the
+  table `_KM_CR_EXPUX_C` (`_KM_CR_EXP10UX_C`) holds C·2⁻⁷⁵ with 64 zero bits first, so its 288-bit window from bit xe −
+  8 starts above C's leading bit and x·C = M·V·2⁻²⁵⁶ + δ with the integer part whole (M the 53-bit significand, |δ| <
+  2⁻²⁰³); M·V in eleven 32-bit columns gives K's 72 bits and the 256-bit fraction, rounded to nearest; its top 192 bits
+  as a triple-double times ln2/512 (`_KM_CR_EXPUX_LH`, `LM`, `LL`) give r within 2⁻¹⁶² (measured 2^-168.3). A negative x
+  takes −K and −r.
+
+e^x − 1 past x = 708 (E ≥ 1021) rounds as e^x does: the −1 is below 2⁻¹⁰²¹ of e^x, inside the fast test's margin and far
+below the accurate path's bound; x ≤ −64 gives −1.
+
+**Error bounds, the exact and tie cases, and the proof.** The fast path's error is the cores' (|hi + lo − e^r·2^(j/512)|
+< 0.9·2⁻⁷⁰ with the reduction's 2⁻¹¹² or 2⁻¹⁶²; measured 2^-71.07 and 2^-71.09 over 24,000 arguments each against
+500-bit MPFR), so the same ε = 2⁻⁶⁹ and the same test; the accurate path's is below 2⁻¹⁵⁰ relative (the reduction's
+2⁻¹⁶², the accurate core's 2⁻¹⁵⁵, `_km_rn3` exact; measured 2^-155.15), as `_km_cr_exp2_scaled`'s. e^x and e^x − 1 are
+exact only at x = 0 (Lindemann–Weierstrass), whatever the exponent, so never a 53-bit midpoint. 10^x is rational only
+for integer x and dyadic only for x ≥ 0: 10ⁿ = 5ⁿ·2ⁿ is a 53-bit number for 0 ≤ n ≤ 22, a midpoint for n = 23 (5²³ has
+54 bits and is odd: the tie, to even, special-cased in `_km_cr_exp10_acc` as before), and neither for n ≥ 24 (5ⁿ odd
+with 56 bits or more) or n < 0 (not dyadic); so the unbounded exponent adds no exact or tie case, and all of them are in
+the first tier. **Proof:** in the first tier, the binary64 functions' own (ADR 0006): Lefèvre–Muller's worst cases
+for e^x, and for 10^x and e^x − 1, which have no published table, an accurate path 18 bits past their expected hardest
+case. Elsewhere no worst-case search exists, and B10a follows the precedent of pow and `_km_cr_exp2_scaled` (#13): the fast
+path is proven (a failed test costs only the accurate path), the accurate path is proven correct for results not within
+2⁻¹⁵⁰ (relative) of a 53-bit midpoint, a random argument is that close with probability about 2⁻⁹⁶, and the domain past
+the first tier has fewer than 2⁵⁹ arguments, so the expected number of misrounded arguments in all of it is below 2⁻³⁷.
+A provably terminating last resort (a multi-word Ziv loop: e^x is transcendental for rational x ≠ 0) would need an
+arbitrary-precision ln 2, exp series and reduction on growable integers — several hundred lines for that 2⁻³⁷ — and is
+not built.
+
+**For the consumer sub-batches.** The largest exponent returned is 2⁶² − 155 and the smallest −2⁶² + 154; `_km_ux_mul`
+adds i64 exponents, so a product of two such results stays inside i64 but three, or two with a prefactor's exponent, can
+wrap past ±2⁶³: a chain with several exponentials must bound them first (any |e| past about 2⁶¹ already decides the
+final result's ±∞ or 0 unless another factor compensates). A saturated value is MPFR's (+∞ or +0), so 0·(+∞) in a chain
+is NaN where the true value may be 0; what the functions do there is theirs to decide, under the NaN policy (the
+correctly rounded ±∞ or 0).
+
+**Verification.** `cr_verify.py` adds `exp_ux`, `expm1_ux` and `exp10_ux` (448,188 arguments: specials and extreme
+exponents to ±2⁶³, every binade from 2⁻¹²⁰⁰ to 2⁶⁵ of both signs, binary64's range, the tiny end, each tier's edges,
+doubles near multiples of ln2/512 (log₁₀2/512) with K to 2⁷¹, Lefèvre–Muller's hard cases, large arguments to 3.2·10¹⁸,
+the saturation edges, expm1's −1 region and exp10's integers −400 … 400 and 10²³) against MPFR at its widest range
+(`mpfr_ref.UX.exp`, `.expm1`, `.exp10`, `UX.parts`): the function, its fast path, the accurate path forced on every
+argument, and at every normal double x the binary64 function's pair, on x86_64 ELF, x86_64 PE and aarch64; about a
+minute of the gate. `tests/mathx.tcyr` adds `cyrius_b10a_exp_ux`, `cyrius_b10a_expm1_ux` and `cyrius_b10a_exp10_ux` (40,
+29 and 27 MPFR rows generated as bit patterns, each by all three entry points; the specials; 4,000 seeded arguments each
+against the accurate path and the binary64 function).
+
+**Cost** (`tests/audit2.bcyr`'s new `bench_audit_b10a`, beside the binary64 functions at the same arguments): e^x at
+−20.05 46 ns (`_km_cr_exp`) → 54 ns (`_km_cr_exp_ux`), e^x − 1 at ln 2 54 → 65 ns, 10^x at −4.75 60 → 69 ns; the second
+tier (e^-720.5) 84 ns; the double-double reduction (e^∓10⁴, e^(10¹²), e^(10⁴) − 1, 10^(10⁴)) 158–165 ns; the integer
+reduction's fast path (e^(10¹⁵)) 614 ns; the accurate path alone 1.86 µs (−20.05), 2.14 µs (−10⁴) and 2.17 µs
+(10^(−10¹²)). The consumers call these only on their slow paths.
+
 ## Consequences
 
 - **Positive** — the Cyrius API is internally consistent (SI energies, `Result` for every

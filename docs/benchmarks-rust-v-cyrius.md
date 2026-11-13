@@ -675,3 +675,38 @@ stepping pointers in the multiply and divide loops instead of indexing gained a 
 
 `tests/audit2.bcyr` takes 49 s with B7's benches (45 s before); `tests/kimiya.bcyr` and `tests/audit.bcyr` are
 unchanged.
+
+## The overflow audit's B10a (2026-11-12)
+
+The first part of the survey's B10, for ADR 0002 #40: `src/mathx.cyr`'s `_km_cr_exp_ux`, `_km_cr_expm1_ux` and
+`_km_cr_exp10_ux`, e^x, e^x − 1 and 10^x of an unbounded-exponent pair, correctly rounded to 53 bits at any exponent.
+No function calls them yet (#40's functions will, on their slow paths only), so no other bench moves. Cyrius-only (Rust
+has no such function); `bench_audit_b10a` in `tests/audit2.bcyr` times each tier beside the binary64 function at the same
+argument, in the same harness and run (the binary64 rows are kimiya.bcyr's `mathx/cr_*` arguments).
+
+| Bench | Argument and path | Binary64 function | Unbounded |
+|---|---|---|---|
+| `mathx/cr_exp` → `cr_exp_ux` | −50000/(8.314·300): the first tier, `_km_cr_exp` itself and its pair | 46 ns | 54 ns |
+| `mathx/cr_exp_ux_acc` | the same, the accurate path alone (the binary64 accurate core, `_km_rn3`) | — | 1.86 µs |
+| `mathx/cr_exp_ux_subnormal` | −720.5 (binary64's result subnormal): the second tier, exp's fast core unscaled | — | 84 ns |
+| `mathx/cr_exp_ux_minus_1e4` | −10⁴: the double-double reduction, then the fast core's tail | — | 159 ns |
+| `mathx/cr_exp_ux_1e12` | 10¹²: the same | — | 158 ns |
+| `mathx/cr_exp_ux_1e15` | 10¹⁵ (past 2⁴¹): the integer reduction on the fast path | — | 614 ns |
+| `mathx/cr_exp_ux_acc_minus_1e4` | −10⁴, the accurate path alone: the integer reduction and the accurate core's tail | — | 2.14 µs |
+| `mathx/cr_expm1` → `cr_expm1_ux` | ln 2: the first tier, `_km_cr_expm1` itself | 54 ns | 65 ns |
+| `mathx/cr_expm1_ux_1e4` | 10⁴: e^x − 1 rounds as e^x, the double-double reduction | — | 165 ns |
+| `mathx/cr_exp10` → `cr_exp10_ux` | −4.75: the first tier, `_km_cr_exp10` itself | 60 ns | 69 ns |
+| `mathx/cr_exp10_ux_1e4` | 10⁴: the double-double reduction with 512·log₂ 10 | — | 159 ns |
+| `mathx/cr_exp10_ux_acc_minus_1e12` | −10¹², the accurate path alone | — | 2.17 µs |
+
+**The first tier** costs 8–11 ns over the binary64 function: the range test, the scaling and the pair, inline in the
+entry point (79 ns before the inlining, through the shared dispatcher). **The reductions**: the integer one (eleven
+columns of 32-bit products, the fraction's six terms summed in triple-double, a triple-double product) is about 0.55 µs,
+so the fast path reduces in double-double wherever 1.5·2⁵²'s rounding to an integer can hold K (|x| < 2⁴¹; 2⁴⁰ for
+10^x): two TwoProducts, two TwoSums and one more for f·ln2/512, 158 ns in all, and the integer reduction serves only
+larger arguments and the accurate path, which runs about once in 50,000 calls past binary64's range. The realistic slow
+path of #40's single-exponential chains (|x| below about 1,500, where a binary64 prefactor can bring the product back)
+is the first, second or double-double tier.
+
+`tests/audit2.bcyr` takes 66 s with B10a's benches (49 s before); `tests/kimiya.bcyr` and `tests/audit.bcyr` are
+unchanged.

@@ -10,7 +10,10 @@
 > 1/(100·x) rounded once (ADR 0002 #19) and put spectroscopy's FFT twiddles on `_km_cr_sincos` (hisab 1.4.0's FFT
 > transcribed, ADR 0003's M4e amendment, port-parity.md §15). M4e-3 added exact rationals rounded once in the same
 > two-phase style (ADR 0002 #21, #22: a double-double quotient with a rounding test, `_km_dd_div_cr`, and the exact
-> multi-word `_km_cr_ratio` = RN(p/q·2^e) behind it; port-parity.md §17).
+> multi-word `_km_cr_ratio` = RN(p/q·2^e) behind it; port-parity.md §17). The overflow audit's B10a (2026-11-12) added
+> e^x, e^x − 1 and 10^x of an unbounded-exponent value, correctly rounded to 53 bits at any exponent (`_km_cr_exp_ux`,
+> `_km_cr_expm1_ux`, `_km_cr_exp10_ux`), the same two-phase cores behind a new reduction, saturating at MPFR's widest
+> exponent range; their range, proof and caveat are ADR 0002's "Addition, 2026-11-12 (audit B10a)".
 
 ## Context
 

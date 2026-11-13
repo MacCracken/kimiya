@@ -46,6 +46,7 @@ var _bench_b6_out = 0;      # fft_spectrum's out buffer (2 × 256 f64: the in-pl
 var _bench_b6_flame = 0;    # [("CO2(g)", 10⁻²⁰⁰), ("H2O(g)", 2·10⁻²⁰⁰), ("N2(g)", 7.52·10⁻²⁰⁰)]
 var _bench_b7_dense = 0;    # the audit's B7 (ADR 0002 #39): a 30 × 31 dense matrix (bench_audit_b7)
 var _bench_b7_out = 0;      # balance_equation's coefficients (31 words)
+var _bench_b10a = 0;        # the audit's B10a (ADR 0002 #40's primitives): 9 (s, e) arguments (bench_audit_b10a)
 # The survey's 2 × 3 (Rust's first product 3037000500² overflows; x = [1, 1, 1]) and a 10 × 9 golden row whose Rust
 # elimination overflows (x = [561, 420, 549, 115, 621, 712, 173, 710, 41]).
 var _bench_b7_survey: i64[6] = { 3037000500, 1, -3037000501, 1, 3037000500, -3037000501 };
@@ -286,6 +287,69 @@ fn _bench_b7_setup() {
     }
 }
 
+# Cyrius-only, the overflow audit's B10a (ADR 0002 #40's primitives): e^x, e^x − 1 and 10^x with an unbounded exponent,
+# each tier, beside the binary64 _km_cr_exp, _km_cr_expm1 and _km_cr_exp10 at the same arguments. fid: 0 _km_cr_exp
+# (the double), 1 _km_cr_exp_ux, 2 its accurate path alone, 3 _km_cr_expm1, 4 _km_cr_expm1_ux, 5 _km_cr_exp10,
+# 6 _km_cr_exp10_ux, 7 its accurate path alone. Argument slots (_bench_b10a_setup): 0 −50000/(8.314·300) (the Arrhenius
+# exponent, as kimiya.bcyr's mathx/cr_exp), 1 −720.5 (a binary64 subnormal: the cores unscaled), 2 −10⁴ and 3 10¹² (the
+# double-double reduction; the accurate path's integer one), 4 ln 2 (as mathx/cr_expm1), 5 10⁴, 6 −4.75 (as
+# mathx/cr_exp10), 7 −10¹², 8 10¹⁵ (past 2⁴¹: the integer reduction on the fast path too).
+fn bench_audit_b10a(name, slot, fid, per_batch, batches) {
+    var xs: f64 = load64(_bench_b10a + 16 * slot);
+    var xe = load64(_bench_b10a + 16 * slot + 8);
+    var sc: f64 = _km_cr_pow2(xe);
+    var x: f64 = xs * sc;                           # the double, for the binary64 functions (|xe| ≤ 9 there)
+    var b = bench_new(name);
+    var k = 0;
+    while (k < batches) {
+        bench_batch_start(b);
+        var i = 0;
+        if (fid == 0) { while (i < per_batch) { var r0: f64 = _km_cr_exp(x); _bench_sink = r0; i = i + 1; } }
+        if (fid == 1) { while (i < per_batch) { var s1, e1 = _km_cr_exp_ux(xs, xe); _bench_sink = s1; i = i + 1; } }
+        if (fid == 2) { while (i < per_batch) { var s2, e2 = _km_cr_exp_ux_acc(xs, xe); _bench_sink = s2; i = i + 1; } }
+        if (fid == 3) { while (i < per_batch) { var r3: f64 = _km_cr_expm1(x); _bench_sink = r3; i = i + 1; } }
+        if (fid == 4) { while (i < per_batch) { var s4, e4 = _km_cr_expm1_ux(xs, xe); _bench_sink = s4; i = i + 1; } }
+        if (fid == 5) { while (i < per_batch) { var r5: f64 = _km_cr_exp10(x); _bench_sink = r5; i = i + 1; } }
+        if (fid == 6) { while (i < per_batch) { var s6, e6 = _km_cr_exp10_ux(xs, xe); _bench_sink = s6; i = i + 1; } }
+        if (fid == 7) {
+            while (i < per_batch) { var s7, e7 = _km_cr_exp10_ux_acc(xs, xe); _bench_sink = s7; i = i + 1; }
+        }
+        bench_batch_stop(b, per_batch);
+        k = k + 1;
+    }
+    bench_report(b);
+}
+
+# The B10a arguments (bench_audit_b10a): nine (s, e) pairs, each _km_ux_from of its double.
+fn _bench_b10a_setup() {
+    _bench_b10a = alloc(16 * 9);
+    var a0: f64 = -50000.0 / (8.314 * 300.0);
+    var a1: f64 = -720.5;
+    var a2: f64 = -10000.0;
+    var a3: f64 = 1000000000000.0;
+    var a4: f64 = 0.6931471805599453;
+    var a5: f64 = 10000.0;
+    var a6: f64 = -4.75;
+    var a7: f64 = -1000000000000.0;
+    var a8: f64 = 1000000000000000.0;
+    var k = 0;
+    while (k < 9) {
+        var x: f64 = a0;
+        if (k == 1) { x = a1; }
+        if (k == 2) { x = a2; }
+        if (k == 3) { x = a3; }
+        if (k == 4) { x = a4; }
+        if (k == 5) { x = a5; }
+        if (k == 6) { x = a6; }
+        if (k == 7) { x = a7; }
+        if (k == 8) { x = a8; }
+        var s, e = _km_ux_from(x);
+        store64(_bench_b10a + 16 * k, s);
+        store64(_bench_b10a + 16 * k + 8, e);
+        k = k + 1;
+    }
+}
+
 # Runs every bench.
 fn main(): i64 {
     alloc_init();
@@ -310,6 +374,22 @@ fn main(): i64 {
     bench_audit_b7("stoichiometry/balance_survey_2x3", 0, 10000, 20);
     bench_audit_b7("stoichiometry/balance_overflow_10x9", 1, 1000, 20);
     bench_audit_b7("stoichiometry/balance_dense_30x31", 2, 1, 10);
+    _bench_b10a_setup();
+    bench_audit_b10a("mathx/cr_exp", 0, 0, 1000000, 20);
+    bench_audit_b10a("mathx/cr_exp_ux", 0, 1, 1000000, 20);
+    bench_audit_b10a("mathx/cr_exp_ux_acc", 0, 2, 20000, 20);
+    bench_audit_b10a("mathx/cr_exp_ux_subnormal", 1, 1, 1000000, 20);
+    bench_audit_b10a("mathx/cr_exp_ux_minus_1e4", 2, 1, 200000, 20);
+    bench_audit_b10a("mathx/cr_exp_ux_1e12", 3, 1, 200000, 20);
+    bench_audit_b10a("mathx/cr_exp_ux_1e15", 8, 1, 50000, 20);
+    bench_audit_b10a("mathx/cr_exp_ux_acc_minus_1e4", 2, 2, 20000, 20);
+    bench_audit_b10a("mathx/cr_expm1", 4, 3, 1000000, 20);
+    bench_audit_b10a("mathx/cr_expm1_ux", 4, 4, 1000000, 20);
+    bench_audit_b10a("mathx/cr_expm1_ux_1e4", 5, 4, 200000, 20);
+    bench_audit_b10a("mathx/cr_exp10", 6, 5, 1000000, 20);
+    bench_audit_b10a("mathx/cr_exp10_ux", 6, 6, 1000000, 20);
+    bench_audit_b10a("mathx/cr_exp10_ux_1e4", 5, 6, 200000, 20);
+    bench_audit_b10a("mathx/cr_exp10_ux_acc_minus_1e12", 7, 7, 20000, 20);
     return 0;
 }
 

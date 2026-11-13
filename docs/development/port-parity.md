@@ -1879,6 +1879,39 @@ pending, 46,406 accepted (809 under ADR 6; under ADR 2 as §26 plus 413 #39 rows
 809), 0 glibc-matching (failed) ===
 ```
 
+## 28. The overflow audit's B10a: e^x, e^x − 1 and 10^x with an unbounded exponent, for ADR 0002 #40 (2026-11-12)
+
+The first part of the survey's B10 (ADR 0002's B10a addition): the primitives of #40's chains, `_km_cr_exp_ux`,
+`_km_cr_expm1_ux` and `_km_cr_exp10_ux` in `src/mathx.cyr`, each a 53-bit significand correctly rounded at any exponent,
+exact up to MPFR's widest exponent range and saturating as MPFR does past it. Nothing calls them yet, so no golden row,
+note or mapping changes: the corpus and the parity line are §27's.
+
+- **`cr_verify.py`**: `exp_ux` 139,453, `expm1_ux` 168,035 and `exp10_ux` 140,700 arguments (448,188), as (s, e) pairs,
+  against MPFR at its widest exponent range (`mpfr_ref.UX.exp`, `.expm1`, `.exp10`, read back by `UX.parts`): specials
+  and exponents to ±2⁶³; every binade from 2⁻¹²⁰⁰ to 2⁶⁵ of both signs (45,816); binary64's own range (30,026), where
+  MPFR's 53-bit value is checked equal to its binary64 rounding wherever that is normal (79,213, 134,297 and 78,875
+  arguments) and the port's pair to its binary64 function's at every normal double x; the tiny end (xe −60 … −49); each
+  tier's edges (708, 1024 or 307, 512; 2⁴⁰ and 2⁴¹, the double-double reduction's end; binary64's thresholds); doubles
+  near K·ln2/512 and (K + ½)·ln2/512 (log₁₀2/512 for 10^x) with K of every bit length to 71 (30,000); Lefèvre–Muller's
+  hard cases; |x| from 10³ to 3.2·10¹⁸ (17,404); the saturation edges at 2⁶¹ (2⁶⁰) ± 60 ulps; expm1's −1 region (−40 …
+  40, around M1 and 120·ln 2: 28,606) and exp10's integers −400 … 400, the ulps around ±30 and around 10²³ (1,247). The
+  function, its fast path where its test passes, and the accurate path forced on every argument: 0 mismatches, the same
+  words and flags on x86_64 ELF, x86_64 PE and aarch64; the fast path falls back on 10, 14 and 2 of them (about 2·10⁻⁵
+  past binary64's range), about a minute of the run.
+- **Measured errors** (24,000 arguments past binary64's range each, against 500-bit MPFR): the integer reduction's r
+  within 2^-168.3 (bound 2⁻¹⁶²), the fast core 2^-71.09 and 2^-71.07 after the integer and the double-double reduction
+  (bound 0.9·2⁻⁷⁰, test ε = 2⁻⁶⁹), the accurate path 2^-155.15 relative (bound 2⁻¹⁵⁰).
+
+Tests: `tests/mathx.tcyr`'s `cyrius_b10a_exp_ux`, `cyrius_b10a_expm1_ux` and `cyrius_b10a_exp10_ux` (40, 29 and 27 MPFR
+rows as bit patterns, each through the function, the accurate path and the fast path, the rows whose fast test fails
+counted: −2⁻⁵⁴ for e^x (2⁻¹⁰⁹ from a midpoint), −2⁻⁵³ for e^x − 1, the tie 10²³, and arguments found by the probe; the
+specials; 4,000 seeded arguments each against the accurate path and the binary64 function).
+
+**Cost** (`docs/benchmarks-rust-v-cyrius.md`'s B10a section): the first tier 54 ns against `_km_cr_exp`'s 46, the cores
+unscaled 84 ns, the double-double reduction 158–165 ns, the integer one 614 ns, the accurate path 1.86–2.17 µs.
+
+Summary, every target: unchanged from §27.
+
 ## How to reproduce
 
 ```sh
