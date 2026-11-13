@@ -39,6 +39,9 @@ consumer (port plan §2.2).
     the 124 derived trait impls (`--markdown` writes the ledger page's table)
   - `docs/benchmarks-rust-v-cyrius.md`: every Rust benchmark with its 2.0.0 Cyrius number and the 160 Cyrius-only ones
   - CI: the ledger's `--check` beside surface parity
+  - `CONTRIBUTING.md` and `SECURITY.md` describe the Cyrius library (the cleanliness check, 2.x supported, the Rust
+    1.x crate frozen at 1.2.0); the stray probe files `atoms.txt` and `probe.cyr` removed from the root;
+    `tests/audit2.bcyr`'s subnormal set by its bits (its one f64 warning in the bench build)
 - **M0 initialize** — `cyrius port` scaffold on Cyrius 6.7.18; `cyrius.cyml` with hisab 3.4.1; golden-value
   generator `scripts/oracle/` (constants 45 + math 18,647 rows, glibc 2.44-pinned, `--check`, independent
   `validate.py`); generated `src/constants.cyr` (14 `KM_` physical constants); parity harness

@@ -132,7 +132,8 @@ fn _bench_b5_setup() {
     var ndmax: f64 = -dmax;
     store64(b5 + 192, _km_bits(ndmax));
     store64(b5 + 200, _km_bits(dmax));
-    var s320: f64 = 0x00000000000007E8;     # 5 equilibrium_constant_subnormal: −10⁻³²⁰, 10⁻³²²
+    var s320: f64 = 0.0;                    # 5 equilibrium_constant_subnormal: −10⁻³²⁰, 10⁻³²²
+    store64(&s320, 0x00000000000007E8);     # the subnormal's bits (a small hex literal reads as an integer)
     var ns320: f64 = -s320;
     store64(b5 + 240, _km_bits(ns320));
     store64(b5 + 248, 0x0000000000000014);
