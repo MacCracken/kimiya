@@ -17,33 +17,33 @@ A port's `test_group` is the Rust test's name, and the script checks that the Cy
 | Rust file | Cyrius tests | Rust tests | Ported | Adapted | Folded | N/A | Deferred | Cyrius-only groups |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
 | `src/error.rs` | `tests/error.tcyr` | 2 | 2 | 0 | 0 | 0 | 0 | 1 |
-| `src/validate.rs` | `tests/validate.tcyr` | 3 | 3 | 0 | 0 | 0 | 0 | 1 |
+| `src/validate.rs` | `tests/validate.tcyr` | 3 | 3 | 0 | 0 | 0 | 0 | 2 |
 | `src/element.rs` | `tests/element.tcyr` | 22 | 22 | 0 | 0 | 0 | 0 | 1 |
 | `src/molecule.rs` | `tests/molecule.tcyr` | 12 | 11 | 0 | 0 | 1 | 0 | 1 |
 | `src/reaction.rs` | `tests/reaction.tcyr` | 10 | 10 | 0 | 0 | 0 | 0 | 3 |
 | `src/thermo.rs` | `tests/thermo.tcyr` | 10 | 10 | 0 | 0 | 0 | 0 | 3 |
-| `src/thermochem.rs` | `tests/thermochem.tcyr` | 62 | 62 | 4 | 0 | 0 | 0 | 9 |
+| `src/thermochem.rs` | `tests/thermochem.tcyr` | 62 | 62 | 4 | 0 | 0 | 0 | 10 |
 | `src/phase.rs` | `tests/phase.tcyr` | 31 | 31 | 1 | 0 | 0 | 0 | 3 |
-| `src/gas.rs` | `tests/gas.tcyr` | 39 | 39 | 0 | 0 | 0 | 0 | 3 |
+| `src/gas.rs` | `tests/gas.tcyr` | 39 | 39 | 0 | 0 | 0 | 0 | 4 |
 | `src/solution.rs` | `tests/solution.tcyr` | 49 | 49 | 0 | 0 | 0 | 0 | 8 |
 | `src/electrochemistry.rs` | `tests/electrochemistry.tcyr` | 35 | 35 | 0 | 0 | 0 | 0 | 5 |
-| `src/kinetics.rs` | `tests/kinetics.tcyr` | 47 | 47 | 0 | 0 | 0 | 0 | 6 |
-| `src/stoichiometry.rs` | `tests/stoichiometry.tcyr` | 63 | 63 | 7 | 0 | 0 | 0 | 11 |
+| `src/kinetics.rs` | `tests/kinetics.tcyr` | 47 | 47 | 0 | 0 | 0 | 0 | 7 |
+| `src/stoichiometry.rs` | `tests/stoichiometry.tcyr` | 63 | 63 | 7 | 0 | 0 | 0 | 15 |
 | `src/organic.rs` | `tests/organic.tcyr` | 21 | 21 | 5 | 0 | 0 | 0 | 4 |
 | `src/inorganic.rs` | `tests/inorganic.tcyr` | 30 | 30 | 0 | 0 | 0 | 0 | 9 |
 | `src/potential.rs` | `tests/potential.tcyr` | 33 | 33 | 0 | 0 | 0 | 0 | 10 |
-| `src/nuclear.rs` | `tests/nuclear.tcyr` | 36 | 36 | 1 | 0 | 0 | 0 | 10 |
-| `src/spectroscopy.rs` | `tests/spectroscopy.tcyr` | 62 | 62 | 1 | 0 | 0 | 0 | 13 |
-| `src/reaction_dynamics.rs` | `tests/reaction_dynamics.tcyr` | 26 | 26 | 1 | 0 | 0 | 0 | 5 |
-| `src/network.rs` | `tests/network.tcyr` | 10 | 10 | 1 | 0 | 0 | 0 | 4 |
-| `src/fitting.rs` | `tests/fitting.tcyr` | 16 | 16 | 0 | 0 | 0 | 0 | 4 |
-| `src/sensitivity.rs` | `tests/sensitivity.tcyr` | 8 | 8 | 1 | 0 | 0 | 0 | 3 |
+| `src/nuclear.rs` | `tests/nuclear.tcyr` | 36 | 36 | 1 | 0 | 0 | 0 | 11 |
+| `src/spectroscopy.rs` | `tests/spectroscopy.tcyr` | 62 | 62 | 1 | 0 | 0 | 0 | 15 |
+| `src/reaction_dynamics.rs` | `tests/reaction_dynamics.tcyr` | 26 | 26 | 1 | 0 | 0 | 0 | 7 |
+| `src/network.rs` | `tests/network.tcyr` | 10 | 10 | 1 | 0 | 0 | 0 | 7 |
+| `src/fitting.rs` | `tests/fitting.tcyr` | 16 | 16 | 0 | 0 | 0 | 0 | 6 |
+| `src/sensitivity.rs` | `tests/sensitivity.tcyr` | 8 | 8 | 1 | 0 | 0 | 0 | 6 |
 | `src/bridge.rs` | — | 22 | 0 | 0 | 0 | 0 | 22 | — |
 | `src/integration/soorat.rs` | — | 12 | 0 | 0 | 0 | 0 | 12 | — |
 | `src/logging.rs` | — | 1 | 0 | 0 | 0 | 0 | 1 | — |
 | `tests/integration.rs` | `tests/integration.tcyr`, `tests/organic.tcyr`, `tests/spectroscopy.tcyr`, `tests/reaction_dynamics.tcyr`, `tests/fitting.tcyr` | 24 | 24 | 2 | 0 | 0 | 0 | 0 |
 | doc tests (`src/lib.rs`, `src/thermochem.rs`) | `tests/integration.tcyr` | 2 | 2 | 1 | 0 | 0 | 0 | — |
-| **Total** | | **688** | **652** | **25** | **0** | **1** | **35** | **117** |
+| **Total** | | **688** | **652** | **25** | **0** | **1** | **35** | **138** |
 
 The Cyrius-only groups (`cyrius_*`, and element's `out_of_range_handles`, validate's `guard_edges`, error's `codes`) test what no Rust test reaches: the port's conventions (handles, caller buffers, words for Rust's integer types), the ADR 0002 changes and the correctly rounded primitives. `tests/mathx.tcyr` and `tests/numerics.tcyr` hold only such tests (the primitives, and hisab 1.4.0's transcribed routines against their golden rows); `tests/parity.tcyr` replays the corpus and `tests/kimiya.tcyr` smoke-tests the bundle.
 

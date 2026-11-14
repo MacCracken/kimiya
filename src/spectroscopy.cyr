@@ -41,8 +41,9 @@
 #   insertion sort on the masses' IEEE total order (Rust's `sort_by(total_cmp)` is stable, and the binned means depend
 #   on the order of equal masses), binning, Rust's `fold(0.0, max)` (NaN-ignoring, src/mathx.cyr's _km_max), the
 #   renormalisation, `retain` in order; the count loop runs `count` times, as Rust's. The working pattern and scratch
-#   start in two stack tables of _KM_ISO_STACK records and move to the heap (lib/alloc.cyr's bump allocator, which
-#   never frees) only past that; an allocation failure is Err(KM_ERR_COMPUTATION_ERROR). Rust's private
+#   start in two stack tables of _KM_ISO_STACK records and move to two buffers of src/validate.cyr's pool of reusable
+#   work tables only past that (2.0.1: 2.0.0's bump allocations were never freed, so each such call grew the heap);
+#   an allocation failure is Err(KM_ERR_COMPUTATION_ERROR). Rust's private
 #   ISOTOPE_PRUNE_REL (10⁻¹²), ISOTOPE_REPORT_REL (0.001) and ISOTOPE_BIN_WIDTH_U (0.5) are typed formula constants
 #   inline in the private helpers that apply them (_km_isotope_normalize, _km_isotope_report, _km_isotope_bin), as
 #   nuclear.cyr's tolerance (port plan §6.4): pinned by golden rows where a row reaches them (× ½ and × 2) and by
@@ -86,8 +87,8 @@
 include "lib/alloc.cyr"
 
 # The [lib] order lets this module call the private helpers of the modules before it (as nuclear.cyr calls thermo.cyr's
-# _km_sum): element.cyr's lookups, organic.cyr's _km_is_enum_value, inorganic.cyr's _km_is_u8 and nuclear.cyr's
-# _km_is_u32.
+# _km_sum): element.cyr's lookups, and validate.cyr's _km_is_enum_value, _km_is_u8 and _km_is_u32 (organic.cyr's,
+# inorganic.cyr's and nuclear.cyr's until 2.0.1).
 
 # The isotope_pattern working tables' stack capacity, in (mass, intensity) records: the pattern and the scratch each.
 # A step's scratch is (pattern peaks) × (the element's isotopes): since ADR 0002 #23 sulfur has four, so S₈'s largest is
@@ -104,12 +105,7 @@ const _KM_ISO_STACK = 192;
 fn absorbance(molar_absorptivity: f64, path_length: f64, concentration: f64): f64 {
     var f, ok = _km_mul3_fast(molar_absorptivity, path_length, concentration);
     if (ok == 1) { return f; }
-    var fin = _km_is_finite(molar_absorptivity) + _km_is_finite(path_length) + _km_is_finite(concentration);
-    if (fin != 3) {
-        var a: f64 = (molar_absorptivity * path_length) * concentration;
-        return a;
-    }
-    var r: f64 = _km_cr_mul3(molar_absorptivity, path_length, concentration);
+    var r: f64 = _km_mul3_rest(molar_absorptivity, path_length, concentration);
     return r;
 }
 
@@ -619,7 +615,7 @@ fn _km_reduced_mass_acc(m1: f64, m2: f64): f64 {
 #must_use
 fn harmonic_oscillator_energy(n, angular_frequency: f64): f64 {
     if (_km_is_u32(n) != 1) { return _km_nan(); }
-    var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
+    var pi: f64 = KM_PI;                    # std::f64::consts::PI
     var tp: f64 = 2.0 * pi;
     var hbar: f64 = KM_PLANCK / tp;
     var nf: f64 = f64_from(n);
@@ -669,7 +665,7 @@ fn rigid_rotor_energy(j, rotational_constant_hz: f64): f64 {
 #must_use
 fn rotational_constant(moment_of_inertia: f64): Result {
     if (_km_is_positive(moment_of_inertia) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
+    var pi: f64 = KM_PI;                    # std::f64::consts::PI
     var h: f64 = KM_PLANCK;
     var h8: f64 = h * 0.125;
     var b: f64 = _km_cr_div3(h8, pi, pi, moment_of_inertia);
@@ -684,11 +680,7 @@ fn rotational_constant(moment_of_inertia: f64): Result {
 fn diatomic_moment_of_inertia(reduced_mass_kg: f64, bond_length_m: f64): f64 {
     var f, ok = _km_mul3_fast(reduced_mass_kg, bond_length_m, bond_length_m);
     if (ok == 1) { return f; }
-    if (_km_is_finite(reduced_mass_kg) != 1 || _km_is_finite(bond_length_m) != 1) {
-        var i: f64 = (reduced_mass_kg * bond_length_m) * bond_length_m;
-        return i;
-    }
-    var r: f64 = _km_cr_mul3(reduced_mass_kg, bond_length_m, bond_length_m);
+    var r: f64 = _km_mul3_rest(reduced_mass_kg, bond_length_m, bond_length_m);
     return r;
 }
 
@@ -728,10 +720,12 @@ fn _km_isotope_sort(buf, n) {
     while (i < n) {
         var mb = load64(buf + 16 * i);
         var ib = load64(buf + 16 * i + 8);
-        var key = _km_total_key(mb);
+        var key = mb ^ ((mb >>> 63) >> 1);  # _km_total_key, inline here and below
         var j = i;
-        while (j > 0 && _km_total_key(load64(buf + 16 * (j - 1))) > key) {
-            store64(buf + 16 * j, load64(buf + 16 * (j - 1)));
+        while (j > 0) {
+            var pb = load64(buf + 16 * (j - 1));
+            if ((pb ^ ((pb >>> 63) >> 1)) <= key) { break; }
+            store64(buf + 16 * j, pb);
             store64(buf + 16 * j + 8, load64(buf + 16 * (j - 1) + 8));
             j = j - 1;
         }
@@ -789,7 +783,8 @@ fn _km_isotope_normalize(buf, n): i64 {
     var k = 0;
     while (k < n) {
         var i: f64 = load64(buf + 16 * k + 8);
-        mx = _km_max(mx, i);
+        # mx = _km_max(mx, i), inline: mx is never NaN, so a NaN i keeps mx, and otherwise the larger (i on a tie).
+        if (i == i && !(mx > i)) { mx = i; }
         k = k + 1;
     }
     if (mx > 0.0) {
@@ -834,20 +829,6 @@ fn _km_isotope_report(buf, n): i64 {
     return kept;
 }
 
-# A heap table of cap records holding the first n records of old; 0 when the allocation fails.
-#must_use
-fn _km_isotope_grow(old, n, cap): i64 {
-    if (cap > 0x0800000000000000 / 16) { return 0; }
-    var p = alloc(16 * cap);
-    if (p == 0) { return 0; }
-    var k = 0;
-    while (k < 2 * n) {
-        store64(p + 8 * k, load64(old + 8 * k));
-        k = k + 1;
-    }
-    return p;
-}
-
 # The isotope pattern (mass-spectrum envelope) of a molecule: its n (atomic number, count) records at `atoms`, 16 bytes
 # each (Z as a word, then the count as a word: Rust's `&[(u8, u32)]`), convolved atom by atom from the single peak
 # (0, 1): for an element with isotope data, `count` times, each step every peak × every isotope (masses added,
@@ -863,12 +844,28 @@ fn _km_isotope_grow(old, n, cap): i64 {
 # `spectroscopy::isotope_pattern`.
 #must_use
 fn isotope_pattern(atoms, n, out, cap): Result {
-    if (n < 0 || (n > 0 && atoms == 0)) { return Err(KM_ERR_INVALID_INPUT); }
+    var slots: i64[2];
+    store64(&slots, 0 - 1);
+    store64(&slots + 8, 0 - 1);
+    var t, v = _km_isotope_pattern_on(atoms, n, out, cap, &slots);
+    _km_scratch_give(load64(&slots));
+    _km_scratch_give(load64(&slots + 8));
+    if (is_ok(t) == 1) { return Ok(v); }
+    return Err(v);
+}
+
+# isotope_pattern's body: past _KM_ISO_STACK records its two working tables move from the stack to two buffers of the
+# work-table pool, whose slots it records at slots (the pattern's) and slots + 8 (the scratch's) for the caller to give
+# back.
+#must_use
+fn _km_isotope_pattern_on(atoms, n, out, cap, slots): Result {
+    if (_km_is_slice(atoms, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (n == 0) { return Err(KM_ERR_INVALID_INPUT); }
-    var pst: f64[384];                      # _KM_ISO_STACK records each
-    var sst: f64[384];
+    var pst: f64[_KM_ISO_STACK * 2];        # _KM_ISO_STACK records each
+    var sst: f64[_KM_ISO_STACK * 2];
     var pat = &pst;
     var scr = &sst;
+    var heap = 0;
     var tcap = _KM_ISO_STACK;
     var zero: f64 = 0.0;
     var one: f64 = 1.0;
@@ -905,8 +902,28 @@ fn isotope_pattern(atoms, n, out, cap): Result {
                 if (np * na > tcap) {
                     var ncap = 2 * tcap;
                     if (ncap < np * na) { ncap = np * na; }
-                    var npat = _km_isotope_grow(pat, np, ncap);
-                    var nscr = _km_isotope_grow(scr, 0, ncap);
+                    if (ncap > 0x0800000000000000 / 16) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                    var npat = 0;
+                    var nscr = 0;
+                    if (heap == 0) {
+                        var q1, s1 = _km_scratch_take(16 * ncap);
+                        store64(slots, s1);
+                        var q2, s2 = _km_scratch_take(16 * ncap);
+                        store64(slots + 8, s2);
+                        if (q1 != 0) {
+                            var kc = 0;
+                            while (kc < 2 * np) {
+                                store64(q1 + 8 * kc, load64(pat + 8 * kc));
+                                kc = kc + 1;
+                            }
+                        }
+                        npat = q1;
+                        nscr = q2;
+                        heap = 1;
+                    } else {
+                        npat = _km_scratch_grow(load64(slots), pat, 16 * ncap, 16 * np);
+                        nscr = _km_scratch_grow(load64(slots + 8), scr, 16 * ncap, 0);
+                    }
                     if (npat == 0 || nscr == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
                     pat = npat;
                     scr = nscr;
@@ -957,18 +974,19 @@ fn isotope_pattern(atoms, n, out, cap): Result {
 # twiddle wn = (cos θ, sin θ) of θ = (−2·π)/len (π = std::f64::consts::PI; −2·π is exact, the ÷ len too) from the
 # correctly rounded _km_cr_sincos, and per block w = (1, 0), each butterfly t = w·d (Complex's mul: re = w.re·d.re −
 # w.im·d.im, im = w.re·d.im + w.im·d.re), u + t and u − t, then w *= wn (mul_assign, the same products): every
-# operation in hisab's order, no FMA, so the result is the oracle's with correctly rounded twiddles.
+# operation in hisab's order, no FMA, so the result is the oracle's with correctly rounded twiddles. The recurrence is
+# input-independent, the same in every block, so the port runs it once a stage, the block loop inside it (2.0.1).
 #
 # ADR 0002 #36 (the overflow audit's B6): it also returns 1 when its products provably stayed in binary64's normal
-# range, else 0 — every component of wn, of each twiddle w a butterfly uses (checked in the first block of a stage: the
-# recurrence is input-independent, the same in every block) and of each butterfly's d is 0 or of magnitude at least
+# range, else 0 — every component of wn, of each twiddle w a butterfly uses (checked once a stage, as it is computed)
+# and of each butterfly's d is 0 or of magnitude at least
 # 2⁻¹⁰⁰ (wn, w) or 2⁻⁹²¹ (d). Then every product of the transform (w·d and the recurrence's w·wn) is an exact zero (a
 # zero factor) or its exact value is at least 2⁻¹⁰²¹ in magnitude, where binary64's rounding is the 53-bit one unless
 # it overflows; and every sum of two doubles is exact below 2⁻¹⁰²¹ and the 53-bit rounding above unless it overflows
 # (the pure-sum lemma, ADR 0002 #33). So the transform is the unbounded-exponent one (#20's semantics) unless some
 # operation overflowed; fft_spectrum tests that on the retained outputs (an overflow reaches one of them as ±∞ or NaN).
 # The twiddles' bound never binds in practice (their smallest nonzero component is 2⁻⁵⁶ for every n ≤ 2²², wn's at
-# least 2⁻⁶⁰ for every n), so the test is the data's: a d below 2⁻⁹²¹ ≈ 2.2·10⁻²⁷⁷ takes the slow path.
+# least 2⁻⁶⁰ for every n), so the test is the data's: a d below 2⁻⁹²¹ ≈ 5.64·10⁻²⁷⁸ takes the slow path.
 #must_use
 fn _km_fft(data, n): i64 {
     if (n <= 1) { return 1; }
@@ -993,8 +1011,7 @@ fn _km_fft(data, n): i64 {
     }
     var ok = 1;
     var lw: f64 = 0x39B0000000000000;       # 2⁻¹⁰⁰: the twiddles' bound
-    var ld: f64 = 0x0660000000000000;       # 2⁻⁹²¹: the data's bound (their products at least 2⁻¹⁰²¹)
-    var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
+    var pi: f64 = KM_PI;                    # std::f64::consts::PI
     var m2pi: f64 = -2.0 * pi;
     var len = 2;
     while (len <= n) {
@@ -1005,27 +1022,30 @@ fn _km_fft(data, n): i64 {
         var awr: f64 = f64_abs(wn_re);
         var awi: f64 = f64_abs(wn_im);
         if ((awr < lw && awr != 0.0) || (awi < lw && awi != 0.0)) { ok = 0; }
-        var start = 0;
-        while (start < n) {
-            var w_re: f64 = 1.0;
-            var w_im: f64 = 0.0;
-            var k = 0;
-            while (k < half) {
+        # The twiddle loop outside the block loop (2.0.1): hisab's recurrence restarts at w = (1, 0) in every block and
+        # is input-independent, so twiddle k is the same in each, computed and tested once; the butterflies of one
+        # stage touch disjoint pairs, so their order does not matter. The data test on the bits: |d| is 0 or at least
+        # 2⁻⁹²¹ exactly when (bits & 0x7FF…F) is 0 or at least 0x066…0 (a NaN's magnitude bits are above it, as
+        # NaN < 2⁻⁹²¹ is false).
+        var w_re: f64 = 1.0;
+        var w_im: f64 = 0.0;
+        var k = 0;
+        while (k < half) {
+            var awr2: f64 = f64_abs(w_re);
+            var awi2: f64 = f64_abs(w_im);
+            if ((awr2 < lw && awr2 != 0.0) || (awi2 < lw && awi2 != 0.0)) { ok = 0; }
+            var start = 0;
+            while (start < n) {
                 var pu = data + 16 * (start + k);
                 var pt = data + 16 * (start + k + half);
                 var u_re: f64 = load64(pu);
                 var u_im: f64 = load64(pu + 8);
                 var d_re: f64 = load64(pt);
                 var d_im: f64 = load64(pt + 8);
-                var adr: f64 = f64_abs(d_re);
-                var adi: f64 = f64_abs(d_im);
-                if (adr < ld) { if (adr != 0.0) { ok = 0; } }
-                if (adi < ld) { if (adi != 0.0) { ok = 0; } }
-                if (start == 0) {
-                    var awr2: f64 = f64_abs(w_re);
-                    var awi2: f64 = f64_abs(w_im);
-                    if ((awr2 < lw && awr2 != 0.0) || (awi2 < lw && awi2 != 0.0)) { ok = 0; }
-                }
+                var bdr = load64(pt) & 0x7FFFFFFFFFFFFFFF;
+                var bdi = load64(pt + 8) & 0x7FFFFFFFFFFFFFFF;
+                if (bdr < 0x0660000000000000) { if (bdr != 0) { ok = 0; } }
+                if (bdi < 0x0660000000000000) { if (bdi != 0) { ok = 0; } }
                 var t_re: f64 = (w_re * d_re) - (w_im * d_im);
                 var t_im: f64 = (w_re * d_im) + (w_im * d_re);
                 var s_re: f64 = u_re + t_re;
@@ -1036,13 +1056,13 @@ fn _km_fft(data, n): i64 {
                 store64(pu + 8, s_im);
                 store64(pt, v_re);
                 store64(pt + 8, v_im);
-                var nw_re: f64 = (w_re * wn_re) - (w_im * wn_im);
-                var nw_im: f64 = (w_re * wn_im) + (w_im * wn_re);
-                w_re = nw_re;
-                w_im = nw_im;
-                k = k + 1;
+                start = start + len;
             }
-            start = start + len;
+            var nw_re: f64 = (w_re * wn_re) - (w_im * wn_im);
+            var nw_im: f64 = (w_re * wn_im) + (w_im * wn_re);
+            w_re = nw_re;
+            w_im = nw_im;
+            k = k + 1;
         }
         len = len << 1;
     }
@@ -1086,7 +1106,7 @@ fn _km_fft_ux(sig, n, w) {
         }
         i = i + 1;
     }
-    var pi: f64 = 0x400921FB54442D18;
+    var pi: f64 = KM_PI;
     var m2pi: f64 = -2.0 * pi;
     var len = 2;
     while (len <= n) {
@@ -1096,14 +1116,15 @@ fn _km_fft_ux(sig, n, w) {
         var wn_im, wn_re = _km_cr_sincos(angle);
         var nrs, nre = _km_ux_from(wn_re);
         var nis, nie = _km_ux_from(wn_im);
-        var start = 0;
-        while (start < n) {
-            var wrs: f64 = 1.0;
-            var wre = 0;
-            var wis: f64 = 0.0;
-            var wie = 0;
-            var k = 0;
-            while (k < half) {
+        # The twiddle loop outside the block loop, as in _km_fft (2.0.1): each twiddle's recurrence step once a stage.
+        var wrs: f64 = 1.0;
+        var wre = 0;
+        var wis: f64 = 0.0;
+        var wie = 0;
+        var k = 0;
+        while (k < half) {
+            var start = 0;
+            while (start < n) {
                 var pu = w + 32 * (start + k);
                 var pt = w + 32 * (start + k + half);
                 var urs: f64 = load64(pu);
@@ -1132,19 +1153,19 @@ fn _km_fft_ux(sig, n, w) {
                 store64(pt + 8, bre);
                 store64(pt + 16, bis);
                 store64(pt + 24, bie);
-                var q1s, q1e = _km_ux_mul(wrs, wre, nrs, nre);
-                var q2s, q2e = _km_ux_mul(wis, wie, nis, nie);
-                var xrs, xre = _km_ux_sub(q1s, q1e, q2s, q2e);
-                var q3s, q3e = _km_ux_mul(wrs, wre, nis, nie);
-                var q4s, q4e = _km_ux_mul(wis, wie, nrs, nre);
-                var xis, xie = _km_ux_add(q3s, q3e, q4s, q4e);
-                wrs = xrs;
-                wre = xre;
-                wis = xis;
-                wie = xie;
-                k = k + 1;
+                start = start + len;
             }
-            start = start + len;
+            var q1s, q1e = _km_ux_mul(wrs, wre, nrs, nre);
+            var q2s, q2e = _km_ux_mul(wis, wie, nis, nie);
+            var xrs, xre = _km_ux_sub(q1s, q1e, q2s, q2e);
+            var q3s, q3e = _km_ux_mul(wrs, wre, nis, nie);
+            var q4s, q4e = _km_ux_mul(wis, wie, nrs, nre);
+            var xis, xie = _km_ux_add(q3s, q3e, q4s, q4e);
+            wrs = xrs;
+            wre = xre;
+            wis = xis;
+            wie = xie;
+            k = k + 1;
         }
         len = len << 1;
     }
@@ -1165,13 +1186,13 @@ fn _km_fft_mag_ux(rs: f64, re, is: f64, ie): f64 {
 
 # ADR 0002 #36: the magnitude spectrum by the unbounded-exponent transform alone (the slow path, which fft_spectrum
 # takes for a finite signal whose IEEE transform left the normal range; forced by the tests and cr_verify.py): the n
-# finite values at `signal`, n a power of two, transformed by _km_fft_ux into 32·n heap bytes, then the first n/2 + 1
-# magnitudes by _km_fft_mag_ux to `out` (n/2 + 1 f64; `out` may overlap `signal`). 1, or 0 if the work table can't be
-# allocated.
+# finite values at `signal`, n a power of two, transformed by _km_fft_ux into 32·n bytes of the work-table pool
+# (src/validate.cyr), then the first n/2 + 1 magnitudes by _km_fft_mag_ux to `out` (n/2 + 1 f64; `out` may overlap
+# `signal`). 1, or 0 if the work table can't be allocated.
 #must_use
 fn _km_fft_spectrum_ux(signal, n, out): i64 {
     if (n > 0x0040000000000000) { return 0; }
-    var w = alloc(32 * n);
+    var w, ws = _km_scratch_take(32 * n);
     if (w == 0) { return 0; }
     _km_fft_ux(signal, n, w);
     var m = n / 2 + 1;
@@ -1183,6 +1204,7 @@ fn _km_fft_spectrum_ux(signal, n, out): i64 {
         store64(out + 8 * k, mag);
         k = k + 1;
     }
+    _km_scratch_give(ws);
     return 1;
 }
 
@@ -1254,9 +1276,10 @@ fn _km_fft_spectrum_fast(signal, n, data): i64 {
 # (_km_fft_spectrum_fast); where its per-operation test proves the transform the unbounded one, it is the result (Rust's
 # bits), with Rust's magnitude of each bin whose square sum is in range and the unbounded one of any other.
 # Otherwise a signal with a NaN or ±∞ keeps Rust's IEEE spectrum (B1's rule for an unvalidated input), and a finite one
-# takes the unbounded transform (_km_fft_spectrum_ux, 32·n heap bytes from the bump allocator, which never frees them).
-# The IEEE transform runs in `out` itself when cap ≥ 2n and `signal` lies outside out's first 2n values (nothing is
-# allocated then); otherwise in 16·n heap bytes, so the signal survives for the slow path. Mirrors
+# takes the unbounded transform (_km_fft_spectrum_ux, in 32·n bytes of src/validate.cyr's pool of reusable work
+# tables). The IEEE transform runs in `out` itself when cap ≥ 2n and `signal` lies outside out's first 2n values
+# (nothing is allocated then); otherwise in 16·n bytes of the pool, so the signal survives for the slow path (2.0.1:
+# 2.0.0 took both tables from the bump allocator, which never frees, so each such call grew the heap). Mirrors
 # `spectroscopy::fft_spectrum`.
 #must_use
 fn fft_spectrum(signal, n, out, cap): Result {
@@ -1268,9 +1291,12 @@ fn fft_spectrum(signal, n, out, cap): Result {
     var data = out;
     var overlap = 0;
     if (signal < out + 16 * n && out < signal + 8 * n) { overlap = 1; }
+    var ds = 0 - 1;
     if (cap < 2 * n || overlap == 1) {
-        data = alloc(16 * n);
-        if (data == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        var q, qs = _km_scratch_take(16 * n);
+        if (q == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        data = q;
+        ds = qs;
     }
     var keep = _km_fft_spectrum_fast(signal, n, data);
     if (keep == 2) { keep = 1; }
@@ -1288,8 +1314,10 @@ fn fft_spectrum(signal, n, out, cap): Result {
                 k = k + 1;
             }
         }
+        _km_scratch_give(ds);
         return Ok(m);
     }
+    _km_scratch_give(ds);
     if (_km_fft_spectrum_ux(signal, n, out) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
     return Ok(m);
 }
@@ -1424,11 +1452,14 @@ fn _km_find_peaks_run(data, n, t: f64, lo: f64, hi: f64, out, room, force): (i64
 # 2⁻⁵³ the exact 11 − 2⁻⁵³ (Rust's 11), so index 3 is one. Rust's threshold decides wherever a proven bound separates
 # the value from it (_km_find_peaks_run). The indices, in ascending order, go to the caller's buffer `out` of `cap` i64
 # words: Ok(count); Ok(0) when n < 3, t is not in [0, 1] (NaN included) or no value is finite, as Rust's empty Vec.
-# Err(KM_ERR_INVALID_INPUT) if (data, n) is no slice, or if more peaks are found than cap holds (`out` untouched; at
-# most (n − 1)/2 can be). Mirrors `spectroscopy::find_peaks`.
+# Err(KM_ERR_INVALID_INPUT) if (data, n) is no slice, if `out` starts inside it past its first value (data < out <
+# data + 8·n, checked after Rust's three Ok(0) cases, which write nothing: the indices would overwrite values still
+# to be scanned; out = data, in place, and out < data work, since the k-th index is written only after value 2k + 2
+# has been read), or if more peaks are found than cap holds (`out` untouched; at most (n − 1)/2 can be). Mirrors
+# `spectroscopy::find_peaks`.
 #must_use
 fn find_peaks(data, n, threshold: f64, out, cap): Result {
-    if (n < 0 || (n > 0 && data == 0)) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_slice(data, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var in_range = 0;                       # (0.0..=1.0).contains(&threshold): false for NaN
     if (threshold >= 0.0 && threshold <= 1.0) { in_range = 1; }
     if (n < 3 || in_range != 1) { return Ok(0); }
@@ -1437,13 +1468,16 @@ fn find_peaks(data, n, threshold: f64, out, cap): Result {
     var k = 0;
     while (k < n) {
         var v: f64 = load64(data + 8 * k);
-        if (_km_is_finite(v) == 1) {
-            lo = _km_min(lo, v);
-            hi = _km_max(hi, v);
+        # _km_is_finite, _km_min and _km_max inline: v − v is 0 exactly for a finite v, and lo and hi are never NaN.
+        var dv: f64 = v - v;
+        if (dv == 0.0) {
+            if (!(lo < v)) { lo = v; }
+            if (!(hi > v)) { hi = v; }
         }
         k = k + 1;
     }
     if (lo > hi) { return Ok(0); }          # no finite values
+    if (out > data && out < data + 8 * n) { return Err(KM_ERR_INVALID_INPUT); }
     var room = cap;
     if (out == 0 || room < 0) { room = 0; }
     var cnt, slow = _km_find_peaks_run(data, n, threshold, lo, hi, out, room, 0);

@@ -53,11 +53,7 @@ fn _km_sum(xs, n): f64 {
 fn heat_transfer(mass_g: f64, specific_heat: f64, delta_t: f64): f64 {
     var f, ok = _km_mul3_fast(mass_g, specific_heat, delta_t);
     if (ok == 1) { return f; }
-    if (_km_is_finite(mass_g) != 1 || _km_is_finite(specific_heat) != 1 || _km_is_finite(delta_t) != 1) {
-        var q: f64 = (mass_g * specific_heat) * delta_t;
-        return q;
-    }
-    var r: f64 = _km_cr_mul3(mass_g, specific_heat, delta_t);
+    var r: f64 = _km_mul3_rest(mass_g, specific_heat, delta_t);
     return r;
 }
 

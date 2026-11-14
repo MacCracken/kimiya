@@ -8,6 +8,8 @@
 # #28 (the overflow audit's B1); no Rust test changes with it (each compares within a tolerance), and one Cyrius-only
 # assertion of Rust's 1/∞ = +0 now pins the port's value (cyrius_zeros_and_nan). The golden corpus separately checks
 # every function over its grid (tests/parity.tcyr).
+#
+# 2.0.1: cyrius_201_null_out (a null `out` is Err(InvalidInput), after Rust's checks).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -811,6 +813,16 @@ fn _t_cyrius_adr33_zero_order() {
     assert(took > 1000, "the fast test passes on most seeded inputs");
 }
 
+# 2.0.1: a null `out` is Err(KM_ERR_INVALID_INPUT), after Rust's own checks (it used to fault).
+fn _t_cyrius_201_null_out() {
+    test_group("cyrius_201_null_out");
+    var t, v = lineweaver_burk(100.0, 5.0, 0);
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT) == 1, "valid inputs, null out: InvalidInput");
+    var nan: f64 = _km_nan();
+    var t1, v1 = lineweaver_burk(nan, 5.0, 0);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "Rust's Vmax check first");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_arrhenius_basic();
@@ -866,6 +878,7 @@ fn main() {
     _t_cyrius_zeros_and_nan();
     _t_cyrius_adr28();
     _t_cyrius_adr33_zero_order();
+    _t_cyrius_201_null_out();
     return assert_summary();
 }
 

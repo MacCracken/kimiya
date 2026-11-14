@@ -4,6 +4,9 @@
 # Result (ADR 0002 #2); `invalid_input_gives_non_finite_gradients` asserts the port's Err for those inputs (with its
 # code) where Rust asserts a non-finite entry; the closure of `custom_gradient` is tests/sens_functions.cyr's `quad`
 # on a caller's tape. The golden corpus separately checks every function over its grid (tests/parity.tcyr).
+#
+# 2.0.1: cyrius_201_null_out (the gradients' null `out`), cyrius_201_no_growth (compute_gradient's index table from
+# the work-table pool) and cyrius_201_compute_gradient_overlap (parameters or out over the tape's own storage).
 
 include "src/error.cyr"
 include "src/constants.cyr"
@@ -296,6 +299,112 @@ fn _t_cyrius_compute_gradient_tape() {
     assert(is_ok(t9) == 1 && q0 == 0.0 && q1 == 3.0, "the tape reset: x² + 3y at (0, 1)");
 }
 
+# 2.0.1: the fixed-formula gradients with a null `out` are Err(KM_ERR_INVALID_INPUT), after Rust's own checks and
+# the ComputationError for a non-finite entry (they used to fault).
+fn _t_cyrius_201_null_out() {
+    test_group("cyrius_201_null_out");
+    var t, v = equilibrium_constant_gradient(-10000.0, 298.15, 0);
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT), "equilibrium_constant_gradient: null out");
+    var t1, v1 = equilibrium_constant_gradient(-10000.0, -1.0, 0);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_TEMPERATURE), "  T checked first");
+    var t2, v2 = arrhenius_gradient(1000000.0, 50000.0, 298.15, 0);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT), "arrhenius_gradient: null out");
+    var t3, v3 = arrhenius_gradient(1000000.0, 50000.0, nan(), 0);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_TEMPERATURE), "  T checked first");
+    var t4, v4 = nernst_gradient(0.34, 2, 298.15, 0.5, 0);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT), "nernst_gradient: null out");
+    var t5, v5 = nernst_gradient(0.34, 2, 0.0, 0.5, 0);
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_TEMPERATURE), "  T checked first");
+    var huge: f64 = 0x7FEFFFFFFFFFFFFF;
+    var neg: f64 = -huge;
+    var t6, v6 = equilibrium_constant_gradient(neg, 1.0, 0);
+    assert(is_err_code(t6, v6, KM_ERR_COMPUTATION_ERROR), "  K overflows: ComputationError before the null out");
+}
+
+# 2.0.1: compute_gradient's index table past 64 parameters comes from src/validate.cyr's pool: after a first call,
+# calls in a loop allocate nothing, on Ok and on the Err after the table (a tape too small), and every slot is given
+# back.
+fn _t_cyrius_201_no_growth() {
+    test_group("cyrius_201_no_growth");
+    var p = alloc(8 * 100);
+    var g = alloc(8 * 100);
+    var i = 0;
+    while (i < 100) {
+        var fi: f64 = f64_from(i);
+        store64(p + 8 * i, fi);
+        i = i + 1;
+    }
+    var small = ad_tape_new(50);
+    var round = 0;
+    var u0 = 0;
+    while (round < 4) {
+        if (round == 1) { u0 = alloc_used(); }
+        var t1, v1 = compute_gradient(&_sf_sum_squares, 0, tape, p, 100, g);
+        var t2, v2 = compute_gradient(&_sf_sum_squares, 0, small, p, 100, g);
+        var g7: f64 = load64(g + 56);
+        assert(is_ok(t1) == 1 && v1 == 100 && g7 == 14.0, "Ok(100), ∂/∂p₇ = 2·7");
+        assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT), "a tape too small: InvalidInput");
+        assert(_km_scratch_claimed() == 0, "every slot given back");
+        round = round + 1;
+    }
+    assert_eq(alloc_used() - u0, 0, "three more rounds allocate nothing");
+}
+
+# 2.0.1: compute_gradient with `parameters` or `out` over the tape's own storage, on a tape built through hisab's
+# setters around the caller's arrays. out = its adjoint array gives the separate buffer's gradient (the n variables
+# are nodes 0 .. n − 1, whose adjoints are the gradient); `out` over the header, the nodes or the adjoints otherwise,
+# or `parameters` over the header or the nodes, is Err(InvalidInput) before the tape is reset (it used to read
+# parameters the nodes had overwritten, or leave the tape's nodes or adjoints overwritten). out = parameters, and an
+# overlap of the two, work: every parameter is read before the gradient is written.
+fn _t_cyrius_201_compute_gradient_overlap() {
+    test_group("cyrius_201_compute_gradient_overlap");
+    var nodes = alloc(40 * 16);
+    var adj = alloc(8 * 16);
+    var ht = alloc(sizeof(AdTape));
+    AdTape_set_nodes(ht, nodes);
+    AdTape_set_adj(ht, adj);
+    AdTape_set_n(ht, 0);
+    AdTape_set_cap(ht, 16);
+    var p: f64[2];
+    p[0] = 2.0;
+    p[1] = 5.0;
+    var sep: f64[2];
+    var t0, v0 = compute_gradient(&_sf_quad, 0, ht, &p, 2, &sep);
+    var s0: f64 = sep[0];
+    var s1: f64 = sep[1];
+    assert(is_ok(t0) == 1 && v0 == 2 && s0 == 4.0 && s1 == 3.0, "a hand-built tape: [2x, 3] = [4, 3]");
+    var t1, v1 = compute_gradient(&_sf_quad, 0, ht, &p, 2, adj);
+    assert(is_ok(t1) == 1 && v1 == 2 && memeq(&sep, adj, 16) == 1, "out = the tape's adjoints = separate buffer");
+    var n1 = AdTape_n(ht);
+    var g: f64[2];
+    var t2, v2 = compute_gradient(&_sf_quad, 0, ht, &p, 2, adj + 8);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT), "out inside the adjoints: InvalidInput");
+    var t3, v3 = compute_gradient(&_sf_quad, 0, ht, &p, 2, adj - 8);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT), "the adjoints' first word inside out: InvalidInput");
+    var t4, v4 = compute_gradient(&_sf_quad, 0, ht, &p, 2, nodes + 40);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT), "out over the nodes: InvalidInput");
+    var t5, v5 = compute_gradient(&_sf_quad, 0, ht, &p, 2, ht + 16);
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_INPUT), "out over the AdTape header: InvalidInput");
+    memcpy(nodes + 600, &p, 16);
+    var t6, v6 = compute_gradient(&_sf_quad, 0, ht, nodes + 600, 2, &g);
+    assert(is_err_code(t6, v6, KM_ERR_INVALID_INPUT), "parameters over the nodes: InvalidInput");
+    var t7, v7 = compute_gradient(&_sf_quad, 0, ht, ht, 2, &g);
+    assert(is_err_code(t7, v7, KM_ERR_INVALID_INPUT), "parameters over the AdTape header: InvalidInput");
+    var x0 = ad_val(ht, 0);                 # the bits of node 0's value, x = 2.0
+    assert(AdTape_n(ht) == n1 && x0 == 0x4000000000000000 && memeq(&sep, adj, 16) == 1,
+        "the tape untouched by the refused calls");
+    memcpy(adj + 32, &p, 16);
+    var t8, v8 = compute_gradient(&_sf_quad, 0, ht, adj + 32, 2, &g);
+    assert(is_ok(t8) == 1 && memeq(&sep, &g, 16) == 1, "parameters over the adjoints: Ok (read before the sweep)");
+    var q: f64[3];
+    memcpy(&q, &p, 16);
+    var t9, v9 = compute_gradient(&_sf_quad, 0, ht, &q, 2, &q);
+    assert(is_ok(t9) == 1 && memeq(&sep, &q, 16) == 1, "out = parameters = separate buffer");
+    memcpy(&q + 8, &p, 16);
+    var t10, v10 = compute_gradient(&_sf_quad, 0, ht, &q + 8, 2, &q);
+    assert(is_ok(t10) == 1 && memeq(&sep, &q, 16) == 1, "out = parameters − 8, overlapping: Ok");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main(): i64 {
     tape = ad_tape_new(4096);
@@ -310,6 +419,9 @@ fn main(): i64 {
     _t_cyrius_adr2_validation();
     _t_cyrius_adr2_zero_rule();
     _t_cyrius_compute_gradient_tape();
+    _t_cyrius_201_null_out();
+    _t_cyrius_201_no_growth();
+    _t_cyrius_201_compute_gradient_overlap();
     return assert_summary();
 }
 

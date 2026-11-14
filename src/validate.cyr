@@ -4,7 +4,10 @@
 # `if (x <= 0.0) { return Err(..); }` lets NaN (and ±∞) through and the function silently
 # returns Ok(NaN). Guards use these predicates in the negated form instead:
 # `if (_km_is_positive(x) != 1) { return Err(..); }`. Crate-private in Rust (`pub(crate)`),
-# so private here; `_km_is_finite` is src/mathx.cyr's.
+# so private here; `_km_is_finite` is src/mathx.cyr's. Since 2.0.1 it also holds the buffer-overlap test
+# `_km_overlaps` and the pool of reusable work tables (the last section), which every module's heap tables come from.
+
+include "lib/alloc.cyr"
 
 # 1 if x is finite and strictly greater than zero: 0 < x < +∞, both comparisons false for NaN.
 # Mirrors `validate::is_positive`.
@@ -20,4 +23,173 @@ fn _km_is_positive(x: f64): i64 {
 fn _km_is_non_negative(x: f64): i64 {
     if (x >= 0.0 && x < _KM_INF) { return 1; }
     return 0;
+}
+
+# ── slices and Rust's integer types ─────────────────────────────────────────────────
+#
+# Shared here since 2.0.1 (they were reaction_dynamics.cyr's _km_rd_slice, fitting.cyr's _km_fit_slice, solution.cyr's
+# _km_is_i32, inorganic.cyr's _km_is_u8 and _km_is_bool, organic.cyr's _km_is_enum_value and nuclear.cyr's
+# _km_is_u32, which spectroscopy.cyr reached across for). A word outside a Rust integer type is the caller's
+# out-of-type input, never wrapped (port plan §6.4).
+
+# 1 if (p, n) is a slice: n ≥ 0, and p not null when n > 0.
+#must_use
+fn _km_is_slice(p, n): i64 {
+    if (n < 0 || (n > 0 && p == 0)) { return 0; }
+    return 1;
+}
+
+# 1 if the word z is a Rust i32 (−2³¹ ..= 2³¹ − 1).
+#must_use
+fn _km_is_i32(z): i64 {
+    if (z < (0 - 0x80000000) || z > 0x7FFFFFFF) { return 0; }
+    return 1;
+}
+
+# 1 if the word x is a Rust u8 (0 ..= 255).
+#must_use
+fn _km_is_u8(x): i64 {
+    if (x < 0 || x > 255) { return 0; }
+    return 1;
+}
+
+# 1 if the word x is a Rust u32 (0 ..= 2³² − 1).
+#must_use
+fn _km_is_u32(x): i64 {
+    if (x < 0 || x > 0xFFFFFFFF) { return 0; }
+    return 1;
+}
+
+# 1 if the word x is a Rust bool: 0 (false) or 1 (true).
+#must_use
+fn _km_is_bool(x): i64 {
+    if (x == 0 || x == 1) { return 1; }
+    return 0;
+}
+
+# 1 if the word v is a value of an enum with `count` members (0 ..= count − 1).
+#must_use
+fn _km_is_enum_value(v, count): i64 {
+    if (v < 0 || v >= count) { return 0; }
+    return 1;
+}
+
+# ── overlapping buffers (2.0.1) ─────────────────────────────────────────────────────
+#
+# Rust can't alias a `&[T]` input with a `&mut` output; here each is a raw pointer, so a caller can pass an output
+# that overlaps an input. A function whose loops read every input value before a write can reach it works with that
+# overlap; where a write could reach a value still to be read, the overlap is Err(KM_ERR_INVALID_INPUT), checked after
+# Rust's own errors. Each function's doc comment gives its rule.
+
+# 1 if the a_bytes bytes at a and the b_bytes bytes at b share a byte, 0 if not or if either span is empty. The sizes
+# are unsigned words, and no pointer + size is formed: b lies in [a, a + a_bytes) exactly when b − a, wrapped, is below
+# a_bytes unsigned, and likewise a in [b, b + b_bytes). So a span that reaches the top of the address space can't wrap
+# around to a false answer. Each caller keeps its sizes below 2⁶⁴, clamping a count it has not bounded. Where every
+# span's end is known not to wrap, the signed form a < b_end && b < a_end is the same test: stoichiometric_matrix and
+# compute_gradient inline it (a call costs about 5 ns, and they test up to 2·n_reactions + 1 and five spans a call).
+#must_use
+fn _km_overlaps(a, a_bytes, b, b_bytes): i64 {
+    if (a_bytes == 0 || b_bytes == 0) { return 0; }
+    var bias = 1 << 63;                     # an unsigned compare: x <u y is (x ^ 2⁶³) < (y ^ 2⁶³)
+    if (((b - a) ^ bias) < (a_bytes ^ bias)) { return 1; }
+    if (((a - b) ^ bias) < (b_bytes ^ bias)) { return 1; }
+    return 0;
+}
+
+# ── reusable work tables (2.0.1) ────────────────────────────────────────────────────
+#
+# A work table larger than a function's stack table came from the bump allocator (lib/alloc.cyr), which never frees,
+# so a call in a loop grew the heap by the table's size every time, until allocations failed (a spurious
+# Err(KM_ERR_COMPUTATION_ERROR) at its 2 GiB limit). Those tables now come from a pool of _KM_SCR_SLOTS grow-only
+# buffers that every module shares: a call claims a free slot (an atomic compare-and-swap, so neither two threads nor a
+# re-entrant call — a callback into kimiya — ever share a buffer), grows its buffer if it is too small (to at least
+# twice its size, so a run of growing calls allocates O(final size)), and gives the slot back before it returns. After
+# the first call at a size, a call allocates nothing. With every slot claimed, a fresh bump block serves the call, as
+# in 2.0.0. The memory is not zeroed: each caller writes or zeroes what it reads, as its stack table needs.
+
+const _KM_SCR_SLOTS = 8;
+var _km_scr_busy: i64[_KM_SCR_SLOTS];       # 1 while a call holds the slot
+var _km_scr_ptr: i64[_KM_SCR_SLOTS];        # the slot's buffer (0 until first used)
+var _km_scr_cap: i64[_KM_SCR_SLOTS];        # its size in bytes
+
+# Gives back a slot claimed by _km_scratch_take; a slot below 0 (a bump block, or a caller's stack table) is ignored.
+fn _km_scratch_give(slot): i64 {
+    if (slot < 0) { return 0; }
+    atomic_fence();                         # the buffer's last writes before the release
+    atomic_store(&_km_scr_busy + 8 * slot, 0);
+    return 0;
+}
+
+# The buffer p of claimed slot `slot` (or, for slot −1, a bump block p), made to hold at least `bytes` bytes with its
+# first `keep` bytes (a multiple of 8) kept: p itself when the slot's buffer is already big enough, else a new buffer
+# (twice the slot's size when that is larger) recorded in the slot, the old one left to the bump allocator; 0 when the
+# allocation fails (the slot keeps p).
+#must_use
+fn _km_scratch_grow(slot, p, bytes, keep): i64 {
+    var cap = 0;
+    if (slot >= 0) {
+        cap = load64(&_km_scr_cap + 8 * slot);
+        if (cap >= bytes) { return p; }
+    }
+    var want = 2 * cap;                     # cap ≤ 2 GiB, lib/alloc.cyr's ALLOC_MAX: no overflow
+    if (want < bytes) { want = bytes; }
+    var q = alloc(want);
+    if (q == 0 && want > bytes) {
+        want = bytes;
+        q = alloc(want);
+    }
+    if (q == 0) { return 0; }
+    var k = 0;
+    while (k < keep) {
+        store64(q + k, load64(p + k));
+        k = k + 8;
+    }
+    if (slot >= 0) {
+        store64(&_km_scr_ptr + 8 * slot, q);
+        store64(&_km_scr_cap + 8 * slot, want);
+    }
+    return q;
+}
+
+# Claims a pool slot whose buffer holds at least `bytes` bytes: (buffer, slot), slot in 0 .. _KM_SCR_SLOTS − 1, which
+# the caller gives back with _km_scratch_give(slot) before it returns; (a fresh bump block, −1) when every slot is
+# claimed; (0, −1) when the memory can't be allocated or bytes is not positive. A slot already big enough is preferred.
+#must_use
+fn _km_scratch_take(bytes): (i64, i64) {
+    if (bytes <= 0) { return (0, 0 - 1); }
+    var i = 0;
+    while (i < _KM_SCR_SLOTS) {
+        if (load64(&_km_scr_busy + 8 * i) == 0 && load64(&_km_scr_cap + 8 * i) >= bytes) {
+            if (atomic_cas(&_km_scr_busy + 8 * i, 0, 1) == 1) { return (load64(&_km_scr_ptr + 8 * i), i); }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < _KM_SCR_SLOTS) {
+        if (load64(&_km_scr_busy + 8 * i) == 0) {
+            if (atomic_cas(&_km_scr_busy + 8 * i, 0, 1) == 1) {
+                var p = _km_scratch_grow(i, load64(&_km_scr_ptr + 8 * i), bytes, 0);
+                if (p == 0) {
+                    _km_scratch_give(i);
+                    return (0, 0 - 1);
+                }
+                return (p, i);
+            }
+        }
+        i = i + 1;
+    }
+    var q = alloc(bytes);
+    return (q, 0 - 1);
+}
+
+# The number of pool slots claimed now: 0 between calls (tests/*.tcyr check that every call gave its slots back).
+#must_use
+fn _km_scratch_claimed(): i64 {
+    var c = 0;
+    var i = 0;
+    while (i < _KM_SCR_SLOTS) {
+        c = c + load64(&_km_scr_busy + 8 * i);
+        i = i + 1;
+    }
+    return c;
 }

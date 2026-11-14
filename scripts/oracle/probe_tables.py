@@ -13,7 +13,7 @@ src/element.cyr, so it tests the data and the harness tests the accessors. Adapt
 tanmatra's probe_tables.py; extend `checks` as the data modules arrive.
 
 - src/constants.cyr: every `const KM_X` against its constants.tsv row (thermo::WATER_SPECIFIC_HEAT
-  included, M2a).
+  included, M2a), and each `std::f64::consts` one (2.0.1: KM_PI) against Python's math value.
 - src/phase_data.cyr (M2a): the K_b / K_f constants against constants.tsv; KM_ANTOINE_COUNT, and
   for every ANTOINE_DATA row the name (read through the blob offsets) and the five coefficient
   columns, against the golden `phase::ANTOINE_DATA[]` rows; _KM_PA_PER_MMHG against the golden
@@ -43,7 +43,7 @@ tanmatra's probe_tables.py; extend `checks` as the data modules arrive.
   `element::lookup_properties` row. The category enum is checked by name: each golden
   `e:ElementCategory.<Variant>` must be the value of KM_ELEMENT_CATEGORY_<SNAKE> as compiled.
 """
-import re, subprocess, sys
+import math, re, struct, subprocess, sys
 from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
@@ -98,6 +98,18 @@ for m in re.finditer(r"^# Rust: kimiya::(\S+)\nconst (KM_[A-Z0-9_]+) = ", cyr, r
         continue
     checks.append((f"x = {name}; fmt_hex(x);", "f", golden[path][2:], f"const {path}"))
     nconst += 1
+# Rust's std::f64::consts the port generates (2.0.1): no golden row, so against Python's value.
+nstd = 0
+for m in re.finditer(r"^# Rust: std::f64::consts::(\S+)\nconst (KM_[A-Z0-9_]+) = ", cyr, re.M):
+    sname, name = m.groups()
+    std = {"PI": math.pi}
+    if sname not in std:
+        fail(f"{name}: std::f64::consts::{sname} has no reference value")
+        continue
+    checks.append((f"x = {name}; fmt_hex(x);", "f", "%016x" % struct.unpack("<Q", struct.pack("<d", std[sname]))[0],
+                   f"const std::f64::consts::{sname}"))
+    nconst += 1
+    nstd += 1
 declared = len(re.findall(r"^const ", cyr, re.M))
 if declared != nconst:
     fail(f"src/constants.cyr declares {declared} consts, {nconst} carry a `# Rust:` path")
@@ -548,7 +560,7 @@ for k, (stmt, kind, want, label) in enumerate(checks):
         ok = g == want
     if not ok:
         fail(f"{label}: {stmt} -> {g!r}, want {want!r}")
-pending = len(golden) - nconst
+pending = len(golden) - (nconst - nstd)
 print(f"checked {nconst} constants, {nelem} element_data cells, {nm2a} phase_data / gas_data cells, "
       f"{nm2b} thermochem_data cells, {nm3a} electrochemistry_data cells, {nm4b_o} organic_data cells, "
       f"{nm4b_i} inorganic_data cells, {nm4c} nuclear_data cells and {nm4e} spectroscopy_data cells through the Cyrius "

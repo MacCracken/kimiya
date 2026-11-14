@@ -18,6 +18,9 @@
 # the Cyrius-only ADR 0002 #23 groups test the table and a pattern ³⁶S changes (S₈). ADR 0002 #30 (the overflow audit's
 # B2: the Beer–Lambert, rotor and moment-of-inertia monomials rounded once, the correctly rounded √(k/μ)) changes none
 # of the Rust tests (each compares within a tolerance, or an exact 0); a Cyrius-only group checks it.
+#
+# 2.0.1: cyrius_201_find_peaks_overlap (an `out` inside `data` is refused, after Rust's Ok(0) cases; in place works) and
+# cyrius_201_no_growth (isotope_pattern's and fft_spectrum's tables from the work-table pool).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -1855,6 +1858,96 @@ fn _t_cyrius_adr37_find_peaks() {
     assert(slow > 100, "… and the near-ties reach the exact predicate");
 }
 
+# 2.0.1: find_peaks with `out` inside `data` past its first value (data < out < data + 8·n) is Err(InvalidInput),
+# with data untouched (it used to overwrite values still to be scanned), checked after Rust's three Ok(0) cases, which
+# write nothing (n < 3, a threshold outside [0, 1], no finite value); out = data (in place) and out below data give
+# the separate buffer's indices.
+fn _t_cyrius_201_find_peaks_overlap() {
+    test_group("cyrius_201_find_peaks_overlap");
+    var d = buf(32);
+    var ref = buf(16);
+    var vals: f64[8];
+    vals[0] = 0.0; vals[1] = 5.0; vals[2] = 3.0; vals[3] = 1.0;
+    vals[4] = 0.5; vals[5] = 4.0; vals[6] = 2.0; vals[7] = 0.0;
+    var k = 0;
+    while (k < 8) { put(d + 64, k, vals[k]); k = k + 1; }
+    var data = d + 64;
+    var t0, c0 = find_peaks(data, 8, 0.0, ref, 8);
+    assert(is_ok(t0) == 1 && c0 == 2 && load64(ref) == 1 && load64(ref + 8) == 5, "separate out: peaks 1 and 5");
+    var t1, v1 = find_peaks(data, 8, 0.0, data + 8, 7);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "out = data + 8: InvalidInput");
+    var t2, v2 = find_peaks(data, 8, 0.0, data + 56, 1);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "out = the last value: InvalidInput");
+    var t3, v3 = find_peaks(data, 8, 0.0, data + 1, 7);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT) == 1, "a misaligned overlap: InvalidInput");
+    var same = 1;
+    k = 0;
+    while (k < 8) {
+        var x: f64 = at(data, k);
+        if (_km_bits(x) != _km_bits(vals[k])) { same = 0; }
+        k = k + 1;
+    }
+    assert(same == 1, "data untouched by the refused calls");
+    var r1, c1 = find_peaks(data, 2, 0.0, data + 8, 7);
+    assert(is_ok(r1) == 1 && c1 == 0, "out = data + 8 with n = 2: Rust's Ok(0) first");
+    var r2, c2 = find_peaks(data, 8, 1.5, data + 8, 7);
+    assert(is_ok(r2) == 1 && c2 == 0, "… with a threshold of 1.5: Ok(0)");
+    var nan_d = buf(4);
+    var qn: f64 = 0x7FF8000000000000;
+    put(nan_d, 0, qn);
+    put(nan_d, 1, qn);
+    put(nan_d, 2, qn);
+    var r3, c3 = find_peaks(nan_d, 3, 0.0, nan_d + 8, 2);
+    assert(is_ok(r3) == 1 && c3 == 0, "… with no finite value: Ok(0)");
+    var t4, c4 = find_peaks(data, 8, 0.0, data + 64, 8);
+    assert(is_ok(t4) == 1 && c4 == 2, "out = data + 8·n (just past it): Ok");
+    var t5, c5 = find_peaks(data, 8, 0.0, data - 8, 9);
+    assert(is_ok(t5) == 1 && c5 == 2 && load64(data - 8) == 1 && load64(data) == 5, "out = data − 8, overlapping: Ok");
+    k = 0;
+    while (k < 8) { put(data, k, vals[k]); k = k + 1; }
+    var t6, c6 = find_peaks(data, 8, 0.0, data, 8);
+    assert(is_ok(t6) == 1 && c6 == 2 && load64(data) == 1 && load64(data + 8) == 5, "in place (out = data): Ok");
+}
+
+# 2.0.1: isotope_pattern's working tables past 192 records, fft_spectrum's transform table (cap below 2n) and its
+# unbounded slow path's come from src/validate.cyr's pool: after a first call, calls in a loop allocate nothing, on
+# Ok and on the Err after the tables (no room), and every slot is given back.
+fn _t_cyrius_201_no_growth() {
+    test_group("cyrius_201_no_growth");
+    var br: i64[2];
+    store64(&br, 35);
+    store64(&br + 8, 300);
+    var io = alloc(16 * 512);
+    var n = 4096;
+    var sig = alloc(8 * n);
+    var tiny = alloc(8 * n);
+    var k = 0;
+    while (k < n) {
+        var x: f64 = f64_from(k % 7);
+        store64(sig + 8 * k, x);
+        store64(tiny + 8 * k, (k % 5) + 1);   # subnormal samples: the unbounded slow path
+        k = k + 1;
+    }
+    var spec = alloc(8 * (n / 2 + 1));
+    var round = 0;
+    var u0 = 0;
+    var np0 = 0;
+    while (round < 4) {
+        if (round == 1) { u0 = alloc_used(); }
+        var t1, v1 = isotope_pattern(&br, 1, io, 512);
+        var t2, v2 = isotope_pattern(&br, 1, io, 3);
+        var t3, v3 = fft_spectrum(sig, n, spec, n / 2 + 1);
+        var t4, v4 = fft_spectrum(tiny, n, spec, n / 2 + 1);
+        if (round == 0) { np0 = v1; }
+        assert(is_ok(t1) == 1 && v1 > 3 && v1 == np0, "Br₃₀₀: Ok, the same peaks each round");
+        assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "no room: InvalidInput");
+        assert(is_ok(t3) == 1 && is_ok(t4) == 1 && v4 == n / 2 + 1, "fft_spectrum, fast and slow: Ok");
+        assert(_km_scratch_claimed() == 0, "every slot given back");
+        round = round + 1;
+    }
+    assert_eq(alloc_used() - u0, 0, "three more rounds allocate nothing");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main(): i64 {
     _t_beer_lambert_basic();
@@ -1934,6 +2027,8 @@ fn main(): i64 {
     _t_cyrius_adr30();
     _t_cyrius_adr36_fft();
     _t_cyrius_adr37_find_peaks();
+    _t_cyrius_201_find_peaks_overlap();
+    _t_cyrius_201_no_growth();
     return assert_summary();
 }
 

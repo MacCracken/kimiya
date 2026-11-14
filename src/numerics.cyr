@@ -19,7 +19,8 @@
 # can integrate without keeping the path. `fin`, when not 0, receives the final state (n f64). Errors are the
 # HisabError variants (the _KM_NUM_ERR_* codes below, private; tests/numerics.tcyr names them), and _KM_NUM_ERR_ALLOC
 # where a work table can't be allocated (Rust would abort). Work tables of up to _KM_NUM_STACK f64 are on the stack;
-# larger ones come from the bump allocator (which never frees), zeroed as Rust's `vec![0.0; n]`.
+# larger ones come from src/validate.cyr's pool of reusable work tables (2.0.1; 2.0.0's bump allocations were never
+# freed), zeroed as Rust's `vec![0.0; n]`.
 #
 # M5b adds hisab 1.4.0's `num::least_squares_poly` (fitting: the Vandermonde system by `powi`, modified Gram–Schmidt QR
 # with its 10⁻¹² rank threshold, back substitution), `num::matrix_rank` with `num::svd` (network: one-sided Jacobi
@@ -39,25 +40,32 @@ const _KM_NUM_ERR_NO_CONVERGENCE = 3;       # HisabError::NoConvergence
 const _KM_NUM_ERR_SINGULAR_PIVOT = 4;       # HisabError::SingularPivot
 const _KM_NUM_ERR_ALLOC = 5;                # a work table could not be allocated (no Rust counterpart)
 
-# Work-table words kept on the stack (RK4 needs 7·n, dopri45 10·n, Euler–Maruyama 3·n).
+# Work-table words kept on the stack (RK4 needs 7·n, dopri45 9·n, Euler–Maruyama 3·n: on the stack for n ≤ 13, 10
+# and 32).
 const _KM_NUM_STACK = 96;
 
-# n zeroed f64 words: the caller's stack table `st` (cap words) when n fits, else the bump allocator; 0 when that
-# fails or 8·n would overflow.
+# n f64 words, zeroed when `zero` is 1: (table, slot) — the caller's stack table `st` (cap words) when n fits (slot
+# −1), else a buffer of src/validate.cyr's work-table pool, whose slot the caller gives back (_km_scratch_give) before
+# it returns; (0, −1) when that fails, n is negative (a caller's size that overflowed) or 8·n would overflow.
 #must_use
-fn _km_num_table(st, cap, n): i64 {
+fn _km_num_table(st, cap, n, zero): (i64, i64) {
     var p = st;
-    if (n > cap) {
-        if (n > 0x0080000000000000) { return 0; }
-        p = alloc(8 * n);
-        if (p == 0) { return 0; }
+    var slot = 0 - 1;
+    if (n > cap || n < 0) {
+        if (n < 0 || n > 0x0080000000000000) { return (0, 0 - 1); }
+        var q, s = _km_scratch_take(8 * n);
+        if (q == 0) { return (0, 0 - 1); }
+        p = q;
+        slot = s;
     }
-    var k = 0;
-    while (k < n) {
-        store64(p + 8 * k, 0);
-        k = k + 1;
+    if (zero == 1) {
+        var k = 0;
+        while (k < n) {
+            store64(p + 8 * k, 0);
+            k = k + 1;
+        }
     }
-    return p;
+    return (p, slot);
 }
 
 # Copies n f64 words from src to dst.
@@ -70,12 +78,16 @@ fn _km_num_copy(dst, src, n) {
     return 0;
 }
 
-# Stores trajectory point k = (t, y[0 .. n)) at out when k < cap.
+# Stores trajectory point k = (t, y[0 .. n)) at out when k < cap (_km_num_copy inline).
 fn _km_num_point(out, cap, k, t: f64, y, n) {
     if (k >= cap) { return 0; }
     var p = out + 8 * k * (1 + n);
     store64(p, t);
-    _km_num_copy(p + 8, y, n);
+    var i = 0;
+    while (i < n) {
+        store64(p + 8 + 8 * i, load64(y + 8 * i));
+        i = i + 1;
+    }
     return 0;
 }
 
@@ -161,8 +173,8 @@ fn _km_rk4_step(f, ctx, t: f64, h: f64, y, k1, k2, k3, k4, tmp, comp, n) {
 #must_use
 fn _km_rk4_trajectory(f, ctx, t0: f64, y0, n, t_end: f64, steps, out, cap, fin): Result {
     if (steps == 0) { return Err(_KM_NUM_ERR_ZERO_STEPS); }
-    var st: f64[96];
-    var w = _km_num_table(&st, _KM_NUM_STACK, 7 * n);
+    var st: f64[_KM_NUM_STACK];
+    var w, ws = _km_num_table(&st, _KM_NUM_STACK, 7 * n, 1);
     if (w == 0) { return Err(_KM_NUM_ERR_ALLOC); }
     var y = w;
     var k1 = w + 8 * n;
@@ -185,6 +197,7 @@ fn _km_rk4_trajectory(f, ctx, t0: f64, y0, n, t_end: f64, steps, out, cap, fin):
         _km_num_point(out, cap, s, t, y, n);
     }
     if (fin != 0) { _km_num_copy(fin, y, n); }
+    _km_scratch_give(ws);
     return Ok(steps + 1);
 }
 
@@ -232,9 +245,9 @@ fn _km_dopri45(f, ctx, t0: f64, y0, n, t_end: f64, tol: f64, h_init: f64, out, c
     var c3: f64 = 3.0 / 10.0;
     var c4: f64 = 4.0 / 5.0;
     var c5: f64 = 8.0 / 9.0;
-    var st: f64[96];
+    var st: f64[_KM_NUM_STACK];
     if (n > 0x0010000000000000) { return Err(_KM_NUM_ERR_ALLOC); }
-    var w = _km_num_table(&st, _KM_NUM_STACK, 9 * n);
+    var w, ws = _km_num_table(&st, _KM_NUM_STACK, 9 * n, 1);
     if (w == 0) { return Err(_KM_NUM_ERR_ALLOC); }
     var y = w;
     var k1 = w + 8 * n;
@@ -451,6 +464,7 @@ fn _km_dopri45(f, ctx, t0: f64, y0, n, t_end: f64, tol: f64, h_init: f64, out, c
     var gap: f64 = t - t_end;
     gap = f64_abs(gap);
     var lim: f64 = h * 0.01;
+    _km_scratch_give(ws);
     if (gap > lim) { return Err(_KM_NUM_ERR_NO_CONVERGENCE); }
     return Ok(count);
 }
@@ -579,8 +593,8 @@ fn _km_pcg32_next_normal(rng): f64 {
 #must_use
 fn _km_euler_maruyama_system(drift, dctx, diff, gctx, t0: f64, y0, n, t_end: f64, steps, rng, out, cap, fin): Result {
     if (steps == 0) { return Err(_KM_NUM_ERR_ZERO_STEPS); }
-    var st: f64[96];
-    var w = _km_num_table(&st, _KM_NUM_STACK, 3 * n);
+    var st: f64[_KM_NUM_STACK];
+    var w, ws = _km_num_table(&st, _KM_NUM_STACK, 3 * n, 1);
     if (w == 0) { return Err(_KM_NUM_ERR_ALLOC); }
     var y = w;
     var a = w + 8 * n;
@@ -615,6 +629,7 @@ fn _km_euler_maruyama_system(drift, dctx, diff, gctx, t0: f64, y0, n, t_end: f64
         _km_num_point(out, cap, s, t, y, n);
     }
     if (fin != 0) { _km_num_copy(fin, y, n); }
+    _km_scratch_give(ws);
     return Ok(steps + 1);
 }
 
@@ -628,15 +643,20 @@ fn _km_euler_maruyama_system(drift, dctx, diff, gctx, t0: f64, y0, n, t_end: f64
 # last coefficient, each sum from Qᵀy down the row. The n = degree + 1 coefficients go to `out`. Ok(n);
 # Err(_KM_NUM_ERR_INVALID_INPUT) for m = 0, fewer than n points or a degree past usize::MAX − 1 (as an unsigned
 # word), or the dependent-columns case; Err(_KM_NUM_ERR_ALLOC). Work: Q (n·m f64) and R (n·n), on the stack up to
-# _KM_NUM_LS_STACK words.
+# _KM_NUM_LS_STACK words, not zeroed (2.0.1): Q is written whole before it is read, and only R's entries above and on
+# the diagonal, each written before it is read, are read. Columns 0 and 1 are 1.0 and x, powi(x, 0) and powi(x, 1)
+# (1·x is x for every x but a signalling NaN, which no caller passes: fit_arrhenius's 1/T and fit_polynomial's
+# validated x).
 const _KM_NUM_LS_STACK = 384;
 #must_use
 fn _km_least_squares_poly(x, y, m, degree, out): Result {
     if (m == 0) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
     if (degree < 0 || degree >= m) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
     var n = degree + 1;
-    var st: f64[384];
-    var w = _km_num_table(&st, _KM_NUM_LS_STACK, n * m + n * n);
+    # n ≤ m, so n·m + n·n ≤ 2·n·m: below 2^26 points it can't overflow; past that, n·m ≤ 2^54 keeps it in range.
+    if (m >= 0x4000000 && m > 0x0040000000000000 / n) { return Err(_KM_NUM_ERR_ALLOC); }
+    var st: f64[_KM_NUM_LS_STACK];
+    var w, ws = _km_num_table(&st, _KM_NUM_LS_STACK, n * m + n * n, 0);
     if (w == 0) { return Err(_KM_NUM_ERR_ALLOC); }
     var q = w;                              # column j at q + 8·j·m (column-major, as Rust's Vec<Vec<f64>> of columns)
     var r = w + 8 * n * m;                  # R[i][j] stored as r[j][i], at r + 8·(j·n + i)
@@ -645,7 +665,12 @@ fn _km_least_squares_poly(x, y, m, degree, out): Result {
         var k = 0;
         while (k < m) {
             var xk: f64 = load64(x + 8 * k);
-            var pw: f64 = _km_powi(xk, j);
+            var pw: f64 = 1.0;
+            if (j == 1) {
+                pw = xk;
+            } elif (j > 1) {
+                pw = _km_powi(xk, j);
+            }
             store64(q + 8 * (j * m + k), pw);
             k = k + 1;
         }
@@ -688,7 +713,10 @@ fn _km_least_squares_poly(x, y, m, degree, out): Result {
             k3 = k3 + 1;
         }
         var norm: f64 = f64_sqrt(ss);
-        if (norm < eps) { return Err(_KM_NUM_ERR_INVALID_INPUT); }
+        if (norm < eps) {
+            _km_scratch_give(ws);
+            return Err(_KM_NUM_ERR_INVALID_INPUT);
+        }
         store64(r + 8 * (j * n + j), norm);
         k3 = 0;
         while (k3 < m) {
@@ -732,6 +760,7 @@ fn _km_least_squares_poly(x, y, m, degree, out): Result {
         store64(out + 8 * i2, co);
         i2 = i2 - 1;
     }
+    _km_scratch_give(ws);
     return Ok(n);
 }
 
@@ -759,8 +788,8 @@ fn _km_matrix_rank(a, m, n, tol: f64): Result {
         w = m;
         l = n;
     }
-    var st: f64[256];
-    var b = _km_num_table(&st, _KM_NUM_SVD_STACK, w * l);
+    var st: f64[_KM_NUM_SVD_STACK];
+    var b, bs = _km_num_table(&st, _KM_NUM_SVD_STACK, w * l, 1);
     if (b == 0) { return Err(_KM_NUM_ERR_ALLOC); }
     var i = 0;
     while (i < m) {
@@ -849,7 +878,10 @@ fn _km_matrix_rank(a, m, n, tol: f64): Result {
             p = p + 1;
         }
         if (converged == 1) { break; }
-        if (sweep == max_sweeps - 1) { return Err(_KM_NUM_ERR_NO_CONVERGENCE); }
+        if (sweep == max_sweeps - 1) {
+            _km_scratch_give(bs);
+            return Err(_KM_NUM_ERR_NO_CONVERGENCE);
+        }
         sweep = sweep + 1;
     }
     var rank = 0;
@@ -868,6 +900,7 @@ fn _km_matrix_rank(a, m, n, tol: f64): Result {
         if (sigma > tol) { rank = rank + 1; }
         j2 = j2 + 1;
     }
+    _km_scratch_give(bs);
     return Ok(rank);
 }
 

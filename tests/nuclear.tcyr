@@ -13,6 +13,8 @@
 # and (0.1, 0.2) give Rust's values; the two Cyrius-only groups below pin the cases they change. ADR 0002 #32 (the
 # overflow audit's B3: binding_energy_per_nucleon with an unbounded exponent) changes none either (Fe-56 stays in
 # range); a Cyrius-only group pins its edge.
+#
+# 2.0.1: cyrius_201_null_out (decay_chain_two_step's null `out` is Err(InvalidInput), after Rust's checks).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -823,6 +825,15 @@ fn _t_cyrius_adr33_q_value() {
     assert_eq(_km_bits(q5), _km_bits(want), "DBL_MAX·931.494…: Rust's chain (+∞)");
 }
 
+# 2.0.1: a null `out` is Err(KM_ERR_INVALID_INPUT), after Rust's own checks (it used to fault).
+fn _t_cyrius_201_null_out() {
+    test_group("cyrius_201_null_out");
+    var t, v = decay_chain_two_step(1000.0, 0.1, 0.05, 1.0, 0);
+    assert(is_err_result(t) == 1 && v == KM_ERR_INVALID_INPUT, "valid inputs, null out: InvalidInput");
+    var t1, v1 = decay_chain_two_step(-1.0, 0.1, 0.05, 1.0, 0);
+    assert(is_err_result(t1) == 1 && v1 == KM_ERR_INVALID_INPUT, "Rust's N₀ check first");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_decay_constant_c14();
@@ -871,6 +882,7 @@ fn main() {
     _t_cyrius_exact_secular();
     _t_cyrius_adr32_bea();
     _t_cyrius_adr33_q_value();
+    _t_cyrius_201_null_out();
     return assert_summary();
 }
 

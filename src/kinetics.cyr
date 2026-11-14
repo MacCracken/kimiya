@@ -313,12 +313,13 @@ fn _km_michaelis_menten_ux(v_max: f64, km: f64, substrate: f64): f64 {
 # The Lineweaver–Burk linearisation 1/v = (Km/Vmax)·(1/[S]) + 1/Vmax: the plot's slope Km/Vmax (s) and intercept
 # 1/Vmax (L·s/mol), from Vmax in mol·L⁻¹·s⁻¹ and Km in mol/L. `out` is the caller's buffer of two f64 (16 bytes,
 # `var lb[16];`): Ok(2), the count written, with the slope at out and the intercept at out + 8; or
-# Err(KM_ERR_INVALID_INPUT) if Vmax or Km is not positive and finite (Vmax checked first), and the buffer is
-# untouched. Mirrors `kinetics::lineweaver_burk`, whose (slope, intercept) tuple the buffer replaces.
+# Err(KM_ERR_INVALID_INPUT) if Vmax or Km is not positive and finite (Vmax checked first), then if `out` is null, and
+# the buffer is untouched. Mirrors `kinetics::lineweaver_burk`, whose (slope, intercept) tuple the buffer replaces.
 #must_use
 fn lineweaver_burk(v_max: f64, km: f64, out): Result {
     if (_km_is_positive(v_max) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(km) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (out == 0) { return Err(KM_ERR_INVALID_INPUT); }
     var slope: f64 = km / v_max;
     var intercept: f64 = 1.0 / v_max;
     store64(out, slope);

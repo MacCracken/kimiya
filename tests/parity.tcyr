@@ -3539,4 +3539,9 @@ fn _par_skip(mp, ml): i64 {
 }
 
 var exit_code = _par_main();
+# 2.0.1: every row's call gave its work-table pool slots back (src/validate.cyr).
+if (_km_scratch_claimed() != 0) {
+    println("parity: a work-table pool slot was not given back");
+    exit_code = exit_code + 1;
+}
 sys_exit_group(exit_code);

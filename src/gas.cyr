@@ -258,7 +258,7 @@ fn van_der_waals_pressure(moles: f64, temperature_k: f64, volume_m3: f64, a: f64
 # chain provably is the unbounded-exponent one (ADR 0002 #31), (0, 0, 0) otherwise. Inside the region n, a, b = 0 or of
 # magnitude in [2⁻⁶⁰, 2⁶⁰] and T, V in [2⁻⁶⁰, 2⁶⁰] every intermediate is provably normal or an exact zero (n·b is 0 or
 # within 2^±120, n·R·T 0 or in [2⁻¹¹⁷, 2¹²⁴], V − n·b in [2⁻¹⁷², 2¹²¹] (V > n·b: ulp-close values subtract exactly), the
-# quotient 0 or in [2⁻¹⁷⁷, 2²⁹⁶], n/V within 2^±120, a·(n/V) and its product with n/V 0 or within 2^±300), so the tests
+# quotient 0 or in [2⁻²³⁸, 2²⁹⁶], n/V within 2^±120, a·(n/V) and its product with n/V 0 or within 2^±300), so the tests
 # below are skipped. Outside it: n·b normal or exact (a zero factor), or +∞ (then V ≤ n·b in both evaluations: the
 # unbounded n·b is past DBL_MAX ≥ V), so V ≤ n·b decides alike; then n·R, n·R·T, n/V, a·(n/V), its product with n/V and
 # the quotient term each normal or an exact zero (n = 0, or a = 0), and V − n·b finite (a difference of two doubles is
@@ -530,13 +530,20 @@ fn _km_pr_pressure_ux(tc: f64, pc: f64, omega: f64, t: f64, v: f64): (f64, i64) 
 # liquid is stable. A repeated root (a spinodal, the critical point) is listed once per
 # multiplicity. `out` is the caller's buffer of three f64 (`var roots[24];`): Ok(n), n = 1–3, with
 # the roots in out[0 .. n − 1]; Err(KM_ERR_INVALID_TEMPERATURE) if T or Tc is not positive and
-# finite, Err(KM_ERR_INVALID_INPUT) if P or Pc is not positive and finite or ω is not finite, or
-# Err(KM_ERR_COMPUTATION_ERROR) if no root has Z > B (only when intermediate values overflow).
+# finite, Err(KM_ERR_INVALID_INPUT) if P or Pc is not positive and finite or ω is not finite,
+# Err(KM_ERR_COMPUTATION_ERROR) if no root has Z > B (only when intermediate values overflow), or
+# Err(KM_ERR_INVALID_INPUT) if `out` is null (after Rust's errors); the buffer is untouched on Err.
 # Mirrors `gas::peng_robinson_z_roots`, whose Vec the buffer and count replace.
 #must_use
 fn peng_robinson_z_roots(params: KmPengRobinsonParams, temperature_k: f64, pressure_pa: f64, out): Result {
     var e, cap_a, cap_b = _km_pr_dimensionless(params, temperature_k, pressure_pa);
     if (e != KM_ERR_NONE) { return Err(e); }
+    if (out == 0) {                         # Rust's no-root error first, then the null buffer
+        var roots[24];
+        var n0 = _km_pr_physical_roots(cap_a, cap_b, &roots);
+        if (n0 == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        return Err(KM_ERR_INVALID_INPUT);
+    }
     var n = _km_pr_physical_roots(cap_a, cap_b, out);
     if (n == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
     return Ok(n);

@@ -550,7 +550,8 @@ Decided in M3b (2026-11-09; kinetics):
   out)` writes the slope (Km/Vmax) at `out` and the intercept (1/Vmax) at `out + 8` of the caller's two-f64 buffer
   (`var lb[16];`) and returns `Ok(2)`, the count written; Rust's errors are unchanged, and on `Err` the buffer is untouched.
   The golden row's output is the tuple's two floats (`f:slope f:intercept`, the format's tuple rule). As for the PR roots,
-  `out` is the caller's contract: a null pointer is not checked.
+  a null `out` is `Err(KM_ERR_INVALID_INPUT)`, checked after Rust's own errors (2.0.1, library-wide for the fixed-size
+  buffers; in 2.0.0 it was the caller's contract and faulted).
 - **Rust's semantics kept** — `zero_order_concentration` is `if remaining < 0.0 { 0.0 } else { remaining }` (NaN
   propagates, −0.0 stays −0.0); `collision_theory_rate`'s steric check is Rust's positive form `p > 0 && p <= 1` (NaN
   fails); `nth_order_half_life` checks `!is_finite(n) || |n − 1| <= 10⁻¹²`, then k, then [A]₀, and returns
@@ -783,7 +784,8 @@ Decided in M4e (2026-11-09; spectroscopy, ADR 0002 #19, ADR 0003's FFT amendment
   a negative count or a null pointer with values is `Err(KM_ERR_INVALID_INPUT)` (every slice function here has an error
   channel). `isotope_abundances(z)` returns its slice as `(pointer, count)` into the baked table ((0, 0) for none).
 - **Allocation** — `isotope_pattern`'s working pattern and scratch start in two stack tables of 192 records and move to
-  the bump allocator (which never frees) only past that (glucose's scratch peaks at 30 records, the Rust test's
+  the heap only past that (the bump allocator, which never frees, until 2.0.1; since 2.0.1 every work table past its
+  stack table comes from `src/validate.cyr`'s pool of reusable work tables, so a call in a loop stops growing the heap) (glucose's scratch peaks at 30 records, the Rust test's
   C₁₀₀₀H₂₀₀₀O₅₀₀S₅₀Br₂₀ at 189; C₅₀₀₀ or a thousand Br, Cl or S atoms need 200–546 and allocate); `fft_spectrum` transforms in `out` when cap ≥ 2n (`signal` may then be `out`: it is read from the end) and
   otherwise allocates 16·n bytes; an allocation failure is `Err(KM_ERR_COMPUTATION_ERROR)` (Rust's FFT error maps there,
   unreachable).
@@ -935,8 +937,8 @@ behaviour, listed for the user in M4f's report):
   `empirical_formula(elements, n, out, cap)` reads 16-byte (Z, f64 bits) records and writes (Z, count) records. Every Vec
   result: the cap checked after Rust's errors, `out` untouched (M4e's rule).
 - **Work tables** — `balance_equation`'s matrix copy and null vector and `empirical_formula`'s mole ratios are
-  function-local tables (512, 64 and 64 words) and move to the bump allocator only past them (the corpus's 30- and
-  70-species chains take that path); an allocation failure is Err(KM_ERR_COMPUTATION_ERROR).
+  function-local tables (512, 64 and 64 words) and move to the heap only past them (2.0.1: the work-table pool; the
+  corpus's 30- and 70-species chains take that path); an allocation failure is Err(KM_ERR_COMPUTATION_ERROR).
 - **Typed constants** — Rust's private EMPIRICAL_TOLERANCE (0.1) is typed inline in `_km_empirical_close`, MAX_COMPOSITION_ENTRY
   (2⁵³) in `_KM_MAX_COMPOSITION_ENTRY`; `validate.py` requires a row to change when the tolerance is halved or doubled and
   when the bound moves by one (both pinned); ± 1 ulp of 0.1 changes no golden row (|r·k − round(r·k)| is a multiple of
@@ -1169,7 +1171,7 @@ F14 and F16's flame, its proposed B8):
   2.5u(1 + u)(|min| + |max|) + (1 + u)·2⁻¹⁰⁷⁴.
 - **The work tables** — the IEEE transform runs in `out` only when cap ≥ 2n and `signal` does not overlap out's first 2n
   values (the slow path needs the signal), so an aliased signal now gets a 16·n-byte heap table; the slow path takes
-  32·n heap bytes (the bump allocator never frees either).
+  32·n heap bytes (the bump allocator never frees either; 2.0.1: both come from the work-table pool).
 - **The corpus** — the oracle's values kept; of the earlier rows 41 of 213 `fft_spectrum`, 3 of 994 `find_peaks` and 16
   of 1,937 flame rows change, the expected counts; edge rows appended with their own seeds (spectroscopy 2,393
   `find_peaks` and 515 `fft_spectrum`, thermochem 443 flame rows); 913 rows noted and mapped (418 #36, 222 #37, 273 #38),
@@ -1198,7 +1200,8 @@ B9):
   Hadamard every stored entry, the lcm (a divisor of the pivot block's determinant) and x are below 2^B, B the smaller of
   the sums of the q largest row and column b = bitlen(max |entry|) + ⌈bitlen(nonzeros)/2⌉, and each product or
   difference before reduce_row below 2^(2B + 1): `_km_balance_bits` sizes the tables once; only allocation limits the
-  size (a 4,096-word local table, the bump allocator past it; Err(ComputationError) when it fails).
+  size (a 4,096-word local table, the bump allocator past it — 2.0.1: the work-table pool; Err(ComputationError) when it
+  fails).
 - **Which overflows can become Ok** (proven) — at the end every pivot row is p_k at c_k and r_k at f, primitive, so x's
   gcd is 1 and |x| ≥ the lcm: an overflow of the lcm or of x is an Err past u32 exactly too, and a reduced row of gcd 2⁶³
   (all its nonzero entries −2⁶³) is orthogonal to no positive x; only the elimination's products, differences and the
@@ -1244,7 +1247,7 @@ look at are in the roadmap's audit list):
   (`_km_rk4_trajectory`, `_km_dopri45`, `_km_gaussian_elimination`, `_km_euler_maruyama_system`), operation for operation;
   errors as hisab's variants (`_KM_NUM_ERR_ZERO_STEPS`, `_INVALID_INPUT`, `_NO_CONVERGENCE`, `_SINGULAR_PIVOT`; `_ALLOC`
   for a work table that can't be allocated). Work tables of up to 96 words on the stack, larger ones from the bump
-  allocator (never freed), zeroed once. A trajectory routine stores point k only while k < cap (`out` may be 0) and
+  allocator (never freed; 2.0.1: the work-table pool), zeroed once. A trajectory routine stores point k only while k < cap (`out` may be 0) and
   returns the point count; `fin` receives the final state. PCG32 is hisab 3.4.1's `pcg32_new` / `pcg32_next` (equal to
   1.4.0's stream 1 bit for bit, the golden rows); `next_f64` and `next_normal` are 1.4.0's on its output.
 - **Callbacks** (§6.3) — a function pointer and a context pointer per Rust closure: `f(ctx, t, y, dy, n)`,
@@ -1277,7 +1280,7 @@ section's parity classes, without the paused audit's rework (its candidate spots
 - **`src/numerics.cyr`** gains hisab 1.4.0's `least_squares_poly` (`_km_least_squares_poly`, with `qr_decompose`'s modified
   Gram–Schmidt), `matrix_rank` on `svd`'s one-sided Jacobi (`_km_matrix_rank`, the singular values only) and
   `CsrMatrix::from_dense` (`_km_csr_from_dense`, into a hisab 3.4.1 `csr_new` handle), operation for operation, work on
-  the stack while small (384, 256 words) and from the bump allocator past it. hisab 3.4.1's `svd_compute_checked`
+  the stack while small (384, 256 words) and from the bump allocator past it (2.0.1: the work-table pool). hisab 3.4.1's `svd_compute_checked`
   disagreed with 1.4.0 on 191 of the 563 rank rows and its `csr_from_dense` keeps entries 1.4.0 drops, so both are
   transcribed; `compute_gradient` uses hisab 3.4.1's tape (its rows agree at class D).
 - **The oracle's Jacobi.** hisab 1.4.0's SVD tests |a_pq| ≤ EPSILON_F64²·√(a_pp·a_qq), below the rounding of a rotated
@@ -1301,7 +1304,7 @@ section's parity classes, without the paused audit's rework (its candidate spots
   entry, and compute each tape's reverse sweep unrolled, with hisab 1.4.0's zero-adjoint skip and the correctly rounded
   exp / ln: every Ok golden row 0 ulp. `compute_gradient(f, ctx, tape, parameters, n, out)`: f(ctx, tape, vars, n)
   through `callptr` returns the output node; the tape is the caller's (`ad_tape_new`), reset per call; the variable
-  indices on the stack up to 64, past that from the bump allocator; the Cyrius-only failures (a tape too small, an
+  indices on the stack up to 64, past that from the bump allocator (2.0.1: the work-table pool); the Cyrius-only failures (a tape too small, an
   output that is not a node) are its Err (ADR 0002's M5b addition).
 - **The golden rows** — network's builders as Rust's `Vec<Vec<f64>>` and hisab 1.4.0's `CsrMatrix` (read back through
   `to_dense`, proven by `CsrMatrix::new` and `PartialEq`); fitting's synthetic Arrhenius data from k = 2^e exactly, so the

@@ -88,7 +88,7 @@ fn half_reaction_couple(h): i64 {
     return &_KM_STANDARD_POTENTIALS_COUPLE_BYTES + _KM_STANDARD_POTENTIALS_COUPLE_OFF[row];
 }
 
-# The number of electrons transferred in STANDARD_POTENTIALS handle h (1 ..= 5); 0 for an invalid handle, which
+# The number of electrons transferred in STANDARD_POTENTIALS handle h (1 ..= 8); 0 for an invalid handle, which
 # no row has. Mirrors `HalfReaction::electrons`.
 #must_use
 fn half_reaction_electrons(h): i64 {
@@ -118,14 +118,34 @@ fn half_reaction_standard_potential(h): f64 {
 # the final subtraction rounded once (_km_nernst_ux). Mirrors `electrochemistry::nernst_potential`, with ADR 0002 #29.
 #must_use
 fn nernst_potential(standard_potential: f64, n_electrons, temperature_k: f64, reaction_quotient: f64): Result {
-    if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
-    if (_km_is_electron_count(n_electrons) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    if (_km_is_positive(reaction_quotient) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    if (_km_is_finite(standard_potential) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    # The guards inline (2.0.1): _km_is_positive's 0 < x < +∞, _km_is_electron_count's 1 ..= 255, and E° − E° = 0
+    # for _km_is_finite (NaN for NaN and ±∞).
+    if (!(temperature_k > 0.0 && temperature_k < _KM_INF)) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    if (n_electrons < 1 || n_electrons > 255) { return Err(KM_ERR_INVALID_INPUT); }
+    if (!(reaction_quotient > 0.0 && reaction_quotient < _KM_INF)) { return Err(KM_ERR_INVALID_INPUT); }
+    var d0: f64 = standard_potential - standard_potential;
+    if (d0 != 0.0) { return Err(KM_ERR_INVALID_INPUT); }
     var n: f64 = f64_from(n_electrons);
     var l: f64 = _km_cr_ln(reaction_quotient);
-    var e, ok = _km_nernst_fast(standard_potential, n, temperature_k, l);
-    if (ok == 1) { return Ok(e); }
+    # _km_nernst_fast's test and chain inline: Rust's bits when R·T, (R·T)/(n·F) and (unless l = 0) the product with l
+    # stay in [2⁻¹⁰²¹, DBL_MAX].
+    var r: f64 = KM_GAS_CONSTANT;
+    var f: f64 = KM_FARADAY;
+    var nmin: f64 = 0x0020000000000000;     # 2⁻¹⁰²¹
+    var dmax: f64 = 0x7FEFFFFFFFFFFFFF;
+    var a: f64 = r * temperature_k;
+    if (a >= nmin && a <= dmax) {
+        var b: f64 = n * f;
+        var c: f64 = a / b;
+        if (c >= nmin) {
+            var p: f64 = c * l;
+            var ap: f64 = f64_abs(p);
+            if (l == 0.0 || ap >= nmin) {
+                var e: f64 = standard_potential - p;
+                return Ok(e);
+            }
+        }
+    }
     var u: f64 = _km_nernst_ux(standard_potential, n, temperature_k, l);
     return Ok(u);
 }

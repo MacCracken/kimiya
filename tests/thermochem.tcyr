@@ -10,6 +10,8 @@
 # test changes: the Rust tests already pass J/mol to vant_hoff_k and adiabatic_flame_temperature, and the
 # table fields stay kJ/mol. The golden corpus separately checks every function over its grid
 # (tests/parity.tcyr).
+#
+# 2.0.1: cyrius_201_flame_prefix (the flame's prefix table gives the segment loop's bits; f(T₀) = −ΔH).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -1160,10 +1162,10 @@ fn _t_cyrius_flame_solver() {
     var t0: f64 = 298.15;
     var below: f64 = 0x3F50624DD2F1A9FB;    # 1e-3, one ulp down
     var nb: f64 = -below;
-    var e1, x1 = _km_flame_newton(nb, p, 1, &cache, t0, t0);
+    var e1, x1 = _km_flame_newton(nb, p, 1, &cache, 0, t0, t0);
     var r1: f64 = x1;
     assert(e1 == KM_ERR_NONE && r1 == t0, "|f| = 1e-3 - 1 ulp: accepted at x0");
-    var e2, x2 = _km_flame_newton(-0.001, p, 1, &cache, t0, t0);
+    var e2, x2 = _km_flame_newton(-0.001, p, 1, &cache, 0, t0, t0);
     var r2: f64 = x2;
     assert(e2 == KM_ERR_NONE && r2 != t0, "|f| = 1e-3: Newton steps");
     # |f'| = n·Cp(298.15) ≈ 29.1·n against EPSILON_F64 = 1e-12.
@@ -1172,9 +1174,9 @@ fn _t_cyrius_flame_solver() {
     var tiny: f64 = 0.000000000001;
     var m_lo: f64 = lo_n * tiny;
     var m_hi: f64 = hi_n * tiny;
-    var e3, x3 = _km_flame_newton(-1.0, sp1("N2(g)", m_lo), 1, &cache, t0, t0);
+    var e3, x3 = _km_flame_newton(-1.0, sp1("N2(g)", m_lo), 1, &cache, 0, t0, t0);
     assert_eq(e3, KM_ERR_INVALID_INPUT, "|f'| = 0.99e-12: derivative is zero");
-    var e4, x4 = _km_flame_newton(-1.0, sp1("N2(g)", m_hi), 1, &cache, t0, t0);
+    var e4, x4 = _km_flame_newton(-1.0, sp1("N2(g)", m_hi), 1, &cache, 0, t0, t0);
     assert(e4 != KM_ERR_INVALID_INPUT, "|f'| = 1.01e-12: Newton steps");
     # Bisection on a CH4/air flame scaled by 10¹² (|f′| ≈ 4·10¹⁴, so f's sign is sure 10⁻⁷ K away).
     var big = sp3("CO2(g)", 1000000000000.0, "H2O(g)", 2000000000000.0, "N2(g)", 7520000000000.0);
@@ -1187,22 +1189,22 @@ fn _t_cyrius_flame_solver() {
     var a: f64 = root - 0.0000005;
     var b1: f64 = a + 0.000000999;
     var b2: f64 = a + 0.000001001;
-    var fa: f64 = _km_flame_f(dh, big, 3, &cb, t0, a);
-    var fb: f64 = _km_flame_f(dh, big, 3, &cb, t0, b1);
+    var fa: f64 = _km_flame_f(dh, big, 3, &cb, 0, t0, a);
+    var fb: f64 = _km_flame_f(dh, big, 3, &cb, 0, t0, b1);
     assert(fa > 0.0 && fb < 0.0, "the bracket straddles the root");
-    var e5, x5 = _km_flame_bisection(dh, big, 3, &cb, t0, a, b1);
+    var e5, x5 = _km_flame_bisection(dh, big, 3, &cb, 0, t0, a, b1);
     var r5: f64 = x5;
     var mid1: f64 = (a + b1) * 0.5;
     assert(e5 == KM_ERR_NONE && r5 == mid1, "|hi - lo| = 0.999e-6: the first midpoint");
-    var e6, x6 = _km_flame_bisection(dh, big, 3, &cb, t0, a, b2);
+    var e6, x6 = _km_flame_bisection(dh, big, 3, &cb, 0, t0, a, b2);
     var r6: f64 = x6;
     var mid2: f64 = (a + b2) * 0.5;
     assert(e6 == KM_ERR_NONE && r6 != mid2, "|hi - lo| = 1.001e-6: bisects on");
     var c: f64 = root - 1.0;
-    var e7, x7 = _km_flame_bisection(dh, big, 3, &cb, t0, a, c);
+    var e7, x7 = _km_flame_bisection(dh, big, 3, &cb, 0, t0, a, c);
     assert_eq(e7, KM_ERR_INVALID_INPUT, "no sign change: hisab's opposite-signs error");
     # Bisection over the whole range lands within its 1e-6 K tolerance of the flame's root.
-    var e8, x8 = _km_flame_bisection(dh, big, 3, &cb, t0, t0, 6000.0);
+    var e8, x8 = _km_flame_bisection(dh, big, 3, &cb, 0, t0, t0, 6000.0);
     var r8: f64 = x8;
     assert(e8 == KM_ERR_NONE && near(r8, root, 0.000001), "bisection's root");
 }
@@ -1368,13 +1370,13 @@ fn _t_cyrius_adr38_flame_sign() {
     assert(is_ok(t1) == 1 && v1 == 0x4072A26666666666, "(−10⁻³²⁰, [CO₂ ×10⁻³⁰⁰], 298.15): 298.15 K (Rust's Err)");
     var cache: i64[64];
     fill_cache(c, 1, &cache);
-    var fa: f64 = _km_flame_f(ne320, c, 1, &cache, t0, t0);
-    var fb: f64 = _km_flame_f(ne320, c, 1, &cache, t0, 6000.0);
+    var fa: f64 = _km_flame_f(ne320, c, 1, &cache, 0, t0, t0);
+    var fb: f64 = _km_flame_f(ne320, c, 1, &cache, 0, t0, 6000.0);
     var pr: f64 = fa * fb;
     assert(fa > 0.0 && fb < 0.0 && _km_bits(pr) == 0x8000000000000000, "… its ends' product is −0");
     var t2, v2 = adiabatic_flame_temperature(e320, c, 1, t0);
     assert(is_err_code(t2, v2, KM_ERR_COMPUTATION_ERROR), "an endothermic ΔH of 10⁻³²⁰: Err in both");
-    var e2, x2 = _km_flame_bisection(e320, c, 1, &cache, t0, t0, 6000.0);
+    var e2, x2 = _km_flame_bisection(e320, c, 1, &cache, 0, t0, t0, 6000.0);
     assert_eq(e2, KM_ERR_INVALID_INPUT, "the bisection's ends both negative, product +0: its opposite-signs error");
     var m200 = sp3("CO2(g)", _b4_fbits(0x16687E92154EF7AC), "H2O(g)", _b4_fbits(0x16787E92154EF7AC), "N2(g)",
         _b4_fbits(0x169706561E451C03));
@@ -1388,6 +1390,101 @@ fn _t_cyrius_adr38_flame_sign() {
     var r3: f64 = v3;
     var r4: f64 = v4;
     assert(is_ok(t4) == 1 && near(r4, r3, 0.000000001), "… Rust's own answer at 10⁻¹⁵⁰ (bracketed in both)");
+}
+
+# 2.0.1: the flame's prefix table (_km_flame_prefix: each cached product's running totals and lower-end
+# antiderivatives, once a call) gives f(T) for T ≥ T₀ the full segment loop's bits — every species, single and
+# multi-segment, at and around each segment boundary, and past the table (no table, T < T₀, NaN) — and f(T₀) is −ΔH
+# exactly, so adiabatic_flame_temperature skips that evaluation.
+fn _t_cyrius_201_flame_prefix() {
+    test_group("cyrius_201_flame_prefix");
+    var p = alloc(16 * KM_SHOMATE_COUNT);
+    var n = 0;
+    var r = 0;
+    while (r < KM_SHOMATE_COUNT) {
+        var f = shomate_data_formula(r + 1);
+        var dup = 0;
+        if (n > 0) {
+            if (streq(load64(p + 16 * (n - 1)), f) == 1) { dup = 1; }
+        }
+        if (dup == 0) {
+            store64(p + 16 * n, f);
+            var fn_: f64 = f64_from(n + 1);
+            var m: f64 = fn_ * 0.37;
+            store64(p + 16 * n + 8, m);
+            n = n + 1;
+        }
+        r = r + 1;
+    }
+    var cache: i64[_KM_FLAME_CACHED * 2];
+    fill_cache(p, n, &cache);
+    var tab: f64[_KM_FLAME_CACHED * _KM_FLAME_SEGS * 3];
+    var t0: f64 = 298.15;
+    _km_flame_prefix(p, n, &cache, &tab, t0);
+    var dh: f64 = -802300.0;
+    var same = 1;
+    var k = 0;
+    while (k < 400) {
+        var kf: f64 = f64_from(k);
+        var t: f64 = t0 + (kf * 14.9);
+        var a: f64 = _km_flame_f(dh, p, n, &cache, 0, t0, t);
+        var b: f64 = _km_flame_f(dh, p, n, &cache, &tab, t0, t);
+        if (_km_bits(a) != _km_bits(b)) { same = 0; }
+        k = k + 1;
+    }
+    assert(same == 1, "400 temperatures from T₀ to 6,250 K: the prefix table's bits");
+    # Every segment boundary of every species, and one ulp either side.
+    var bnd = 1;
+    r = 0;
+    while (r < KM_SHOMATE_COUNT) {
+        var tb: f64 = KM_SHOMATE_T_MAX[r];
+        var tl: f64 = KM_SHOMATE_T_MIN[r];
+        var q = 0;
+        while (q < 6) {
+            var x: f64 = tb;
+            if (q >= 3) { x = tl; }
+            var bx = _km_bits(x) + ((q % 3) - 1);
+            var tt: f64 = 0.0;
+            store64(&tt, bx);
+            if (tt >= t0) {
+                var a2: f64 = _km_flame_f(dh, p, n, &cache, 0, t0, tt);
+                var b2: f64 = _km_flame_f(dh, p, n, &cache, &tab, t0, tt);
+                if (_km_bits(a2) != _km_bits(b2)) { bnd = 0; }
+            }
+            q = q + 1;
+        }
+        r = r + 1;
+    }
+    assert(bnd == 1, "every T_min and T_max, one ulp either side: the same bits");
+    var at0: f64 = _km_flame_f(dh, p, n, &cache, &tab, t0, t0);
+    var nd: f64 = -dh;
+    assert(_km_bits(at0) == _km_bits(nd), "f(T₀) = −ΔH exactly");
+    var pz: f64 = 0.0;
+    var nz: f64 = -pz;
+    var z1: f64 = _km_flame_f(pz, p, n, &cache, 0, t0, t0);
+    var z2: f64 = _km_flame_f(nz, p, n, &cache, 0, t0, t0);
+    assert(_km_bits(z1) == _km_bits(nz) && _km_bits(z2) == 0, "f(T₀) for ΔH = ±0 is ∓0");
+    var lo: f64 = 200.0;
+    var below: f64 = _km_flame_f(dh, p, n, &cache, &tab, t0, lo);
+    var below0: f64 = _km_flame_f(dh, p, n, &cache, 0, t0, lo);
+    var nan: f64 = _km_nan();
+    var fn1: f64 = _km_flame_f(dh, p, n, &cache, &tab, t0, nan);
+    var fn0: f64 = _km_flame_f(dh, p, n, &cache, 0, t0, nan);
+    assert(_km_bits(below) == _km_bits(below0) && _km_bits(fn1) == _km_bits(fn0), "T < T₀ and NaN: the full loop");
+    # A cold start inside a later segment (T₀ = 1,500 K) and the flame itself, through every Newton step.
+    var t1: f64 = 1500.0;
+    _km_flame_prefix(p, n, &cache, &tab, t1);
+    var hot = 1;
+    k = 0;
+    while (k < 300) {
+        var kf2: f64 = f64_from(k);
+        var t2: f64 = t1 + (kf2 * 15.3);
+        var a3: f64 = _km_flame_f(dh, p, n, &cache, 0, t1, t2);
+        var b3: f64 = _km_flame_f(dh, p, n, &cache, &tab, t1, t2);
+        if (_km_bits(a3) != _km_bits(b3)) { hot = 0; }
+        k = k + 1;
+    }
+    assert(hot == 1, "T₀ = 1,500 K: the same bits");
 }
 
 # Runs every test group; returns the failure count from assert_summary().
@@ -1463,6 +1560,7 @@ fn main() {
     _t_cyrius_adr33_reaction_sums();
     _t_cyrius_adr34_shomate();
     _t_cyrius_adr38_flame_sign();
+    _t_cyrius_201_flame_prefix();
     return assert_summary();
 }
 

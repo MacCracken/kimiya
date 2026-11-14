@@ -5,6 +5,9 @@
 # ArrheniusFit the KmArrheniusFit fit_arrhenius writes; usize::MAX is the word −1; a value Rust writes with an exponent
 # is written positionally. The synthetic data take the correctly rounded exp (Rust: glibc's). The golden corpus
 # separately checks every function over its grid (tests/parity.tcyr).
+#
+# 2.0.1: cyrius_201_null_out (fit_arrhenius' null `out`) and cyrius_201_no_growth (the work tables come from
+# src/validate.cyr's pool: no allocation per call after the first).
 
 include "src/error.cyr"
 include "src/constants.cyr"
@@ -516,6 +519,77 @@ fn _t_cyrius_least_squares_helper() {
     assert(is_ok(t4) == 1 && _km_is_nan(n0) == 1, "a NaN x: Ok with NaN coefficients");
 }
 
+# 2.0.1: fit_arrhenius with a null `out` is Err(KM_ERR_INVALID_INPUT), after Rust's own errors (it used to fault).
+fn _t_cyrius_201_null_out() {
+    test_group("cyrius_201_null_out");
+    var ts: f64[3];
+    var ks: f64[3];
+    ts[0] = 300.0; ts[1] = 350.0; ts[2] = 400.0;
+    ks[0] = 0.001; ks[1] = 0.01; ks[2] = 0.05;
+    var fit: f64[2];
+    var t0, v0 = fit_arrhenius(&ts, 3, &ks, 3, &fit);
+    assert(is_ok(t0) == 1 && v0 == 2, "with a buffer: Ok(2)");
+    var t, v = fit_arrhenius(&ts, 3, &ks, 3, 0);
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT), "null out: InvalidInput");
+    ts[1] = -1.0;
+    var t1, v1 = fit_arrhenius(&ts, 3, &ks, 3, 0);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_TEMPERATURE), "Rust's temperature check first");
+}
+
+# 2.0.1: fit_arrhenius's and fit_polynomial's heap tables (past 32 points; past degree 15) and the least squares'
+# come from src/validate.cyr's pool: after a first call, calls in a loop allocate nothing, on Ok and on the Errs after
+# the tables (a bad temperature late in the list, a null out, too few distinct x), and every slot is given back.
+fn _t_cyrius_201_no_growth() {
+    test_group("cyrius_201_no_growth");
+    var ts = alloc(8 * 40);
+    var ks = alloc(8 * 40);
+    var bad = alloc(8 * 40);
+    var i = 0;
+    while (i < 40) {
+        var fi: f64 = f64_from(i);
+        var t: f64 = 300.0 + fi;
+        var kr: f64 = 0.001 + (0.0001 * fi);
+        store64(ts + 8 * i, t);
+        store64(bad + 8 * i, t);
+        store64(ks + 8 * i, kr);
+        i = i + 1;
+    }
+    var m1: f64 = -1.0;
+    store64(bad + 8 * 35, m1);
+    var xs = alloc(8 * 30);
+    var ys = alloc(8 * 30);
+    var flat = alloc(8 * 30);
+    i = 0;
+    while (i < 30) {
+        var xi: f64 = f64_from(i - 15);
+        var x: f64 = xi / 15.0;
+        store64(xs + 8 * i, x);
+        store64(ys + 8 * i, x);
+        i = i + 1;
+    }
+    var fit: f64[2];
+    var co: f64[17];
+    var round = 0;
+    var u0 = 0;
+    while (round < 4) {
+        if (round == 1) { u0 = alloc_used(); }
+        var r1, v1 = fit_arrhenius(ts, 40, ks, 40, &fit);
+        var r2, v2 = fit_arrhenius(bad, 40, ks, 40, &fit);
+        var r3, v3 = fit_arrhenius(ts, 40, ks, 40, 0);
+        var r4, v4 = fit_polynomial(xs, 30, ys, 30, 16, &co, 17);
+        var r5, v5 = fit_polynomial(flat, 30, ys, 30, 16, &co, 17);
+        var r6, v6 = fit_polynomial(xs, 30, ys, 30, 16, &co, 16);
+        assert(is_ok(r1) == 1 && is_err_code(r2, v2, KM_ERR_INVALID_TEMPERATURE), "fit_arrhenius: Ok; T[35] < 0");
+        assert(is_err_code(r3, v3, KM_ERR_INVALID_INPUT), "fit_arrhenius: null out");
+        assert(is_ok(r4) == 1 && v4 == 17, "fit_polynomial, degree 16: Ok(17)");
+        assert(is_err_code(r5, v5, KM_ERR_COMPUTATION_ERROR), "fit_polynomial: one distinct x");
+        assert(is_err_code(r6, v6, KM_ERR_INVALID_INPUT), "fit_polynomial: no room");
+        assert(_km_scratch_claimed() == 0, "every slot given back");
+        round = round + 1;
+    }
+    assert_eq(alloc_used() - u0, 0, "three more rounds allocate nothing");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main(): i64 {
     _t_fit_arrhenius_known_data();
@@ -540,6 +614,8 @@ fn main(): i64 {
     _t_cyrius_check_order();
     _t_cyrius_structs();
     _t_cyrius_least_squares_helper();
+    _t_cyrius_201_null_out();
+    _t_cyrius_201_no_growth();
     return assert_summary();
 }
 

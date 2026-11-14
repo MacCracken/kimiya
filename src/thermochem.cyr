@@ -64,13 +64,19 @@ fn lookup_thermochem(formula): i64 {
     if (formula == 0) { return 0; }
     var c0 = load8(formula);
     if (c0 == 0) { return 0; }
-    var n = strlen(formula);
     var row = 0;
     while (row < KM_THERMOCHEM_COUNT) {
         var p = &_KM_THERMOCHEM_FORMULA_BYTES + _KM_THERMOCHEM_FORMULA_OFF[row];
-        # The first byte decides most rows; memeq stops at p's NUL, which differs from formula's byte.
+        # The first byte decides most rows; the rest compare from byte 1 to the first difference or the shared NUL
+        # (formula is read no further than p's NUL).
         if (load8(p) == c0) {
-            if (memeq(p, formula, n) == 1 && load8(p + n) == 0) { return row + 1; }
+            var i = 1;
+            var b = load8(p + 1);
+            while (b != 0 && b == load8(formula + i)) {
+                i = i + 1;
+                b = load8(p + i);
+            }
+            if (b == 0 && load8(formula + i) == 0) { return row + 1; }
         }
         row = row + 1;
     }
@@ -585,12 +591,19 @@ fn _km_shomate_row_h(row, temperature_k: f64): f64 {
     return u;
 }
 
-# 1 if SHOMATE_DATA row `row`'s formula is the C string `formula` of length n, whose first byte is c0.
+# 1 if SHOMATE_DATA row `row`'s formula is the C string `formula`, whose first byte is c0: the first byte, then the
+# rest from byte 1 to the first difference or the shared NUL (formula is read no further than the row's NUL).
 #must_use
-fn _km_shomate_formula_is(row, formula, c0, n): i64 {
+fn _km_shomate_formula_is(row, formula, c0): i64 {
     var p = &_KM_SHOMATE_FORMULA_BYTES + _KM_SHOMATE_FORMULA_OFF[row];
     if (load8(p) != c0) { return 0; }
-    if (memeq(p, formula, n) == 1 && load8(p + n) == 0) { return 1; }
+    var i = 1;
+    var b = load8(p + 1);
+    while (b != 0 && b == load8(formula + i)) {
+        i = i + 1;
+        b = load8(p + i);
+    }
+    if (b == 0 && load8(formula + i) == 0) { return 1; }
     return 0;
 }
 
@@ -610,10 +623,10 @@ fn lookup_shomate(formula): i64 {
     if (formula == 0) { return 0; }
     var c0 = load8(formula);
     if (c0 == 0) { return 0; }
-    var n = strlen(formula);
     var row = 0;
     while (row < KM_SHOMATE_COUNT) {
-        if (_km_shomate_formula_is(row, formula, c0, n) == 1) { return row + 1; }
+        var p = &_KM_SHOMATE_FORMULA_BYTES + _KM_SHOMATE_FORMULA_OFF[row];
+        if (load8(p) == c0 && _km_shomate_formula_is(row, formula, c0) == 1) { return row + 1; }
         row = row + 1;
     }
     return 0;
@@ -627,10 +640,10 @@ fn lookup_shomate_at(formula, temperature_k: f64): i64 {
     if (formula == 0) { return 0; }
     var c0 = load8(formula);
     if (c0 == 0) { return 0; }
-    var n = strlen(formula);
     var row = 0;
     while (row < KM_SHOMATE_COUNT) {
-        if (_km_shomate_formula_is(row, formula, c0, n) == 1) {
+        var p = &_KM_SHOMATE_FORMULA_BYTES + _KM_SHOMATE_FORMULA_OFF[row];
+        if (load8(p) == c0 && _km_shomate_formula_is(row, formula, c0) == 1) {
             var lo: f64 = KM_SHOMATE_T_MIN[row];
             var hi: f64 = KM_SHOMATE_T_MAX[row];
             if (temperature_k >= lo && temperature_k <= hi) { return row + 1; }
@@ -687,12 +700,12 @@ fn _km_segments_lookup(formula): (i64, i64) {
     if (formula == 0) { return (0 - 1, 0); }
     var c0 = load8(formula);
     if (c0 == 0) { return (0 - 1, 0); }
-    var n = strlen(formula);
     var start = 0;
     while (start < KM_SHOMATE_COUNT) {
-        if (_km_shomate_formula_is(start, formula, c0, n) == 1) {
+        var p = &_KM_SHOMATE_FORMULA_BYTES + _KM_SHOMATE_FORMULA_OFF[start];
+        if (load8(p) == c0 && _km_shomate_formula_is(start, formula, c0) == 1) {
             var count = 1;
-            while (start + count < KM_SHOMATE_COUNT && _km_shomate_formula_is(start + count, formula, c0, n) == 1) {
+            while (start + count < KM_SHOMATE_COUNT && _km_shomate_formula_is(start + count, formula, c0) == 1) {
                 count = count + 1;
             }
             return (start, count);
@@ -781,6 +794,10 @@ fn enthalpy_change_cp(formula, t1_k: f64, t2_k: f64): Result {
 # Vec; the port doesn't allocate (the bump allocator can't free, and this is called in loops).
 const _KM_FLAME_CACHED = 32;
 
+# How many segments of a cached product the prefix table keeps (3 words each); the generated SHOMATE_DATA has at most
+# 3 per species, and a product with more is evaluated by the full loop.
+const _KM_FLAME_SEGS = 3;
+
 # The segments (start, count) of product k: from the stack table `cache` for k < _KM_FLAME_CACHED,
 # else resolved from its formula (already checked to have segments).
 #must_use
@@ -790,16 +807,78 @@ fn _km_flame_segments(products, cache, k): (i64, i64) {
     return (start, count);
 }
 
+# The prefix table of the flame's sensible enthalpies, for each product k < _KM_FLAME_CACHED with at most
+# _KM_FLAME_SEGS segments, at tab + 8·3·(k·_KM_FLAME_SEGS + i) for its segment i: (the running total of
+# _km_segments_enthalpy_change(T₀, T) before segment i, a_i = max(T₀, the segment's lower end), H(a_i)). For T ≥ T₀
+# every segment i before the one T falls in contributes H(upper_i) − H(a_i) whatever T is (when upper_i > a_i), so
+# the running totals are the loop's own additions in its order, and the last segment adds H(T) − H(a_j): one new
+# antiderivative per product per evaluation, the loop's bits.
+fn _km_flame_prefix(products, n, cache, tab, t0: f64) {
+    var inf: f64 = _KM_INF;
+    var k = 0;
+    while (k < n && k < _KM_FLAME_CACHED) {
+        var start, count = _km_flame_segments(products, cache, k);
+        if (count <= _KM_FLAME_SEGS) {
+            var slot = tab + 24 * _KM_FLAME_SEGS * k;
+            var total: f64 = 0.0;
+            var lower: f64 = -inf;
+            var i = 0;
+            while (i < count) {
+                var row = start + i;
+                var upper: f64 = KM_SHOMATE_T_MAX[row];
+                if (i + 1 == count) { upper = inf; }
+                var a: f64 = _km_max(t0, lower);
+                var ha: f64 = _km_shomate_row_h(row, a);
+                store64(slot + 24 * i, total);
+                store64(slot + 24 * i + 8, a);
+                store64(slot + 24 * i + 16, ha);
+                if (i + 1 < count && upper > a) {
+                    var hb: f64 = _km_shomate_row_h(row, upper);
+                    total = total + (hb - ha);
+                }
+                lower = upper;
+                i = i + 1;
+            }
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
 # The flame's energy balance f(T) = −ΔH_rxn − Σ nᵢ·∫[T₀→T] Cpᵢ dT (J/mol): Rust's closure `f`, the sum
-# folded from −0.0 (Rust's `.sum()`) in product order.
+# folded from −0.0 (Rust's `.sum()`) in product order. With a prefix table `tab` (_km_flame_prefix; 0 for none) and
+# T ≥ T₀, a product it covers takes its running total and one antiderivative; T < T₀, NaN, or a product past the
+# table runs the whole segment loop (_km_segments_enthalpy_change): the same bits either way.
 #must_use
-fn _km_flame_f(dh: f64, products, n, cache, t0: f64, t: f64): f64 {
+fn _km_flame_f(dh: f64, products, n, cache, tab, t0: f64, t: f64): f64 {
     var heat: f64 = -0.0;
+    var fast = 0;
+    if (tab != 0 && t >= t0) { fast = 1; }
     var k = 0;
     while (k < n) {
         var start, count = _km_flame_segments(products, cache, k);
         var moles: f64 = load64(products + k * 16 + 8);
-        var d: f64 = _km_segments_enthalpy_change(start, count, t0, t);
+        var d: f64 = 0.0;
+        if (fast == 1 && k < _KM_FLAME_CACHED && count <= _KM_FLAME_SEGS) {
+            # The segment T falls in: the first whose t_max ≥ T, else the last (the loop's break).
+            var j = 0;
+            while (j + 1 < count) {
+                var up: f64 = KM_SHOMATE_T_MAX[start + j];
+                if (up >= t) { break; }
+                j = j + 1;
+            }
+            var slot = tab + 24 * (_KM_FLAME_SEGS * k + j);
+            var total: f64 = load64(slot);
+            var aj: f64 = load64(slot + 8);
+            if (t > aj) {
+                var hb: f64 = _km_shomate_row_h(start + j, t);
+                var ha: f64 = load64(slot + 16);
+                total = total + (hb - ha);
+            }
+            d = 1.0 * total;                # the loop's sign (T₁ = T₀ ≤ T₂ = T)
+        } else {
+            d = _km_segments_enthalpy_change(start, count, t0, t);
+        }
         heat = heat + (moles * d);
         k = k + 1;
     }
@@ -830,13 +909,13 @@ fn _km_flame_df(products, n, cache, t: f64): f64 {
 # (KM_ERR_INVALID_INPUT, x) for hisab's "derivative is zero" and (KM_ERR_COMPUTATION_ERROR, x) for its
 # NoConvergence; the caller only tells Ok from Err, as Rust's `if let Ok`.
 #must_use
-fn _km_flame_newton(dh: f64, products, n, cache, t0: f64, x0: f64): (i64, f64) {
+fn _km_flame_newton(dh: f64, products, n, cache, tab, t0: f64, x0: f64): (i64, f64) {
     var tol: f64 = 0.001;
     var eps: f64 = EPSILON_F64;
     var x: f64 = x0;
     var it = 0;
     while (it < 50) {
-        var fx: f64 = _km_flame_f(dh, products, n, cache, t0, x);
+        var fx: f64 = _km_flame_f(dh, products, n, cache, tab, t0, x);
         var afx: f64 = f64_abs(fx);
         if (afx < tol) { return (KM_ERR_NONE, x); }
         var dfx: f64 = _km_flame_df(products, n, cache, x);
@@ -858,12 +937,12 @@ fn _km_flame_newton(dh: f64, products, n, cache, t0: f64, x0: f64): (i64, f64) {
 # not underflow to a zero (a NaN, ±∞ or ±0 operand included). The flame calls it only after its bracket test proved
 # f(a) and f(b) of strictly opposite signs, and f is deterministic, so neither test refuses there: no result changes.
 #must_use
-fn _km_flame_bisection(dh: f64, products, n, cache, t0: f64, a: f64, b: f64): (i64, f64) {
+fn _km_flame_bisection(dh: f64, products, n, cache, tab, t0: f64, a: f64, b: f64): (i64, f64) {
     var tol: f64 = 0.000001;
     var lo: f64 = a;
     var hi: f64 = b;
-    var f_lo: f64 = _km_flame_f(dh, products, n, cache, t0, lo);
-    var f_hi: f64 = _km_flame_f(dh, products, n, cache, t0, hi);
+    var f_lo: f64 = _km_flame_f(dh, products, n, cache, tab, t0, lo);
+    var f_hi: f64 = _km_flame_f(dh, products, n, cache, tab, t0, hi);
     if ((f_lo > 0.0 && f_hi > 0.0) || (f_lo < 0.0 && f_hi < 0.0)) { return (KM_ERR_INVALID_INPUT, 0.0); }
     if (f_lo > 0.0) {
         var sw: f64 = lo;
@@ -873,7 +952,7 @@ fn _km_flame_bisection(dh: f64, products, n, cache, t0: f64, a: f64, b: f64): (i
     var it = 0;
     while (it < 200) {
         var mid: f64 = (lo + hi) * 0.5;
-        var f_mid: f64 = _km_flame_f(dh, products, n, cache, t0, mid);
+        var f_mid: f64 = _km_flame_f(dh, products, n, cache, tab, t0, mid);
         var am: f64 = f64_abs(f_mid);
         var w: f64 = hi - lo;
         var aw: f64 = f64_abs(w);
@@ -913,7 +992,7 @@ fn adiabatic_flame_temperature(reaction_enthalpy_j: f64, products, n, t_initial_
 
     # Resolve each product's segments once (Rust's `resolved`, one pass in list order) and the range
     # every product covers.
-    var cache: i64[64];
+    var cache: i64[_KM_FLAME_CACHED * 2];
     var inf: f64 = _KM_INF;
     var range_min: f64 = -inf;
     var range_max: f64 = inf;
@@ -934,6 +1013,9 @@ fn adiabatic_flame_temperature(reaction_enthalpy_j: f64, products, n, t_initial_
         k = k + 1;
     }
     if (t_initial_k < range_min || t_initial_k >= range_max) { return Err(KM_ERR_INVALID_TEMPERATURE); }
+    # Each cached product's running totals and lower-end antiderivatives, once (_km_flame_prefix).
+    var tab: f64[_KM_FLAME_CACHED * _KM_FLAME_SEGS * 3];
+    _km_flame_prefix(products, n, &cache, &tab, t_initial_k);
 
     # f(T₀) = −ΔH_rxn and f decreases, so a sign change on [T₀, T_max] means an exothermic reaction
     # whose root lies in the data range. ADR 0002 #38: the exact sign test (f_lo < 0 < f_hi or f_hi < 0 < f_lo),
@@ -943,8 +1025,10 @@ fn adiabatic_flame_temperature(reaction_enthalpy_j: f64, products, n, t_initial_
     # the xor of theirs, its value negative, −∞ or −0, the last only by underflow.
     var t_lo: f64 = t_initial_k;
     var t_hi: f64 = range_max;
-    var f_lo: f64 = _km_flame_f(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_lo);
-    var f_hi: f64 = _km_flame_f(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_hi);
+    # f(T₀) is −ΔH_rxn exactly: at T = T₀ no segment adds a term (b > a fails), so each product's change is +0, each
+    # moles·(+0) is +0 (moles > 0), the sum from −0.0 is +0, and −ΔH − (+0) is −ΔH (−0 for ΔH = +0).
+    var f_lo: f64 = -reaction_enthalpy_j;
+    var f_hi: f64 = _km_flame_f(reaction_enthalpy_j, products, n, &cache, &tab, t_initial_k, t_hi);
     var bracketed = 0;
     if ((f_lo < 0.0 && f_hi > 0.0) || (f_lo > 0.0 && f_hi < 0.0)) { bracketed = 1; }
     if (bracketed != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
@@ -962,12 +1046,12 @@ fn adiabatic_flame_temperature(reaction_enthalpy_j: f64, products, n, t_initial_
     var t_guess: f64 = _km_min(g1, t_hi);
 
     # Newton first; accept only a root in t_lo ..= t_hi.
-    var en, tn = _km_flame_newton(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_guess);
+    var en, tn = _km_flame_newton(reaction_enthalpy_j, products, n, &cache, &tab, t_initial_k, t_guess);
     var t_newton: f64 = tn;
     if (en == KM_ERR_NONE && t_newton >= t_lo && t_newton <= t_hi) { return Ok(t_newton); }
 
     # Fallback: bisection on the verified bracket.
-    var eb, tb = _km_flame_bisection(reaction_enthalpy_j, products, n, &cache, t_initial_k, t_lo, t_hi);
+    var eb, tb = _km_flame_bisection(reaction_enthalpy_j, products, n, &cache, &tab, t_initial_k, t_lo, t_hi);
     if (eb != KM_ERR_NONE) { return Err(KM_ERR_COMPUTATION_ERROR); }
     var t_bis: f64 = tb;
     return Ok(t_bis);

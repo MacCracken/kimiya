@@ -11,6 +11,9 @@
 # Cyrius-only groups cover what no oracle row reaches: work tables past the stack ones (the heap path), the trajectory
 # capacity (points stored while k < cap, the final state in `fin`), the Neumaier compensation's two branches, and the
 # scratch reuse that leaves an unwritten derivative at its previous value.
+#
+# 2.0.1: cyrius_201_table_guards (a negative table size, the least squares' size guard) and cyrius_201_no_growth (the
+# transcribed routines' tables from src/validate.cyr's pool).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -364,6 +367,102 @@ fn _t_cyrius_pcg32() {
     assert(_km_bits(d) == _km_bits(q), "next_f64 = next_u32 / 2³²");
 }
 
+# 2.0.1: a work-table size that overflowed to a negative word is refused (it used to be taken as fitting the stack
+# table), and least squares refuses a Q + R size past 2^55 words before multiplying it out.
+fn _t_cyrius_201_table_guards() {
+    test_group("cyrius_201_table_guards");
+    var st: f64[4];
+    var p1, s1 = _km_num_table(&st, 4, 0 - 1, 1);
+    assert(p1 == 0 && s1 == 0 - 1, "n = -1: (0, -1)");
+    var p2, s2 = _km_num_table(&st, 4, 0x8000000000000000, 1);
+    assert(p2 == 0 && s2 == 0 - 1, "n = i64::MIN: (0, -1)");
+    var p3, s3 = _km_num_table(&st, 4, 4, 1);
+    assert(p3 == &st && s3 == 0 - 1, "n = cap: the stack table, no slot");
+    var p4, s4 = _km_num_table(&st, 4, 5, 1);
+    assert(p4 != 0 && p4 != &st && s4 >= 0 && load64(p4 + 32) == 0, "n = cap + 1: a zeroed pool buffer");
+    _km_scratch_give(s4);
+    var x: f64[2];
+    var c: f64[2];
+    var r, v = _km_least_squares_poly(&x, &x, 0x4000000000000, 0x1000000, &c);
+    assert(is_err_result(r) == 1 && v == _KM_NUM_ERR_ALLOC, "n·m past 2^54: Err(alloc), no table");
+}
+
+# 2.0.1: the transcribed routines' heap tables come from src/validate.cyr's pool: after a first call at a size, calls
+# in a loop allocate nothing (they used to grow the bump heap by the table each time), on Ok and on every Err after
+# the table, and every slot is given back.
+fn _t_cyrius_201_no_growth() {
+    test_group("cyrius_201_no_growth");
+    var k: f64 = 0.7;
+    var p: f64[1];
+    store64(&p, k);
+    var y0 = alloc(8 * 40);
+    var one: f64 = 1.0;
+    var i = 0;
+    while (i < 40) {
+        store64(y0 + 8 * i, one);
+        i = i + 1;
+    }
+    var fin = alloc(8 * 40);
+    var tol: f64 = 0.000001;
+    var hi: f64 = 0.02;
+    var rng = pcg32_new(5);
+    var x = alloc(8 * 300);
+    i = 0;
+    while (i < 300) {
+        var xi: f64 = f64_from(i);
+        store64(x + 8 * i, xi);
+        i = i + 1;
+    }
+    var dup = alloc(8 * 300);               # equal x: dependent columns, Err after the table
+    var c: f64[3];
+    var dense = alloc(8 * 400);
+    i = 0;
+    while (i < 400) {
+        var di: f64 = f64_from(i % 7);
+        store64(dense + 8 * i, di);
+        i = i + 1;
+    }
+    var round = 0;
+    var u0 = 0;
+    while (round < 4) {
+        if (round == 1) { u0 = alloc_used(); }
+        var r1, v1 = _km_rk4_trajectory(&_rd_f_decay, &p, 0.0, y0, 20, 2.0, 10, 0, 0, fin);
+        var r2, v2 = _km_dopri45(&_rd_f_decay, &p, 0.0, y0, 20, 2.0, tol, hi, 0, 0);
+        var r3, v3 = _km_euler_maruyama_system(&_rd_f_decay, &p, &_rd_g_const, &p, 0.0, y0, 40, 1.0, 5, rng, 0, 0, fin);
+        var r4, v4 = _km_least_squares_poly(x, x, 300, 2, &c);
+        var r5, v5 = _km_least_squares_poly(dup, x, 300, 2, &c);
+        var r6, v6 = _km_matrix_rank(dense, 20, 20, 0.0000000001);
+        assert(is_ok(r1) == 1 && is_ok(r2) == 1 && is_ok(r3) == 1 && is_ok(r4) == 1, "rk4, dopri45, EM, LS: Ok");
+        assert(is_err_result(r5) == 1, "LS on equal x: Err after the table");
+        assert(_km_scratch_claimed() == 0, "every slot given back");
+        round = round + 1;
+    }
+    assert_eq(alloc_used() - u0, 0, "three more rounds allocate nothing");
+}
+
+# 2.0.1: _km_matrix_rank's vectors past 256 words come from the work-table pool and go back on Ok as on its Errs: a
+# converging 20 × 20 rank allocates nothing after the first call.
+fn _t_cyrius_201_rank_no_growth() {
+    test_group("cyrius_201_rank_no_growth");
+    var a = alloc(8 * 400);
+    var i = 0;
+    while (i < 20) {
+        var one: f64 = 1.0;
+        store64(a + 8 * (i * 20 + i), one);
+        i = i + 1;
+    }
+    var round = 0;
+    var u0 = 0;
+    while (round < 4) {
+        if (round == 1) { u0 = alloc_used(); }
+        var r, v = _km_matrix_rank(a, 20, 20, 0.0000000001);
+        assert(is_ok(r) == 1 && v == 20, "the 20 × 20 identity: Ok(20)");
+        assert(_km_scratch_claimed() == 0, "the slot given back on Ok");
+        round = round + 1;
+    }
+    assert_eq(alloc_used() - u0, 0, "three more ranks allocate nothing");
+}
+
 # Replays the numerics golden rows, then runs the Cyrius-only groups; nonzero on any failure, pending or measured row.
 fn main(): i64 {
     if (_par_alloc() != 0) { return 1; }
@@ -386,6 +485,9 @@ fn main(): i64 {
     _t_cyrius_scratch_reuse();
     _t_cyrius_elimination();
     _t_cyrius_pcg32();
+    _t_cyrius_201_table_guards();
+    _t_cyrius_201_no_growth();
+    _t_cyrius_201_rank_no_growth();
     var bad = assert_summary();
     if (failing > 0 || _par_rows_pend > 0 || _par_rows_meas > 0) { bad = bad + 1; }
     return bad;

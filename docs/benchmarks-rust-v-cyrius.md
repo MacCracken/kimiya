@@ -3,8 +3,8 @@
 Each row times one benchmark body: the same work in Rust (`rust-old/`, release build) and in
 Cyrius (`tests/kimiya.bcyr`; since the overflow audit's B4 `tests/audit.bcyr` and since B5 `tests/audit2.bcyr` for the
 audit's Cyrius-only benches; since M5a `tests/numerics.bcyr`; `cyrius bench` runs all four). The release's full table is
-[2.0.0: every benchmark](#200-every-benchmark-2026-11-13); the milestone sections after it appended their rows as they
-landed. Numbers are host-specific, so compare within a column set, never across hosts.
+[2.0.0: every benchmark](#200-every-benchmark-2026-11-13), and [2.0.1](#201-the-repairs-2026-11-13) lists what 2.0.1's
+speed-ups changed; the milestone sections after them appended their rows as they landed. Numbers are host-specific, so compare within a column set, never across hosts.
 
 ## Method
 
@@ -17,6 +17,72 @@ landed. Numbers are host-specific, so compare within a column set, never across 
   (1.31 µs per read on this host); the per-op figure is lib/bench.cyr's ps mean.
 - **Host:** x86_64 Linux, HPET clocksource. Toolchains: rustc 1.99.1 (release); Cyrius 6.7.18
   (ganita 1.2.15).
+
+## 2.0.1: the repairs (2026-11-13)
+
+2.0.1's bit-identical speed-ups (CHANGELOG [2.0.1] › Performance) changed these benchmarks; every other one is within
+the run-to-run noise. Before is the 2.0.0 tree's `cyrius bench` run of 2026-11-13, taken before any 2.0.1 change (so it
+differs slightly from the 2.0.0 table below, a different run); after is 2.0.1's run on the same host. Run-to-run noise
+here is about ±5 %, and this 2.0.1 run was a slow one: the untouched stdlib benches `mathx/f64_sin`, `mathx/f64_cos` and
+`mathx/ganita_f64_atan2` ran 5–8 % slower than in the 2.0.0 run. Code-layout shifts move untouched functions as much
+(one run's `kimiya.bcyr` timed `mathx/cr_exp` at 46 ns while `audit2.bcyr`'s copy of the same bench gave 40 ns), so a
+change under about 8 % is noise. Rust is `rust-old/benchmarks.md`'s *latest* criterion median.
+
+| Bench | Rust 1.2.0 | Cyrius 2.0.0 | Cyrius 2.0.1 | Change |
+|---|---|---|---|---|
+| `element/lookup_by_symbol` | 44.73 ns | 71 ns | 57 ns | −20 % |
+| `molecule/molecular_weight_glucose` | 3.63 ns | 29 ns | 24 ns | −17 % |
+| `thermochem/reaction_enthalpy_ch4` | 38.58 ns | 303 ns | 228 ns | −25 % |
+| `thermochem/reaction_gibbs_energy` | — | 298 ns | 221 ns | −26 % |
+| `thermochem/reaction_entropy` | — | 286 ns | 201 ns | −30 % |
+| `thermochem/reaction_enthalpy_edge` | — | 592 ns | 492 ns | −17 % |
+| `thermochem/enthalpy_change_cp` | 24.00 ns | 184 ns | 146 ns | −21 % |
+| `thermochem/adiabatic_flame_ch4_air` | 301.48 ns | 3.55 µs | 2.04 µs | −42 % |
+| `thermochem/adiabatic_flame_tiny` | — | 1.47 µs | 1.15 µs | −22 % |
+| `stoichiometry/empirical_formula_glucose` | — | 612 ns | 487 ns | −20 % |
+| `stoichiometry/empirical_formula_edge` | — | 7.81 µs | 3.90 µs | −50 % |
+| `dynamics/first_order_100steps` | 4.41 µs | 10.32 µs | 9.35 µs | −9 % |
+| `dynamics/stochastic_100steps` | — | 22.32 µs | 21.60 µs | −3 % |
+| `fitting/arrhenius_6pts` | 233.40 ns | 987 ns | 944 ns | −4 % |
+| `fitting/polynomial_deg2_20pts` | 500.05 ns | 2.28 µs | 2.08 µs | −9 % |
+| `spectroscopy/fft_spectrum_256` | — | 30.37 µs | 25.21 µs | −17 % |
+| `spectroscopy/fft_spectrum_1024` | — | 140.80 µs | 114.02 µs | −19 % |
+| `spectroscopy/fft_spectrum_4096` | — | 656.29 µs | 528.29 µs | −20 % |
+| `spectroscopy/fft_spectrum_256_huge` | — | 319.07 µs | 246.27 µs | −23 % |
+| `spectroscopy/fft_spectrum_256_subnormal` | — | 341.28 µs | 267.35 µs | −22 % |
+| `spectroscopy/fft_spectrum_256_squares` | — | 45.02 µs | 39.19 µs | −13 % |
+| `spectroscopy/find_peaks_1000` | — | 20.42 µs | 11.63 µs | −43 % |
+| `spectroscopy/find_peaks_1000_subnormal` | — | 38.59 µs | 29.30 µs | −24 % |
+| `spectroscopy/isotope_pattern_glucose` | 2.80 µs | 15.91 µs | 13.32 µs | −16 % |
+| `spectroscopy/isotope_pattern_cystine` | — | 18.68 µs | 15.49 µs | −17 % |
+| `spectroscopy/isotope_pattern_s8` | — | 18.76 µs | 14.79 µs | −21 % |
+| `nuclear/decay_chain_two_step` | — | 261 ns | 238 ns | −9 % |
+| `potential/dihedral_angle` | 20.35 ns | 135 ns | 109 ns | −19 % |
+| `potential/bond_angle` | — | 217 ns | 187 ns | −14 % |
+| `potential/bond_angle_linear` | — | 140 ns | 96 ns | −31 % |
+| `electrochemistry/nernst_potential` | 6.42 ns | 92 ns | 71 ns | −23 % |
+| `electrochemistry/nernst_potential_edge` | — | 214 ns | 187 ns | −13 % |
+| `solution/ionic_strength` | — | 32 ns | 26 ns | −19 % |
+| `solution/solution_conductivity` | — | 74 ns | 71 ns | −4 % |
+| `mathx/cr_log10` | — | 80 ns | 67 ns | −16 % |
+| `mathx/cr_expm1` | — | 51 ns | 46 ns | −10 % |
+| `mathx/cr_expm1_ux` | — | 64 ns | 56 ns | −12 % |
+| `mathx/cr_acos` | — | 139 ns | 140 ns | +1 % |
+| `mathx/cr_pow` | — | 138 ns | 138 ns | +0 % |
+| `thermo/heat_transfer` | 0.95 ns | 68 ns | 62 ns | −9 % |
+| `phase/boiling_point_elevation` | — | 69 ns | 61 ns | −12 % |
+| `phase/freezing_point_depression` | — | 69 ns | 62 ns | −10 % |
+| `spectroscopy/absorbance` | 0.98 ns | 67 ns | 63 ns | −6 % |
+| `spectroscopy/diatomic_moment_of_inertia` | — | 80 ns | 68 ns | −15 % |
+| `spectroscopy/rigid_rotor_energy` | — | 112 ns | 108 ns | −4 % |
+| `thermo/heat_transfer_tie` | — | 377 ns | 311 ns | −18 % |
+
+The buffer-overlap checks (CHANGELOG [2.0.1] › Fixed, aliased buffers), timed by `cyrius bench` runs of the tree just
+before them and after, on the same host (tests/numerics.bcyr twice each, tests/kimiya.bcyr once):
+`network/stoichiometric_matrix_h2_br2` 268 → 252 ns (the checks are folded into the record validation, and the fill
+walks pointers), `sensitivity/compute_gradient_arrhenius` 500 → 508–516 ns (+2–3 %: three loads and five span tests),
+`stoichiometry/percent_composition_glucose` 266 → 266 ns, `stoichiometry/empirical_formula_glucose` 484 → 488 ns,
+`stoichiometry/empirical_formula_edge` 3.90 → 3.92 µs, `spectroscopy/find_peaks_1000` 11.31 → 11.34 µs.
 
 ## 2.0.0: every benchmark (2026-11-13)
 

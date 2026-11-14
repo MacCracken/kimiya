@@ -1,5 +1,7 @@
 # validate.tcyr — the tests of rust-old/src/validate.rs, ported one for one (each test_group is
 # the Rust test's name). ±1e-300 are bit patterns (the lexer has no exponent notation).
+#
+# 2.0.1: cyrius_201_scratch_pool, the pool of reusable work tables (claim, give back, grow, the bump fallback).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -66,12 +68,71 @@ fn _t_guard_edges() {
     assert_eq(_km_is_non_negative(ninf), 0, "non_negative(-inf)");
 }
 
+# 2.0.1: the pool of reusable work tables. A slot is claimed by one caller at a time (a nested take gets another),
+# given back for reuse, grown to at least twice its size with the kept bytes copied, and preferred when it is already
+# big enough; with every slot claimed a take is a fresh bump block (slot −1), and after a first call at a size a
+# take-and-give allocates nothing.
+fn _t_cyrius_201_scratch_pool() {
+    test_group("cyrius_201_scratch_pool");
+    assert_eq(_km_scratch_claimed(), 0, "no slot claimed at the start");
+    var p0, s0 = _km_scratch_take(1000);
+    assert(p0 != 0 && s0 >= 0, "a slot");
+    store64(p0, 0x1234);
+    store64(p0 + 992, 0x5678);
+    var p1, s1 = _km_scratch_take(1000);
+    assert(p1 != 0 && s1 >= 0 && s1 != s0 && p1 != p0, "a nested take gets another slot");
+    var g = _km_scratch_grow(s0, p0, 5000, 1000);
+    assert(g != 0 && g != p0 && load64(g) == 0x1234 && load64(g + 992) == 0x5678, "grow keeps the bytes");
+    assert(load64(&_km_scr_cap + 8 * s0) == 5000, "grown to the request (above twice 1000)");
+    var g2 = _km_scratch_grow(s0, g, 3000, 0);
+    assert(g2 == g, "already big enough: the same buffer");
+    _km_scratch_give(s1);
+    _km_scratch_give(s0);
+    assert_eq(_km_scratch_claimed(), 0, "both given back");
+    var u0 = alloc_used();
+    var p2, s2 = _km_scratch_take(4000);
+    assert(p2 == g && s2 == s0, "the big-enough slot is preferred");
+    _km_scratch_give(s2);
+    var k = 0;
+    while (k < 100) {
+        var p3, s3 = _km_scratch_take(800 + 40 * k);
+        _km_scratch_give(s3);
+        k = k + 1;
+    }
+    assert_eq(alloc_used() - u0, 0, "takes within the pool's sizes allocate nothing");
+    var held: i64[8];
+    k = 0;
+    while (k < _KM_SCR_SLOTS) {
+        var p4, s4 = _km_scratch_take(64);
+        held[k] = s4;
+        k = k + 1;
+    }
+    assert_eq(_km_scratch_claimed(), _KM_SCR_SLOTS, "every slot claimed");
+    var p5, s5 = _km_scratch_take(64);
+    assert(p5 != 0 && s5 == 0 - 1, "then a bump block, slot -1");
+    _km_scratch_give(s5);
+    k = 0;
+    while (k < _KM_SCR_SLOTS) {
+        _km_scratch_give(held[k]);
+        k = k + 1;
+    }
+    assert_eq(_km_scratch_claimed(), 0, "all given back");
+    var p6, s6 = _km_scratch_take(0);
+    assert(p6 == 0 && s6 == 0 - 1, "take(0): (0, -1)");
+    var cap0 = load64(&_km_scr_cap + 8 * s0);
+    var p7, s7 = _km_scratch_take(cap0 + 8);
+    var cap1 = load64(&_km_scr_cap + 8 * s7);
+    assert(s7 == s0 && cap1 == 2 * cap0, "growth past the request: twice the slot's size");
+    _km_scratch_give(s7);
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_positive_rejects_nan_inf_zero_negative();
     _t_non_negative_accepts_zero();
     _t_finite_rejects_nan_inf();
     _t_guard_edges();
+    _t_cyrius_201_scratch_pool();
     return assert_summary();
 }
 

@@ -6,7 +6,8 @@
 # unpaired-electron tables, the Madelung constants and Born exponents, the 30 Shannon IONIC_RADII rows — is
 # src/inorganic_data.cyr (generated); AVOGADRO, ELEMENTARY_CHARGE and COULOMB_CONSTANT are src/constants.cyr's.
 # Fallible functions return a value-form Result whose Err payload is a KM_ERR_* code, and reject NaN and ±∞ inputs.
-# Every expression keeps Rust's operation order, so every result is bit-identical (classes A and B), but one: the CFSE
+# Every expression keeps Rust's operation order, so every result is bit-identical (classes A and B), but four (ADR 0002
+# #12, #15, #32 and #33): the CFSE
 # is computed exactly, (3·e_g − 2·t₂g) / 5 in one correctly rounded division (ADR 0002 #12; the golden rows where Rust's
 # −0.4·t₂g + 0.6·e_g misses it are mapped by the harness and reported as accepted under ADR 2), and Δ_tet is the
 # correctly rounded 4Δ/9 also where Rust's Δ·4 overflows (ADR 0002 #15, mapped the same way). ADR 0002 #32 (the overflow
@@ -31,20 +32,6 @@
 #   no row has a zero charge or coordination) and ionic_radius_radius_pm(h) (NaN).
 
 include "lib/string.cyr"
-
-# 1 if the word x is a Rust u8 (0 ..= 255).
-#must_use
-fn _km_is_u8(x): i64 {
-    if (x < 0 || x > 255) { return 0; }
-    return 1;
-}
-
-# 1 if the word x is a Rust bool: 0 (false) or 1 (true).
-#must_use
-fn _km_is_bool(x): i64 {
-    if (x == 0 || x == 1) { return 1; }
-    return 0;
-}
 
 # ── crystal field theory ────────────────────────────────────────────────────────────
 
@@ -169,7 +156,7 @@ fn born_lande_lattice_energy(madelung: f64, z_cation, z_anion, r0_m: f64, born_e
 # born_lande_lattice_energy's fast path, for its validated inputs (the charges as exact doubles): (U, 1) while Rust's
 # chain provably is the unbounded-exponent one (ADR 0002 #32), or (0, 0). For M in [2⁻⁶⁰, 2⁶⁰] and r₀ in [2⁻²⁰⁰, 2⁶⁰]
 # every partial product is provably normal (−k_e·N_A·M in [2⁵², 2¹⁷²], times z⁺ and z⁻ (at most 2³² each) below 2²³⁶,
-# times e·e (e ≈ 2^-62.4) in [2⁻⁷⁴, 2¹⁷⁴], over r₀ in [2⁻¹³⁴, 2³¹²]: every physical salt), so the test is skipped;
+# times e·e (e ≈ 2^-62.4) in [2⁻⁷⁴, ≈ 2¹¹²], over r₀ in [2⁻¹³⁴, 2³¹²]: every physical salt), so the test is skipped;
 # otherwise each partial product and the quotient by r₀ must lie in [2⁻¹⁰²¹, DBL_MAX] (_km_ux_normal; −k_e·N_A is a
 # normal constant). The factor 1 − 1/n is always the unbounded one: 1/n is in (0, 1), and where Rust's 1/n is not normal
 # (n > 2¹⁰²¹) both 1/n are below 2⁻⁵⁴, so both differences round to 1. The final product of two doubles is then rounded

@@ -42,6 +42,9 @@ const _KM_RD_MAX_STEPS = 10000000;
 # n·(n + 1): 2n² + 5n, so n ≤ 8 here).
 const _KM_RD_STIFF_STACK = 168;
 
+# Final-state words kept on the stack by simulate_stochastic.
+const _KM_RD_FIN_STACK = 16;
+
 # Rust's validate_time_and_steps: KM_ERR_NONE, or the code for a t_end that is not positive and finite, then a step
 # count of 0 or past 10⁷ (a negative word is a usize past it).
 #must_use
@@ -61,13 +64,6 @@ fn _km_rd_all_finite(y, n): i64 {
         if (_km_is_finite(v) != 1) { return 0; }
         k = k + 1;
     }
-    return 1;
-}
-
-# 1 if (p, n) is a slice: n ≥ 0, and p not null when n > 0.
-#must_use
-fn _km_rd_slice(p, n): i64 {
-    if (n < 0 || (n > 0 && p == 0)) { return 0; }
     return 1;
 }
 
@@ -295,7 +291,7 @@ fn simulate_michaelis_menten(initial_substrate: f64, v_max: f64, km: f64, t_end:
 # after the integration; its first cap points are then written). Mirrors `reaction_dynamics::simulate_adaptive`.
 #must_use
 fn simulate_adaptive(f, ctx, y0, n, t_end: f64, tol: f64, out, cap): Result {
-    if (f == 0 || _km_rd_slice(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (f == 0 || _km_is_slice(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(t_end) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_positive(tol) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_rd_all_finite(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -321,20 +317,22 @@ fn simulate_adaptive(f, ctx, y0, n, t_end: f64, tol: f64, out, cap): Result {
 # Exactly two points, (0, y0) and (t_end, y(t_end)), 1 + n f64 each, go to `out` (cap ≥ 2 points): Ok(2). For n = 0
 # nothing is integrated. Err(KM_ERR_INVALID_INPUT) if t_end is not positive and finite, steps is 0 or above 10⁷, or
 # y0 has a non-finite value; Err(KM_ERR_COMPUTATION_ERROR) if I − h·J is singular (a pivot below 10⁻¹²), an iterate is
-# not finite, or Newton fails to converge in a step; Err(KM_ERR_INVALID_INPUT) if cap < 2 (after the integration; out
-# untouched on every Err). Mirrors `reaction_dynamics::simulate_stiff`; Rust's Err for a resized Jacobian has no
-# counterpart (the buffer is flat).
+# not finite, or Newton fails to converge in a step; Err(KM_ERR_INVALID_INPUT) if cap < 2, or if the two points'
+# 2·(1 + n) f64 at `out` overlap y0's n values other than in place (out = y0, which works: point 1 is written first,
+# then point 0's state from its last value down, then its t), after the integration; out untouched on every Err.
+# Mirrors `reaction_dynamics::simulate_stiff`; Rust's Err for a resized Jacobian has no counterpart (the buffer is
+# flat).
 #must_use
 fn simulate_stiff(f, fctx, jac, jctx, y0, n, t_end: f64, steps, out, cap): Result {
-    if (f == 0 || jac == 0 || _km_rd_slice(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (f == 0 || jac == 0 || _km_is_slice(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var e = _km_rd_time_and_steps(t_end, steps);
     if (e != KM_ERR_NONE) { return Err(e); }
     if (_km_rd_all_finite(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (n > 0x01000000) { return Err(KM_ERR_COMPUTATION_ERROR); }
     var ns: f64 = f64_from(steps);
     var h: f64 = t_end / ns;
-    var st: f64[168];
-    var w = _km_num_table(&st, _KM_RD_STIFF_STACK, 2 * n * n + 5 * n);
+    var st: f64[_KM_RD_STIFF_STACK];
+    var w, ws = _km_num_table(&st, _KM_RD_STIFF_STACK, 2 * n * n + 5 * n, 1);
     if (w == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
     var y = w;
     var yn = w + 8 * n;
@@ -386,7 +384,10 @@ fn simulate_stiff(f, fctx, jac, jctx, y0, n, t_end: f64, steps, out, cap): Resul
                     i = i + 1;
                 }
                 var gr, gv = _km_gaussian_elimination(aug, n, delta);
-                if (is_err_result(gr) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                if (is_err_result(gr) == 1) {
+                    _km_scratch_give(ws);
+                    return Err(KM_ERR_COMPUTATION_ERROR);
+                }
                 i = 0;
                 while (i < n) {
                     var a: f64 = load64(yn + 8 * i);
@@ -395,7 +396,10 @@ fn simulate_stiff(f, fctx, jac, jctx, y0, n, t_end: f64, steps, out, cap): Resul
                     store64(yn + 8 * i, s);
                     i = i + 1;
                 }
-                if (_km_rd_all_finite(yn, n) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                if (_km_rd_all_finite(yn, n) != 1) {
+                    _km_scratch_give(ws);
+                    return Err(KM_ERR_COMPUTATION_ERROR);
+                }
                 last = _km_rd_max_abs(delta, n);
                 var ynorm: f64 = _km_rd_max_abs(yn, n);
                 var lim: f64 = rtol * ynorm;
@@ -408,16 +412,33 @@ fn simulate_stiff(f, fctx, jac, jctx, y0, n, t_end: f64, steps, out, cap): Resul
             if (converged == 0) {
                 var ynorm2: f64 = _km_rd_max_abs(yn, n);
                 var lim2: f64 = atol * ynorm2;
-                if (last > lim2) { return Err(KM_ERR_COMPUTATION_ERROR); }
+                if (last > lim2) {
+                    _km_scratch_give(ws);
+                    return Err(KM_ERR_COMPUTATION_ERROR);
+                }
             }
             _km_num_copy(y, yn, n);
             step = step + 1;
         }
     }
-    if (out == 0 || cap < 2) { return Err(KM_ERR_INVALID_INPUT); }
-    var zero: f64 = 0.0;
-    _km_num_point(out, 2, 0, zero, y0, n);
+    if (out == 0 || cap < 2) {
+        _km_scratch_give(ws);
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    if (out != y0 && out < y0 + 8 * n && y0 < out + 16 * (n + 1)) {
+        _km_scratch_give(ws);
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    # Point 1, then point 0 (y0 may be `out`: its state moves up one word, from the last value down, then t).
     _km_num_point(out, 2, 1, t_end, y, n);
+    var kk = n - 1;
+    while (kk >= 0) {
+        store64(out + 8 + 8 * kk, load64(y0 + 8 * kk));
+        kk = kk - 1;
+    }
+    var zero: f64 = 0.0;
+    store64(out, zero);
+    _km_scratch_give(ws);
     return Ok(2);
 }
 
@@ -427,17 +448,24 @@ fn simulate_stiff(f, fctx, jac, jctx, y0, n, t_end: f64, steps, out, cap): Resul
 # normal draws from hisab's PCG32 seeded with `seed` (stream 1, as Rust's `Pcg32::new(seed, 1)`), so a seed gives the
 # same path every time. The steps + 1 points (t, y), 1 + n f64 each, go to `out` (cap points). Ok(steps + 1);
 # Err(KM_ERR_INVALID_INPUT) if t_end is not positive and finite, steps is 0 or above 10⁷, or y0 has a non-finite value;
-# Err(KM_ERR_COMPUTATION_ERROR) if the solver fails or the final state is not finite (or the generator can't be
+# Err(KM_ERR_COMPUTATION_ERROR) if the solver fails or the final state is not finite (or a work table can't be
 # allocated); Err(KM_ERR_INVALID_INPUT) if the points don't fit (after integrating without storing, out untouched).
 # Mirrors `reaction_dynamics::simulate_stochastic`.
 #must_use
 fn simulate_stochastic(drift, dctx, diffusion, gctx, y0, n, t_end: f64, steps, seed, out, cap): Result {
-    if (drift == 0 || diffusion == 0 || _km_rd_slice(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (drift == 0 || diffusion == 0 || _km_is_slice(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var e = _km_rd_time_and_steps(t_end, steps);
     if (e != KM_ERR_NONE) { return Err(e); }
     if (_km_rd_all_finite(y0, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
-    var rng = pcg32_new(seed);
-    if (rng == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    # hisab 3.4.1's pcg32_new(seed) on the stack (pcg32_new takes its 16 bytes from the bump allocator, never freed):
+    # state 0, inc 3, one step, state += seed, one step. The same stream, without the per-call allocation.
+    var rng: i64[2];
+    store64(&rng, 0);
+    store64(&rng + 8, 3);
+    var r0 = pcg32_next(&rng);
+    var s0 = load64(&rng);
+    store64(&rng, s0 + seed);
+    var r1 = pcg32_next(&rng);
     var count = steps + 1;
     var o = out;
     var c = cap;
@@ -445,12 +473,22 @@ fn simulate_stochastic(drift, dctx, diffusion, gctx, y0, n, t_end: f64, steps, s
         o = 0;
         c = 0;
     }
-    var st: f64[16];
-    var fin = _km_num_table(&st, 16, n);
+    var st: f64[_KM_RD_FIN_STACK];
+    var fin, fs = _km_num_table(&st, _KM_RD_FIN_STACK, n, 1);
     if (fin == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
-    var r, v = _km_euler_maruyama_system(drift, dctx, diffusion, gctx, 0.0, y0, n, t_end, steps, rng, o, c, fin);
-    if (is_err_result(r) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
-    if (_km_rd_all_finite(fin, n) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
-    if (o == 0) { return Err(KM_ERR_INVALID_INPUT); }
+    var r, v = _km_euler_maruyama_system(drift, dctx, diffusion, gctx, 0.0, y0, n, t_end, steps, &rng, o, c, fin);
+    if (is_err_result(r) == 1) {
+        _km_scratch_give(fs);
+        return Err(KM_ERR_COMPUTATION_ERROR);
+    }
+    if (_km_rd_all_finite(fin, n) != 1) {
+        _km_scratch_give(fs);
+        return Err(KM_ERR_COMPUTATION_ERROR);
+    }
+    if (o == 0) {
+        _km_scratch_give(fs);
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    _km_scratch_give(fs);
     return Ok(count);
 }

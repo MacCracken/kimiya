@@ -5484,7 +5484,9 @@ fn run_audit6(fid, mode, a): (i64, i64, i64) {
             tmax = _km_min(tmax, hi);
             j = j + 1;
         }
-        var e, x = _km_flame_bisection(dh, &pr, n, &cache, t0, t0, tmax);
+        var tab: f64[_KM_FLAME_CACHED * _KM_FLAME_SEGS * 3];   # 2.0.1's prefix table, as the flame builds it
+        _km_flame_prefix(&pr, n, &cache, &tab, t0);
+        var e, x = _km_flame_bisection(dh, &pr, n, &cache, &tab, t0, t0, tmax);
         var xb: f64 = x;
         var w1 = _km_bits(xb);
         if (e != KM_ERR_NONE) { w1 = (1 << 63) | e; }

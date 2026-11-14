@@ -7,6 +7,227 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-11-13
+
+The repairs of 2.0.0's P(-1) review sweep. No golden row changes: the corpus is still 342,485 rows ok, 0 failed and
+46,634 accepted. Every performance change is bit-identical in results and Err codes, checked by the corpus and by
+randomized probes against the 2.0.0 code. The one API addition is `KM_PI`.
+
+### Fixed
+- **Null caller buffers** (kinetics, nuclear, gas, fitting, sensitivity). `lineweaver_burk`, `decay_chain_two_step`,
+  `peng_robinson_z_roots`, `fit_arrhenius`, `equilibrium_constant_gradient`, `arrhenius_gradient` and `nernst_gradient`
+  wrote through a null `out` and faulted. They now return `Err(KM_ERR_INVALID_INPUT)`, checked after Rust's own errors.
+  For `peng_robinson_z_roots`, Rust's no-physical-root ComputationError still comes first. The functions that take a
+  capacity already treated a null `out` as holding nothing. The port plan's note that a null `out` is the caller's
+  contract is updated.
+- **Aliased buffers** (spectroscopy, reaction_dynamics, stoichiometry, network, sensitivity). Rust can't alias a slice
+  with its output; here each is a raw pointer. Every public function that reads one caller buffer and writes another
+  was checked, by reading and by probes of each overlap: `out` = an input, `out` partly inside one, an input partly
+  inside `out`, two outputs overlapping. Where a write could reach a value still to be read, the overlap is now
+  `Err(KM_ERR_INVALID_INPUT)`, after Rust's own errors; exact in place works wherever the loop allows it at no cost.
+  Each function's doc comment gives its rule:
+  - spectroscopy `find_peaks`: an `out` inside `data` past its first value (data < out < data + 8n) overwrote values
+    still to be scanned. It is now `Err(KM_ERR_INVALID_INPUT)`, checked after Rust's three Ok(0) cases (n < 3, a
+    threshold outside [0, 1], no finite value), which write nothing. `out = data` and `out < data` work.
+  - reaction_dynamics `simulate_stiff`: in place (`out = y0`), point 0's t overwrote y0[0] before the copy. Point 1 is
+    now written first, then point 0's state from its last value down, then its t. Any other overlap with y0 is
+    `Err(KM_ERR_INVALID_INPUT)`, after the integration.
+  - stoichiometry `assign_oxidation_states`: in place (`out = atoms`), it read records it had already overwritten: wrong
+    states, or a fault on a garbage Z. The records are now written from the last down, so in place and any `out` above
+    `atoms` work. An `out` below `atoms` that overlaps them is `Err(KM_ERR_INVALID_INPUT)`.
+  - stoichiometry `empirical_formula` and `percent_composition`: an `out` inside the input records past their start
+    (for `percent_composition`, the molecule's own atom records, its vec's buffer) overwrote atomic numbers still to be
+    read: wrong records, or for `percent_composition` a fault on a garbage Z. It is now `Err(KM_ERR_INVALID_INPUT)`. In
+    place and an `out` below the records work: record k is written after input record k is read, and below record
+    k + 1.
+  - network `stoichiometric_matrix` zeroes the matrix before it reads the reaction records, so a matrix overlapping the
+    records or any term list, in place included, gave a wrong matrix or faulted on a garbage term pointer. Every such
+    overlap is now `Err(KM_ERR_INVALID_INPUT)`. The test is folded into the records' validation pass, and the fill's
+    loops now walk pointers (the same stores in the same order, checked against the old fill on 200,000 random
+    networks), which pays for it: `network/stoichiometric_matrix_h2_br2` 268 → 252 ns (the checks alone made it 33 ns
+    slower in A/B probes, and a call to the helper per span 96 ns).
+  - network `rate_from_stoichiometry` reads every rate for each species, and row i + 1 after writing species i's rate:
+    an `out` overlapping the rates, or starting inside the matrix past its first entry, read values it had overwritten.
+    Both are now `Err(KM_ERR_INVALID_INPUT)`. `out = matrix` and an `out` below it work.
+  - sensitivity `compute_gradient`: a tape built through hisab's setters can hold the caller's arrays. `parameters` over
+    the tape's header or nodes read values the nodes had overwritten; `out` over the header faulted, and over the nodes,
+    or over the adjoints other than exactly, left the tape's records overwritten. These are now
+    `Err(KM_ERR_INVALID_INPUT)`, before the tape is reset. `out` = the adjoint array works (the n variables are nodes
+    0 … n − 1, whose adjoints are the gradient), and `out` may overlap `parameters`. The check's three loads and five
+    span tests cost about 10 ns: `sensitivity/compute_gradient_arrhenius` 500 → 508–516 ns (+2–3 %).
+  - Checked and unchanged: `fit_arrhenius`, `fit_polynomial`, `balance_equation`, `isotope_pattern`, `fft_spectrum`,
+    `simulate_adaptive` and `simulate_stochastic` read every input before they write `out` (or, for `fft_spectrum`,
+    transform in a pool table when the signal lies in out's first 2n values), so every overlap gives the separate
+    buffer's result. `peng_robinson_z_roots` takes its parameters by value. Callback contexts are the caller's, and
+    kimiya never reads them.
+  - The overlap test is src/validate.cyr's `_km_overlaps(a, a_bytes, b, b_bytes)`, which forms no pointer + size and so
+    can't wrap. `stoichiometric_matrix` and `compute_gradient` inline its signed form, where no end can wrap (a call
+    costs about 5 ns). Cyrius-only test groups check each rule: in place gives the separate buffer's result, and each
+    refused overlap gives its Err with the inputs untouched.
+  - The timings are `cyrius bench` runs of the tree before and after on the same host, two of each for
+    tests/numerics.bcyr. The other benches on a changed path are unchanged: `percent_composition_glucose` 266 → 266 ns,
+    `empirical_formula_glucose` 484 → 488 ns, `empirical_formula_edge` 3.90 → 3.92 µs, `find_peaks_1000`
+    11.31 → 11.34 µs.
+- stoichiometry `empirical_formula`: its 16·n heap table was taken before Rust's per-element validation, so a huge n
+  gave ComputationError instead of Rust's InvalidElement or InvalidInput. The table is now taken after the validation,
+  and its size is guarded.
+- **Memory growth per call** (validate, numerics, reaction_dynamics, fitting, network, sensitivity, spectroscopy,
+  stoichiometry). A work table larger than its function's stack table came from the bump allocator, which never frees.
+  A call in a loop therefore grew the heap by the table every time, until the allocator's 2 GiB limit turned it into a
+  spurious `Err(KM_ERR_COMPUTATION_ERROR)`. Examples: 64 KiB per `fft_spectrum(4096)` with cap n/2 + 1, 12 KiB per
+  `isotope_pattern` of Br₃₀₀, 2 KB per `simulate_stiff` with n = 10, and 4.9 KB per `fit_polynomial` of 200 points. The
+  tables now come from a pool of eight reusable, grow-only buffers in `src/validate.cyr` (`_km_scratch_take` /
+  `_km_scratch_give`; [ADR 0007](docs/adr/0007-shared-work-table-pool.md)):
+  - A call claims a slot by an atomic compare-and-swap, so neither two threads nor a re-entrant call (a callback into
+    kimiya) ever share one. A slot grows to at least twice its size, and the call gives it back before it returns.
+  - After the first call at a given size, a call allocates nothing. With every slot claimed, a fresh bump block serves
+    the call, as in 2.0.0.
+  - Every site is covered: the transcribed routines' tables (`_km_num_table`), `simulate_stiff`, `simulate_stochastic`,
+    `fit_arrhenius`, `fit_polynomial`, `sparse_stoichiometric_matrix`, `compute_gradient`, `isotope_pattern`,
+    `fft_spectrum` and its unbounded slow path, `balance_equation`'s three tables and `empirical_formula`'s.
+  - The only per-call allocations left are results the caller keeps: KmMolecule's vec and formula string, and the CSR
+    handle `sparse_stoichiometric_matrix` returns.
+  - Cyrius-only `cyrius_201_no_growth` groups in seven test files check that a loop allocates nothing after its first
+    call, on Ok and on every Err after the table, and that every slot is given back. `tests/parity.tcyr` checks that no
+    slot is still claimed after the whole corpus.
+  - There is no API or result change.
+- reaction_dynamics `simulate_stochastic`: `pcg32_new` took 16 bytes from the bump allocator on every call. The
+  generator now lives on the stack, seeded exactly as `pcg32_new` seeds it (the same stream, which a test pins).
+- **Latent guards** (mathx, numerics). No caller reached any of these today:
+  - `_km_cr_finish` and `_km_exp_fin` gave −0 for an exponent above 1024, because 2^(e − 1) wrapped. They also gave +0
+    for a normal result at e = −1023, where 2⁻¹⁰²³ encoded as +0. They now give +∞, 2⁻¹⁰²²·(h + m + l)/2 (scaled in
+    two exact steps) and, below e = −2044, +0.
+  - `_km_f64_int(+0)` looped forever; it now returns (0, 0).
+  - `_km_num_table` took a size that had overflowed to a negative word as fitting its stack table; it now fails.
+  - The least squares guards n·m + n·n before multiplying it out.
+- Stack tables are sized by their constants (`_KM_NUM_STACK`, `_KM_RD_STIFF_STACK`, `_KM_FLAME_CACHED * 2`, …) instead
+  of a second literal.
+
+### Changed
+- validate: the shared helpers live in `src/validate.cyr`. They are the slice test `_km_is_slice` (formerly
+  reaction_dynamics' `_km_rd_slice` and fitting's `_km_fit_slice`, now also used by `isotope_pattern`, `find_peaks` and
+  `empirical_formula`) and the Rust integer-type predicates `_km_is_i32`, `_km_is_u8`, `_km_is_u32`, `_km_is_bool` and
+  `_km_is_enum_value`. The predicates came from solution, inorganic, nuclear and organic, which spectroscopy had reached
+  across for. The buffer-overlap test `_km_overlaps` is new (Fixed, aliased buffers).
+- mathx:
+  - one special-value ladder, `_km_ln_special`, for ln's and log10's fast and accurate paths;
+  - `_km_cr_log10` takes the layout of `_km_cr_ln`: the normal range inline, the rest through
+    `_km_cr_log10_fast` and the accurate path;
+  - `_km_mul3_rest`, the shared tail of the five x·y·z shapes (`heat_transfer`, `boiling_point_elevation`,
+    `freezing_point_depression`, `absorbance`, `diatomic_moment_of_inertia`), goes straight to `_km_cr_mono` once the
+    fast path declines (2.0.0 retried the fast path through `_km_cr_mul3`);
+  - `_km_ux_sqrt_f64`'s unreachable r ≥ 2 branch is marked defensive, with the proof.
+- solution: `_km_dh_az2_ux`, Rust's ((−A)·z)·z with an unbounded exponent, is now the prologue of the three
+  activity-coefficient `_ux` helpers.
+- error: `km_error_name` and `km_error_message` are now a `match` with an `_ =>` arm, CLAUDE.md's enum rule.
+- constants: **`KM_PI`** (Rust's `std::f64::consts::PI`) is generated into `src/constants.cyr` by `scripts/oracle`.
+  `t_constants.rs` emits Rust's standard-library constants the port uses, and `validate.py` and `probe_tables.py` check
+  each against Python's math value; it has no golden row. It replaces π's bits, typed by hand at six sites in
+  spectroscopy and potential. This is the new public constant.
+- Comments corrected:
+  - spectroscopy: 2⁻⁹²¹ ≈ 5.64·10⁻²⁷⁸;
+  - nuclear: only half-lives below ln 2/DBL_MAX ≈ 3.86·10⁻³⁰⁹ overflow;
+  - electrochemistry: 1 ..= 8 electrons;
+  - inorganic: four functions differ from Rust (ADR 0002 #12, #15, #32, #33), and the Born–Landé bound is ≈ 2¹¹²;
+  - numerics: dopri45 takes 9·n words, so it is on the stack for n ≤ 10;
+  - molecule: 2²⁶ is a quarter of VEC_CAP_MAX;
+  - gas: van der Waals' quotient is at least 2⁻²³⁸;
+  - mathx: `_km_exp_core` is valid for |xh| < 1180, by the K < 2²⁰ argument, and `_km_ln_core`'s call costs about
+    14 ns.
+- Not done, measured:
+  - `_km_shomate_cp5` / `_km_shomate_h5` calling `_km_shomate_cp_fast` / `_h_fast`: the extra call costs 7 ns on
+    `KmShomate.cp` (34 → 41 ns) and 3 ns on `enthalpy_antiderivative`.
+  - `_km_exp_acc_core` ending with `_km_exp_acc_r`: the code moved so that `ideal_gas_pressure`,
+    `faraday_charge_required` and `pre_equilibrium_rate` ran 6–7 % slower, an alignment effect, in A/B runs against
+    2.0.0.
+  - One shared gas box test: the three tests differ, and a call costs about 5 ns on paths of 120–300 ns.
+  - `_km_mul5_fast` with its helpers inline: `osmotic_pressure` was slower (139 → 147 ns). `_km_mul4_fast`'s inlining
+    measured a win and is in.
+
+### Performance
+All bit-identical. Before is the 2.0.0 tree's `cyrius bench` run of 2026-11-13, taken before any change; after is 2.0.1's
+run on the same host. Run-to-run noise on this host is about ±5 %, and this 2.0.1 run was a slow one: untouched stdlib
+benches (`f64_sin`, `f64_cos`, `ganita_f64_atan2`) ran 5–8 % slower than in the 2.0.0 run. Code-layout shifts move
+untouched functions by as much, so a change under about 8 % is within the noise. For those, the A/B probes quoted
+above (built from both trees, run back to back) are the better measure. Rust is
+`rust-old/benchmarks.md`'s criterion median, for the benchmarks that have a Rust counterpart.
+
+- **Name lookups** (thermochem, phase, element). Each matching first byte used to cost a strlen and a memeq. The scans
+  now compare bytes from byte 1 to the first difference or the shared NUL. `lookup_antoine` used to run a `streq` on
+  every row; it now has the same first-byte test, so chloroform takes 393 → 43 ns (an A/B probe). A shared compare
+  helper measured 11 ns slower per lookup, so each scan keeps its own inline loop.
+- **adiabatic_flame_temperature** (thermochem). Once per call, a prefix table stores each product's running total
+  before each segment and the antiderivative at each segment's lower end. f(T) for T ≥ T₀ then adds one antiderivative
+  per product (the loop's additions, in its order). T < T₀, NaN, or a product past the table runs the full segment
+  loop. f(T₀) is −ΔH exactly, so that evaluation is skipped.
+- `empirical_formula` (stoichiometry) keeps the counts from the search pass instead of re-running the tolerance test.
+- `molecular_weight` (molecule) inlines `element_lookup_by_number`'s two checks.
+- The least squares (numerics) no longer zeroes its Q and R table: Q is written whole, and only R's written entries are
+  read. Columns 0 and 1 are 1.0 and x, without `_km_powi`. `_km_num_point` inlines `_km_num_copy`.
+- **The FFT** (spectroscopy). `_km_fft` and `_km_fft_ux` run the twiddle loop outside the block loop, so each twiddle is
+  computed and tested once a stage. The data's range test works on the bits.
+- spectroscopy: `find_peaks`' min/max pass, the isotope sort's key and the isotope normalisation's max are inline.
+- nuclear: `decay_chain_two_step` reuses e^(−λ₁t) when λ_min is λ₁.
+- potential: `bond_angle`'s and `dihedral_angle`'s fast paths inline sub3, cross, dot3 and max.
+- electrochemistry: `nernst_potential`'s guards and fast-path test are inline.
+- solution: `ionic_strength`'s i32 test is inline, and its finiteness scan runs only in the rare non-finite case.
+  `solution_conductivity` goes straight to `_km_cr_mono` when the fast path fails.
+- mathx:
+  - `_km_cr_log10` inlines the ln core;
+  - `_km_cr_expm1` inlines its fast path and exp's core, as `_km_cr_exp` does;
+  - `_km_cr_acos` inlines `_km_acos_core` and one copy of `_km_atan_core` (A/B: 147 → 140 ns);
+  - `_km_pow_pos_fast` inlines the ln and exp cores (A/B: 136 → 131 ns);
+  - `_km_mul3_fast` and `_km_mul4_fast` inline their helpers (`rigid_rotor_energy`, A/B: 103 → 98 ns).
+
+| Bench | Rust 1.2.0 | Cyrius 2.0.0 | Cyrius 2.0.1 | Change |
+|---|---|---|---|---|
+| `element/lookup_by_symbol` | 44.73 ns | 71 ns | 57 ns | −20 % |
+| `molecule/molecular_weight_glucose` | 3.63 ns | 29 ns | 24 ns | −17 % |
+| `thermochem/reaction_enthalpy_ch4` | 38.58 ns | 303 ns | 228 ns | −25 % |
+| `thermochem/reaction_gibbs_energy` | — | 298 ns | 221 ns | −26 % |
+| `thermochem/reaction_entropy` | — | 286 ns | 201 ns | −30 % |
+| `thermochem/reaction_enthalpy_edge` | — | 592 ns | 492 ns | −17 % |
+| `thermochem/enthalpy_change_cp` | 24.00 ns | 184 ns | 146 ns | −21 % |
+| `thermochem/adiabatic_flame_ch4_air` | 301.48 ns | 3.55 µs | 2.04 µs | −42 % |
+| `thermochem/adiabatic_flame_tiny` | — | 1.47 µs | 1.15 µs | −22 % |
+| `stoichiometry/empirical_formula_glucose` | — | 612 ns | 487 ns | −20 % |
+| `stoichiometry/empirical_formula_edge` | — | 7.81 µs | 3.90 µs | −50 % |
+| `dynamics/first_order_100steps` | 4.41 µs | 10.32 µs | 9.35 µs | −9 % |
+| `dynamics/stochastic_100steps` | — | 22.32 µs | 21.60 µs | −3 % |
+| `fitting/arrhenius_6pts` | 233.40 ns | 987 ns | 944 ns | −4 % |
+| `fitting/polynomial_deg2_20pts` | 500.05 ns | 2.28 µs | 2.08 µs | −9 % |
+| `spectroscopy/fft_spectrum_256` | — | 30.37 µs | 25.21 µs | −17 % |
+| `spectroscopy/fft_spectrum_1024` | — | 140.80 µs | 114.02 µs | −19 % |
+| `spectroscopy/fft_spectrum_4096` | — | 656.29 µs | 528.29 µs | −20 % |
+| `spectroscopy/fft_spectrum_256_huge` | — | 319.07 µs | 246.27 µs | −23 % |
+| `spectroscopy/fft_spectrum_256_subnormal` | — | 341.28 µs | 267.35 µs | −22 % |
+| `spectroscopy/fft_spectrum_256_squares` | — | 45.02 µs | 39.19 µs | −13 % |
+| `spectroscopy/find_peaks_1000` | — | 20.42 µs | 11.63 µs | −43 % |
+| `spectroscopy/find_peaks_1000_subnormal` | — | 38.59 µs | 29.30 µs | −24 % |
+| `spectroscopy/isotope_pattern_glucose` | 2.80 µs | 15.91 µs | 13.32 µs | −16 % |
+| `spectroscopy/isotope_pattern_cystine` | — | 18.68 µs | 15.49 µs | −17 % |
+| `spectroscopy/isotope_pattern_s8` | — | 18.76 µs | 14.79 µs | −21 % |
+| `nuclear/decay_chain_two_step` | — | 261 ns | 238 ns | −9 % |
+| `potential/dihedral_angle` | 20.35 ns | 135 ns | 109 ns | −19 % |
+| `potential/bond_angle` | — | 217 ns | 187 ns | −14 % |
+| `potential/bond_angle_linear` | — | 140 ns | 96 ns | −31 % |
+| `electrochemistry/nernst_potential` | 6.42 ns | 92 ns | 71 ns | −23 % |
+| `electrochemistry/nernst_potential_edge` | — | 214 ns | 187 ns | −13 % |
+| `solution/ionic_strength` | — | 32 ns | 26 ns | −19 % |
+| `solution/solution_conductivity` | — | 74 ns | 71 ns | −4 % |
+| `mathx/cr_log10` | — | 80 ns | 67 ns | −16 % |
+| `mathx/cr_expm1` | — | 51 ns | 46 ns | −10 % |
+| `mathx/cr_expm1_ux` | — | 64 ns | 56 ns | −12 % |
+| `mathx/cr_acos` | — | 139 ns | 140 ns | +1 % |
+| `mathx/cr_pow` | — | 138 ns | 138 ns | +0 % |
+| `thermo/heat_transfer` | 0.95 ns | 68 ns | 62 ns | −9 % |
+| `phase/boiling_point_elevation` | — | 69 ns | 61 ns | −12 % |
+| `phase/freezing_point_depression` | — | 69 ns | 62 ns | −10 % |
+| `spectroscopy/absorbance` | 0.98 ns | 67 ns | 63 ns | −6 % |
+| `spectroscopy/diatomic_moment_of_inertia` | — | 80 ns | 68 ns | −15 % |
+| `spectroscopy/rigid_rotor_energy` | — | 112 ns | 108 ns | −4 % |
+| `thermo/heat_transfer_tie` | — | 377 ns | 311 ns | −18 % |
+
 ## [2.0.0] - 2026-11-13
 
 **The Cyrius port.** kimiya 2.0.0 is a Cyrius library (toolchain 6.7.18, hisab 3.4.1), ported from the Rust crate

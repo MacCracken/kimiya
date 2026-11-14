@@ -99,11 +99,7 @@ fn henry_solubility(partial_pressure: f64, henry_constant: f64): Result {
 fn boiling_point_elevation(kb: f64, molality: f64, van_t_hoff_factor: f64): f64 {
     var f, ok = _km_mul3_fast(kb, molality, van_t_hoff_factor);
     if (ok == 1) { return f; }
-    if (_km_is_finite(kb) != 1 || _km_is_finite(molality) != 1 || _km_is_finite(van_t_hoff_factor) != 1) {
-        var dt: f64 = (kb * molality) * van_t_hoff_factor;
-        return dt;
-    }
-    var r: f64 = _km_cr_mul3(kb, molality, van_t_hoff_factor);
+    var r: f64 = _km_mul3_rest(kb, molality, van_t_hoff_factor);
     return r;
 }
 
@@ -115,11 +111,7 @@ fn boiling_point_elevation(kb: f64, molality: f64, van_t_hoff_factor: f64): f64 
 fn freezing_point_depression(kf: f64, molality: f64, van_t_hoff_factor: f64): f64 {
     var f, ok = _km_mul3_fast(kf, molality, van_t_hoff_factor);
     if (ok == 1) { return f; }
-    if (_km_is_finite(kf) != 1 || _km_is_finite(molality) != 1 || _km_is_finite(van_t_hoff_factor) != 1) {
-        var dt: f64 = (kf * molality) * van_t_hoff_factor;
-        return dt;
-    }
-    var r: f64 = _km_cr_mul3(kf, molality, van_t_hoff_factor);
+    var r: f64 = _km_mul3_rest(kf, molality, van_t_hoff_factor);
     return r;
 }
 
@@ -215,9 +207,21 @@ fn _km_antoine_row(h): i64 {
 #must_use
 fn lookup_antoine(name): i64 {
     if (name == 0) { return 0; }
+    var c0 = load8(name);
+    if (c0 == 0) { return 0; }                # no row has an empty name
     var row = 0;
     while (row < KM_ANTOINE_COUNT) {
-        if (streq(&_KM_ANTOINE_NAME_BYTES + _KM_ANTOINE_NAME_OFF[row], name) == 1) { return row + 1; }
+        var p = &_KM_ANTOINE_NAME_BYTES + _KM_ANTOINE_NAME_OFF[row];
+        # The first byte decides most rows; the rest compare from byte 1 to the first difference or the shared NUL.
+        if (load8(p) == c0) {
+            var i = 1;
+            var b = load8(p + 1);
+            while (b != 0 && b == load8(name + i)) {
+                i = i + 1;
+                b = load8(p + i);
+            }
+            if (b == 0 && load8(name + i) == 0) { return row + 1; }
+        }
         row = row + 1;
     }
     return 0;

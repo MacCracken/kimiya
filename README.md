@@ -2,7 +2,7 @@
 
 **Kimiya** (كيمياء — Arabic for "alchemy", the root of "chemistry") — chemistry engine for the [AGNOS](https://github.com/MacCracken/agnosticos) ecosystem.
 
-Kimiya **2.0.0** is a Cyrius library: a parity port of the Rust crate **1.2.0** (tag `1.2.0`, the crates.io release),
+Kimiya **2.0.1** is a Cyrius library: a parity port of the Rust crate **1.2.0** (tag `1.2.0`, the crates.io release),
 which stays frozen in [`rust-old/`](rust-old/) as the reference implementation. Every function is checked against it
 value by value:
 - **the golden corpus**: 389,119 rows over 22 modules, identical on x86_64 Linux, x86_64 Windows PE and aarch64.
@@ -66,7 +66,7 @@ modules = ["dist/hisab.cyr"]
 
 [deps.kimiya]
 git = "https://github.com/MacCracken/kimiya.git"
-tag = "2.0.0"
+tag = "2.0.1"
 modules = ["dist/kimiya.cyr"]
 ```
 

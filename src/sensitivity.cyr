@@ -22,6 +22,9 @@
 include "lib/alloc.cyr"
 include "lib/hisab.cyr"
 
+# The parameter-index words compute_gradient keeps on the stack.
+const _KM_SENS_STACK = 64;
+
 # The gradient of the equilibrium constant K = exp(−ΔG/(R·T)) with ΔG and T as independent variables: [∂K/∂ΔG in
 # mol/J, (∂K/∂T)_ΔG in K⁻¹] = [−K/(RT), K·ΔG/(RT²)], evaluated as hisab 1.4.0's sweep of the tape −ΔG, R·T, ÷, exp:
 # ∂K/∂ΔG = −(K/(R·T)) and (∂K/∂T)_ΔG = (−(K·(−ΔG))/((R·T)·(R·T)))·R, both 0 where K underflows to 0. The temperature
@@ -29,7 +32,8 @@ include "lib/hisab.cyr"
 # for that, differentiate ΔG° = ΔH° − TΔS° explicitly with compute_gradient. `delta_g_j` in J/mol, `temperature_k` in
 # K; the two entries go to `out` (two f64): Ok(2). Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite;
 # Err(KM_ERR_INVALID_INPUT) if ΔG is not finite; Err(KM_ERR_COMPUTATION_ERROR) if an entry is not finite (K or its
-# derivatives overflow). Mirrors `sensitivity::equilibrium_constant_gradient`, with ADR 0002 #2.
+# derivatives overflow); Err(KM_ERR_INVALID_INPUT) if `out` is null (`out` is untouched on Err). Mirrors
+# `sensitivity::equilibrium_constant_gradient`, with ADR 0002 #2.
 #must_use
 fn equilibrium_constant_gradient(delta_g_j: f64, temperature_k: f64, out): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
@@ -59,6 +63,7 @@ fn equilibrium_constant_gradient(delta_g_j: f64, temperature_k: f64, out): Resul
     var g_dg: f64 = 0.0;
     if (g_neg != 0.0) { g_dg = g_dg - g_neg; }
     if (_km_is_finite(g_dg) != 1 || _km_is_finite(g_t) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (out == 0) { return Err(KM_ERR_INVALID_INPUT); }
     store64(out, g_dg);
     store64(out + 8, g_t);
     return Ok(2);
@@ -70,8 +75,8 @@ fn equilibrium_constant_gradient(delta_g_j: f64, temperature_k: f64, out): Resul
 # (−((A·e)·(−Ea))/((R·T)·(R·T)))·R with e = exp(−Ea/(RT)), the last two 0 where A or A·e is 0. `pre_exponential` A in
 # the units of k, `activation_energy_j` Ea in J/mol, `temperature_k` T in K; the three entries go to `out` (three f64):
 # Ok(3). Err(KM_ERR_INVALID_TEMPERATURE) if T is not positive and finite; Err(KM_ERR_INVALID_INPUT) if A, then Ea, is
-# not finite; Err(KM_ERR_COMPUTATION_ERROR) if an entry is not finite. Mirrors `sensitivity::arrhenius_gradient`, with
-# ADR 0002 #2.
+# not finite; Err(KM_ERR_COMPUTATION_ERROR) if an entry is not finite; Err(KM_ERR_INVALID_INPUT) if `out` is null
+# (`out` is untouched on Err). Mirrors `sensitivity::arrhenius_gradient`, with ADR 0002 #2.
 #must_use
 fn arrhenius_gradient(pre_exponential: f64, activation_energy_j: f64, temperature_k: f64, out): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
@@ -110,6 +115,7 @@ fn arrhenius_gradient(pre_exponential: f64, activation_energy_j: f64, temperatur
     if (_km_is_finite(g_a) != 1 || _km_is_finite(g_ea) != 1 || _km_is_finite(g_t) != 1) {
         return Err(KM_ERR_COMPUTATION_ERROR);
     }
+    if (out == 0) { return Err(KM_ERR_INVALID_INPUT); }
     store64(out, g_a);
     store64(out + 8, g_ea);
     store64(out + 16, g_t);
@@ -122,8 +128,9 @@ fn arrhenius_gradient(pre_exponential: f64, activation_energy_j: f64, temperatur
 # E° in V, `n_electrons` the electrons transferred (Rust's u8, a word), `temperature_k` T in K, `reaction_quotient` Q
 # (dimensionless); the three entries go to `out` (three f64): Ok(3). Err(KM_ERR_INVALID_TEMPERATURE) if T is not
 # positive and finite; Err(KM_ERR_INVALID_INPUT) if n is outside 1 ..= 255, then if Q is not positive and finite, then
-# if E° is not finite; Err(KM_ERR_COMPUTATION_ERROR) if an entry is not finite (−RT/(nFQ) past DBL_MAX). Mirrors
-# `sensitivity::nernst_gradient`, with ADR 0002 #2.
+# if E° is not finite; Err(KM_ERR_COMPUTATION_ERROR) if an entry is not finite (−RT/(nFQ) past DBL_MAX);
+# Err(KM_ERR_INVALID_INPUT) if `out` is null (`out` is untouched on Err). Mirrors `sensitivity::nernst_gradient`, with
+# ADR 0002 #2.
 #must_use
 fn nernst_gradient(standard_potential: f64, n_electrons, temperature_k: f64, reaction_quotient: f64, out): Result {
     if (_km_is_positive(temperature_k) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
@@ -155,6 +162,7 @@ fn nernst_gradient(standard_potential: f64, n_electrons, temperature_k: f64, rea
         g_t = g_t + p;
     }
     if (_km_is_finite(g_t) != 1 || _km_is_finite(g_q) != 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (out == 0) { return Err(KM_ERR_INVALID_INPUT); }
     var one: f64 = 1.0;
     store64(out, one);
     store64(out + 8, g_t);
@@ -181,32 +189,71 @@ fn gibbs_temperature_sensitivity(enthalpy_j: f64, temperature_k: f64, entropy_j_
 # node; one reverse sweep then gives ∂f/∂pₖ for each k, in order, to the caller's buffer `out` (n f64). Ok(n);
 # Err(KM_ERR_INVALID_INPUT) if f or tape is 0, n is negative, parameters or out is null with n > 0, the tape cannot
 # hold the n variables, or the output is not a node of the tape (the tape filled up while f built on it: every hisab
-# op then returns AD_FULL); Err(KM_ERR_COMPUTATION_ERROR) if the index table (past 64 parameters, from the bump
-# allocator) can't be allocated. Non-finite values f produces appear in the gradient as they are. Mirrors
-# `sensitivity::compute_gradient` (ADR 0002 #2: Rust's Result was never Err).
+# op then returns AD_FULL); Err(KM_ERR_COMPUTATION_ERROR) if the index table (past 64 parameters, from
+# src/validate.cyr's pool of reusable work tables) can't be allocated. Overlaps (2.0.1; a tape built through hisab's
+# setters can hold the caller's arrays): Err(KM_ERR_INVALID_INPUT), before the tape is reset, if `parameters` or `out`
+# overlaps the tape's AdTape header or its cap 40-byte nodes, or `out` its cap adjoints other than exactly (out = the
+# adjoint array works: the n variables are nodes 0 .. n − 1, whose adjoints are the gradient). `out` may overlap
+# `parameters`, all read before it is written, and `parameters` the adjoints, written after. Non-finite values f
+# produces appear in the gradient as they are. Mirrors `sensitivity::compute_gradient` (ADR 0002 #2: Rust's Result was
+# never Err).
 #must_use
 fn compute_gradient(f, ctx, tape, parameters, n, out): Result {
     if (f == 0 || tape == 0 || n < 0) { return Err(KM_ERR_INVALID_INPUT); }
     if (n > 0 && (parameters == 0 || out == 0)) { return Err(KM_ERR_INVALID_INPUT); }
-    var st: i64[64];
+    var st: i64[_KM_SENS_STACK];
     var vars = &st;
-    if (n > 64) {
+    var vs = 0 - 1;
+    if (n > _KM_SENS_STACK) {
         if (n > 0x0080000000000000) { return Err(KM_ERR_INVALID_INPUT); }
-        vars = alloc(8 * n);
-        if (vars == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        var q, qs = _km_scratch_take(8 * n);
+        if (q == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+        vars = q;
+        vs = qs;
+    }
+    # The overlaps, before the tape is reset. The tape's storage is hisab 3.4.1's `AdTape { nodes; adj; n; cap; }`
+    # (its fields read in place: an accessor call costs about 5 ns), cap nodes of 40 bytes (val, d1, d2, i1, i2) and
+    # cap adjoints. Each test is src/validate.cyr's _km_overlaps in its signed form, a < b_end && b < a_end, inline (its
+    # five calls made the bench 9 % slower): n ≤ 2⁵⁵ here, so 8·n can't wrap, and a hand-built tape's cap is clamped to
+    # 2⁵⁶, so 40·cap can't (a cap ≤ 0 tape is full, Err(KM_ERR_INVALID_INPUT) for every n > 0 anyway).
+    if (n > 0) {
+        var nodes = load64(tape);
+        var adj = load64(tape + 8);
+        var tc = load64(tape + 24);
+        if (tc > 0x0100000000000000) { tc = 0x0100000000000000; }
+        var he = tape + sizeof(AdTape);
+        var ne = nodes + 40 * tc;
+        var ae = adj + 8 * tc;
+        var nb = 8 * n;
+        if ((parameters < he && tape < parameters + nb) || (parameters < ne && nodes < parameters + nb) ||
+            (out < he && tape < out + nb) || (out < ne && nodes < out + nb) ||
+            (out < ae && adj < out + nb && out != adj)) {
+            _km_scratch_give(vs);
+            return Err(KM_ERR_INVALID_INPUT);
+        }
     }
     ad_tape_reset(tape);
     var k = 0;
     while (k < n) {
         var id = ad_var(tape, load64(parameters + 8 * k));
-        if (id < 0) { return Err(KM_ERR_INVALID_INPUT); }
+        if (id < 0) {
+            _km_scratch_give(vs);
+            return Err(KM_ERR_INVALID_INPUT);
+        }
         store64(vars + 8 * k, id);
         k = k + 1;
     }
     var root = callptr(f, ctx, tape, vars, n);
     var gt, gv = ad_grad(tape, root);
-    if (is_err_result(gt) == 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (is_err_result(gt) == 1) {
+        _km_scratch_give(vs);
+        return Err(KM_ERR_INVALID_INPUT);
+    }
     var wt, wv = ad_grad_write(tape, vars, n, out);
-    if (is_err_result(wt) == 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (is_err_result(wt) == 1) {
+        _km_scratch_give(vs);
+        return Err(KM_ERR_INVALID_INPUT);
+    }
+    _km_scratch_give(vs);
     return Ok(n);
 }

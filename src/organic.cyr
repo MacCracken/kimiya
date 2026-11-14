@@ -23,13 +23,6 @@
 #   no error channel (Rust returns a bare f64): a negative n, a null pointer with n > 0, an invalid KmBondType
 #   value or a count outside 0 ..= u32::MAX (never wrapped) gives NaN.
 
-# 1 if the word v is a value of an enum with `count` members (0 ..= count − 1).
-#must_use
-fn _km_is_enum_value(v, count): i64 {
-    if (v < 0 || v >= count) { return 0; }
-    return 1;
-}
-
 # ── bond energies ───────────────────────────────────────────────────────────────────
 
 # Average bond dissociation energy of bond type b (a KmBondType value) in kJ/mol (gas phase, averaged over typical

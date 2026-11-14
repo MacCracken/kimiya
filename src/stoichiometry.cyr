@@ -42,10 +42,11 @@
 #   exact edges (r = 11/10 and 19/10 within, one ulp past them not). `round` halves away from zero, as Rust's
 #   (src/mathx.cyr's _km_round_half_away on the fast path, q + [2R ≥ B] on the exact one).
 # - Work tables: balance_equation's matrix copy, null vector and multi-word tables (ADR 0002 #39), and
-#   empirical_formula's ratios (a double-double each, then the counts), use function-local tables (512, 64, 4,096 and
-#   128 words) and move to the bump allocator (which never frees) only past them; an allocation failure is
-#   Err(KM_ERR_COMPUTATION_ERROR). assign_oxidation_states needs none: each state is a function of the atomic number
-#   once the solved element is known, so the result is written in one pass at the end.
+#   empirical_formula's ratios (a double-double and the count each), use function-local tables (512, 64, 4,096 and
+#   192 words) and move to buffers of src/validate.cyr's pool of reusable work tables only past them (2.0.1: 2.0.0's
+#   bump allocations were never freed); an allocation failure is Err(KM_ERR_COMPUTATION_ERROR).
+#   assign_oxidation_states needs none: each state is a function of the atomic number once the solved element is known,
+#   so the result is written in one pass at the end.
 
 include "lib/alloc.cyr"
 
@@ -769,6 +770,12 @@ const _KM_MAX_COMPOSITION_ENTRY = 9007199254740992;
 # The largest m·n balance_equation takes: 2⁵⁶ words is beyond any address space, so a larger product names no matrix.
 const _KM_BAL_MAX_CELLS = 0x0100000000000000;
 
+# The local tables of the fast path's matrix copy and of the null vector (words), and of the exact path's work; the
+# work-table pool (src/validate.cyr) past each.
+const _KM_BAL_I64_LOCAL = 512;
+const _KM_BAL_X_LOCAL = 64;
+const _KM_BAL_BIG_LOCAL = 4096;
+
 # ADR 0002 #39's size bound B: every minor of the m × n matrix of order at most q = min(m, n) is below 2^B in
 # magnitude. By Hadamard's inequality a minor is at most the product of its rows' Euclidean lengths, each at most its
 # whole row's; a row with z nonzero entries of largest magnitude μ has ‖row‖ ≤ √z·μ < 2^b, b = bitlen(μ) +
@@ -842,24 +849,30 @@ fn _km_balance_bits(matrix, m, n): i64 {
 }
 
 # The fast path (ADR 0002 #39): Rust 1.2.0's fraction-free Gauss–Jordan elimination and null vector on i64 with its
-# checked arithmetic (_km_i64_*_ck, _km_reduce_row), the matrix copied to a local table (the heap past 512 words), the
-# n coefficients to the words at x. 0: x holds them, past Rust's zero, sign and u32 checks; 1: one of Rust's other
-# ComputationErrors (ambiguous, only the trivial solution, a zero coefficient, mixed signs, past u32), or the copy
-# can't be allocated; 2: one of Rust's checked operations overflowed (its overflow Err), where _km_balance_big
-# restarts from the original matrix. While no check fails every value is the exact integer, so 0 and 1 are the
-# exact algorithm's outcome too.
+# checked arithmetic (_km_i64_*_ck, _km_reduce_row), the matrix copied to a local table (past _KM_BAL_I64_LOCAL
+# words, a buffer of src/validate.cyr's work-table pool), the n coefficients to the words at x. 0: x holds them, past
+# Rust's zero, sign and u32 checks; 1: one of Rust's other ComputationErrors (ambiguous, only the trivial solution, a
+# zero coefficient, mixed signs, past u32), or the copy can't be allocated; 2: one of Rust's checked operations
+# overflowed (its overflow Err), where _km_balance_big restarts from the original matrix. While no check fails every
+# value is the exact integer, so 0 and 1 are the exact algorithm's outcome too.
 #must_use
 fn _km_balance_i64(matrix, m, n, x): i64 {
     var cells = m * n;
+    var ast: i64[_KM_BAL_I64_LOCAL];
+    if (cells <= _KM_BAL_I64_LOCAL) { return _km_balance_i64_on(matrix, m, n, x, &ast); }
+    var a, asl = _km_scratch_take(8 * cells);
+    if (a == 0) { return 1; }
+    var r = _km_balance_i64_on(matrix, m, n, x, a);
+    _km_scratch_give(asl);
+    return r;
+}
+
+# _km_balance_i64 with its table of m·n words at a.
+#must_use
+fn _km_balance_i64_on(matrix, m, n, x, a): i64 {
+    var cells = m * n;
+    # The exact integer copy, row-major.
     var k = 0;
-    # The exact integer copy, row-major: a local table, the heap past it.
-    var ast: i64[512];
-    var a = &ast;
-    if (cells > 512) {
-        a = alloc(8 * cells);
-        if (a == 0) { return 1; }
-    }
-    k = 0;
     while (k < cells) {
         store64(a + 8 * k, load64(matrix + 8 * k));
         k = k + 1;
@@ -1016,9 +1029,6 @@ fn _km_balance_i64(matrix, m, n, x): i64 {
     return 0;
 }
 
-# The local work table of the exact path (words); the heap past it.
-const _KM_BAL_BIG_LOCAL = 4096;
-
 # The exact slow path (ADR 0002 #39): Rust 1.2.0's elimination exactly as written — the pivot search, the swap,
 # reduce_row, the sign flip, row_r ← pivot·row_r − factor·row_pivot then reduce_row, the lcm of the pivots,
 # x[c] = −(row[f]·(lcm/piv)), reduce_row(x), the zero, sign and u32 checks — on signed multi-word integers
@@ -1028,8 +1038,9 @@ const _KM_BAL_BIG_LOCAL = 4096;
 # entry of the original matrix) is below 2^B, the lcm and x too, and a product or difference before reduce_row below
 # 2^(2B + 1). So a matrix slot holds B/31 + 2 limbs (one past the bound: _km_sb_divexact's untrimmed top limb) and a
 # work slot twice that plus two; the words are m row pointers, m·n matrix slots, and n scratch, n null-vector and eleven
-# work slots: a local table of 4,096 words, the bump allocator (which never frees) past it — a 40 × 41 matrix of
-# 2⁵³ entries (B = 2,280) takes about 1.1 MB a call. The rows are swapped through their pointers.
+# work slots: a local table of 4,096 words, a buffer of src/validate.cyr's work-table pool past it (2.0.1; 2.0.0's
+# bump allocation was never freed) — a 40 × 41 matrix of 2⁵³ entries (B = 2,280) takes about 1.1 MB. The rows are
+# swapped through their pointers.
 #must_use
 fn _km_balance_big(matrix, m, n, x): i64 {
     var bb = _km_balance_bits(matrix, m, n);
@@ -1039,12 +1050,18 @@ fn _km_balance_big(matrix, m, n, x): i64 {
     var lim = 0x0000010000000000;           # 2⁴⁰ words: past the allocator's 2 GiB limit many times over
     if (ss > lim / (m * n) || ws > lim / (2 * n + 11)) { return 1; }
     var words = m + m * n * ss + (2 * n + 11) * ws;
-    var wst: i64[4096];
-    var w = &wst;
-    if (words > _KM_BAL_BIG_LOCAL) {
-        w = alloc(8 * words);
-        if (w == 0) { return 1; }
-    }
+    var wst: i64[_KM_BAL_BIG_LOCAL];
+    if (words <= _KM_BAL_BIG_LOCAL) { return _km_balance_big_on(matrix, m, n, x, &wst, cs, ss, ws); }
+    var w, wsl = _km_scratch_take(8 * words);
+    if (w == 0) { return 1; }
+    var r = _km_balance_big_on(matrix, m, n, x, w, cs, ss, ws);
+    _km_scratch_give(wsl);
+    return r;
+}
+
+# _km_balance_big on its work table w, with the slot sizes cs (limbs), ss and ws (words) it computed.
+#must_use
+fn _km_balance_big_on(matrix, m, n, x, w, cs, ss, ws): i64 {
     var rows = w;
     var mat = w + 8 * m;
     var scr = mat + 8 * (m * n * ss);
@@ -1226,7 +1243,7 @@ fn _km_balance_big(matrix, m, n, x): i64 {
 # where Rust's i64 overflows the port goes on exactly (Rust's i64 algorithm first, the same steps on multi-word
 # integers from the original matrix at its first overflow: _km_balance_i64, _km_balance_big). Heap: the i64 copy past
 # 512 cells and the null vector past 64 words (8 bytes a word), and the multi-word tables past 4,096 words (about
-# 8·(m·n·B/31 + 4·n·B/31) bytes for _km_balance_bits' B); the bump allocator never frees them.
+# 8·(m·n·B/31 + 4·n·B/31) bytes for _km_balance_bits' B), from src/validate.cyr's pool of reusable work tables.
 # Err(KM_ERR_INVALID_INPUT) if m < 1 (an empty matrix), n < 2 (fewer than two species), (matrix, m·n) is no buffer, or
 # an entry exceeds 2⁵³ in magnitude (ADR 0002 #7: Rust's bound, kept); Err(KM_ERR_COMPUTATION_ERROR) if the equation
 # cannot be balanced (only the trivial solution), is ambiguous (a null space of dimension above 1), needs a zero
@@ -1253,13 +1270,21 @@ fn _km_balance_equation(matrix, m, n, out, cap, force): Result {
         if (v > _KM_MAX_COMPOSITION_ENTRY || v < 0 - _KM_MAX_COMPOSITION_ENTRY) { return Err(KM_ERR_INVALID_INPUT); }
         k = k + 1;
     }
-    # The null vector: a local table, the heap past it.
-    var xst: i64[64];
-    var x = &xst;
-    if (n > 64) {
-        x = alloc(8 * n);
-        if (x == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
-    }
+    # The null vector: a local table, a buffer of the work-table pool past it.
+    var xst: i64[_KM_BAL_X_LOCAL];
+    if (n <= _KM_BAL_X_LOCAL) { return _km_balance_solve(matrix, m, n, out, cap, force, &xst); }
+    var x, xs = _km_scratch_take(8 * n);
+    if (x == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var t, v = _km_balance_solve(matrix, m, n, out, cap, force, x);
+    _km_scratch_give(xs);
+    if (is_ok(t) == 1) { return Ok(v); }
+    return Err(v);
+}
+
+# _km_balance_equation past its input checks, the null vector's n words at x.
+#must_use
+fn _km_balance_solve(matrix, m, n, out, cap, force, x): Result {
+    var k = 0;
     var st = 2;
     if (force != 1) { st = _km_balance_i64(matrix, m, n, x); }
     if (st == 2) { st = _km_balance_big(matrix, m, n, x); }
@@ -1397,8 +1422,10 @@ fn _km_exact_oxidation_state(num, den): (i64, i64, i64) {
 # atom in order, Err(KM_ERR_INVALID_INPUT) for a count outside 1 ..= u32::MAX, then Err(KM_ERR_INVALID_ELEMENT) for an
 # atomic number outside 1 ..= 118; Err(KM_ERR_COMPUTATION_ERROR) if two distinct elements are unknown, if the
 # rule-assigned states cannot balance the charge, on arithmetic overflow, or for a state outside i32;
-# Err(KM_ERR_INVALID_INPUT) if the n records do not fit in cap (`out` untouched). Mirrors
-# `stoichiometry::assign_oxidation_states`, with ADR 0002 #7's rational states.
+# Err(KM_ERR_INVALID_INPUT) if the n records do not fit in cap, or if `out` lies below `atoms` and overlaps its n
+# records (`out` untouched). In place (out = atoms) and any out above atoms work: the records are written from the
+# last down, each after its input record is read. Mirrors `stoichiometry::assign_oxidation_states`, with ADR 0002
+# #7's rational states.
 #must_use
 fn assign_oxidation_states(atoms, n, overall_charge, out, cap): Result {
     if (overall_charge < _KM_I32_MIN || overall_charge > _KM_I32_MAX) { return Err(KM_ERR_INVALID_INPUT); }
@@ -1504,10 +1531,13 @@ fn assign_oxidation_states(atoms, n, overall_charge, out, cap): Result {
         }
     }
     if (out == 0 || cap < n) { return Err(KM_ERR_INVALID_INPUT); }
+    if (out < atoms && out + 24 * n > atoms) { return Err(KM_ERR_INVALID_INPUT); }
     var hf = has_fluorine;
     var mh = others_all_metal;
-    k = 0;
-    while (k < n) {
+    # From the last record down: record k (24 bytes) ends at or below record k + 1's start, so with out ≥ atoms
+    # every write lands past the input words still to be read (atoms + 16·j, j < k).
+    k = n - 1;
+    while (k >= 0) {
         var z2 = load64(atoms + 16 * k);
         var rec = out + 24 * k;
         store64(rec, z2);
@@ -1519,7 +1549,7 @@ fn assign_oxidation_states(atoms, n, overall_charge, out, cap): Result {
             store64(rec + 8, os2);
             store64(rec + 16, 1);
         }
-        k = k + 1;
+        k = k - 1;
     }
     return Ok(n);
 }
@@ -1668,7 +1698,10 @@ fn percent_yield(actual: f64, theoretical: f64): Result {
 # Errors as molecular_weight (Err(KM_ERR_INVALID_ELEMENT) for an atom that names no element;
 # Err(KM_ERR_COMPUTATION_ERROR) for a molecule whose atoms could not be allocated), then Err(KM_ERR_COMPUTATION_ERROR)
 # if the molecular weight is not positive (no atoms, or every count 0); Err(KM_ERR_INVALID_INPUT) if the records do not
-# fit in cap (`out` untouched). Mirrors `stoichiometry::percent_composition`, with ADR 0002 #24.
+# fit in cap, or if `out` starts inside the molecule's atom records past their start (its vec's buffer, reached through
+# lib/vec.cyr's layout: a record would overwrite atoms still to be read) (`out` untouched). out = those records (in
+# place: the molecule is left holding the percentages' bits as counts) and an `out` below them work: record k is
+# written after atom k is read, and below atom k + 1. Mirrors `stoichiometry::percent_composition`, with ADR 0002 #24.
 #must_use
 fn percent_composition(molecule: KmMolecule, out, cap): Result {
     var tw, vw = molecule.molecular_weight();
@@ -1679,6 +1712,7 @@ fn percent_composition(molecule: KmMolecule, out, cap): Result {
     # Rust looks each element up again (an Err that can't arise: molecular_weight succeeded on the same atoms).
     if (out == 0 || cap < na) { return Err(KM_ERR_INVALID_INPUT); }
     var data = load64(molecule.atoms);      # lib/vec.cyr's layout: { data, len, cap }; 2 words per atom
+    if (out > data && out < data + 16 * na) { return Err(KM_ERR_INVALID_INPUT); }
     var k = 0;
     while (k < na) {
         var z = load64(data + 16 * k);
@@ -1808,6 +1842,9 @@ fn _km_emp_close_exact(pi: f64, mi: f64, pj: f64, mj: f64, k): (i64, i64) {
     return (1, q);
 }
 
+# The elements empirical_formula keeps its ratio table for on the stack (2 words each).
+const _KM_EMP_LOCAL = 64;
+
 # The tolerance test of element i's ratio (r̃ₕ, r̃ₗ) with multiplier k: the fast path, the exact one where it can't
 # decide (or always, when force is 1: scripts/oracle/cr_verify.py's check of the exact path). (1, count) or (0, 0).
 #must_use
@@ -1832,7 +1869,10 @@ fn _km_emp_close(rh: f64, rl: f64, k, pi: f64, mi: f64, pj: f64, mj: f64, force)
 # Err(KM_ERR_INVALID_ELEMENT) for an atomic number outside 1 ..= 118, then Err(KM_ERR_INVALID_INPUT) for a mass percent
 # not positive and finite; Err(KM_ERR_COMPUTATION_ERROR) if no multiplier in 1 ..= 6 gives integer ratios within 1/10, a
 # count exceeds u32::MAX (every ratio of 2³² − ½ or more), or a work table can't be allocated; Err(KM_ERR_INVALID_INPUT)
-# if the n records do not fit in cap (`out` untouched). Mirrors `stoichiometry::empirical_formula`, with ADR 0002 #26.
+# if the n records do not fit in cap, or if `out` starts inside `elements` past their start (elements < out <
+# elements + 16·n: a record would overwrite atomic numbers still to be read) (`out` untouched). out = elements (in
+# place) and an `out` below them work: record k is written after element k is read, and below element k + 1. Mirrors
+# `stoichiometry::empirical_formula`, with ADR 0002 #26.
 #must_use
 fn empirical_formula(elements, n, out, cap): Result {
     return _km_empirical_formula(elements, n, out, cap, 0);
@@ -1842,15 +1882,8 @@ fn empirical_formula(elements, n, out, cap): Result {
 # of that path; the result is the same).
 #must_use
 fn _km_empirical_formula(elements, n, out, cap, force): Result {
-    if (n < 0 || (n > 0 && elements == 0)) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_slice(elements, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (n == 0) { return Err(KM_ERR_INVALID_INPUT); }                  # Rust: need at least one element
-    # The ratios as double-doubles (r̃ₕ, r̃ₗ), two words per element, later the counts: a local table, the heap past it.
-    var rst: f64[128];
-    var rt = &rst;
-    if (n > 64) {
-        rt = alloc(16 * n);
-        if (rt == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
-    }
     # Rust's validation, in its order (its mass % → moles conversion can't fail).
     var k = 0;
     while (k < n) {
@@ -1860,13 +1893,30 @@ fn _km_empirical_formula(elements, n, out, cap, force): Result {
         if (_km_is_positive(pct) != 1) { return Err(KM_ERR_INVALID_INPUT); }
         k = k + 1;
     }
+    # The ratios as double-doubles (r̃ₕ, r̃ₗ) and the count the last tolerance test gave, three words per element: a
+    # local table, a buffer of the work-table pool (src/validate.cyr) past it, taken after the validation, so a huge n
+    # gets Rust's per-element errors first.
+    var rst: f64[_KM_EMP_LOCAL * 3];
+    if (n <= _KM_EMP_LOCAL) { return _km_empirical_solve(elements, n, out, cap, force, &rst); }
+    if (n > 0x0080000000000000) { return Err(KM_ERR_COMPUTATION_ERROR); }   # 24·n would overflow
+    var rt, rs = _km_scratch_take(24 * n);
+    if (rt == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    var t, v = _km_empirical_solve(elements, n, out, cap, force, rt);
+    _km_scratch_give(rs);
+    if (is_ok(t) == 1) { return Ok(v); }
+    return Err(v);
+}
+
+# _km_empirical_formula past Rust's validation, its ratio table (24·n bytes: r̃ₕ, r̃ₗ, the count) at rt.
+#must_use
+fn _km_empirical_solve(elements, n, out, cap, force, rt): Result {
     # The exact minimum of the moles pct/mass (element j): the rounded quotients decide unless they are equal (RN is
     # monotone), and _km_ratio_lt decides those.
     var j = 0;
     var pj: f64 = load64(elements + 8);
     var mj: f64 = KM_ELEMENT_ATOMIC_MASS[load64(elements) - 1];
     var qj: f64 = pj / mj;
-    k = 1;
+    var k = 1;
     while (k < n) {
         var pk: f64 = load64(elements + 16 * k + 8);
         var mk: f64 = KM_ELEMENT_ATOMIC_MASS[load64(elements + 16 * k) - 1];
@@ -1908,8 +1958,8 @@ fn _km_empirical_formula(elements, n, out, cap, force): Result {
         var rh: f64 = y0 * sc;
         var rl: f64 = d * sc;
         if (rh >= rmax) { return Err(KM_ERR_COMPUTATION_ERROR); }
-        store64(rt + 16 * k, rh);
-        store64(rt + 16 * k + 8, rl);
+        store64(rt + 24 * k, rh);
+        store64(rt + 24 * k + 8, rl);
         k = k + 1;
     }
     # The smallest multiplier that brings every ratio within 1/10 of an integer.
@@ -1919,35 +1969,33 @@ fn _km_empirical_formula(elements, n, out, cap, force): Result {
         var all = 1;
         var i = 0;
         while (i < n && all == 1) {
-            var ri: f64 = load64(rt + 16 * i);
-            var li: f64 = load64(rt + 16 * i + 8);
+            var ri: f64 = load64(rt + 24 * i);
+            var li: f64 = load64(rt + 24 * i + 8);
             var pi: f64 = load64(elements + 16 * i + 8);
             var mi: f64 = KM_ELEMENT_ATOMIC_MASS[load64(elements + 16 * i) - 1];
             var st, c = _km_emp_close(ri, li, kk, pi, mi, pj, mj, force);
             if (st != 1) { all = 0; }
+            store64(rt + 24 * i + 16, c);   # round(rᵢ·kk) when it passes: the count, if kk is the multiplier
             i = i + 1;
         }
         if (all == 1) { mult = kk; }
         kk = kk + 1;
     }
     if (mult == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }         # Rust: no multiplier in 1..=6
-    # The counts, round(rᵢ·mult) (each passes the test at mult, so the same path gives it); past u32::MAX Rust's Err.
+    # The counts, round(rᵢ·mult): the search pass at mult, every element's test passing, stored them; past u32::MAX
+    # Rust's Err.
     k = 0;
     while (k < n) {
-        var rc: f64 = load64(rt + 16 * k);
-        var lc: f64 = load64(rt + 16 * k + 8);
-        var pc: f64 = load64(elements + 16 * k + 8);
-        var mc: f64 = KM_ELEMENT_ATOMIC_MASS[load64(elements + 16 * k) - 1];
-        var stc, cnt = _km_emp_close(rc, lc, mult, pc, mc, pj, mj, force);
-        if (stc != 1 || cnt > _KM_U32_MAX) { return Err(KM_ERR_COMPUTATION_ERROR); }
-        store64(rt + 16 * k, cnt);
+        var cnt = load64(rt + 24 * k + 16);
+        if (cnt > _KM_U32_MAX) { return Err(KM_ERR_COMPUTATION_ERROR); }
         k = k + 1;
     }
     if (out == 0 || cap < n) { return Err(KM_ERR_INVALID_INPUT); }
+    if (out > elements && out < elements + 16 * n) { return Err(KM_ERR_INVALID_INPUT); }
     k = 0;
     while (k < n) {
         store64(out + 16 * k, load64(elements + 16 * k));
-        store64(out + 16 * k + 8, load64(rt + 16 * k));
+        store64(out + 16 * k + 8, load64(rt + 24 * k + 16));
         k = k + 1;
     }
     return Ok(n);

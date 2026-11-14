@@ -15,8 +15,9 @@
 #   `PolynomialFit { coefficients: Vec<f64> }` is struct KmPolynomialFit, a view of a coefficient buffer (its pointer
 #   and length), with Rust's two methods. fit_polynomial writes the coefficients to the caller's buffer `out` of `cap`
 #   f64 (Err(KM_ERR_INVALID_INPUT) when they don't fit, after Rust's errors, `out` untouched).
-# - Work tables (the linearised data, the QR's Q and R) are on the stack while small and come from the bump allocator
-#   otherwise (never freed); a table that can't be allocated is Err(KM_ERR_COMPUTATION_ERROR).
+# - Work tables (the linearised data, the QR's Q and R) are on the stack while small and come from src/validate.cyr's
+#   pool of reusable work tables otherwise (2.0.1: 2.0.0's bump allocations were never freed); a table that can't be
+#   allocated is Err(KM_ERR_COMPUTATION_ERROR).
 
 include "lib/alloc.cyr"
 
@@ -59,12 +60,10 @@ impl KmPolynomialFit {
     }
 }
 
-# 1 if (p, n) is a slice of f64: n ≥ 0, and p not null when n > 0.
-#must_use
-fn _km_fit_slice(p, n): i64 {
-    if (n < 0 || (n > 0 && p == 0)) { return 0; }
-    return 1;
-}
+# Work-table words fit_arrhenius keeps on the stack (x and y, 2 per point: 32 points), and fit_polynomial's
+# coefficient table (16: degree 15).
+const _KM_FIT_STACK = 64;
+const _KM_FIT_COEF_STACK = 16;
 
 # Fits the Arrhenius parameters (A, Ea) to n (temperature, rate constant) pairs: x = 1/T, y = ln k (correctly
 # rounded), then hisab 1.4.0's degree-1 least squares y = a₀ + a₁·x, so A = exp(a₀) (correctly rounded) and
@@ -73,17 +72,18 @@ fn _km_fit_slice(p, n): i64 {
 # than 2 points; then, pair by pair, Err(KM_ERR_INVALID_TEMPERATURE) for a temperature that is not positive and finite
 # and Err(KM_ERR_INVALID_INPUT) for a rate constant that is not; Err(KM_ERR_COMPUTATION_ERROR) if the least squares
 # fails (equal temperatures, or 1/T so close that the QR's second column falls below 10⁻¹²) or a table can't be
-# allocated. A or Ea may come out ±∞ or NaN where 1/T or exp overflows (a subnormal T), as in Rust. Mirrors
-# `fitting::fit_arrhenius`, whose ArrheniusFit `out` receives.
+# allocated; Err(KM_ERR_INVALID_INPUT) if `out` is null (after Rust's errors; `out` is untouched on Err). A or Ea may
+# come out ±∞ or NaN where 1/T or exp overflows (a subnormal T), as in Rust. Mirrors `fitting::fit_arrhenius`, whose
+# ArrheniusFit `out` receives.
 #must_use
 fn fit_arrhenius(temperatures_k, nt, rate_constants, nk, out): Result {
-    if (_km_fit_slice(temperatures_k, nt) != 1 || _km_fit_slice(rate_constants, nk) != 1) {
+    if (_km_is_slice(temperatures_k, nt) != 1 || _km_is_slice(rate_constants, nk) != 1) {
         return Err(KM_ERR_INVALID_INPUT);
     }
     if (nt != nk) { return Err(KM_ERR_INVALID_INPUT); }
     if (nt < 2) { return Err(KM_ERR_INVALID_INPUT); }
-    var st: f64[64];
-    var w = _km_num_table(&st, 64, 2 * nt);
+    var st: f64[_KM_FIT_STACK];
+    var w, ws = _km_num_table(&st, _KM_FIT_STACK, 2 * nt, 1);
     if (w == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
     var x = w;
     var y = w + 8 * nt;
@@ -91,8 +91,14 @@ fn fit_arrhenius(temperatures_k, nt, rate_constants, nk, out): Result {
     while (k < nt) {
         var t: f64 = load64(temperatures_k + 8 * k);
         var kr: f64 = load64(rate_constants + 8 * k);
-        if (_km_is_positive(t) != 1) { return Err(KM_ERR_INVALID_TEMPERATURE); }
-        if (_km_is_positive(kr) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+        if (_km_is_positive(t) != 1) {
+            _km_scratch_give(ws);
+            return Err(KM_ERR_INVALID_TEMPERATURE);
+        }
+        if (_km_is_positive(kr) != 1) {
+            _km_scratch_give(ws);
+            return Err(KM_ERR_INVALID_INPUT);
+        }
         var xi: f64 = 1.0 / t;
         var yi: f64 = _km_cr_ln(kr);
         store64(x + 8 * k, xi);
@@ -101,14 +107,22 @@ fn fit_arrhenius(temperatures_k, nt, rate_constants, nk, out): Result {
     }
     var c: f64[2];
     var r, v = _km_least_squares_poly(x, y, nt, 1, &c);
-    if (is_err_result(r) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (is_err_result(r) == 1) {
+        _km_scratch_give(ws);
+        return Err(KM_ERR_COMPUTATION_ERROR);
+    }
     var ln_a: f64 = load64(&c);
     var slope: f64 = load64(&c + 8);
     var a: f64 = _km_cr_exp(ln_a);
     var ns: f64 = -slope;
     var ea: f64 = ns * KM_GAS_CONSTANT;
+    if (out == 0) {
+        _km_scratch_give(ws);
+        return Err(KM_ERR_INVALID_INPUT);
+    }
     store64(out, a);
     store64(out + 8, ea);
+    _km_scratch_give(ws);
     return Ok(2);
 }
 
@@ -121,7 +135,7 @@ fn fit_arrhenius(temperatures_k, nt, rate_constants, nk, out): Result {
 # as in Rust. Mirrors `fitting::fit_polynomial`, whose PolynomialFit `out` (with the count) becomes.
 #must_use
 fn fit_polynomial(x, nx, y, ny, degree, out, cap): Result {
-    if (_km_fit_slice(x, nx) != 1 || _km_fit_slice(y, ny) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_is_slice(x, nx) != 1 || _km_is_slice(y, ny) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (nx != ny) { return Err(KM_ERR_INVALID_INPUT); }
     if (degree < 0 || nx <= degree) { return Err(KM_ERR_INVALID_INPUT); }
     var k = 0;
@@ -137,13 +151,20 @@ fn fit_polynomial(x, nx, y, ny, degree, out, cap): Result {
         k = k + 1;
     }
     var n = degree + 1;
-    var st: f64[16];
-    var c = _km_num_table(&st, 16, n);
+    var st: f64[_KM_FIT_COEF_STACK];
+    var c, cs = _km_num_table(&st, _KM_FIT_COEF_STACK, n, 1);
     if (c == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
     var r, v = _km_least_squares_poly(x, y, nx, degree, c);
-    if (is_err_result(r) == 1) { return Err(KM_ERR_COMPUTATION_ERROR); }
-    if (out == 0 || cap < n) { return Err(KM_ERR_INVALID_INPUT); }
+    if (is_err_result(r) == 1) {
+        _km_scratch_give(cs);
+        return Err(KM_ERR_COMPUTATION_ERROR);
+    }
+    if (out == 0 || cap < n) {
+        _km_scratch_give(cs);
+        return Err(KM_ERR_INVALID_INPUT);
+    }
     _km_num_copy(out, c, n);
+    _km_scratch_give(cs);
     return Ok(n);
 }
 
@@ -155,7 +176,7 @@ fn fit_polynomial(x, nx, y, ny, degree, out, cap): Result {
 # `fitting::fit_beer_lambert`.
 #must_use
 fn fit_beer_lambert(concentrations, nc, absorbances, na, path_length: f64): Result {
-    if (_km_fit_slice(concentrations, nc) != 1 || _km_fit_slice(absorbances, na) != 1) {
+    if (_km_is_slice(concentrations, nc) != 1 || _km_is_slice(absorbances, na) != 1) {
         return Err(KM_ERR_INVALID_INPUT);
     }
     if (_km_is_positive(path_length) != 1) { return Err(KM_ERR_INVALID_INPUT); }

@@ -4,6 +4,10 @@
 # (port plan §6.3), so `m[i][j]` is entry i·n + j and `m.len()` the row count; `rate_ragged_matrix_is_error` has no
 # direct counterpart (a flat matrix has one row length): its group checks the nearest Cyrius case, a rate vector longer
 # or shorter than the rows. The golden corpus separately checks every function over its grid (tests/parity.tcyr).
+#
+# 2.0.1: cyrius_201_no_growth (sparse_stoichiometric_matrix's dense table from the work-table pool),
+# cyrius_201_stoichiometric_matrix_overlap and cyrius_201_rate_overlap (an `out` overlapping an input it would
+# overwrite before reading is refused; in place works where the loop allows it).
 
 include "src/error.cyr"
 include "src/constants.cyr"
@@ -328,6 +332,124 @@ fn _t_cyrius_usize_words() {
     assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "2 rates in a buffer of 1");
 }
 
+# 2.0.1: sparse_stoichiometric_matrix's dense table (past 256 entries) comes from src/validate.cyr's pool, so a call
+# allocates only the CSR handle it returns (the caller's), the same bytes as compressing the dense matrix alone, and
+# every slot is given back.
+fn _t_cyrius_201_no_growth() {
+    test_group("cyrius_201_no_growth");
+    var tt: i64[4];
+    term(&tt, 0, 1.0);
+    term(&tt + 16, 1, 1.0);
+    var rx = alloc(32 * 60);
+    var j = 0;
+    while (j < 60) {
+        reaction(rx + 32 * j, &tt, 1, &tt + 16, 1);
+        j = j + 1;
+    }
+    var dense = alloc(8 * 300);
+    var dt, dv = stoichiometric_matrix(5, rx, 60, dense, 300);
+    assert(is_ok(dt) == 1 && dv == 300, "the dense 5 × 60 matrix");
+    var a0 = alloc_used();
+    var h = _km_csr_from_dense(dense, 5, 60);
+    var csr_bytes = alloc_used() - a0;
+    assert(h != 0 && csr_bytes > 0, "the CSR alone");
+    var t0, c0 = sparse_stoichiometric_matrix(5, rx, 60);
+    var round = 0;
+    while (round < 3) {
+        var u0 = alloc_used();
+        var t, c = sparse_stoichiometric_matrix(5, rx, 60);
+        assert(is_ok(t) == 1 && csr_nnz(c) == 120, "Ok, 120 entries");
+        assert_eq(alloc_used() - u0, csr_bytes, "a call allocates the returned CSR only");
+        assert(_km_scratch_claimed() == 0, "every slot given back");
+        round = round + 1;
+    }
+}
+
+# 2.0.1: stoichiometric_matrix zeroes the matrix before it reads the reaction records, so a matrix at `out` that
+# overlaps the records or a term list, in place included, is Err(InvalidInput), the records untouched (it used to read
+# zeroed or overwritten records: a wrong matrix, or a fault on a garbage term pointer); an `out` ending at the
+# records or starting just past the term lists gives the separate buffer's matrix.
+fn _t_cyrius_201_stoichiometric_matrix_overlap() {
+    test_group("cyrius_201_stoichiometric_matrix_overlap");
+    var io = alloc(1024);
+    var rr = io + 256;                      # the two reaction records (64 bytes)
+    var tl = io + 512;                      # their four term lists, one term each (64 bytes)
+    term(tl, 0, 1.0);
+    term(tl + 16, 1, 1.0);
+    term(tl + 32, 1, 1.0);
+    term(tl + 48, 2, 1.0);
+    reaction(rr, tl, 1, tl + 16, 1);
+    reaction(rr + 32, tl + 32, 1, tl + 48, 1);
+    var sep: f64[6];
+    var t0, v0 = stoichiometric_matrix(3, rr, 2, &sep, 6);
+    var b0: f64 = at(&sep, 2, 1, 0);
+    var b1: f64 = at(&sep, 2, 1, 1);
+    assert(is_ok(t0) == 1 && v0 == 6 && b0 == 1.0 && b1 == -1.0, "separate out: 3 × 2");
+    var t1, v1 = stoichiometric_matrix(3, rr, 2, rr, 6);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_INPUT) == 1, "in place (out = the records): InvalidInput");
+    var t2, v2 = stoichiometric_matrix(3, rr, 2, rr + 40, 6);
+    assert(is_err_code(t2, v2, KM_ERR_INVALID_INPUT) == 1, "out inside the records: InvalidInput");
+    var t3, v3 = stoichiometric_matrix(3, rr, 2, rr - 47, 6);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT) == 1, "the records' first byte inside out: InvalidInput");
+    var t4, v4 = stoichiometric_matrix(3, rr, 2, tl + 48, 6);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "out over the last term list: InvalidInput");
+    var t5, v5 = stoichiometric_matrix(3, rr, 2, tl - 40, 6);
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_INPUT) == 1, "out over the first term list: InvalidInput");
+    var t6, v6 = stoichiometric_matrix(3, rr, 2, tl + 1, 6);
+    assert(is_err_code(t6, v6, KM_ERR_INVALID_INPUT) == 1, "a misaligned overlap: InvalidInput");
+    var same = 1;
+    if (load64(rr) != tl || load64(rr + 8) != 1 || load64(rr + 48) != tl + 48 || load64(rr + 56) != 1) { same = 0; }
+    var c3: f64 = load64(tl + 56);
+    if (load64(tl + 48) != 2 || c3 != 1.0) { same = 0; }
+    assert(same == 1, "the records untouched by the refused calls");
+    var t7, v7 = stoichiometric_matrix(3, rr, 2, rr - 48, 6);
+    assert(is_ok(t7) == 1 && v7 == 6 && memeq(&sep, rr - 48, 48) == 1, "out ending at the records: Ok");
+    var t8, v8 = stoichiometric_matrix(3, rr, 2, tl + 64, 6);
+    assert(is_ok(t8) == 1 && v8 == 6 && memeq(&sep, tl + 64, 48) == 1, "out just past the term lists: Ok");
+}
+
+# 2.0.1: rate_from_stoichiometry reads every rate for each species, and row i + 1 after writing species i's rate, so an
+# `out` overlapping the rates, or starting inside the matrix past its first entry, is Err(InvalidInput), the inputs
+# untouched (it used to read rates and rows it had overwritten); out = the matrix (in place) and an `out` below it,
+# overlapping, give the separate buffer's rates.
+fn _t_cyrius_201_rate_overlap() {
+    test_group("cyrius_201_rate_overlap");
+    var io = alloc(1024);
+    var mat = io + 256;                     # [−1, 0.5; 1, −2; 0, 1]
+    var rates = io + 512;                   # [0.25, 3]
+    var sm: f64[6];
+    sm[0] = -1.0; sm[1] = 0.5; sm[2] = 1.0; sm[3] = -2.0; sm[4] = 0.0; sm[5] = 1.0;
+    var sr: f64[2];
+    sr[0] = 0.25; sr[1] = 3.0;
+    memcpy(mat, &sm, 48);
+    memcpy(rates, &sr, 16);
+    var sep: f64[3];
+    var t0, v0 = rate_from_stoichiometry(mat, 3, 2, rates, 2, &sep, 3);
+    var r0: f64 = sep[0];
+    var r1: f64 = sep[1];
+    var r2: f64 = sep[2];
+    assert(is_ok(t0) == 1 && v0 == 3 && r0 == 1.25 && r1 == -5.75 && r2 == 3.0, "separate out: 3 rates");
+    var t1, v1 = rate_from_stoichiometry(mat, 3, 2, rates, 2, mat, 3);
+    assert(is_ok(t1) == 1 && v1 == 3 && memeq(&sep, mat, 24) == 1, "in place (out = the matrix) = separate buffer");
+    memcpy(mat, &sm, 48);
+    var t2, v2 = rate_from_stoichiometry(mat, 3, 2, rates, 2, mat - 16, 3);
+    assert(is_ok(t2) == 1 && v2 == 3 && memeq(&sep, mat - 16, 24) == 1, "out = matrix − 16, overlapping: Ok");
+    memcpy(mat, &sm, 48);
+    var t3, v3 = rate_from_stoichiometry(mat, 3, 2, rates, 2, mat + 16, 3);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT) == 1, "out inside the matrix (row 1): InvalidInput");
+    var t4, v4 = rate_from_stoichiometry(mat, 3, 2, rates, 2, mat + 1, 3);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "a misaligned overlap: InvalidInput");
+    var t5, v5 = rate_from_stoichiometry(mat, 3, 2, rates, 2, rates, 3);
+    assert(is_err_code(t5, v5, KM_ERR_INVALID_INPUT) == 1, "out = the rates: InvalidInput");
+    var t6, v6 = rate_from_stoichiometry(mat, 3, 2, rates, 2, rates - 16, 3);
+    assert(is_err_code(t6, v6, KM_ERR_INVALID_INPUT) == 1, "the rates' first value inside out: InvalidInput");
+    var t7, v7 = rate_from_stoichiometry(mat, 3, 2, rates, 2, rates + 8, 3);
+    assert(is_err_code(t7, v7, KM_ERR_INVALID_INPUT) == 1, "out over the last rate: InvalidInput");
+    assert(memeq(mat, &sm, 48) == 1 && memeq(rates, &sr, 16) == 1, "the inputs untouched by the refused calls");
+    var t8, v8 = rate_from_stoichiometry(mat, 3, 2, rates, 2, rates - 24, 3);
+    assert(is_ok(t8) == 1 && memeq(&sep, rates - 24, 24) == 1, "out ending at the rates: Ok");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main(): i64 {
     setup();
@@ -345,6 +467,9 @@ fn main(): i64 {
     _t_cyrius_csr_threshold();
     _t_cyrius_rank_transcription();
     _t_cyrius_usize_words();
+    _t_cyrius_201_no_growth();
+    _t_cyrius_201_stoichiometric_matrix_overlap();
+    _t_cyrius_201_rate_overlap();
     return assert_summary();
 }
 

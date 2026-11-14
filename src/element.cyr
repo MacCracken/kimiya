@@ -48,14 +48,19 @@ fn element_lookup_by_symbol(sym): i64 {
     if (sym == 0) { return 0; }
     var c0 = load8(sym);
     if (c0 == 0) { return 0; }
-    var n = strlen(sym);
     var row = 0;
     while (row < KM_ELEMENT_COUNT) {
         var p = &_KM_ELEMENT_SYMBOL_BYTES + _KM_ELEMENT_SYMBOL_OFF[row];
-        # The first byte decides most rows. memeq stops at the first differing byte, so it reads
-        # no further than p's NUL (sym has no NUL in its first n bytes).
+        # The first byte decides most rows; the rest compare from byte 1 to the first difference or the shared NUL
+        # (sym is read no further than p's NUL).
         if (load8(p) == c0) {
-            if (memeq(p, sym, n) == 1 && load8(p + n) == 0) { return row + 1; }
+            var i = 1;
+            var b = load8(p + 1);
+            while (b != 0 && b == load8(sym + i)) {
+                i = i + 1;
+                b = load8(p + i);
+            }
+            if (b == 0 && load8(sym + i) == 0) { return row + 1; }
         }
         row = row + 1;
     }

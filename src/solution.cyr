@@ -48,13 +48,6 @@
 #   the charge as an i64 word — and the count n, as thermochem's species lists. It has no error channel (Rust
 #   returns a bare f64): a negative n, a null pointer with n > 0, or a charge outside the i32 range gives NaN.
 
-# 1 if the word z is a Rust i32 (−2³¹ ..= 2³¹ − 1).
-#must_use
-fn _km_is_i32(z): i64 {
-    if (z < (0 - 0x80000000) || z > 0x7FFFFFFF) { return 0; }
-    return 1;
-}
-
 # ── concentration units ─────────────────────────────────────────────────────────────
 
 # Molarity M = moles / volume_liters in mol/L, from the amount of solute (mol) and the solution volume (L).
@@ -247,21 +240,27 @@ fn weak_base_ph(kb: f64, concentration: f64): Result {
 fn ionic_strength(ions, n): f64 {
     if (n < 0 || (n > 0 && ions == 0)) { return _km_nan(); }
     var s: f64 = -0.0;
-    var fin = 1;
     var k = 0;
     while (k < n) {
         var c: f64 = load64(ions + k * 16);
         var zi = load64(ions + k * 16 + 8);
-        if (_km_is_i32(zi) != 1) { return _km_nan(); }
+        if (zi < (0 - 0x80000000) || zi > 0x7FFFFFFF) { return _km_nan(); }   # _km_is_i32, inline
         var z: f64 = f64_from(zi);
         var term: f64 = (c * z) * z;
         s = s + term;
-        if (_km_is_finite(c) != 1) { fin = 0; }
         k = k + 1;
     }
     var i: f64 = 0.5 * s;
     var ds: f64 = s - s;
-    if (ds == 0.0 || fin != 1) { return i; }
+    if (ds == 0.0) { return i; }
+    # A non-finite sum: Rust's ½·Σ when a concentration is not finite (scanned only here, the rare case), else the
+    # unbounded evaluation.
+    k = 0;
+    while (k < n) {
+        var c2: f64 = load64(ions + k * 16);
+        if (_km_is_finite(c2) != 1) { return i; }
+        k = k + 1;
+    }
     var u: f64 = _km_ionic_strength_ux(ions, n);
     return u;
 }
@@ -327,16 +326,24 @@ fn debye_huckel_limiting(charge, ionic_str: f64, a_constant: f64): Result {
     return Ok(gamma);
 }
 
-# debye_huckel_limiting's log₁₀ γ with an unbounded exponent (ADR 0002 #35), for its validated inputs: Rust's
-# ((−A)·z)·z and √I rounded to 53 bits (src/mathx.cyr's _km_ux_*), the final product rounded once into binary64.
+# Rust's ((−A)·z)·z with an unbounded exponent (ADR 0002 #35): the prologue the three activity-coefficient _ux helpers
+# share (2.0.1), z the charge as an exact double, each product rounded to 53 bits (src/mathx.cyr's _km_ux_*).
 #must_use
-fn _km_dh_limiting_arg_ux(charge, ionic_str: f64, a_constant: f64): f64 {
+fn _km_dh_az2_ux(charge, a_constant: f64): (f64, i64) {
     var z: f64 = f64_from(charge);
     var zs, ze = _km_ux_from(z);
     var as, ae = _km_ux_from(a_constant);
     var ns, ne = _km_ux_neg(as, ae);
     var ps, pe = _km_ux_mul(ns, ne, zs, ze);
     var qs, qe = _km_ux_mul(ps, pe, zs, ze);
+    return (qs, qe);
+}
+
+# debye_huckel_limiting's log₁₀ γ with an unbounded exponent (ADR 0002 #35), for its validated inputs: Rust's
+# ((−A)·z)·z and √I rounded to 53 bits (src/mathx.cyr's _km_ux_*), the final product rounded once into binary64.
+#must_use
+fn _km_dh_limiting_arg_ux(charge, ionic_str: f64, a_constant: f64): f64 {
+    var qs, qe = _km_dh_az2_ux(charge, a_constant);
     var is, ie = _km_ux_from(ionic_str);
     var rs, re = _km_ux_sqrt(is, ie);
     var x: f64 = _km_ux_mul_f64(qs, qe, rs, re);
@@ -384,12 +391,7 @@ fn debye_huckel_extended(charge, ionic_str: f64, a_constant: f64, b_constant: f6
 # is at least 1), the quotient rounded once into binary64.
 #must_use
 fn _km_dh_extended_arg_ux(charge, ionic_str: f64, a_constant: f64, b_constant: f64, ion_size: f64): f64 {
-    var z: f64 = f64_from(charge);
-    var zs, ze = _km_ux_from(z);
-    var as, ae = _km_ux_from(a_constant);
-    var ns, ne = _km_ux_neg(as, ae);
-    var ps, pe = _km_ux_mul(ns, ne, zs, ze);
-    var qs, qe = _km_ux_mul(ps, pe, zs, ze);
+    var qs, qe = _km_dh_az2_ux(charge, a_constant);
     var is, ie = _km_ux_from(ionic_str);
     var rs, re = _km_ux_sqrt(is, ie);
     var us, ue = _km_ux_mul(qs, qe, rs, re);
@@ -437,12 +439,7 @@ fn davies_activity(charge, ionic_str: f64, a_constant: f64): Result {
 # binary64.
 #must_use
 fn _km_davies_arg_ux(charge, ionic_str: f64, a_constant: f64): f64 {
-    var z: f64 = f64_from(charge);
-    var zs, ze = _km_ux_from(z);
-    var as, ae = _km_ux_from(a_constant);
-    var ns, ne = _km_ux_neg(as, ae);
-    var ps, pe = _km_ux_mul(ns, ne, zs, ze);
-    var qs, qe = _km_ux_mul(ps, pe, zs, ze);
+    var qs, qe = _km_dh_az2_ux(charge, a_constant);
     var is, ie = _km_ux_from(ionic_str);
     var rs, re = _km_ux_sqrt(is, ie);
     var one: f64 = 1.0;
@@ -563,6 +560,13 @@ fn solution_conductivity(molar_conductivity: f64, concentration: f64): f64 {
         var kappa: f64 = (molar_conductivity * concentration) / 1000.0;
         return kappa;
     }
-    var r: f64 = _km_cr_mul_div(molar_conductivity, concentration, 1000.0);
+    # _km_cr_mul_div past its fast path, which just failed: _km_cr_mono directly.
+    var nb: f64[2];
+    store64(&nb, molar_conductivity);
+    store64(&nb + 8, concentration);
+    var db: f64[1];
+    var thousand: f64 = 1000.0;
+    store64(&db, thousand);
+    var r: f64 = _km_cr_mono(&nb, 2, &db, 1);
     return r;
 }

@@ -21,13 +21,16 @@ enum KmError {
 # "Unknown" for a value that is no code.
 #must_use
 fn km_error_name(code): i64 {
-    if (code == KM_ERR_NONE) { return "None"; }
-    if (code == KM_ERR_INVALID_ELEMENT) { return "InvalidElement"; }
-    if (code == KM_ERR_INVALID_REACTION) { return "InvalidReaction"; }
-    if (code == KM_ERR_INVALID_CONCENTRATION) { return "InvalidConcentration"; }
-    if (code == KM_ERR_INVALID_TEMPERATURE) { return "InvalidTemperature"; }
-    if (code == KM_ERR_INVALID_INPUT) { return "InvalidInput"; }
-    if (code == KM_ERR_COMPUTATION_ERROR) { return "ComputationError"; }
+    match code {
+        KM_ERR_NONE => { return "None"; }
+        KM_ERR_INVALID_ELEMENT => { return "InvalidElement"; }
+        KM_ERR_INVALID_REACTION => { return "InvalidReaction"; }
+        KM_ERR_INVALID_CONCENTRATION => { return "InvalidConcentration"; }
+        KM_ERR_INVALID_TEMPERATURE => { return "InvalidTemperature"; }
+        KM_ERR_INVALID_INPUT => { return "InvalidInput"; }
+        KM_ERR_COMPUTATION_ERROR => { return "ComputationError"; }
+        _ => { return "Unknown"; }
+    }
     return "Unknown";
 }
 
@@ -36,12 +39,15 @@ fn km_error_name(code): i64 {
 # "unknown error" for a value that is no code.
 #must_use
 fn km_error_message(code): i64 {
-    if (code == KM_ERR_NONE) { return "no error"; }
-    if (code == KM_ERR_INVALID_ELEMENT) { return "invalid element"; }
-    if (code == KM_ERR_INVALID_REACTION) { return "invalid reaction"; }
-    if (code == KM_ERR_INVALID_CONCENTRATION) { return "invalid concentration"; }
-    if (code == KM_ERR_INVALID_TEMPERATURE) { return "invalid temperature"; }
-    if (code == KM_ERR_INVALID_INPUT) { return "invalid input"; }
-    if (code == KM_ERR_COMPUTATION_ERROR) { return "computation error"; }
+    match code {
+        KM_ERR_NONE => { return "no error"; }
+        KM_ERR_INVALID_ELEMENT => { return "invalid element"; }
+        KM_ERR_INVALID_REACTION => { return "invalid reaction"; }
+        KM_ERR_INVALID_CONCENTRATION => { return "invalid concentration"; }
+        KM_ERR_INVALID_TEMPERATURE => { return "invalid temperature"; }
+        KM_ERR_INVALID_INPUT => { return "invalid input"; }
+        KM_ERR_COMPUTATION_ERROR => { return "computation error"; }
+        _ => { return "unknown error"; }
+    }
     return "unknown error";
 }

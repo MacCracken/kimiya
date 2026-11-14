@@ -186,7 +186,27 @@ pub fn emit(root: &Path, provenance: &str) -> Result<String, String> {
         ],
     );
     out.push_str(&consts(root, Home::Constants)?);
+    out.push_str(&std_consts()?);
     Ok(out.trim_end().to_string() + "\n")
+}
+
+/// The Rust standard library's constants the port's formulas use, as `const KM_<NAME>` under a
+/// `# Rust: std::f64::consts::<NAME>` line (2.0.1: one generated π for the FFT, the angles and the
+/// spectroscopy formulas that Rust writes with `std::f64::consts::PI`, where each had its bits typed by
+/// hand). No golden row: they are not kimiya's constants; `validate.py` and `probe_tables.py` check
+/// each against Python's `math` value.
+pub fn std_consts() -> Result<String, String> {
+    let mut out = String::new();
+    out.push_str(
+        "# π, the double nearest it (Rust's `std::f64::consts::PI`): the FFT's twiddle angle, the\n\
+         # geometry's angles and the spectroscopy formulas that Rust writes with it.\n",
+    );
+    out.push_str("# Rust: std::f64::consts::PI\n");
+    out.push_str(&format!(
+        "const KM_PI = {};\n\n",
+        f64_lit(std::f64::consts::PI)?
+    ));
+    Ok(out)
 }
 
 /// Every constant of `home`, in `ALL` order, as `const KM_<NAME> = <literal>;` under its Rust doc

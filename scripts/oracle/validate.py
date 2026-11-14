@@ -8,7 +8,8 @@ and no Python packages. Usage, from the repo root:
 2. constants.tsv matches the `pub const NAME: f64 = <literal>;` items of rust-old/src/*.rs,
    all of them (Python's float() is correctly rounded, like rustc's literal conversion).
 3. src/constants.cyr: every `const KM_X = <decimal>;` is a positional decimal (no exponent,
-   no hex), names its Rust path, and parses to that constant's golden bits.
+   no hex), names its Rust path, and parses to that constant's golden bits (a `std::f64::consts`
+   one, 2.0.1's KM_PI, to Python's math value: it has no golden row).
 4. math.tsv, the exact functions, recomputed in Python with Rust's semantics: sqrt
    (math.sqrt is correctly rounded), abs, floor, trunc, round (half away from zero), min and
    max (a NaN operand is ignored; the sign of a zero result is unspecified in Rust, so only
@@ -275,6 +276,14 @@ for m in re.finditer(r"^# Rust: kimiya::(\S+)\nconst (KM_[A-Z0-9_]+) = (.+);$", 
     check(name == "KM_" + path.split("::")[1], f"constants.cyr: {name} names kimiya::{path}")
     check(re.fullmatch(r"-?[0-9]+\.[0-9]+", lit), f"constants.cyr: {name} = {lit} is not a positional decimal")
     check(path in golden_consts and f2b(float(lit)) == golden_consts.get(path), f"constants.cyr: {name} = {lit} is not the golden {path}")
+    n += 1
+STD_CONSTS = {"PI": math.pi}  # Rust's std::f64::consts the port generates (2.0.1), against Python's values
+for m in re.finditer(r"^# Rust: std::f64::consts::(\S+)\nconst (KM_[A-Z0-9_]+) = (.+);$", cyr, re.M):
+    sname, name, lit = m.groups()
+    check(name == "KM_" + sname, f"constants.cyr: {name} names std::f64::consts::{sname}")
+    check(re.fullmatch(r"-?[0-9]+\.[0-9]+", lit), f"constants.cyr: {name} = {lit} is not a positional decimal")
+    check(sname in STD_CONSTS and f2b(float(lit)) == f2b(STD_CONSTS.get(sname, math.nan)),
+          f"constants.cyr: {name} = {lit} is not std::f64::consts::{sname}")
     n += 1
 check(n == len(re.findall(r"^const ", cyr, re.M)) and n > 0, "constants.cyr: a const without its `# Rust:` line")
 print("constants.cyr literals checked:", n)

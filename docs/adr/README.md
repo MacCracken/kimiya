@@ -27,3 +27,4 @@ Decisions about kimiya — what we chose, the context, and the consequences we a
 | [0004](0004-accept-ganita-pow-minus-one-divergence.md) | Accept ganita's pow(−1, DBL_MAX) divergence | Accepted |
 | [0005](0005-correctly-rounded-primitives-for-ill-conditioned-functions.md) | Correctly rounded acos, cos, ln and x^2.5 for the ill-conditioned gas functions | Accepted; amended by 0006 (its M3a amendment superseded) |
 | [0006](0006-correct-rounding-is-the-accuracy-target.md) | Correct rounding is the accuracy target; parity with the oracle is functional | Accepted |
+| [0007](0007-shared-work-table-pool.md) | A shared pool of reusable work tables | Accepted |

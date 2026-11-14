@@ -28,7 +28,8 @@ var _KM_MOLECULE_CARBON_DIOXIDE: i64[4] = { 6, 1, 8, 2 };
 var _KM_MOLECULE_METHANE: i64[4] = { 6, 1, 1, 4 };
 var _KM_MOLECULE_GLUCOSE: i64[6] = { 6, 6, 1, 12, 8, 6 };
 
-# The largest pair count a molecule takes: the vec's capacity limit, halved (2 words per atom).
+# The largest pair count a molecule takes: 2²⁶, a quarter of lib/vec.cyr's VEC_CAP_MAX (2²⁸ words), at 2 words per
+# atom a factor of two inside it (a push past VEC_CAP_MAX aborts the process).
 const _KM_MOLECULE_MAX_ATOMS = 0x4000000;
 
 impl KmMolecule {
@@ -103,9 +104,11 @@ impl KmMolecule {
         var end = data + vec_len(self.atoms) * 8;
         var at = data;
         while (at < end) {
-            var h = element_lookup_by_number(load64(at));
-            if (h == 0) { return Err(KM_ERR_INVALID_ELEMENT); }
-            var mass: f64 = KM_ELEMENT_ATOMIC_MASS[h - 1];   # row h − 1, checked above
+            # element_lookup_by_number's two checks, inline (the handle is z).
+            var z = load64(at);
+            if (z < 1 || z > KM_ELEMENT_COUNT) { return Err(KM_ERR_INVALID_ELEMENT); }
+            if (KM_ELEMENT_ATOMIC_NUMBER[z - 1] != z) { return Err(KM_ERR_INVALID_ELEMENT); }
+            var mass: f64 = KM_ELEMENT_ATOMIC_MASS[z - 1];   # row z − 1, checked above
             var count: f64 = f64_from(load64(at + 8));
             total = total + (mass * count);
             at = at + 16;

@@ -11,6 +11,8 @@
 # the fast path's rounding test fails, and a seeded check that the accurate path (_km_cr_<f>_acc) agrees
 # with the full function. Every expected bit pattern is MPFR 4.2.2's correctly rounded value
 # (scripts/oracle/mpfr_ref.py). scripts/oracle/cr_verify.py checks millions of arguments on every target.
+#
+# 2.0.1: cyrius_201_scale_guards (_km_cr_finish's and _km_exp_fin's scale for every exponent, _km_f64_int(+0)).
 
 include "tests/ulp.cyr"
 include "src/mathx_data.cyr"
@@ -2399,6 +2401,45 @@ fn _t_cyrius_b10a_exp10_ux() {
     assert(ans > 3900, "10^x: the fast path answers almost all");
 }
 
+# 2.0.1: the final scalings of _km_cr_finish and _km_exp_fin for every exponent (no caller reaches these today):
+# e > 1024 is +∞ (2^e·[0.99, 2.01] is past DBL_MAX; 2^(e − 1) used to wrap to −0), a normal result at e = −1023
+# (h ≥ 2) is 2^-1022·h/2 (2^-1023 used to encode as +0), e below −2044 is +0, and e = 1024 and the subnormal grid
+# are unchanged. _km_f64_int(+0) returns (0, 0) instead of looping.
+fn _t_cyrius_201_scale_guards() {
+    test_group("cyrius_201_scale_guards");
+    var r: f64 = _km_cr_finish(1026, 1.5, 0.0, 0.0);
+    assert_bits_eq(_km_bits(r), 0x7FF0000000000000, "finish(1026, 1.5) = +inf");
+    var r1: f64 = _km_cr_finish(1025, 0.99, 0.0, 0.0);
+    assert_bits_eq(_km_bits(r1), 0x7FF0000000000000, "finish(1025, 0.99) = +inf");
+    var r2: f64 = _km_cr_finish(1024, 0.75, 0.0, 0.0);
+    assert_bits_eq(_km_bits(r2), 0x7FE8000000000000, "finish(1024, 0.75) = 1.5·2^1023");
+    var r3: f64 = _km_cr_finish(0 - 1023, 2.0, 0.0, 0.0);
+    assert_bits_eq(_km_bits(r3), 0x0010000000000000, "finish(-1023, 2) = 2^-1022");
+    var r4: f64 = _km_cr_finish(0 - 1023, 1.5, 0.0, 0.0);
+    assert_bits_eq(_km_bits(r4), 0x000C000000000000, "finish(-1023, 1.5) = 0.75·2^-1022, on the subnormal grid");
+    var r5: f64 = _km_cr_finish(0 - 1022, 1.5, 0.0, 0.0);
+    assert_bits_eq(_km_bits(r5), 0x0018000000000000, "finish(-1022, 1.5) = 1.5·2^-1022");
+    var r6: f64 = _km_cr_finish(0 - 3000, 1.5, 0.0, 0.0);
+    assert_bits_eq(_km_bits(r6), 0, "finish(-3000, 1.5) = +0");
+    var r7: f64 = _km_cr_finish(0 - 1074, 1.5, 0.0, 0.0);
+    assert_bits_eq(_km_bits(r7), 2, "finish(-1074, 1.5) = 2·2^-1074 (the tie to even)");
+    var ok, e1 = _km_exp_fin(1.5, 0.0, 1026, 0.0);
+    assert(ok == 1, "exp_fin(e = 1026) decides");
+    assert_bits_eq(_km_bits(e1), 0x7FF0000000000000, "exp_fin(1.5, e = 1026) = +inf");
+    var ok2, e2 = _km_exp_fin(1.5, 0.0, 1024, 0.0);
+    assert_bits_eq(_km_bits(e2), 0x7FF0000000000000, "exp_fin(1.5, e = 1024) = +inf, IEEE overflow");
+    var ok3, e3 = _km_exp_fin(2.0, 0.0, 0 - 1023, 0.0);
+    assert(ok3 == 1, "exp_fin(e = -1023) decides");
+    assert_bits_eq(_km_bits(e3), 0x0010000000000000, "exp_fin(2, e = -1023) = 2^-1022");
+    var ok4, e4 = _km_exp_fin(1.5, 0.0, 0 - 3000, 0.0);
+    assert(ok4 == 1, "exp_fin(e = -3000) decides");
+    assert_bits_eq(_km_bits(e4), 0, "exp_fin(1.5, e = -3000) = +0");
+    var m, ee = _km_f64_int(0);
+    assert(m == 0 && ee == 0, "_km_f64_int(+0) = (0, 0)");
+    var m1, ee1 = _km_f64_int(1);
+    assert(m1 == 0x0010000000000000 && ee1 == 0 - 1126, "_km_f64_int(2^-1074) = 2^52·2^-1126");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_special_values();
@@ -2437,6 +2478,7 @@ fn main() {
     _t_cyrius_b10a_exp_ux();
     _t_cyrius_b10a_expm1_ux();
     _t_cyrius_b10a_exp10_ux();
+    _t_cyrius_201_scale_guards();
     return assert_summary();
 }
 

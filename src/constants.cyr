@@ -128,3 +128,8 @@ const KM_RYDBERG_EV = 13.605693122994;
 # Specific heat capacity of water in J/(g·°C).
 # Rust: kimiya::thermo::WATER_SPECIFIC_HEAT
 const KM_WATER_SPECIFIC_HEAT = 4.184;
+
+# π, the double nearest it (Rust's `std::f64::consts::PI`): the FFT's twiddle angle, the
+# geometry's angles and the spectroscopy formulas that Rust writes with it.
+# Rust: std::f64::consts::PI
+const KM_PI = 3.141592653589793;

@@ -47,18 +47,12 @@
 include "lib/string.cyr"
 include "lib/ganita.cyr"
 
-# 1 if the word x is a Rust u32 (0 ..= 2³² − 1).
-#must_use
-fn _km_is_u32(x): i64 {
-    if (x < 0 || x > 0xFFFFFFFF) { return 0; }
-    return 1;
-}
-
 # ── radioactive decay ───────────────────────────────────────────────────────────────
 
 # The decay constant λ = ln 2 / t½ from a half-life in any time unit, in the reciprocal unit. A half-life of +∞ (the
 # stable-isotope convention of isotope_half_life_s) gives λ = 0. Ok(λ), or Err(KM_ERR_INVALID_INPUT) if the half-life
-# is not positive (0, negative, NaN or −∞); a subnormal half-life overflows to Ok(+∞), as in Rust. Computed as Rust's
+# is not positive (0, negative, NaN or −∞); a half-life below ln 2/DBL_MAX ≈ 3.86·10⁻³⁰⁹ (a subnormal; the larger
+# subnormals do not) overflows to Ok(+∞), as in Rust. Computed as Rust's
 # `LN_2 / half_life`, one division. Mirrors `nuclear::decay_constant`.
 #must_use
 fn decay_constant(half_life: f64): Result {
@@ -311,12 +305,14 @@ fn _km_q_value_ux(reactant_masses_u, nr, product_masses_u, np): f64 {
 # private EQUAL_RATE_REL_TOL, typed inline); N_C uses expm1 for accuracy at small t. `out` is the caller's buffer of
 # three f64 (24 bytes, `var nabc[24];`): Ok(3), the count written, with N_A at out, N_B at out + 8 and N_C at out + 16;
 # or Err(KM_ERR_INVALID_INPUT) if λ₁ or λ₂ is not positive and finite, then if N₀, then t, is negative or not finite,
-# and the buffer is untouched. Mirrors `nuclear::decay_chain_two_step`, whose (N_A, N_B, N_C) tuple the buffer replaces.
+# then if `out` is null, and the buffer is untouched. Mirrors `nuclear::decay_chain_two_step`, whose (N_A, N_B, N_C)
+# tuple the buffer replaces.
 #must_use
 fn decay_chain_two_step(n0: f64, lambda1: f64, lambda2: f64, time: f64, out): Result {
     if (_km_is_positive(lambda1) != 1 || _km_is_positive(lambda2) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(n0) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (_km_is_non_negative(time) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (out == 0) { return Err(KM_ERR_INVALID_INPUT); }
     var nl1: f64 = -lambda1;
     var x1: f64 = nl1 * time;
     var e1: f64 = _km_cr_exp(x1);
@@ -339,9 +335,13 @@ fn decay_chain_two_step(n0: f64, lambda1: f64, lambda2: f64, time: f64, out): Re
         var nem: f64 = -em;
         growth = nem / delta;
     }
-    var nlm: f64 = -lambda_min;
-    var xm: f64 = nlm * time;
-    var em_min: f64 = _km_cr_exp(xm);
+    # e^(−λ_min·t) is e1 when λ_min is λ₁ (λ₁ ≤ λ₂; both positive and finite, so == is the bit test).
+    var em_min: f64 = e1;
+    if (lambda_min != lambda1) {
+        var nlm: f64 = -lambda_min;
+        var xm: f64 = nlm * time;
+        em_min = _km_cr_exp(xm);
+    }
     var nb: f64 = ((n0 * lambda1) * em_min) * growth;
     # N_C = N₀(1 − e^(−λ₁t)) − N_B, with expm1 for accuracy at small t.
     var nn0: f64 = -n0;

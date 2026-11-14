@@ -4,9 +4,10 @@
 # - **Matrices** (port plan §6.3). Rust's dense `Vec<Vec<f64>>` (rows = species, columns = reactions) is a flat
 #   row-major buffer and its dimensions: entry (i, j) of an m × n matrix at p + 8·(i·n + j). A flat matrix has one row
 #   length, so Rust's ragged-matrix Errs have no counterpart. A builder writes to the caller's buffer `out` of `cap`
-#   f64: Ok(the count written); Err(KM_ERR_INVALID_INPUT) when it doesn't fit, after Rust's own errors (`out`
-#   untouched). A matrix argument whose (pointer, m·n) is no buffer (a negative dimension, m·n past the address space,
-#   a null pointer with entries) is Err(KM_ERR_INVALID_INPUT), checked first (an out-of-type input, port plan §6.4).
+#   f64: Ok(the count written); Err(KM_ERR_INVALID_INPUT) when it doesn't fit, or (2.0.1) when it overlaps an input
+#   that a write could reach before it is read (each function's rule), after Rust's own errors (`out` untouched).
+#   A matrix argument whose (pointer, m·n) is no buffer (a negative dimension, m·n past the address space, a null
+#   pointer with entries) is Err(KM_ERR_INVALID_INPUT), checked first (an out-of-type input, port plan §6.4).
 # - **Reactions.** Rust's `ReactionDef = (Vec<(usize, f64)>, Vec<(usize, f64)>)` is a 32-byte record: the reactants'
 #   pointer and count, then the products' pointer and count; each term a 16-byte record, the species index as a usize
 #   word (a negative word is past every n_species) and the coefficient's f64 bits — Rust's tuple order. `reactions`
@@ -39,13 +40,18 @@ fn _km_net_buffer(p, m, n): i64 {
 }
 
 # 1 if the n_reactions records at `reactions` are well formed (each term list a slice) and every species index is
-# below n_species (both as usize words); 0 otherwise. Rust's index check, in its order: reaction by reaction, the
-# reactants before the products.
+# below n_species (both as usize words); 2 if they are and the records or a term list overlap the bytes [out, out_end)
+# (stoichiometric_matrix's matrix, acted on only when it is not empty; sparse_stoichiometric_matrix passes (0, 0),
+# which no buffer overlaps); 0 otherwise. Rust's index check, in its order: reaction by reaction, the reactants before
+# the products. The overlap test is src/validate.cyr's _km_overlaps in its signed form, a < b_end && b < a_end,
+# folded into this loop: each span is one the loop has read and out_end lies at most 2⁶² past out, so no end wraps
+# (a call to _km_overlaps per span made stoichiometric_matrix's bench a third slower).
 #must_use
-fn _km_net_reactions_ok(n_species, reactions, n_reactions): i64 {
+fn _km_net_reactions_ok(n_species, reactions, n_reactions, out, out_end): i64 {
     if (n_reactions < 0 || (n_reactions > 0 && reactions == 0)) { return 0; }
     var bias = 1 << 63;                     # an unsigned compare: x <u y is (x ^ 2⁶³) < (y ^ 2⁶³)
     var lim = n_species ^ bias;
+    var hit = 0;
     var j = 0;
     while (j < n_reactions) {
         var rec = reactions + 32 * j;
@@ -60,36 +66,44 @@ fn _km_net_reactions_ok(n_species, reactions, n_reactions): i64 {
                 if ((s ^ bias) >= lim) { return 0; }
                 k = k + 1;
             }
+            if (out < tp + 16 * tn && tp < out_end && tn > 0) { hit = 1; }
             side = side + 1;
         }
         j = j + 1;
     }
+    if (out < reactions + 32 * n_reactions && reactions < out_end && n_reactions > 0) { hit = 1; }
+    if (hit == 1) { return 2; }
     return 1;
 }
 
 # Fills the n_species × n_reactions matrix at m (zeroed first): for reaction j, each reactant's coefficient subtracted
-# from (species, j) and each product's added, in list order (a species listed twice is summed). The records are valid.
+# from (species, j) and each product's added, in list order (a species listed twice is summed). The records are valid,
+# and m holds the matrix (so m + 8·n_species·n_reactions is an address). The loops walk pointers (2.0.1: the same
+# stores in the same order, faster, which pays for stoichiometric_matrix's overlap test).
 fn _km_net_fill(m, n_species, reactions, n_reactions) {
-    var k = 0;
-    while (k < n_species * n_reactions) {
-        store64(m + 8 * k, 0);
-        k = k + 1;
+    var p = m;
+    var e = m + 8 * n_species * n_reactions;
+    while (p < e) {
+        store64(p, 0);
+        p = p + 8;
     }
     var j = 0;
     while (j < n_reactions) {
         var rec = reactions + 32 * j;
+        var col = m + 8 * j;                # entry (s, j) at col + 8·s·n_reactions
         var side = 0;
         while (side < 2) {
             var tp = load64(rec + 16 * side);
             var tn = load64(rec + 16 * side + 8);
             var t = 0;
             while (t < tn) {
-                var s = load64(tp + 16 * t);
-                var c: f64 = load64(tp + 16 * t + 8);
-                var at = m + 8 * (s * n_reactions + j);
+                var s = load64(tp);
+                var c: f64 = load64(tp + 8);
+                var at = col + 8 * s * n_reactions;
                 var v: f64 = load64(at);
                 if (side == 0) { v = v - c; } else { v = v + c; }
                 store64(at, v);
+                tp = tp + 16;
                 t = t + 1;
             }
             side = side + 1;
@@ -104,35 +118,55 @@ fn _km_net_fill(m, n_species, reactions, n_reactions) {
 # reactant, a species listed more than once summed, a catalyst on both sides +0. The n_species × n_reactions entries
 # go row-major to the caller's buffer `out` of `cap` f64: Ok(n_species·n_reactions). Err(KM_ERR_INVALID_INPUT) if the
 # records are malformed (above), there are no species or no reactions, or a species index is n_species or more;
-# Err(KM_ERR_INVALID_INPUT) if the matrix does not fit in cap (`out` untouched). Coefficients are not validated (NaN
-# and ±∞ propagate). Mirrors `network::stoichiometric_matrix`, whose Vec<Vec<f64>> the buffer replaces.
+# Err(KM_ERR_INVALID_INPUT) if the matrix does not fit in cap, or if its entries at `out` overlap the reaction records
+# or any of their term lists, in place included: the matrix is zeroed before the records are read (`out` untouched).
+# Coefficients are not validated (NaN and ±∞ propagate). Mirrors `network::stoichiometric_matrix`, whose
+# Vec<Vec<f64>> the buffer replaces.
 #must_use
 fn stoichiometric_matrix(n_species, reactions, n_reactions, out, cap): Result {
-    if (_km_net_reactions_ok(n_species, reactions, n_reactions) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    # The matrix's end for the overlap test the validation folds in: out + 8·n_species·n_reactions where that is
+    # below 2⁵⁹ cells; 2⁶² bytes past out for more (past every address space). Its Err comes after Rust's.
+    var out_end = out;
+    if (n_species > 0 && n_reactions > 0) {
+        out_end = out + 0x4000000000000000;
+        if (n_species < 0x10000000 && n_reactions < 0x10000000) {
+            out_end = out + 8 * n_species * n_reactions;
+        } elif (n_species < 0x0800000000000000 / n_reactions) {
+            out_end = out + 8 * n_species * n_reactions;
+        }
+    }
+    var ok = _km_net_reactions_ok(n_species, reactions, n_reactions, out, out_end);
+    if (ok == 0) { return Err(KM_ERR_INVALID_INPUT); }
     if (n_species == 0) { return Err(KM_ERR_INVALID_INPUT); }
     if (n_reactions == 0) { return Err(KM_ERR_INVALID_INPUT); }
     if (n_species < 0 || cap < 0 || out == 0 || n_species > cap / n_reactions) { return Err(KM_ERR_INVALID_INPUT); }
+    if (ok == 2) { return Err(KM_ERR_INVALID_INPUT); }
     _km_net_fill(out, n_species, reactions, n_reactions);
     return Ok(n_species * n_reactions);
 }
 
 # The stoichiometric matrix of stoichiometric_matrix in CSR (compressed sparse row) form, as a hisab 3.4.1 CSR handle
-# (`csr_nrows` … `csr_values`): the dense matrix is built first (on the stack up to 256 entries, else from the bump
-# allocator, never freed) and compressed as hisab 1.4.0's CsrMatrix::from_dense does, entries with |v| ≤ 10⁻¹² (and
-# NaN) dropped. Ok(handle); the errors of stoichiometric_matrix (but no capacity); Err(KM_ERR_COMPUTATION_ERROR) if a
-# table can't be allocated. Mirrors `network::sparse_stoichiometric_matrix`.
+# (`csr_nrows` … `csr_values`): the dense matrix is built first (on the stack up to 256 entries, else in a buffer of
+# src/validate.cyr's pool of reusable work tables) and compressed as hisab 1.4.0's CsrMatrix::from_dense does, entries
+# with |v| ≤ 10⁻¹² (and NaN) dropped; the handle and its arrays are the caller's, from the bump allocator. Ok(handle);
+# the errors of stoichiometric_matrix (but no capacity); Err(KM_ERR_COMPUTATION_ERROR) if a table can't be allocated.
+# Mirrors `network::sparse_stoichiometric_matrix`.
 #must_use
 fn sparse_stoichiometric_matrix(n_species, reactions, n_reactions): Result {
-    if (_km_net_reactions_ok(n_species, reactions, n_reactions) != 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (_km_net_reactions_ok(n_species, reactions, n_reactions, 0, 0) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     if (n_species == 0) { return Err(KM_ERR_INVALID_INPUT); }
     if (n_reactions == 0) { return Err(KM_ERR_INVALID_INPUT); }
     if (n_species < 0 || n_species > 0x0FFFFFFFFFFFFFFF / n_reactions) { return Err(KM_ERR_COMPUTATION_ERROR); }
-    var st: f64[256];
-    var dense = _km_num_table(&st, _KM_NET_STACK, n_species * n_reactions);
+    var st: f64[_KM_NET_STACK];
+    var dense, ds = _km_num_table(&st, _KM_NET_STACK, n_species * n_reactions, 1);
     if (dense == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
     _km_net_fill(dense, n_species, reactions, n_reactions);
     var csr = _km_csr_from_dense(dense, n_species, n_reactions);
-    if (csr == 0) { return Err(KM_ERR_COMPUTATION_ERROR); }
+    if (csr == 0) {
+        _km_scratch_give(ds);
+        return Err(KM_ERR_COMPUTATION_ERROR);
+    }
+    _km_scratch_give(ds);
     return Ok(csr);
 }
 
@@ -166,7 +200,10 @@ fn conservation_law_count(n_species, rank): i64 {
 # column order from −0.0 (Rust's `.sum()`: a row of zero length gives −0.0), in the unit of the rates. The m rates go
 # to the caller's buffer `out` of `cap` f64: Ok(m). Err(KM_ERR_INVALID_INPUT) if (matrix, m·n) is no buffer or (rates,
 # n_rates) no slice, the matrix is empty (m = 0) or its row length n differs from n_rates; Err(KM_ERR_INVALID_INPUT)
-# if m does not fit in cap (`out` untouched). Mirrors `network::rate_from_stoichiometry`.
+# if m does not fit in cap, or if the m values at `out` overlap the rates (each rate is read for every species) or
+# start inside the matrix past its first entry (matrix < out < matrix + 8·m·n: they would overwrite rows still to be
+# read) (`out` untouched). out = matrix (in place) and an `out` below the matrix work: species i's rate is written
+# after row i is read, and below row i + 1. Mirrors `network::rate_from_stoichiometry`.
 #must_use
 fn rate_from_stoichiometry(matrix, m, n, rates, n_rates, out, cap): Result {
     if (_km_net_buffer(matrix, m, n) != 1) { return Err(KM_ERR_INVALID_INPUT); }
@@ -174,6 +211,10 @@ fn rate_from_stoichiometry(matrix, m, n, rates, n_rates, out, cap): Result {
     if (m == 0) { return Err(KM_ERR_INVALID_INPUT); }
     if (n != n_rates) { return Err(KM_ERR_INVALID_INPUT); }
     if (out == 0 || cap < m) { return Err(KM_ERR_INVALID_INPUT); }
+    # m·n < 2⁶⁰ (a buffer), so 8·m and 8·n are below 2⁶³ (for n = 0 the rates' span is empty, whatever 8·m is), and
+    # matrix + 8·m·n is the matrix's end.
+    if (_km_overlaps(out, 8 * m, rates, 8 * n) == 1) { return Err(KM_ERR_INVALID_INPUT); }
+    if (out > matrix && out < matrix + 8 * m * n) { return Err(KM_ERR_INVALID_INPUT); }
     var i = 0;
     while (i < m) {
         var row = matrix + 8 * i * n;

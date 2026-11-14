@@ -311,9 +311,11 @@ fn _km_cr_pow2(e): f64 {
     return r;
 }
 
-# RN(2^e·(h + m + l)) for a normalised triple-double h + m + l in [0.99, 2.01], every result range: a normal
+# RN(2^e·(h + m + l)) for a normalised triple-double h + m + l in [0.99, 2.01] and any e, every result range: a normal
 # result is RN3 then an exact scale (2^1024 in two steps; a significand that rounds up past DBL_MAX gives
-# +∞, as IEEE overflow does). A result below 2^-1022 is rounded ONCE, at the subnormal grid: with
+# +∞, as IEEE overflow does, and every e > 1024 gives +∞ by 2^1023·2^1023; a normal result at e = −1023, h + m + l ≥ 2,
+# scales by 2^(e + 1022) then 2^-1022, and an e below −2044 scales the subnormal-grid sum by 2^-1022, which rounds it to
+# +0 as it must). A result below 2^-1022 is rounded ONCE, at the subnormal grid: with
 # y = 2^(e + 1022)·(h + m + l) < 1 (each part scaled exactly), RN(1 + y) has its ulp at 2^-52, which is
 # 2^-1074 after the final scale, and (RN(1 + y) − 1)·2^-1022 is exact (glibc's specialcase technique). The
 # sum 1 + yh + ym + yl is rounded exactly: 1 + yh = a + b (Fast2Sum), and RN(a + b + RO(ym + yl)) =
@@ -324,8 +326,13 @@ fn _km_cr_finish(e, h: f64, m: f64, l: f64): f64 {
     if (e >= 0 - 1021) {
         var z: f64 = _km_rn3(h, m, l);
         if (e > 1023) {
-            var s1: f64 = _km_cr_pow2(e - 1);
-            var o: f64 = (z * s1) * 2.0;
+            var s1: f64 = _km_cr_pow2(1023);
+            var o: f64 = z * s1;
+            if (e > 1024) {
+                o = o * s1;                  # past 2^1025·0.99: ±∞
+            } else {
+                o = o * 2.0;
+            }
             return o;
         }
         var s2: f64 = _km_cr_pow2(e);
@@ -334,7 +341,9 @@ fn _km_cr_finish(e, h: f64, m: f64, l: f64): f64 {
     }
     var h1, m1a = _km_fast_two_sum(h, m);    # renormalised, so the sign tests below decide y < 1
     var m1, l1 = _km_two_sum(m1a, l);
-    var s: f64 = _km_cr_pow2(e + 1022);
+    var es = e + 1022;
+    if (es < 0 - 1022) { es = 0 - 1022; }    # 2^e·2.01 < 2^-1075 already: the sum below rounds to 1, the result +0
+    var s: f64 = _km_cr_pow2(es);
     var yh: f64 = h1 * s;
     var ym: f64 = m1 * s;
     var yl: f64 = l1 * s;
@@ -344,16 +353,15 @@ fn _km_cr_finish(e, h: f64, m: f64, l: f64): f64 {
         if (ym > 0.0) { normal = 1; }
         if (ym == 0.0 && yl >= 0.0) { normal = 1; }
     }
-    if (normal == 1) {                       # y ≥ 1: the result is at least 2^-1022
+    var dmin: f64 = _km_cr_pow2(0 - 1022);
+    if (normal == 1) {                       # y ≥ 1: the result is at least 2^-1022 (e is −1022 or −1023)
         var z2: f64 = _km_rn3(h, m, l);
-        var s3: f64 = _km_cr_pow2(e);
-        var y2: f64 = z2 * s3;
+        var y2: f64 = (z2 * s) * dmin;       # both scales exact: z2·2^(e + 1022) ≥ 1
         return y2;
     }
     var a, b = _km_fast_two_sum(1.0, yh);
     var v: f64 = _km_ro_sum(ym, yl);
     var w: f64 = _km_rn3(a, b, v);
-    var dmin: f64 = _km_cr_pow2(0 - 1022);
     var r: f64 = (w - 1.0) * dmin;
     return r;
 }
@@ -375,8 +383,11 @@ fn _km_cr_finish(e, h: f64, m: f64, l: f64): f64 {
 # chains short: this code is latency-bound (each operation goes through memory). About one argument in
 # 50,000 falls back.
 
-# The fast core for e^(xh + xl), |xh| ≤ 745.2 and |xl| ≤ 2^-42: (hi, lo, E) with hi + lo = e^x/2^E within
-# 2^-70. exp passes xl = 0; exp10 passes x·ln 10 as xh + xl (xl folds into the K·L2 term).
+# The fast core for e^(xh + xl), |xh| < 1180 and |xl| ≤ 2^-42: (hi, lo, E) with hi + lo = e^x/2^E within
+# 2^-70. |xh| < 1180 keeps K = RN(xh·512/ln 2) below 871,700 < 2^20, which K·L1's exactness needs (L1 has 33 bits);
+# past 745.2 (the ux tiers' 708 < |x| < 1024, and x·ln 10 up to 1179) the dropped K·L3 grows from 2^-79.2 to 2^-78.8,
+# inside the bound's margin (0.9·2^-70 against ε = 2^-69). exp passes xl = 0; exp10 passes x·ln 10 as xh + xl (xl
+# folds into the K·L2 term).
 #must_use
 fn _km_exp_core(xh: f64, xl: f64): (f64, f64, i64) {
     var inv: f64 = _KM_CR_EXP_INVLN2N;
@@ -410,8 +421,9 @@ fn _km_exp_core(xh: f64, xl: f64): (f64, f64, i64) {
 }
 
 # The fast test with bound err (absolute, on hi + lo) and the scale for any E: (1, RN(2^E·(hi + lo))) or (0, 0)
-# when the test fails. Normal results scale
-# exactly (2^1024 in two steps). A result that may be subnormal (E ≤ −1022 and 2^(E+1022)·(hi + lo) < 1, decided
+# when the test fails. Normal results scale exactly (2^1024 in two steps, +∞ for every E > 1024, and 2^(E + 1022)
+# then 2^-1022 at E = −1023; an E below −2044 scales by 2^-1022, so the result is +0 as it must be). A result that
+# may be subnormal (E ≤ −1022 and 2^(E+1022)·(hi + lo) < 1, decided
 # on hi + lo renormalised: the core's lo is not, when r1 = 0) is tested on the subnormal grid, rounding once:
 # y = 2^(E+1022)·(hi + lo) (exact), 1 + y = a + b + yl with a + b = 1 + yh exactly, and the ends
 # a + ((b + yl) ∓ ε') with ε' = err·2^(E+1022) + 2^-104 (|b + yl| ≤ 2^-52, so the two inner roundings are below
@@ -423,24 +435,31 @@ fn _km_exp_fin(hi: f64, lo: f64, e, err: f64): (i64, f64) {
         var v: f64 = hi + (lo + err);
         if (u != v) { return (0, 0.0); }
         if (e > 1023) {
-            var s1: f64 = _km_cr_pow2(e - 1);
-            var o: f64 = (u * s1) * 2.0;
+            var s1: f64 = _km_cr_pow2(1023);
+            var o: f64 = u * s1;
+            if (e > 1024) {
+                o = o * s1;                  # past 2^1025·0.99: ±∞
+            } else {
+                o = o * 2.0;
+            }
             return (1, o);
         }
         var s2: f64 = _km_cr_pow2(e);
         var y: f64 = u * s2;
         return (1, y);
     }
-    var s: f64 = _km_cr_pow2(e + 1022);
+    var es = e + 1022;
+    if (es < 0 - 1022) { es = 0 - 1022; }    # 2^E·2 < 2^-1075 already: rounds to +0 below
+    var s: f64 = _km_cr_pow2(es);
     var hn: f64 = hi + lo;                   # hi + lo renormalised: lo can be up to 2^-38 when r1 = 0
     var ln: f64 = lo - (hn - hi);
     var yh: f64 = hn * s;
-    if (yh > 1.0 || (yh == 1.0 && ln >= 0.0)) {   # 2^E·(hi + lo) ≥ 2^-1022: a normal result
+    var dmin: f64 = _km_cr_pow2(0 - 1022);
+    if (yh > 1.0 || (yh == 1.0 && ln >= 0.0)) {   # 2^E·(hi + lo) ≥ 2^-1022: a normal result (E is −1022 or −1023)
         var u2: f64 = hi + (lo - err);
         var v2: f64 = hi + (lo + err);
         if (u2 != v2) { return (0, 0.0); }
-        var s3: f64 = _km_cr_pow2(e);
-        var y2: f64 = u2 * s3;
+        var y2: f64 = (u2 * s) * dmin;       # both scales exact: u2·2^(E + 1022) ≥ 1
         return (1, y2);
     }
     var yl: f64 = ln * s;
@@ -451,7 +470,6 @@ fn _km_exp_fin(hi: f64, lo: f64, e, err: f64): (i64, f64) {
     var u3: f64 = a + (w - err2);
     var v3: f64 = a + (w + err2);
     if (u3 != v3) { return (0, 0.0); }
-    var dmin: f64 = _km_cr_pow2(0 - 1022);
     var r: f64 = (u3 - 1.0) * dmin;
     return (1, r);
 }
@@ -771,10 +789,101 @@ fn _km_cr_exp10_acc(x: f64): f64 {
 # −37.42994775023704 (e^x < 2^-54) rounds to −1.
 #must_use
 fn _km_cr_expm1(x: f64): f64 {
-    var y, ok = _km_cr_expm1_fast(x);
-    if (ok == 1) { return y; }
-    var z: f64 = _km_cr_expm1_acc(x);
-    return z;
+    # _km_cr_expm1_fast's body with _km_exp_core's inline (2.0.1), as _km_cr_exp inlines its fast path: the same
+    # operations, each failed test or region left to the accurate path.
+    var ax = load64(&x) & 0x7FFFFFFFFFFFFFFF;
+    if (ax < 0x3F90000000000000) {               # |x| < 2^-6
+        if (ax < 0x3CA0000000000000) { return x; }   # |x| < 2^-53, ±0, subnormals
+        var p: f64 = x * x;                      # x² = p + pe exactly (Dekker, inline)
+        var cx: f64 = 134217729.0 * x;
+        var x1: f64 = cx - (cx - x);
+        var x2: f64 = x - x1;
+        var pe: f64 = (((x1 * x1) - p) + (2.0 * (x1 * x2))) + (x2 * x2);
+        var k3: f64 = _KM_CR_EXPM1_Q3;
+        var k4: f64 = _KM_CR_EXPM1_Q4;
+        var k5: f64 = _KM_CR_EXPM1_Q5;
+        var k6: f64 = _KM_CR_EXPM1_Q6;
+        var k7: f64 = _KM_CR_EXPM1_Q7;
+        var k8: f64 = _KM_CR_EXPM1_Q8;
+        var k9: f64 = _KM_CR_EXPM1_Q9;
+        var s: f64 = ((k3 + (x * k4)) + (p * (k5 + (x * k6)))) + ((p * p) * ((k7 + (x * k8)) + (p * k9)));
+        var x3: f64 = (x * p) * s;
+        var hp: f64 = p * 0.5;
+        var hs: f64 = x + hp;
+        var ht: f64 = hp - (hs - x);
+        var lo: f64 = (ht + (pe * 0.5)) + x3;
+        var ex3: f64 = f64_abs(x3);
+        var exa: f64 = f64_abs(x);
+        var c49: f64 = 0x3CE0000000000000;      # 2^-49
+        var c100: f64 = 0x39B0000000000000;     # 2^-100
+        var err: f64 = (ex3 * c49) + (exa * c100);
+        var u: f64 = hs + (lo - err);
+        var v: f64 = hs + (lo + err);
+        if (u == v) { return u; }
+        var za: f64 = _km_cr_expm1_acc(x);
+        return za;
+    }
+    var m1b = _KM_CR_EXPM1_M1 & 0x7FFFFFFFFFFFFFFF;
+    if (ax > m1b) {                              # |x| > 37.42994775023704
+        if (x < 0.0) { return -1.0; }            # x < EXPM1_M1 (−∞ included): e^x < 2^-54
+        if (ax > 0x4086200000000000) {           # x > 708, +∞, NaN: the accurate path returns the specials
+            var zs: f64 = _km_cr_expm1_acc(x);
+            return zs;
+        }
+    }
+    # _km_exp_core(x, 0), inline.
+    var inv: f64 = _KM_CR_EXP_INVLN2N;
+    var l1: f64 = _KM_CR_EXP_L1;
+    var l2: f64 = _KM_CR_EXP_L2;
+    var tt: f64 = (x * inv) + 6755399441055744.0;   # 1.5·2^52: rounds x·512/ln 2 to an integer
+    var kd: f64 = tt - 6755399441055744.0;
+    var k = load64(&tt) - 0x4338000000000000;
+    var ti = (k & 511) * 32;
+    var e = k >>> 9;
+    var rh: f64 = x - (kd * l1);
+    var sx: f64 = (kd * l2) - 0.0;           # the core's (K·L2) − xl with xl = 0
+    var r: f64 = rh - sx;
+    var rl: f64 = (rh - r) - sx;
+    var cr: f64 = r + 49152.0;               # 1.5·2^15: rounds r to a multiple of 2^-37
+    var r1: f64 = cr - 49152.0;
+    var r2: f64 = r - r1;
+    var p3: f64 = _KM_CR_EXP_P3;
+    var p4: f64 = _KM_CR_EXP_P4;
+    var p5: f64 = _KM_CR_EXP_P5;
+    var zr: f64 = r * r;
+    var q: f64 = (zr * (0.5 + (r * p3))) + ((zr * zr) * (p4 + (r * p5)));
+    var ta: f64 = load64(&_KM_CR_EXP_T + ti);
+    var tb: f64 = load64(&_KM_CR_EXP_T + ti + 8);
+    var p1: f64 = ta * r1;
+    var hi: f64 = ta + p1;
+    var e1: f64 = p1 - (hi - ta);
+    var rlq: f64 = rl + q;
+    var lo2: f64 = (e1 + tb) + ((ta * (r2 + rlq)) + (tb * (r + rlq)));
+    var hh: f64 = 0.0;
+    var ll: f64 = lo2;
+    var sc: f64 = 1.0;
+    if (e == 0) {
+        hh = hi - 1.0;                           # exact: hi in [0.9993, 1.9987]
+    } else {
+        sc = _km_cr_pow2(e);
+        var hsc: f64 = hi * sc;
+        if (e > 0) {
+            hh = hsc - 1.0;
+            var t1: f64 = -1.0 - (hh - hsc);
+            ll = t1 + (lo2 * sc);
+        } else {
+            hh = -1.0 + hsc;
+            var t2: f64 = hsc - (hh + 1.0);
+            ll = t2 + (lo2 * sc);
+        }
+    }
+    var err2: f64 = 0x3BA0000000000000;      # 2^-69
+    var errs: f64 = err2 * sc;
+    var u2: f64 = hh + (ll - errs);
+    var v2: f64 = hh + (ll + errs);
+    if (u2 == v2) { return u2; }
+    var zb: f64 = _km_cr_expm1_acc(x);
+    return zb;
 }
 
 # The fast path alone: (its result, 1), or (0, 0) when its test fails or x > 708 (left to the accurate path).
@@ -974,6 +1083,25 @@ fn _km_ln_core(ui, ebias): (f64, f64, f64) {
     return (s2, lo, err);
 }
 
+# The special values ln and log10 share: (x for NaN, −∞ for ±0, the quiet NaN for x < 0 (−∞ included), +∞ for +∞;
+# 1), or (0, 0) for a positive finite x. The one ladder of _km_cr_ln_fast, _km_cr_ln_acc, _km_cr_log10_fast and
+# _km_cr_log10_acc (2.0.1).
+#must_use
+fn _km_ln_special(x: f64): (f64, i64) {
+    if (x != x) { return (x, 1); }
+    if (x == 0.0) {
+        var m1: f64 = -1.0;
+        var ninf: f64 = m1 / 0.0;
+        return (ninf, 1);
+    }
+    if (x < 0.0) {
+        var nan: f64 = _km_nan();               # the same quiet NaN on every target
+        return (nan, 1);
+    }
+    if (x == _KM_INF) { return (x, 1); }
+    return (0.0, 0);
+}
+
 # ln(x), correctly rounded. ln(1) = +0, ln(±0) = −∞, ln(+∞) = +∞, NaN for NaN and x < 0 (−∞ included).
 #must_use
 fn _km_cr_ln(x: f64): f64 {
@@ -986,7 +1114,7 @@ fn _km_cr_ln(x: f64): f64 {
         var zw: f64 = _km_cr_ln_acc(x);
         return zw;
     }
-    # _km_ln_core's body, inline (a call and its three-value return cost about 4 ns here).
+    # _km_ln_core's body, inline (a call and its three-value return cost about 14 ns here).
     var t = ui - 0x3FE7FC0000000000;
     var e0 = t >>> 52;
     var ti = ((t >> 43) & 511) * 32;
@@ -1047,17 +1175,8 @@ fn _km_cr_ln_fast(x: f64): (f64, i64) {
     var ui = load64(&x);
     var eb = 0;
     if (((ui - 0x0010000000000000) ^ 0x8000000000000000) >= 0xFFE0000000000000) {
-        if (x != x) { return (x, 1); }
-        if (x == 0.0) {
-            var m1: f64 = -1.0;
-            var ninf: f64 = m1 / 0.0;
-            return (ninf, 1);
-        }
-        if (x < 0.0) {
-            var nan: f64 = _km_nan();           # the same quiet NaN on every target
-            return (nan, 1);
-        }
-        if (x == _KM_INF) { return (x, 1); }
+        var sv, sp = _km_ln_special(x);
+        if (sp == 1) { return (sv, 1); }
         var p54: f64 = 0x4350000000000000;      # 2^54
         var xs: f64 = x * p54;
         ui = load64(&xs);
@@ -1135,17 +1254,8 @@ fn _km_ln_acc_td(x: f64, out) {
 # ln by the accurate path alone, for every x.
 #must_use
 fn _km_cr_ln_acc(x: f64): f64 {
-    if (x != x) { return x; }
-    if (x == 0.0) {
-        var m1: f64 = -1.0;
-        var ninf: f64 = m1 / 0.0;
-        return ninf;
-    }
-    if (x < 0.0) {
-        var nan: f64 = _km_nan();               # the same quiet NaN on every target
-        return nan;
-    }
-    if (x == _KM_INF) { return x; }
+    var sv, sp = _km_ln_special(x);
+    if (sp == 1) { return sv; }
     if (x == 1.0) { return 0.0; }
     var buf: f64[3];
     _km_ln_acc_td(x, &buf);
@@ -1159,25 +1269,60 @@ fn _km_cr_ln_acc(x: f64): f64 {
 #must_use
 fn _km_cr_log10(x: f64): f64 {
     var ui = load64(&x);
-    var eb = 0;
-    if (((ui - 0x0010000000000000) ^ 0x8000000000000000) >= 0xFFE0000000000000) {   # as in _km_cr_ln
-        if (x != x) { return x; }
-        if (x == 0.0) {
-            var m1: f64 = -1.0;
-            var ninf: f64 = m1 / 0.0;
-            return ninf;
-        }
-        if (x < 0.0) {
-            var nan: f64 = _km_nan();
-            return nan;
-        }
-        if (x == _KM_INF) { return x; }
-        var p54: f64 = 0x4350000000000000;          # a subnormal x, scaled exactly by 2^54
-        var xs: f64 = x * p54;
-        ui = load64(&xs);
-        eb = 0 - 54;
+    # x ≤ 0, subnormal, ∞ or NaN (the test of _km_cr_ln): the fast path's own ladder, then the accurate path.
+    if (((ui - 0x0010000000000000) ^ 0x8000000000000000) >= 0xFFE0000000000000) {
+        var w, okw = _km_cr_log10_fast(x);
+        if (okw == 1) { return w; }
+        var zw: f64 = _km_cr_log10_acc(x);
+        return zw;
     }
-    var hi, lo, eln = _km_ln_core(ui, eb);
+    # _km_ln_core's body, inline as in _km_cr_ln (2.0.1).
+    var t = ui - 0x3FE7FC0000000000;
+    var e0 = t >>> 52;
+    var ti = ((t >> 43) & 511) * 32;
+    var mb = ui - (e0 << 52);
+    var m: f64 = mb;
+    var mhb = mb & 0xFFFFFFFFF0000000;
+    var mh: f64 = mhb;
+    var ml: f64 = m - mh;
+    var cl: f64 = load64(&_KM_CR_LN_T + ti);
+    var lh: f64 = load64(&_KM_CR_LN_T + ti + 8);
+    var lm: f64 = load64(&_KM_CR_LN_T + ti + 16);
+    var r: f64 = ((mh * cl) - 1.0) + (ml * cl);
+    var cc: f64 = r * 134217729.0;
+    var ra: f64 = cc - (cc - r);
+    var rb: f64 = r - ra;
+    var t1: f64 = -0.5 * (ra * ra);             # −ra²/2, exact
+    var nrb: f64 = -rb;
+    var t2: f64 = nrb * (ra + (0.5 * rb));
+    var c3: f64 = _KM_CR_LN_C3;
+    var c4: f64 = _KM_CR_LN_C4;
+    var c5: f64 = _KM_CR_LN_C5;
+    var c6: f64 = _KM_CR_LN_C6;
+    var c7: f64 = _KM_CR_LN_C7;
+    var c8: f64 = _KM_CR_LN_C8;
+    var z: f64 = r * r;
+    var pz: f64 = ((c3 + (r * c4)) + (z * (c5 + (r * c6)))) + ((z * z) * (c7 + (r * c8)));   # Estrin
+    var p: f64 = (z * r) * pz;
+    var ef: f64 = f64_from(e0);
+    var ln2h: f64 = _KM_CR_LN_LN2H;
+    var ln2m: f64 = _KM_CR_LN_LN2M;
+    var a: f64 = ef * ln2h;                      # exact: LN2H has 42 bits, |E| < 2^11
+    var s0: f64 = a + lh;
+    var d0: f64 = lh - (s0 - a);
+    var s1: f64 = s0 + r;
+    var d1: f64 = r - (s1 - s0);
+    var s2: f64 = s1 + t1;
+    var d2: f64 = t1 - (s2 - s1);
+    var lo: f64 = (((ef * ln2m) + lm) + (t2 + p)) + ((d0 + d1) + d2);   # short chains (latency)
+    var apl: f64 = f64_abs(p);
+    var ah: f64 = f64_abs(s2);
+    var ae: f64 = f64_abs(ef);
+    var k49: f64 = 0x3CE0000000000000;          # 2^-49
+    var k83: f64 = 0x3AC0000000000000;          # 2^-83
+    var k93: f64 = 0x3A20000000000000;          # 2^-93
+    var eln: f64 = ((apl * k49) + (ah * k83)) + (ae * k93);
+    var hi: f64 = s2;
     var ivh: f64 = _KM_CR_LN_IVH;
     var ivm: f64 = _KM_CR_LN_IVM;
     var i1: f64 = _KM_CR_LN_IVH1;
@@ -1197,8 +1342,8 @@ fn _km_cr_log10(x: f64): f64 {
     var u: f64 = ph + (pl - err);
     var v: f64 = ph + (pl + err);
     if (u == v) { return u; }
-    var z: f64 = _km_cr_log10_acc(x);
-    return z;
+    var za: f64 = _km_cr_log10_acc(x);
+    return za;
 }
 
 # The fast path alone: (its result, 1), or (0, 0) when its rounding test fails; the same operations as
@@ -1208,17 +1353,8 @@ fn _km_cr_log10_fast(x: f64): (f64, i64) {
     var ui = load64(&x);
     var eb = 0;
     if (((ui - 0x0010000000000000) ^ 0x8000000000000000) >= 0xFFE0000000000000) {   # as in _km_cr_ln
-        if (x != x) { return (x, 1); }
-        if (x == 0.0) {
-            var m1: f64 = -1.0;
-            var ninf: f64 = m1 / 0.0;
-            return (ninf, 1);
-        }
-        if (x < 0.0) {
-            var nan: f64 = _km_nan();
-            return (nan, 1);
-        }
-        if (x == _KM_INF) { return (x, 1); }
+        var sv, sp = _km_ln_special(x);
+        if (sp == 1) { return (sv, 1); }
         var p54: f64 = 0x4350000000000000;          # a subnormal x, scaled exactly by 2^54
         var xs: f64 = x * p54;
         ui = load64(&xs);
@@ -1250,17 +1386,8 @@ fn _km_cr_log10_fast(x: f64): (f64, i64) {
 # log10 by the accurate path alone: the triple-double ln times 1/ln 10 = IVH + IVM + IVL.
 #must_use
 fn _km_cr_log10_acc(x: f64): f64 {
-    if (x != x) { return x; }
-    if (x == 0.0) {
-        var m1: f64 = -1.0;
-        var ninf: f64 = m1 / 0.0;
-        return ninf;
-    }
-    if (x < 0.0) {
-        var nan: f64 = _km_nan();               # the same quiet NaN on every target
-        return nan;
-    }
-    if (x == _KM_INF) { return x; }
+    var sv, sp = _km_ln_special(x);
+    if (sp == 1) { return sv; }
     if (x == 1.0) { return 0.0; }
     var buf: f64[3];
     _km_ln_acc_td(x, &buf);
@@ -1473,7 +1600,54 @@ fn _km_pow_pos_fast(ux, y: f64): (f64, i64) {
         ui = load64(&xs);
         eb = 0 - 54;
     }
-    var lh, ll, eln = _km_ln_core(ui, eb);
+    # _km_ln_core(ui, eb)'s body, inline (2.0.1), as _km_cr_ln inlines it.
+    var t = ui - 0x3FE7FC0000000000;
+    var e0 = t >>> 52;
+    var ti = ((t >> 43) & 511) * 32;
+    var mb = ui - (e0 << 52);
+    var m: f64 = mb;
+    var mhb = mb & 0xFFFFFFFFF0000000;
+    var mh: f64 = mhb;
+    var ml: f64 = m - mh;
+    var lc: f64 = load64(&_KM_CR_LN_T + ti);
+    var tlh: f64 = load64(&_KM_CR_LN_T + ti + 8);
+    var tlm: f64 = load64(&_KM_CR_LN_T + ti + 16);
+    var lr: f64 = ((mh * lc) - 1.0) + (ml * lc);
+    var cc: f64 = lr * 134217729.0;
+    var ra: f64 = cc - (cc - lr);
+    var rb: f64 = lr - ra;
+    var t1: f64 = -0.5 * (ra * ra);             # −ra²/2, exact
+    var nrb: f64 = -rb;
+    var t2: f64 = nrb * (ra + (0.5 * rb));
+    var c3: f64 = _KM_CR_LN_C3;
+    var c4: f64 = _KM_CR_LN_C4;
+    var c5: f64 = _KM_CR_LN_C5;
+    var c6: f64 = _KM_CR_LN_C6;
+    var c7: f64 = _KM_CR_LN_C7;
+    var c8: f64 = _KM_CR_LN_C8;
+    var zr: f64 = lr * lr;
+    var pz: f64 = ((c3 + (lr * c4)) + (zr * (c5 + (lr * c6)))) + ((zr * zr) * (c7 + (lr * c8)));   # Estrin
+    var lp: f64 = (zr * lr) * pz;
+    var le = e0 + eb;
+    var ef: f64 = f64_from(le);
+    var ln2h: f64 = _KM_CR_LN_LN2H;
+    var ln2m: f64 = _KM_CR_LN_LN2M;
+    var la: f64 = ef * ln2h;                     # exact: LN2H has 42 bits, |E| < 2^11
+    var s0: f64 = la + tlh;
+    var d0: f64 = tlh - (s0 - la);
+    var s1: f64 = s0 + lr;
+    var d1: f64 = lr - (s1 - s0);
+    var s2: f64 = s1 + t1;
+    var d2: f64 = t1 - (s2 - s1);
+    var ll: f64 = (((ef * ln2m) + tlm) + (t2 + lp)) + ((d0 + d1) + d2);
+    var alp: f64 = f64_abs(lp);
+    var als: f64 = f64_abs(s2);
+    var ale: f64 = f64_abs(ef);
+    var k49: f64 = 0x3CE0000000000000;          # 2^-49
+    var k83: f64 = 0x3AC0000000000000;          # 2^-83
+    var k93: f64 = 0x3A20000000000000;          # 2^-93
+    var eln: f64 = ((alp * k49) + (als * k83)) + (ale * k93);
+    var lh: f64 = s2;
     var zh0: f64 = y * lh;                       # z = y·(lh + ll): Dekker's product, both factors split
     var cy: f64 = 134217729.0 * y;
     var y1: f64 = cy - (cy - y);
@@ -1498,7 +1672,34 @@ fn _km_pow_pos_fast(ux, y: f64): (f64, i64) {
     var k69: f64 = 0x3BA0000000000000;           # 2^-69
     var errz: f64 = (ay * eln) + (azh * k100);
     var err: f64 = (errz * 2.0625) + k69;
-    var hi, lo, e = _km_exp_core(zh, zl);
+    # _km_exp_core(zh, zl)'s body, inline (2.0.1).
+    var inv: f64 = _KM_CR_EXP_INVLN2N;
+    var x_l1: f64 = _KM_CR_EXP_L1;
+    var x_l2: f64 = _KM_CR_EXP_L2;
+    var tt: f64 = (zh * inv) + 6755399441055744.0;   # 1.5·2^52: rounds z·512/ln 2 to an integer
+    var kd: f64 = tt - 6755399441055744.0;
+    var k = load64(&tt) - 0x4338000000000000;
+    var xti = (k & 511) * 32;
+    var e = k >>> 9;
+    var rh: f64 = zh - (kd * x_l1);
+    var xsk: f64 = (kd * x_l2) - zl;
+    var xr: f64 = rh - xsk;
+    var rl: f64 = (rh - xr) - xsk;
+    var xc: f64 = xr + 49152.0;                 # 1.5·2^15: rounds r to a multiple of 2^-37
+    var r1: f64 = xc - 49152.0;
+    var r2: f64 = xr - r1;
+    var p3: f64 = _KM_CR_EXP_P3;
+    var p4: f64 = _KM_CR_EXP_P4;
+    var p5: f64 = _KM_CR_EXP_P5;
+    var xz: f64 = xr * xr;                       # Estrin: the code is latency-bound, so keep chains short
+    var q: f64 = (xz * (0.5 + (xr * p3))) + ((xz * xz) * (p4 + (xr * p5)));
+    var ta: f64 = load64(&_KM_CR_EXP_T + xti);
+    var tb: f64 = load64(&_KM_CR_EXP_T + xti + 8);
+    var p1: f64 = ta * r1;
+    var hi: f64 = ta + p1;
+    var e1: f64 = p1 - (hi - ta);
+    var rlq: f64 = rl + q;
+    var lo: f64 = (e1 + tb) + ((ta * (r2 + rlq)) + (tb * (xr + rlq)));
     if (e > 0 - 1022 && e < 1024) {             # a normal result: _km_exp_fin's first case, inline
         var u: f64 = hi + (lo - err);
         var v: f64 = hi + (lo + err);
@@ -2848,17 +3049,134 @@ fn _km_cr_atan2_acc(y: f64, x: f64): f64 {
 # π/2 is 2^-54.15 inside its rounding interval); NaN for NaN and |x| > 1. Mirrors `f64::acos`.
 #must_use
 fn _km_cr_acos(x: f64): f64 {
-    var ax = load64(&x) & 0x7FFFFFFFFFFFFFFF;
-    if (ax >= 0x3C70000000000000 && ax < 0x3FF0000000000000) {   # 2^-56 ≤ |x| < 1: the fast core inline
-        var hi, lo, err = _km_acos_core(x);
-        var u: f64 = hi + (lo - err);
-        var v: f64 = hi + (lo + err);
-        if (u == v) { return u; }
-        var a: f64 = _km_cr_acos_acc(x);
-        return a;
+    var axb = load64(&x) & 0x7FFFFFFFFFFFFFFF;
+    if (axb < 0x3C70000000000000 || axb >= 0x3FF0000000000000) {   # |x| < 2^-56, |x| ≥ 1 or NaN: the specials
+        var r, ok = _km_acos_special(x);
+        return r;
     }
-    var r, ok = _km_acos_special(x);              # every other x is a special value
-    return r;
+    # 2^-56 ≤ |x| < 1: _km_acos_core's body and its _km_atan_core's, inline (2.0.1), the same operations.
+    var ax: f64 = f64_abs(x);
+    var wh: f64 = 0.0;
+    var wl: f64 = 0.0;
+    if (ax >= 0.5) {
+        var a: f64 = 1.0 - ax;                    # exact (Sterbenz)
+        var bh: f64 = 1.0 + ax;                   # Fast2Sum(1, |x|)
+        var bl: f64 = ax - (bh - 1.0);
+        var ca: f64 = 134217729.0 * a;            # (1 − |x|)·bh by Dekker's product
+        var a1: f64 = ca - (ca - a);
+        var a2: f64 = a - a1;
+        var cb: f64 = 134217729.0 * bh;
+        var b1: f64 = cb - (cb - bh);
+        var b2: f64 = bh - b1;
+        wh = a * bh;
+        var we: f64 = (((a1 * b1) - wh) + (a1 * b2) + (a2 * b1)) + (a2 * b2);
+        wl = we + (a * bl);
+    } else {
+        var cx: f64 = 134217729.0 * ax;           # x² = p + pe (Dekker)
+        var x1: f64 = cx - (cx - ax);
+        var x2: f64 = ax - x1;
+        var px: f64 = ax * ax;
+        var pex: f64 = (((x1 * x1) - px) + (2.0 * (x1 * x2))) + (x2 * x2);
+        wh = 1.0 - px;                            # Fast2Sum(1, −p)
+        var we2: f64 = (1.0 - wh) - px;
+        wl = we2 - pex;
+    }
+    var rh: f64 = f64_sqrt(wh);                   # s = rh + rl, one Newton step
+    var cs: f64 = 134217729.0 * rh;
+    var s1: f64 = cs - (cs - rh);
+    var s2: f64 = rh - s1;
+    var sp2: f64 = rh * rh;
+    var spe: f64 = (((s1 * s1) - sp2) + (2.0 * (s1 * s2))) + (s2 * s2);
+    var rl: f64 = (((wh - sp2) - spe) + wl) / (2.0 * rh);
+    var neg = 0;
+    if (x < 0.0) { neg = 1; }
+    # The atan core's arguments: atan(s/|x|) from the offset by neg when s ≤ |x|, else π/2 ∓ atan(|x|/s).
+    var nh: f64 = rh;
+    var nl: f64 = rl;
+    var dh: f64 = ax;
+    var dl: f64 = 0.0;
+    var oct = neg;
+    if (!(rh <= ax)) {
+        nh = ax;
+        nl = 0.0;
+        dh = rh;
+        dl = rl;
+        oct = 2 + neg;
+    }
+    var zh: f64 = nh / dh;
+    var cz: f64 = zh + 26388279066624.0;          # 1.5·2^44: rounds n/d to a multiple of 2^-8
+    var c: f64 = cz - 26388279066624.0;
+    var j = load64(&cz) - 0x42B8000000000000;
+    var sh: f64 = nh;
+    var sl: f64 = nl;
+    var eh: f64 = dh;
+    var el: f64 = dl;
+    if (j != 0) {
+        var d1: f64 = (dh + 384.0) - 384.0;       # 1.5·2^8: dh on the 2^-44 grid
+        var d2: f64 = dh - d1;
+        var n1: f64 = (nh + 384.0) - 384.0;
+        var n2: f64 = nh - n1;
+        var p1: f64 = c * d1;                     # exact
+        var np1: f64 = -p1;
+        var u0: f64 = nh + np1;                   # TwoSum(nh, −c·d1)
+        var ub: f64 = u0 - nh;
+        var ue: f64 = (nh - (u0 - ub)) + (np1 - ub);
+        sh = u0;
+        sl = ((ue - (c * d2)) + nl) - (c * dl);
+        var q1: f64 = c * n1;                     # exact
+        var v0: f64 = dh + q1;                    # TwoSum(dh, c·n1)
+        var vb: f64 = v0 - dh;
+        var ve: f64 = (dh - (v0 - vb)) + (q1 - vb);
+        eh = v0;
+        el = ((ve + (c * n2)) + dl) + (c * nl);
+    }
+    var qh: f64 = sh / eh;                        # δ = qh + ql: Dekker's division
+    var cq: f64 = 134217729.0 * qh;
+    var q1h: f64 = cq - (cq - qh);
+    var q1l: f64 = qh - q1h;
+    var ce: f64 = 134217729.0 * eh;
+    var e1h: f64 = ce - (ce - eh);
+    var e1l: f64 = eh - e1h;
+    var pp: f64 = qh * eh;
+    var pe: f64 = (((q1h * e1h) - pp) + (q1h * e1l) + (q1l * e1h)) + (q1l * e1l);
+    var ql: f64 = ((((sh - pp) - pe) + sl) - (qh * el)) / eh;
+    var a3: f64 = _KM_CR_SC_A3;
+    var a5: f64 = _KM_CR_SC_A5;
+    var a7: f64 = _KM_CR_SC_A7;
+    var a9: f64 = _KM_CR_SC_A9;
+    var z: f64 = qh * qh;
+    var pz: f64 = ((qh * z) * (a3 + (z * (a5 + (z * (a7 + (z * a9))))))) - (ql * z);
+    var ah: f64 = load64(&_KM_CR_ATAN_T + 24 * j);
+    var am: f64 = load64(&_KM_CR_ATAN_T + 24 * j + 8);
+    var oh: f64 = 0.0;
+    var om: f64 = 0.0;
+    var sg: f64 = 1.0;
+    if (oct == 1) {
+        oh = _KM_CR_SC_PIH;
+        om = _KM_CR_SC_PIM;
+        sg = -1.0;
+    }
+    if (oct >= 2) {
+        oh = _KM_CR_SC_PIO2H;
+        om = _KM_CR_SC_PIO2M;
+        if (oct == 2) { sg = -1.0; }
+    }
+    var sah: f64 = sg * ah;
+    var h1: f64 = oh + sah;                       # Fast2Sum: |oh| ≥ |ah| or oh = 0
+    var f1: f64 = sah - (h1 - oh);
+    var sqh: f64 = sg * qh;
+    var hi: f64 = h1 + sqh;                       # Fast2Sum: |h1| ≥ |qh| or h1 = 0
+    var f2: f64 = sqh - (hi - h1);
+    var tl: f64 = (am + ql) + pz;
+    var lo: f64 = ((f1 + f2) + om) + (sg * tl);
+    var ahi: f64 = f64_abs(hi);
+    var k68: f64 = 0x3BA6A09E667F3BCD;            # 2^-68.5 (√2·2^-69)
+    var err: f64 = ahi * k68;
+    var u: f64 = hi + (lo - err);
+    var v: f64 = hi + (lo + err);
+    if (u == v) { return u; }
+    var za: f64 = _km_cr_acos_acc(x);
+    return za;
 }
 
 # The special values of acos: (result, 1), or (0, 0) for 2^-56 ≤ |x| < 1.
@@ -3722,6 +4040,8 @@ fn _km_ux_sqrt_f64(xs: f64, xe): f64 {
     var tr: f64 = r + r;
     var t: f64 = rem / tr;
     var k = (xe - odd) / 2;
+    # Defensive, unreachable: w ≤ 4 − 2⁻⁵¹, so √w < 2 − 2⁻⁵³ (√(1 − ε) < 1 − ε/2), below the midpoint between
+    # 2 − 2⁻⁵² and 2, and r ≤ 2 − 2⁻⁵² (2.0.1's review, scripts' probe of the largest w).
     if (r >= 2.0) {                                 # √w rounded up to 2: (1, k + 1)
         r = r * 0.5;
         t = t * 0.5;
@@ -3979,6 +4299,7 @@ fn _km_f64_int(b): (i64, i64) {
     var be = b >> 52;
     var m = b & 0x000FFFFFFFFFFFFF;
     if (be != 0) { return (m | 0x0010000000000000, be - 1075); }
+    if (m == 0) { return (0, 0); }          # +0 is outside the contract: (0, 0), not an endless loop
     var e = 0 - 1074;
     while (m < 0x0010000000000000) {
         m = m << 1;
@@ -4756,6 +5077,23 @@ fn _km_mul_div_acc(x: f64, y: f64, z: f64): f64 {
     return r;
 }
 
+# x·y·z once _km_mul3_fast has declined (ADR 0002 #27, #30: heat_transfer, boiling_point_elevation,
+# freezing_point_depression, absorbance, diatomic_moment_of_inertia): Rust's (x·y)·z when a factor is not finite, else
+# the correctly rounded monomial by _km_cr_mono directly (_km_cr_mul3 would retry the fast path that just declined).
+#must_use
+fn _km_mul3_rest(x: f64, y: f64, z: f64): f64 {
+    if (_km_is_finite(x) != 1 || _km_is_finite(y) != 1 || _km_is_finite(z) != 1) {
+        var q: f64 = (x * y) * z;
+        return q;
+    }
+    var nb: f64[3];
+    store64(&nb, x);
+    store64(&nb + 8, y);
+    store64(&nb + 16, z);
+    var g: f64 = _km_cr_mono(&nb, 3, 0, 0);
+    return g;
+}
+
 # RN(x·y·z) by its fast path: N = sₓs_ys_z by _km_dd_mul_d on the exact TwoProduct sₓs_y (within 3.01u², N in [1, 8)),
 # rounded by _km_dd_round_ends; a failed test (a midpoint or near one) falls back.
 #must_use
@@ -4780,12 +5118,48 @@ fn _km_mul3_fast(x: f64, y: f64, z: f64): (f64, i64) {
     var sx: f64 = sxb;
     var sy: f64 = syb;
     var sz: f64 = szb;
-    var ph, pl = _km_two_prod(sx, sy);
-    var h, l = _km_dd_mul_d(ph, pl, sz);
-    var z1, z2 = _km_dd_round_ends(h, l);
+    # Its four helpers inline (2.0.1), each in its own operation order: _km_two_prod(sx, sy),
+    # _km_dd_mul_d(ph, pl, sz), _km_dd_round_ends(h, l) and _km_mono_fin(z1, k, neg).
+    var ph: f64 = sx * sy;
+    var split: f64 = 134217729.0;
+    var ca: f64 = split * sx;
+    var ah: f64 = ca - (ca - sx);
+    var al: f64 = sx - ah;
+    var cb: f64 = split * sy;
+    var bh: f64 = cb - (cb - sy);
+    var bl: f64 = sy - bh;
+    var pl: f64 = (al * bl) - (((ph - (ah * bh)) - (al * bh)) - (ah * bl));
+    var p: f64 = ph * sz;
+    var cc: f64 = split * ph;
+    var ahh: f64 = cc - (cc - ph);
+    var ahl: f64 = ph - ahh;
+    var cd: f64 = split * sz;
+    var bzh: f64 = cd - (cd - sz);
+    var bzl: f64 = sz - bzh;
+    var e: f64 = (ahl * bzl) - (((p - (ahh * bzh)) - (ahl * bzh)) - (ahh * bzl));
+    var c: f64 = pl * sz;
+    var t: f64 = e + c;
+    var h: f64 = p + t;
+    var l: f64 = t - (h - p);
+    var k100: f64 = 0x39B0000000000000;     # 2^-100
+    var eps: f64 = h * k100;
+    var lo: f64 = l - eps;
+    var hi: f64 = l + eps;
+    var z1: f64 = h + lo;
+    var z2: f64 = h + hi;
     if (z1 != z2) { return (0.0, 0); }
-    var r, ok = _km_mono_fin(z1, k, neg);
-    return (r, ok);
+    var yb = load64(&z1);
+    var kk = k + (yb >> 52) - 1023;
+    if (kk > 1023) {
+        var inf: f64 = _KM_INF;
+        if (neg == 1) { inf = -inf; }
+        return (inf, 1);
+    }
+    if (kk < 0 - 1021) { return (0.0, 0); }
+    var rb = yb + (k << 52);
+    if (neg == 1) { rb = rb | 0x8000000000000000; }
+    var r: f64 = rb;
+    return (r, 1);
 }
 
 # RN(x·y·z), correctly rounded: heat_transfer, boiling_point_elevation, freezing_point_depression (ADR 0002 #27).
@@ -5100,13 +5474,59 @@ fn _km_mul4_fast(a: f64, b: f64, c: f64, d: f64): (f64, i64) {
     var sb: f64 = sbb;
     var sc: f64 = scb;
     var sd: f64 = sdb;
-    var ph, pl = _km_two_prod(sa, sb);
-    var h1, l1 = _km_dd_mul_d(ph, pl, sc);
-    var h2, l2 = _km_dd_mul_d(h1, l1, sd);
-    var z1, z2 = _km_dd_round_ends(h2, l2);
+    # Its helpers inline (2.0.1), each in its own operation order: _km_two_prod, _km_dd_mul_d per further factor,
+    # _km_dd_round_ends and _km_mono_fin.
+    var ph: f64 = sa * sb;
+    var ca0: f64 = 134217729.0 * sa;
+    var ah0: f64 = ca0 - (ca0 - sa);
+    var al0: f64 = sa - ah0;
+    var cb0: f64 = 134217729.0 * sb;
+    var bh0: f64 = cb0 - (cb0 - sb);
+    var bl0: f64 = sb - bh0;
+    var pl: f64 = (al0 * bl0) - (((ph - (ah0 * bh0)) - (al0 * bh0)) - (ah0 * bl0));
+    var p1: f64 = ph * sc;
+    var ca1: f64 = 134217729.0 * ph;
+    var ahh1: f64 = ca1 - (ca1 - ph);
+    var ahl1: f64 = ph - ahh1;
+    var cb1: f64 = 134217729.0 * sc;
+    var bh1: f64 = cb1 - (cb1 - sc);
+    var bl1: f64 = sc - bh1;
+    var e1: f64 = (ahl1 * bl1) - (((p1 - (ahh1 * bh1)) - (ahl1 * bh1)) - (ahh1 * bl1));
+    var c1: f64 = pl * sc;
+    var t1: f64 = e1 + c1;
+    var h1: f64 = p1 + t1;
+    var l1: f64 = t1 - (h1 - p1);
+    var p2: f64 = h1 * sd;
+    var ca2: f64 = 134217729.0 * h1;
+    var ahh2: f64 = ca2 - (ca2 - h1);
+    var ahl2: f64 = h1 - ahh2;
+    var cb2: f64 = 134217729.0 * sd;
+    var bh2: f64 = cb2 - (cb2 - sd);
+    var bl2: f64 = sd - bh2;
+    var e2: f64 = (ahl2 * bl2) - (((p2 - (ahh2 * bh2)) - (ahl2 * bh2)) - (ahh2 * bl2));
+    var c2: f64 = l1 * sd;
+    var t2: f64 = e2 + c2;
+    var h2: f64 = p2 + t2;
+    var l2: f64 = t2 - (h2 - p2);
+    var k100: f64 = 0x39B0000000000000;     # 2^-100
+    var eps: f64 = h2 * k100;
+    var lo: f64 = l2 - eps;
+    var hi: f64 = l2 + eps;
+    var z1: f64 = h2 + lo;
+    var z2: f64 = h2 + hi;
     if (z1 != z2) { return (0.0, 0); }
-    var r, ok = _km_mono_fin(z1, k, neg);
-    return (r, ok);
+    var yb = load64(&z1);
+    var kk = k + (yb >> 52) - 1023;
+    if (kk > 1023) {
+        var inf: f64 = _KM_INF;
+        if (neg == 1) { inf = -inf; }
+        return (inf, 1);
+    }
+    if (kk < 0 - 1021) { return (0.0, 0); }
+    var rb = yb + (k << 52);
+    if (neg == 1) { rb = rb | 0x8000000000000000; }
+    var r: f64 = rb;
+    return (r, 1);
 }
 
 # RN(a·b·c·d), correctly rounded: rigid_rotor_energy's h·B·J·(J + 1) (#30).

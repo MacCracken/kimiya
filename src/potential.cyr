@@ -6,7 +6,8 @@
 # KM_ERR_INVALID_INPUT (Rust's only error here), and reject NaN and ±∞ inputs where Rust does. Every expression keeps
 # Rust's operation order, constant by constant, including the private helpers sub3 / cross / dot3 (_km_sub3,
 # _km_cross, _km_dot3, on scalars: Rust's [f64; 3] by value is three f64 here, and each helper returns its three
-# results as a multi-value return). The arithmetic functions are bit-identical (class B: + − × ÷ and √) but where an
+# results as a multi-value return; bond_angle's and dihedral_angle's fast paths inline them in the same operation
+# order, 2.0.1). The arithmetic functions are bit-identical (class B: + − × ÷ and √) but where an
 # ADR 0002 row below says otherwise; morse (exp), bond_angle and dihedral_angle (atan2) are class C on src/mathx.cyr's
 # correctly rounded _km_cr_exp and _km_cr_atan2 (ADR 0006), compared exactly against the corrected oracle
 # (docs/development/port-parity.md §14).
@@ -272,7 +273,7 @@ fn _km_dihedral_angle_ux(a, b, c, d): Result {
     var yvs, yve = _km_ux_mul(sbs, sbe, dns, dne);
     var xvs, xve = _km_dot3_ux(&n1, &n2);
     var phi: f64 = _km_ux_atan2_f64(yvs, yve, xvs, xve);
-    var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
+    var pi: f64 = KM_PI;                    # std::f64::consts::PI
     if (phi <= -pi) { return Ok(pi); }
     return Ok(phi);
 }
@@ -486,13 +487,18 @@ fn bond_angle(a, b, c): Result {
     var c0: f64 = load64(c);
     var c1: f64 = load64(c + 8);
     var c2: f64 = load64(c + 16);
-    var ba0, ba1, ba2 = _km_sub3(a0, a1, a2, b0, b1, b2);
-    var bc0, bc1, bc2 = _km_sub3(c0, c1, c2, b0, b1, b2);
-    var ba_sq: f64 = _km_dot3(ba0, ba1, ba2, ba0, ba1, ba2);
-    var bc_sq: f64 = _km_dot3(bc0, bc1, bc2, bc0, bc1, bc2);
+    # Rust's sub3, cross and dot3 (and f64::max) inline on this fast path (2.0.1), each in the helper's operation order.
+    var ba0: f64 = a0 - b0;
+    var ba1: f64 = a1 - b1;
+    var ba2: f64 = a2 - b2;
+    var bc0: f64 = c0 - b0;
+    var bc1: f64 = c1 - b1;
+    var bc2: f64 = c2 - b2;
+    var ba_sq: f64 = ((ba0 * ba0) + (ba1 * ba1)) + (ba2 * ba2);
+    var bc_sq: f64 = ((bc0 * bc0) + (bc1 * bc1)) + (bc2 * bc2);
     var tol: f64 = 0.000000000001;          # COINCIDENT_REL_TOL, 10⁻¹²
     var tol_sq: f64 = tol * tol;
-    var b_sq: f64 = _km_dot3(b0, b1, b2, b0, b1, b2);
+    var b_sq: f64 = ((b0 * b0) + (b1 * b1)) + (b2 * b2);
     # Rust's chain while it provably stays the unbounded-exponent one (ADR 0002 #20): |ba|², |bc|², max(|a|², |b|²),
     # max(|c|², |b|²) and |ba × bc|² in [2^-900, DBL_MAX], ba · bc finite. A sum of squares of at least 2^-900 is exact
     # of any underflowed term (each below 2^-1022 absorbed where it is added), so these and the thresholds are the
@@ -500,18 +506,22 @@ fn bond_angle(a, b, c): Result {
     var lo: f64 = 0x07B0000000000000;       # 2^-900
     var hi: f64 = 0x7FEFFFFFFFFFFFFF;       # DBL_MAX
     if (ba_sq >= lo && ba_sq <= hi && bc_sq >= lo && bc_sq <= hi) {
-        var a_sq: f64 = _km_dot3(a0, a1, a2, a0, a1, a2);
-        var ma: f64 = _km_max(a_sq, b_sq);
-        var c_sq: f64 = _km_dot3(c0, c1, c2, c0, c1, c2);
-        var mc: f64 = _km_max(c_sq, b_sq);
+        var a_sq: f64 = ((a0 * a0) + (a1 * a1)) + (a2 * a2);
+        var ma: f64 = b_sq;                 # _km_max(a_sq, b_sq): a NaN a_sq gives b_sq, a NaN b_sq a_sq
+        if (a_sq == a_sq && (b_sq != b_sq || a_sq > b_sq)) { ma = a_sq; }
+        var c_sq: f64 = ((c0 * c0) + (c1 * c1)) + (c2 * c2);
+        var mc: f64 = b_sq;                 # _km_max(c_sq, b_sq)
+        if (c_sq == c_sq && (b_sq != b_sq || c_sq > b_sq)) { mc = c_sq; }
         if (ma >= lo && ma <= hi && mc >= lo && mc <= hi) {
             var ta: f64 = tol_sq * ma;
             if (ba_sq <= ta) { return Err(KM_ERR_INVALID_INPUT); }
             var tc: f64 = tol_sq * mc;
             if (bc_sq <= tc) { return Err(KM_ERR_INVALID_INPUT); }
-            var cr0, cr1, cr2 = _km_cross(ba0, ba1, ba2, bc0, bc1, bc2);
-            var cn: f64 = _km_dot3(cr0, cr1, cr2, cr0, cr1, cr2);
-            var x: f64 = _km_dot3(ba0, ba1, ba2, bc0, bc1, bc2);
+            var cr0: f64 = (ba1 * bc2) - (ba2 * bc1);
+            var cr1: f64 = (ba2 * bc0) - (ba0 * bc2);
+            var cr2: f64 = (ba0 * bc1) - (ba1 * bc0);
+            var cn: f64 = ((cr0 * cr0) + (cr1 * cr1)) + (cr2 * cr2);
+            var x: f64 = ((ba0 * bc0) + (ba1 * bc1)) + (ba2 * bc2);
             var dxx: f64 = x - x;
             if (cn >= lo && cn <= hi && dxx == 0.0) {
                 var y: f64 = f64_sqrt(cn);
@@ -571,9 +581,16 @@ fn dihedral_angle(a, b, c, d): Result {
     var d0: f64 = load64(d);
     var d1: f64 = load64(d + 8);
     var d2: f64 = load64(d + 16);
-    var u0, u1, u2 = _km_sub3(b0, b1, b2, a0, a1, a2);       # b₁
-    var v0, v1, v2 = _km_sub3(c0, c1, c2, b0, b1, b2);       # b₂
-    var w0, w1, w2 = _km_sub3(d0, d1, d2, c0, c1, c2);       # b₃
+    # Rust's sub3, cross and dot3 inline on this fast path (2.0.1), each in the helper's operation order.
+    var u0: f64 = b0 - a0;                  # b₁ = B − A
+    var u1: f64 = b1 - a1;
+    var u2: f64 = b2 - a2;
+    var v0: f64 = c0 - b0;                  # b₂ = C − B
+    var v1: f64 = c1 - b1;
+    var v2: f64 = c2 - b2;
+    var w0: f64 = d0 - c0;                  # b₃ = D − C
+    var w1: f64 = d1 - c1;
+    var w2: f64 = d2 - c2;
     # |b₁|², |b₂|², |b₃|² as Rust's dot3 (inline: the squares are the fast path's test), b₁ = (u0, u1, u2) and so on.
     var q0: f64 = u0 * u0;
     var q1: f64 = u1 * u1;
@@ -612,10 +629,14 @@ fn dihedral_angle(a, b, c, d): Result {
         if (is_ok(tx) == 1) { return Ok(vx); }
         return Err(vx);
     }
-    var n10, n11, n12 = _km_cross(u0, u1, u2, v0, v1, v2);
-    var n20, n21, n22 = _km_cross(v0, v1, v2, w0, w1, w2);
-    var n1_sq: f64 = _km_dot3(n10, n11, n12, n10, n11, n12);
-    var n2_sq: f64 = _km_dot3(n20, n21, n22, n20, n21, n22);
+    var n10: f64 = (u1 * v2) - (u2 * v1);   # n₁ = b₁ × b₂
+    var n11: f64 = (u2 * v0) - (u0 * v2);
+    var n12: f64 = (u0 * v1) - (u1 * v0);
+    var n20: f64 = (v1 * w2) - (v2 * w1);   # n₂ = b₂ × b₃
+    var n21: f64 = (v2 * w0) - (v0 * w2);
+    var n22: f64 = (v0 * w1) - (v1 * w0);
+    var n1_sq: f64 = ((n10 * n10) + (n11 * n11)) + (n12 * n12);
+    var n2_sq: f64 = ((n20 * n20) + (n21 * n21)) + (n22 * n22);
     if (_km_is_positive(n1_sq) != 1 || _km_is_positive(n2_sq) != 1) { return Err(KM_ERR_INVALID_INPUT); }
     var tol: f64 = 0.00000000000000000001;  # COLLINEAR_SIN_SQ_TOL, 10⁻²⁰
     var t1: f64 = (tol * b1_sq) * b2_sq;
@@ -623,11 +644,11 @@ fn dihedral_angle(a, b, c, d): Result {
     var t2: f64 = (tol * b2_sq) * b3_sq;
     if (n2_sq <= t2) { return Err(KM_ERR_INVALID_INPUT); }
     var sb: f64 = f64_sqrt(b2_sq);
-    var dn: f64 = _km_dot3(u0, u1, u2, n20, n21, n22);
+    var dn: f64 = ((u0 * n20) + (u1 * n21)) + (u2 * n22);
     var yv: f64 = sb * dn;
-    var xv: f64 = _km_dot3(n10, n11, n12, n20, n21, n22);
+    var xv: f64 = ((n10 * n20) + (n11 * n21)) + (n12 * n22);
     var phi: f64 = _km_cr_atan2(yv, xv);
-    var pi: f64 = 0x400921FB54442D18;       # std::f64::consts::PI
+    var pi: f64 = KM_PI;                    # std::f64::consts::PI
     if (phi <= -pi) { return Ok(pi); }
     return Ok(phi);
 }

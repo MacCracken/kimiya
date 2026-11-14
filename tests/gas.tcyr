@@ -6,6 +6,8 @@
 # peng_robinson_z_roots fills a caller's buffer of three f64 and returns Ok(n). ADR 0002 #31 changes none of the Rust
 # tests (each compares within a tolerance, or an Err). The golden corpus separately checks every function over its grid
 # (tests/parity.tcyr).
+#
+# 2.0.1: cyrius_201_null_out (peng_robinson_z_roots' null `out` is Err(InvalidInput), after Rust's errors).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -746,6 +748,22 @@ fn _t_cyrius_adr31() {
     assert_eq(fast, 5000, "… and the fast path takes every one");
 }
 
+# 2.0.1: peng_robinson_z_roots with a null `out` is Err(KM_ERR_INVALID_INPUT), after Rust's own errors — the
+# temperature check and the no-physical-root ComputationError (it used to fault).
+fn _t_cyrius_201_null_out() {
+    test_group("cyrius_201_null_out");
+    var t, v = peng_robinson_z_roots(KM_PR_NITROGEN, 300.0, 1000000.0, 0);
+    assert(is_err_code(t, v, KM_ERR_INVALID_INPUT), "valid inputs, null out: InvalidInput");
+    var t1, v1 = peng_robinson_z_roots(KM_PR_NITROGEN, -1.0, 1000000.0, 0);
+    assert(is_err_code(t1, v1, KM_ERR_INVALID_TEMPERATURE), "Rust's T check first");
+    var huge: f64 = 0x7FEFFFFFFFFFFFFF;
+    var roots[24];
+    var t2, v2 = peng_robinson_z_roots(KM_PR_NITROGEN, 300.0, huge, &roots);
+    var t3, v3 = peng_robinson_z_roots(KM_PR_NITROGEN, 300.0, huge, 0);
+    assert(is_err_code(t2, v2, KM_ERR_COMPUTATION_ERROR) && is_err_code(t3, v3, KM_ERR_COMPUTATION_ERROR),
+        "no physical root: ComputationError, with or without a buffer");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_ideal_gas_stp_volume();
@@ -790,6 +808,7 @@ fn main() {
     _t_cyrius_presets_and_roots();
     _t_cyrius_correctly_rounded_primitives();
     _t_cyrius_adr31();
+    _t_cyrius_201_null_out();
     return assert_summary();
 }
 

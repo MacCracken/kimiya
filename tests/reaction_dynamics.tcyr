@@ -8,6 +8,9 @@
 # n × n Jacobian cannot be resized): its group checks the nearest Cyrius case, a Jacobian callback that writes nothing,
 # which leaves J = 0 and is no panic either. The golden corpus separately checks every function over its grid
 # (tests/parity.tcyr).
+#
+# 2.0.1: cyrius_201_stiff_in_place_and_stochastic_rng (simulate_stiff in place; the stack PCG32 is pcg32_new's
+# stream, with no allocation) and cyrius_201_no_growth (the solvers' tables from the work-table pool).
 
 include "tests/ulp.cyr"
 include "src/error.cyr"
@@ -639,6 +642,84 @@ fn _t_cyrius_jacobian_reused() {
     assert(_jac_calls > 50, "the callback was called every iteration");
 }
 
+# 2.0.1: simulate_stiff in place (out = y0) gives the separate buffer's two points (it used to overwrite y0[0] with
+# point 0's t before copying the state); any other overlap of the two points with y0 is Err(InvalidInput), y0
+# untouched. simulate_stochastic seeds a stack PCG32 exactly as pcg32_new does (the same stream) and allocates
+# nothing per call.
+fn _t_cyrius_201_stiff_in_place_and_stochastic_rng() {
+    test_group("cyrius_201_stiff_in_place_and_stochastic_rng");
+    var p = vals2(1.0, 0.5);
+    var sep = alloc(8 * 3 * 2);
+    var y0 = vals2(1.0, 0.25);
+    var t1, v1 = simulate_stiff(&_rd_f_reversible, p, &_rd_j_reversible, p, y0, 2, 20.0, 50, sep, 2);
+    var io = alloc(8 * 3 * 2 + 128);
+    var y = io + 64;
+    store64(y, load64(y0));
+    store64(y + 8, load64(y0 + 8));
+    var t2, v2 = simulate_stiff(&_rd_f_reversible, p, &_rd_j_reversible, p, y, 2, 20.0, 50, y, 2);
+    assert(is_ok(t1) == 1 && is_ok(t2) == 1 && v2 == 2 && memeq(sep, y, 48) == 1, "in place = separate buffer");
+    store64(y, load64(y0));
+    store64(y + 8, load64(y0 + 8));
+    var t3, v3 = simulate_stiff(&_rd_f_reversible, p, &_rd_j_reversible, p, y, 2, 20.0, 50, y + 8, 2);
+    assert(is_err_code(t3, v3, KM_ERR_INVALID_INPUT) == 1, "out = y0 + 8: InvalidInput");
+    var t4, v4 = simulate_stiff(&_rd_f_reversible, p, &_rd_j_reversible, p, y, 2, 20.0, 50, y - 40, 2);
+    assert(is_err_code(t4, v4, KM_ERR_INVALID_INPUT) == 1, "out below y0, its point 1 over y0: InvalidInput");
+    assert(memeq(y, y0, 16) == 1, "y0 untouched by the refused calls");
+    var t5, v5 = simulate_stiff(&_rd_f_reversible, p, &_rd_j_reversible, p, y, 2, 20.0, 50, y - 48, 2);
+    assert(is_ok(t5) == 1 && memeq(sep, y - 48, 48) == 1, "out ending at y0: Ok, the same points");
+    # The stream: simulate_stochastic against the solver driven by pcg32_new's handle.
+    var k = vals1(1.0);
+    var s = vals1(0.1);
+    var z1 = vals1(1.0);
+    var b1 = alloc(8 * 2 * 51);
+    var b2 = alloc(8 * 2 * 51);
+    var t6, v6 = simulate_stochastic(&_rd_f_decay, k, &_rd_g_const, s, z1, 1, 1.0, 50, 42, b1, 51);
+    var rng = pcg32_new(42);
+    var fin: f64[1];
+    var t7, v7 = _km_euler_maruyama_system(&_rd_f_decay, k, &_rd_g_const, s, 0.0, z1, 1, 1.0, 50, rng, b2, 51, &fin);
+    assert(is_ok(t6) == 1 && is_ok(t7) == 1 && memeq(b1, b2, 8 * 2 * 51) == 1, "the stack generator = pcg32_new's");
+    var u0 = alloc_used();
+    var t8, v8 = simulate_stochastic(&_rd_f_decay, k, &_rd_g_const, s, z1, 1, 1.0, 50, 7, b1, 51);
+    var u1 = alloc_used();
+    assert(is_ok(t8) == 1 && u1 == u0, "no allocation per call");
+}
+
+# 2.0.1: simulate_stiff's, simulate_adaptive's and simulate_stochastic's heap tables come from src/validate.cyr's
+# pool: after a first call, calls in a loop allocate nothing, on Ok and on the Errs after the tables (no room, a
+# non-finite Newton iterate), and every slot is given back.
+fn _t_cyrius_201_no_growth() {
+    test_group("cyrius_201_no_growth");
+    var p = vals2(0.1, 0.1);
+    var y0 = alloc(8 * 40);
+    var one: f64 = 1.0;
+    var i = 0;
+    while (i < 40) {
+        store64(y0 + 8 * i, one);
+        i = i + 1;
+    }
+    var out = alloc(8 * 41 * 64);
+    var kk = vals1(1.0);
+    var s = vals1(0.1);
+    var round = 0;
+    var u0 = 0;
+    while (round < 4) {
+        if (round == 1) { u0 = alloc_used(); }
+        var r1, v1 = simulate_stiff(&_rd_f_decay, p, &_rd_j_decay, p, y0, 10, one, 10, out, 2);
+        var r2, v2 = simulate_stiff(&_rd_f_decay, p, &_rd_j_decay, p, y0, 10, one, 10, out, 1);
+        var r3, v3 = simulate_stiff(&_rd_f_nan, p, &_rd_j_decay, p, y0, 10, one, 10, out, 2);
+        var r4, v4 = simulate_adaptive(&_rd_f_decay, p, y0, 11, one, 0.000001, out, 64);
+        var r5, v5 = simulate_stochastic(&_rd_f_decay, kk, &_rd_g_const, s, y0, 40, one, 10, 7, out, 11);
+        var r6, v6 = simulate_stochastic(&_rd_f_decay, kk, &_rd_g_const, s, y0, 40, one, 10, 7, out, 10);
+        assert(is_ok(r1) == 1 && is_ok(r4) == 1 && is_ok(r5) == 1, "stiff, adaptive, stochastic: Ok");
+        assert(is_err_code(r2, v2, KM_ERR_INVALID_INPUT) == 1 && is_err_code(r6, v6, KM_ERR_INVALID_INPUT) == 1,
+            "no room: InvalidInput");
+        assert(is_err_code(r3, v3, KM_ERR_COMPUTATION_ERROR) == 1, "a NaN rate: Err inside the integration");
+        assert(_km_scratch_claimed() == 0, "every slot given back");
+        round = round + 1;
+    }
+    assert_eq(alloc_used() - u0, 0, "three more rounds allocate nothing");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main(): i64 {
     traj = alloc(8 * 4 * TCAP);
@@ -675,6 +756,8 @@ fn main(): i64 {
     _t_cyrius_inline_constants();
     _t_cyrius_check_order();
     _t_cyrius_jacobian_reused();
+    _t_cyrius_201_stiff_in_place_and_stochastic_rng();
+    _t_cyrius_201_no_growth();
     return assert_summary();
 }
 

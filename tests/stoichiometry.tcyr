@@ -26,6 +26,11 @@
 #   oxidation_state_magnetite_non_integer_is_error assert Ok with the exact averages (KO₂'s O −1/2, C₃H₈'s C −8/3,
 #   Fe₃O₄'s Fe +8/3, ADR 0002 #7's reference tests) where Rust asserted Err; oxidation_state_single_element's O₂⁻ is
 #   −1/2, and oxidation_state_huge_count_does_not_panic's (O, u32::MAX)×2 at i32::MIN is −2³⁰/(2³² − 1).
+#
+# 2.0.1: cyrius_201_aliasing_and_order (assign_oxidation_states in place, an overlap below refused; empirical_formula's
+# per-element errors before its table), cyrius_201_no_growth (the balance and empirical tables from the pool), and
+# cyrius_201_empirical_formula_overlap and cyrius_201_percent_composition_overlap (in place and an `out` below the
+# input work, an `out` inside it is refused).
 
 include "src/error.cyr"
 include "src/constants.cyr"
@@ -1576,6 +1581,164 @@ fn _t_cyrius_adr39_multiword() {
     assert(load64(&r) == 1 && load64(&r + 8) == 1, "|1 − 2| = 1");
 }
 
+# 2.0.1: assign_oxidation_states writes its records from the last down, so in place (out = atoms) and any out above
+# atoms give the separate buffer's records (in place used to read records it had overwritten: wrong states, or a
+# fault on a garbage Z); out below atoms overlapping them is Err(InvalidInput), atoms untouched. empirical_formula
+# takes its heap table after Rust's per-element validation, so a huge n gets Rust's InvalidElement, not
+# ComputationError.
+fn _t_cyrius_201_aliasing_and_order() {
+    test_group("cyrius_201_aliasing_and_order");
+    var io = alloc(1024);
+    var a = io + 256;
+    # KMnO₄: K +1, Mn +7, O −2.
+    store64(a, 19); store64(a + 8, 1); store64(a + 16, 25); store64(a + 24, 1); store64(a + 32, 8); store64(a + 40, 4);
+    var sep = alloc(72);
+    var t0, v0 = assign_oxidation_states(a, 3, 0, sep, 3);
+    assert(is_ok(t0) == 1 && v0 == 3 && load64(sep + 32) == 7 && load64(sep + 56) == 0 - 2, "separate out: KMnO₄");
+    var t1, v1 = assign_oxidation_states(a, 3, 0, a, 3);
+    assert(is_ok(t1) == 1 && v1 == 3 && memeq(sep, a, 72) == 1, "in place = separate buffer");
+    store64(a, 6); store64(a + 8, 100); store64(a + 16, 6); store64(a + 24, 100);
+    var sep2 = alloc(48);
+    var t2, v2 = assign_oxidation_states(a, 2, 1, sep2, 2);
+    var t3, v3 = assign_oxidation_states(a, 2, 1, a + 8, 2);
+    assert(is_ok(t2) == 1 && is_ok(t3) == 1 && memeq(sep2, a + 8, 48) == 1 && load64(sep2 + 16) == 200,
+        "out = atoms + 8 = separate buffer (C₂₀₀⁺: 1/200)");
+    store64(a, 19); store64(a + 8, 1); store64(a + 16, 25); store64(a + 24, 1); store64(a + 32, 8); store64(a + 40, 4);
+    var t4, v4 = assign_oxidation_states(a, 3, 0, a - 8, 3);
+    assert(is_err_result(t4) == 1 && v4 == KM_ERR_INVALID_INPUT, "out = atoms − 8, overlapping: InvalidInput");
+    var t5, v5 = assign_oxidation_states(a, 3, 0, a - 71, 3);
+    assert(is_err_result(t5) == 1 && v5 == KM_ERR_INVALID_INPUT, "out = atoms − 71, one byte over: InvalidInput");
+    assert(load64(a) == 19 && load64(a + 16) == 25 && load64(a + 40) == 4, "atoms untouched by the refused calls");
+    var t6, v6 = assign_oxidation_states(a, 3, 0, a - 72, 3);
+    assert(is_ok(t6) == 1 && memeq(sep, a - 72, 72) == 1, "out ending at atoms: Ok");
+    # empirical_formula: Z = 0 first, with an n whose table would not fit in memory.
+    store64(&_emp_in, 0);
+    store64(&_emp_in + 8, 0);
+    var t7, v7 = empirical_formula(&_emp_in, 0x8000001, &_emp_out, 16);
+    assert(is_err_result(t7) == 1 && v7 == KM_ERR_INVALID_ELEMENT, "n = 2^27 + 1, Z = 0 first: InvalidElement");
+}
+
+# 2.0.1: empirical_formula writes record k after reading element k, so in place (out = elements) and an `out` below
+# them, overlapping, give the separate buffer's records; an `out` inside elements past their start would overwrite
+# atomic numbers still to be read (wrong records) and is Err(InvalidInput), the elements untouched.
+fn _t_cyrius_201_empirical_formula_overlap() {
+    test_group("cyrius_201_empirical_formula_overlap");
+    var io = alloc(512);
+    var e = io + 128;
+    # 40.00 % C, 6.71 % H, 53.29 % O: CH₂O.
+    var src: i64[6];
+    var pc: f64 = 40.0;
+    var ph: f64 = 6.71;
+    var po: f64 = 53.29;
+    store64(&src, 6);
+    store64(&src + 8, pc);
+    store64(&src + 16, 1);
+    store64(&src + 24, ph);
+    store64(&src + 32, 8);
+    store64(&src + 40, po);
+    memcpy(e, &src, 48);
+    var sep: i64[6];
+    var t0, v0 = empirical_formula(e, 3, &sep, 3);
+    assert(is_ok(t0) == 1 && v0 == 3 && sep[1] == 1 && sep[3] == 2 && sep[5] == 1, "separate out: CH₂O");
+    var t1, v1 = empirical_formula(e, 3, e, 3);
+    assert(is_ok(t1) == 1 && v1 == 3 && memeq(&sep, e, 48) == 1, "in place = separate buffer");
+    memcpy(e, &src, 48);
+    var t2, v2 = empirical_formula(e, 3, e - 8, 3);
+    assert(is_ok(t2) == 1 && v2 == 3 && memeq(&sep, e - 8, 48) == 1, "out = elements − 8, overlapping: Ok");
+    memcpy(e, &src, 48);
+    var t3, v3 = empirical_formula(e, 3, e + 8, 3);
+    assert(is_err_result(t3) == 1 && v3 == KM_ERR_INVALID_INPUT, "out = elements + 8: InvalidInput");
+    var t4, v4 = empirical_formula(e, 3, e + 16, 3);
+    assert(is_err_result(t4) == 1 && v4 == KM_ERR_INVALID_INPUT, "out = the second record: InvalidInput");
+    var t5, v5 = empirical_formula(e, 3, e + 47, 3);
+    assert(is_err_result(t5) == 1 && v5 == KM_ERR_INVALID_INPUT, "out at the last byte: InvalidInput");
+    assert(memeq(e, &src, 48) == 1, "the elements untouched by the refused calls");
+    var t6, v6 = empirical_formula(e, 3, e + 48, 3);
+    assert(is_ok(t6) == 1 && memeq(&sep, e + 48, 48) == 1, "out just past the elements: Ok");
+}
+
+# 2.0.1: percent_composition writes record k after reading atom k, so in place over the molecule's own atom records
+# (its vec's buffer) and an `out` below them, overlapping, give the separate buffer's records; an `out` inside them
+# past their start would overwrite atoms still to be read (a wrong record, or a fault on a garbage Z) and is
+# Err(InvalidInput), the molecule untouched. The test points glucose's vec at its own copy of the records.
+fn _t_cyrius_201_percent_composition_overlap() {
+    test_group("cyrius_201_percent_composition_overlap");
+    var g = KmMolecule_glucose();
+    var sep: i64[6];
+    var t0, v0 = percent_composition(g, &sep, 3);
+    assert(is_ok(t0) == 1 && v0 == 3 && sep[0] == 6 && sep[2] == 1 && sep[4] == 8, "separate out: glucose");
+    var io = alloc(512);
+    var d = io + 128;
+    var orig: i64[6];
+    memcpy(&orig, load64(g.atoms), 48);
+    memcpy(d, &orig, 48);
+    store64(g.atoms, d);                    # lib/vec.cyr's { data, len, cap }: the records now at d
+    var t1, v1 = percent_composition(g, d, 3);
+    assert(is_ok(t1) == 1 && v1 == 3 && memeq(&sep, d, 48) == 1, "in place = separate buffer");
+    memcpy(d, &orig, 48);
+    var t2, v2 = percent_composition(g, d - 8, 3);
+    assert(is_ok(t2) == 1 && v2 == 3 && memeq(&sep, d - 8, 48) == 1, "out = the records − 8, overlapping: Ok");
+    memcpy(d, &orig, 48);
+    var t3, v3 = percent_composition(g, d + 8, 3);
+    assert(is_err_result(t3) == 1 && v3 == KM_ERR_INVALID_INPUT, "out = the records + 8: InvalidInput");
+    var t4, v4 = percent_composition(g, d + 32, 3);
+    assert(is_err_result(t4) == 1 && v4 == KM_ERR_INVALID_INPUT, "out = the last record: InvalidInput");
+    var t5, v5 = percent_composition(g, d + 1, 3);
+    assert(is_err_result(t5) == 1 && v5 == KM_ERR_INVALID_INPUT, "a misaligned overlap: InvalidInput");
+    assert(memeq(d, &orig, 48) == 1 && g.atom_count(1) == 12, "the molecule untouched by the refused calls");
+    var t6, v6 = percent_composition(g, d + 48, 3);
+    assert(is_ok(t6) == 1 && memeq(&sep, d + 48, 48) == 1, "out just past the records: Ok");
+}
+
+# 2.0.1: balance_equation's tables (the null vector past 64 species, the fast path's copy past 512 cells, the exact
+# path's work past 4,096 words) and empirical_formula's ratio table past 64 elements come from src/validate.cyr's
+# pool: after a first call, calls in a loop allocate nothing, on Ok and on the Errs after the tables, and every slot
+# is given back.
+fn _t_cyrius_201_no_growth() {
+    test_group("cyrius_201_no_growth");
+    # A chain of 70 species, X₀ → X₁ … in one element: row 0 is (1, −1, 0, …), a 1 × 70 matrix with a 68-dimensional
+    # null space (ambiguous: Err after the tables), and the 69 × 70 chain (rank 69: the coefficients all 1).
+    var m = 69;
+    var nn = 70;
+    var mat = alloc(8 * m * nn);
+    var i = 0;
+    while (i < m) {
+        store64(mat + 8 * (i * nn + i), 1);
+        store64(mat + 8 * (i * nn + i + 1), 0 - 1);
+        i = i + 1;
+    }
+    var co = alloc(8 * nn);
+    var el = alloc(16 * 70);
+    i = 0;
+    while (i < 70) {
+        store64(el + 16 * i, i + 1);
+        var pct: f64 = KM_ELEMENT_ATOMIC_MASS[i];
+        store64(el + 16 * i + 8, pct);
+        i = i + 1;
+    }
+    var eo = alloc(16 * 70);
+    var round = 0;
+    var u0 = 0;
+    while (round < 4) {
+        if (round == 1) { u0 = alloc_used(); }
+        var t1, v1 = balance_equation(mat, m, nn, co, nn);
+        var t2, v2 = _km_balance_equation(mat, m, nn, co, nn, 1);
+        var t3, v3 = balance_equation(mat, 1, nn, co, nn);
+        var t4, v4 = balance_equation(mat, m, nn, co, nn - 1);
+        var t5, v5 = empirical_formula(el, 70, eo, 70);
+        var t6, v6 = empirical_formula(el, 70, eo, 69);
+        assert(is_ok(t1) == 1 && v1 == nn && load64(co) == 1 && load64(co + 8 * 69) == 1, "the chain: all 1");
+        assert(is_ok(t2) == 1 && v2 == nn, "the exact path forced: Ok");
+        assert(is_err_result(t3) == 1 && v3 == KM_ERR_COMPUTATION_ERROR, "1 × 70: ambiguous");
+        assert(is_err_result(t4) == 1 && v4 == KM_ERR_INVALID_INPUT, "no room: InvalidInput");
+        assert(is_ok(t5) == 1 && v5 == 70 && load64(eo + 8) == 1, "70 elements, one mole each: all 1");
+        assert(is_err_result(t6) == 1 && v6 == KM_ERR_INVALID_INPUT, "empirical_formula, no room: InvalidInput");
+        assert(_km_scratch_claimed() == 0, "every slot given back");
+        round = round + 1;
+    }
+    assert_eq(alloc_used() - u0, 0, "three more rounds allocate nothing");
+}
+
 # Runs every test group; returns the failure count from assert_summary().
 fn main() {
     _t_limiting_reagent_basic();
@@ -1652,6 +1815,10 @@ fn main() {
     _t_cyrius_adr39_unbounded_integers();
     _t_cyrius_adr39_size_and_forced();
     _t_cyrius_adr39_multiword();
+    _t_cyrius_201_aliasing_and_order();
+    _t_cyrius_201_no_growth();
+    _t_cyrius_201_empirical_formula_overlap();
+    _t_cyrius_201_percent_composition_overlap();
     return assert_summary();
 }
 
